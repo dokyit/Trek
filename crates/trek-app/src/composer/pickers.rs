@@ -1279,7 +1279,11 @@ pub fn picker_items<H: PickerHost>(host: &H, cx: &App) -> Vec<PickItem> {
             let mut v: Vec<_> = commands
                 .iter()
                 .filter(|c| {
-                    c.kind != trek_agents::CommandKind::Agent && matches(&c.name, &c.description)
+                    c.kind != trek_agents::CommandKind::Agent
+                        // `permissions full`, `consult arena`: arguments of a command listed once
+                        // (the phone's list keeps them), not rows of their own.
+                        && !(c.kind == trek_agents::CommandKind::Command && c.name.contains(' '))
+                        && matches(&c.name, &c.description)
                 })
                 .collect();
             v.sort_by_key(|c| rank(&c.name));
@@ -1300,8 +1304,11 @@ pub fn picker_items<H: PickerHost>(host: &H, cx: &App) -> Vec<PickItem> {
             let codex = agent == AgentId::Codex;
             let mut v: Vec<_> = commands
                 .iter()
+                // By name only: `$HOME` or `$5` in a sentence mustn't find a skill whose
+                // description has the word, and take ↩ from sending.
                 .filter(|c| {
-                    c.kind == trek_agents::CommandKind::Skill && matches(&c.name, &c.description)
+                    c.kind == trek_agents::CommandKind::Skill
+                        && (q.is_empty() || c.name.to_lowercase().contains(&q))
                 })
                 .collect();
             v.sort_by_key(|c| rank(&c.name));
@@ -1620,7 +1627,9 @@ pub fn picker<H: PickerHost>(host: &H, cx: &mut Context<H>) -> Option<AnyElement
             .as_ref()
             .is_some_and(|(root, _)| ws.cwd_in(host.scope()).as_ref() == Some(root))
     };
+    let no_folder = host.workspace().read(cx).cwd_in(host.scope()).is_none();
     let empty = match t.kind {
+        PickKind::Mention if no_folder => "Open a project to mention its files",
         PickKind::Mention if p.indexing.is_some() && !indexed_here => "Indexing project files…",
         PickKind::Mention => "No matching files",
         PickKind::Skill => "No matching skills",
@@ -1683,28 +1692,37 @@ pub fn picker<H: PickerHost>(host: &H, cx: &mut Context<H>) -> Option<AnyElement
                                     icon.size(px(look::ICON)).text_color(theme.muted_foreground),
                                 )
                             })
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .gap(px(2.))
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_size(px(text::BODY))
-                                            .text_color(theme.foreground)
-                                            .child(item.label),
-                                    )
-                                    .when(!detail.is_empty(), |el| {
-                                        el.child(
-                                            div()
-                                                .truncate()
-                                                .text_size(px(text::LABEL))
-                                                .text_color(theme.muted_foreground)
-                                                .child(detail),
-                                        )
-                                    }),
-                            )
+                            .child({
+                                let name = div()
+                                    .truncate()
+                                    .text_size(px(text::BODY))
+                                    .text_color(theme.foreground)
+                                    .child(item.label);
+                                let detail = (!detail.is_empty()).then(|| {
+                                    div()
+                                        .truncate()
+                                        .text_size(px(text::LABEL))
+                                        .text_color(theme.muted_foreground)
+                                        .child(detail)
+                                });
+                                if files {
+                                    // A file's folder reads beside its name, so every row is one
+                                    // line as tall as the next.
+                                    h_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .gap(px(8.))
+                                        .child(name.flex_none().max_w(relative(0.65)))
+                                        .children(detail.map(|d| d.flex_1().min_w_0()))
+                                } else {
+                                    v_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .gap(px(2.))
+                                        .child(name)
+                                        .children(detail)
+                                }
+                            })
                             .on_click(cx.listener(move |this: &mut H, _, window, cx| {
                                 accept_pick(this, i, window, cx)
                             }))

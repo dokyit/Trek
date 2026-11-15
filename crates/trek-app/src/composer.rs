@@ -2996,21 +2996,21 @@ impl Composer {
                 };
                 menu.separator()
                     .item(
-                        PopupMenuItem::new("Mention a file  @")
+                        hinted("Mention a file", "@", "plus-mention")
                             .icon(IconName::File)
                             .on_click(move |_, window, cx| {
                                 e.update(cx, |c, cx| c.insert_trigger("@", window, cx))
                             }),
                     )
                     .item(
-                        PopupMenuItem::new("Use a skill  $")
+                        hinted("Use a skill", "$", "plus-skill")
                             .icon(crate::assets::Lucide::Sparkle)
                             .on_click(move |_, window, cx| {
                                 f.update(cx, |c, cx| c.insert_trigger("$", window, cx))
                             }),
                     )
                     .item(
-                        PopupMenuItem::new("Run a command  /")
+                        hinted("Run a command", "/", "plus-command")
                             .icon(IconName::SquareTerminal)
                             .on_click(move |_, window, cx| {
                                 g.update(cx, |c, cx| c.insert_trigger("/", window, cx))
@@ -3018,7 +3018,18 @@ impl Composer {
                     )
                     .separator()
                     .item(
-                        PopupMenuItem::new("Restate first")
+                        PopupMenuItem::element(|_, cx| {
+                            v_flex()
+                                .id("plus-restate")
+                                .test_support()
+                                .child("Restate first")
+                                .child(
+                                    div()
+                                        .text_size(to_rems(text::META))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("The agent says back what you asked before it starts"),
+                                )
+                        })
                             .icon(crate::assets::Lucide::MessageSquareQuote)
                             .checked(restate)
                             .on_click(move |_, window, cx| {
@@ -4333,6 +4344,27 @@ const RING_ROOM: f32 = 75.;
 const MIC_ROOM: f32 = 35.;
 /// Past the narrow form, what the model pill needs to name the account too ("Default", "Work").
 const ACCOUNT_ROOM: f32 = 130.;
+
+/// A + menu row that names a key typed in the prompt, the key in the quiet text to its right (as
+/// the thread menu shows its shortcuts).
+fn hinted(label: &'static str, key: &'static str, id: &'static str) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, cx| {
+        h_flex()
+            .id(id)
+            .test_support()
+            .w_full()
+            .gap_4()
+            .justify_between()
+            .child(label)
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(to_rems(text::META))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(key),
+            )
+    })
+}
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

@@ -1837,3 +1837,40 @@ fn plan_mode_for_an_agent_with_none_is_said_before_the_message_goes() {
         );
     });
 }
+
+/// `$name` looks for a skill by its name: a word that is only in a description (`echo $project`)
+/// finds none, so ↩ still sends.
+#[test]
+fn a_dollar_word_finds_skills_by_name_not_description() {
+    run(async |cx| {
+        let trek = open(cx);
+        slash_commands_for_test(&trek, cx);
+        let picks = |trek: &Trek, cx: &gpui_kit::TestAppContext| {
+            cx.read(|cx| trek.root.read(cx).composer.read(cx).picks(cx))
+        };
+        trek.type_text(cx, "echo $project");
+        assert!(picks(&trek, cx).is_empty(), "{:?}", picks(&trek, cx));
+        for _ in 0..13 {
+            trek.press(cx, "backspace");
+        }
+        trek.type_text(cx, "run $improve");
+        assert_eq!(picks(&trek, cx).len(), 2, "{:?}", picks(&trek, cx));
+    });
+}
+
+/// `/perm` lists the command once: its levels are what's typed after it, not rows of their own.
+#[test]
+fn the_slash_menu_lists_a_command_once() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.type_text(cx, "/perm");
+        let picks = cx.read(|cx| trek.root.read(cx).composer.read(cx).picks(cx));
+        assert_eq!(picks, ["/permissions"]);
+        for _ in 0..5 {
+            trek.press(cx, "backspace");
+        }
+        trek.type_text(cx, "/consult");
+        let picks = cx.read(|cx| trek.root.read(cx).composer.read(cx).picks(cx));
+        assert_eq!(picks, ["/consult"]);
+    });
+}

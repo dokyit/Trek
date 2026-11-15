@@ -80,15 +80,14 @@ impl Outbox {
         results: Vec<(String, Result<PathBuf>)>,
     ) -> (Option<String>, Option<String>) {
         self.saving = self.saving.saturating_sub(n);
-        let mut failed = None;
+        let mut failures: Vec<(String, String)> = Vec::new();
         for (label, result) in results {
             match result {
                 Ok(path) => self.add([path]),
-                Err(e) => {
-                    failed.get_or_insert(format!("Couldn't attach {label}: {e}."));
-                }
+                Err(e) => failures.push((label, e.to_string().trim_end_matches('.').to_string())),
             }
         }
+        let failed = not_attached(&failures);
         if failed.is_some() {
             self.held = None;
         }
@@ -98,6 +97,28 @@ impl Outbox {
             None
         };
         (failed, send)
+    }
+}
+
+/// What a toast says of the pictures that couldn't be attached (name and reason each): the one,
+/// or all of them at once with the first reason.
+fn not_attached(failures: &[(String, String)]) -> Option<String> {
+    match failures {
+        [] => None,
+        [(label, why)] => Some(format!("Couldn't attach {label}: {why}.")),
+        [(first, why), rest @ ..] => {
+            let more = match rest {
+                [(second, _)] => format!("{first} and {second}"),
+                [(second, _), others @ ..] => {
+                    format!("{first}, {second} and {} more", others.len())
+                }
+                [] => first.clone(),
+            };
+            Some(format!(
+                "Couldn't attach {} pictures ({more}): {why}.",
+                failures.len()
+            ))
+        }
     }
 }
 
@@ -1611,6 +1632,34 @@ mod tests {
                 vec![("the pasted image".into(), Ok(PathBuf::from("/s/c.png")))]
             ),
             (None, None)
+        );
+    }
+
+    #[test]
+    fn every_failed_picture_is_said_at_once() {
+        let mut outbox = Outbox {
+            saving: 4,
+            ..Default::default()
+        };
+        let fail = |name: &str| (name.to_string(), Err(anyhow::anyhow!("it isn't downloaded.")));
+        let (failed, _) = outbox.landed(
+            4,
+            vec![
+                fail("IMG_1.HEIC"),
+                ("ok.png".into(), Ok(PathBuf::from("/s/ok.png"))),
+                fail("IMG_2.HEIC"),
+                fail("IMG_3.HEIC"),
+            ],
+        );
+        assert_eq!(
+            failed.as_deref(),
+            Some("Couldn't attach 3 pictures (IMG_1.HEIC, IMG_2.HEIC and 1 more): it isn't downloaded.")
+        );
+        assert_eq!(outbox.paths, vec![PathBuf::from("/s/ok.png")]);
+        let (two, _) = outbox.landed(0, vec![fail("A"), fail("B")]);
+        assert_eq!(
+            two.as_deref(),
+            Some("Couldn't attach 2 pictures (A and B): it isn't downloaded.")
         );
     }
 
