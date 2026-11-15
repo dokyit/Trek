@@ -4,8 +4,7 @@ Trek on one Mac can start a thread on another of your machines running Trek, fol
 follow-ups and answer approvals, the way the phone does today. The first time a repo is needed on the
 other machine, Trek clones it there and copies the files git ignores (an `.env`), in one dialog.
 
-Written 2026-10-20 from T3 Code's "Run on" and "Add to another machine" (Theo's demo) and from a
-read of what Trek already has.
+Written 2026-10-20 from a read of what Trek already has.
 
 ## What exists
 

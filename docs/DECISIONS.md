@@ -7,19 +7,17 @@ All agent orchestration, storage, git, PTY and protocol code lives in UI-agnosti
 (`trek-core`, `trek-agents`) so the UI layer could be swapped (Tauri / web) without touching the engine.
 
 Why:
-- Every competitor installed on this machine except Zed is Electron: T3 Code 414 MB, Cursor 963 MB,
-  Antigravity 410 MB, OpenCode 408 MB, Orca 568 MB, Synara 704 MB, Capy 320 MB on disk.
-  T3 Code Nightly measured at ~1.2 GB RSS while running. Codex/ChatGPT desktop has public 6–8 GB+ reports.
+- Agent apps built on Electron run to several hundred MB on disk and often over 1 GB in memory while open.
 - GPUI apps: ~60–150 MB idle, ~0 % idle CPU (redraws only on change), 120 fps GPU rendering, <300 ms startup.
 - GPUI Kit ships what Trek needs: Input w/ IME, Textarea, markdown TextView with highlighting, VirtualList,
   Sidebar, Resizable, Dock, Select/Combobox/Command palette, Slider, Switch, Dialog/Sheet/Notification,
   Settings panel, Message/MessageScroller/Shimmer/Skeleton, plus a Motion layer (retargetable springs,
   `Presence` exit animations, keyframes, `MotionReveal`).
-- Zed (GPUI) proves the agent-panel use case; Zeron, Runner, Waku, Arbor are GPUI agent harnesses too.
+- GPUI already carries a large editor and its agent panel, so the use case is proven.
 
 Accepted costs / risks:
-- ~2× slower UI iteration than React; no devtools; LLMs know older GPUI APIs → `.ref/gpui-kit` is vendored
-  locally (gitignored) and is the source of truth for every API we call. **Never guess an API.**
+- About 2× slower UI iteration than React, no devtools, and coding agents know older GPUI APIs, so the
+  vendored GPUI Kit source is the reference for every API Trek calls.
 - GPUI is pre-1.0 with weekly breaking changes → pin exact versions, upgrade deliberately.
 - Web preview pane (wry) is an overlay with no clipping — keep it a fixed pane.
 - Terminal: build on `alacritty_terminal` (Apache-2.0). Do NOT copy Zed's `terminal`/`auto_update` crates (GPL).
@@ -27,7 +25,7 @@ Accepted costs / risks:
   results are sent back to the UI over channels and applied on the foreground thread. Stream tokens are
   batched per frame, never `cx.notify()` per token. Keep every `Task` handle (dropping cancels).
 
-Rejected: Electron (the problem we're solving), Tauri (WebKit perf is why OpenCode left it; still a fallback),
+Rejected: Electron (the problem we're solving), Tauri (WebKit performance; still a fallback),
 SwiftUI (no Windows/Linux), Iced/Slint/Dioxus/Makepad (immature for this app class).
 
 ## 2. Model access: three backend kinds behind one trait
@@ -313,7 +311,7 @@ can reach any agent and model the user has in Trek, not just its own provider's.
 ordinary thread with `parent_id` set: it runs in its parent's folder (worktree and all), stays out of the
 inbox (search finds it), and shows inline in its parent with its logo, live status and answer. It sees only
 the prompt it's given; for another round with the same model the agent delegates again with the findings
-so far (T3 Code's Orchestrator V2 does the same), which keeps every round's brief explicit.
+so far, which keeps every round's brief explicit.
 - **Advise** runs it Supervised, read-only, and declines every request it makes before anyone sees it (a
   plan it offers is kept as its advice). Read-only is enforced per agent, not just asked for: Claude Code
   starts without its editing tools (`--disallowedTools`, which no allow rule overrides), Codex keeps its

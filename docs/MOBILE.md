@@ -1707,8 +1707,7 @@ instead and queue).
   words its confirmation as the sidebar and `worktree_ui::confirm_leave` do. Search runs
   `Store::search` off the main thread, as the sidebar's does.
 - **Changed files per turn** go out as `changes` items from one function, `turn_changes`, which
-  answers `None` until the Mac works them out (`Workspace::turn_changes`, another branch: marked
-  `TODO(merge)`).
+  answers `None` until the Mac works them out (`Workspace::turn_changes`).
 - `cargo run -p trek-remote --example probe -- '<trek://pair link>' [--thread <id> [--limit 200]
   [--before first] [--send "…"] [--answer allow|deny]]` is a phone in a terminal, for testing a
   running Trek (`--limit` and `--before` open a thread at its end and page back to its start,
