@@ -1071,7 +1071,8 @@ impl ThreadView {
                 self.expanded.insert(key);
                 self.expanded_gen += 1;
                 if let Some(row) = self.rows(cx).row_of(ix) {
-                    self.scroll_to_row(row, cx);
+                    self.scroller
+                        .update(cx, |s, cx| _ = s.scroll_to_item(row, cx));
                 }
                 cx.notify();
             }
