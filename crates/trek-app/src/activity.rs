@@ -989,6 +989,7 @@ mod tests {
 
     #[test]
     fn a_group_names_the_calls_that_failed_or_were_denied() {
+        use super::trouble;
         use ToolStatus::*;
         assert_eq!(trouble([Done, Running]), None);
         assert_eq!(trouble([Done, Failed]), Some("1 failed".into()));
