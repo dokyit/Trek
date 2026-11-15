@@ -75,6 +75,8 @@ enum Row {
         ix: usize,
         key: SharedString,
         summary: SharedString,
+        /// "1 failed" when a call in it did, so a closed group says so.
+        trouble: Option<SharedString>,
         kind: ToolKind,
         running: bool,
         open: bool,
@@ -1536,6 +1538,12 @@ impl ThreadView {
                     let live_thought = thought_after(&live.items, live.reasoning, &members);
                     let mut kinds = Vec::with_capacity(members.len());
                     let mut running = false;
+                    let trouble = crate::activity::trouble(members.iter().filter_map(|&m| {
+                        match &live.items[m] {
+                            Item::Tool { status, .. } => Some(*status),
+                            _ => None,
+                        }
+                    }));
                     let tools: Vec<Row> = members
                         .into_iter()
                         .map(|ix| {
@@ -1595,6 +1603,7 @@ impl ThreadView {
                         open: self.expanded.contains(key.as_ref()),
                         key,
                         summary: summarize(&tool_kinds).into(),
+                        trouble: trouble.map(Into::into),
                         kind: tool_kinds.last().copied().unwrap_or(ToolKind::Thought),
                         running,
                         tools,
@@ -3065,6 +3074,7 @@ impl ThreadView {
                     ix,
                     key,
                     summary,
+                    trouble,
                     kind,
                     running,
                     open,
@@ -3094,6 +3104,14 @@ impl ThreadView {
                                         })
                                         .child(summary),
                                 )
+                                // A closed group still says when a call in it went wrong.
+                                .children(trouble.map(|t| {
+                                    div()
+                                        .id(("tool-group-trouble", ix))
+                                        .test_support()
+                                        .text_color(palette::red(cx))
+                                        .child(format!("· {t}"))
+                                }))
                                 .child(
                                     Icon::new(if open {
                                         IconName::ChevronDown
@@ -5800,9 +5818,16 @@ impl ThreadView {
                         .unwrap_or_default()
                 ),
                 Row::ToolGroup {
-                    summary, running, ..
+                    summary,
+                    trouble,
+                    running,
+                    ..
                 } => format!(
-                    "{indent}group: {summary}{}",
+                    "{indent}group: {summary}{}{}",
+                    trouble
+                        .as_ref()
+                        .map(|t| format!(" · {t}"))
+                        .unwrap_or_default(),
                     if *running { " (running)" } else { "" }
                 ),
                 Row::Notice { .. } => format!("{indent}notice"),

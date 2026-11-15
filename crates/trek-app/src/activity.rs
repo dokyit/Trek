@@ -119,6 +119,25 @@ pub fn summarize(kinds: &[ToolKind]) -> String {
     capitalize(&text)
 }
 
+/// What went wrong in a group of calls, for its summary line: "1 failed", "2 denied", "1 failed,
+/// 1 denied". `None` when every call ran (or is still running).
+pub fn trouble(statuses: impl IntoIterator<Item = ToolStatus>) -> Option<String> {
+    let (mut failed, mut denied) = (0, 0);
+    for status in statuses {
+        match status {
+            ToolStatus::Failed => failed += 1,
+            ToolStatus::Denied => denied += 1,
+            ToolStatus::Running | ToolStatus::Done => {}
+        }
+    }
+    match (failed, denied) {
+        (0, 0) => None,
+        (f, 0) => Some(format!("{f} failed")),
+        (0, d) => Some(format!("{d} denied")),
+        (f, d) => Some(format!("{f} failed, {d} denied")),
+    }
+}
+
 fn capitalize(text: &str) -> String {
     let mut chars = text.chars();
     chars
@@ -965,6 +984,18 @@ mod tests {
         assert_eq!(
             phrase("mcp__trek-orchestrate__read_thread", "", None),
             "Working with threads"
+        );
+    }
+
+    #[test]
+    fn a_group_names_the_calls_that_failed_or_were_denied() {
+        use ToolStatus::*;
+        assert_eq!(trouble([Done, Running]), None);
+        assert_eq!(trouble([Done, Failed]), Some("1 failed".into()));
+        assert_eq!(trouble([Denied, Denied]), Some("2 denied".into()));
+        assert_eq!(
+            trouble([Failed, Done, Denied, Failed]),
+            Some("2 failed, 1 denied".into())
         );
     }
 

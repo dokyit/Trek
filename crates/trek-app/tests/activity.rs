@@ -213,6 +213,32 @@ fn without_motion_a_finished_group_goes_straight_to_the_transcript() {
 }
 
 #[test]
+fn a_closed_group_says_when_a_call_in_it_failed() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        feed(
+            &trek,
+            cx,
+            &id,
+            vec![
+                start("t1", "Run command", "cargo test"),
+                AgentEvent::ToolFinished {
+                    id: "t1".into(),
+                    output: "error[E0432]: unresolved import".into(),
+                    ok: false,
+                },
+                AgentEvent::TextDelta("The build fails.".into()),
+            ],
+        );
+        assert_eq!(
+            trek.rows(cx),
+            ["group: Ran 1 command · 1 failed", "assistant"]
+        );
+    });
+}
+
+#[test]
 fn a_card_shows_the_group_in_the_transcript_until_it_is_answered() {
     run(async |cx| {
         let trek = open(cx);
