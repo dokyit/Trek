@@ -137,6 +137,8 @@ fn tool_calls_fold_into_summary_rows() {
             |i| matches!(i, Item::Tool { detail, .. } if detail == "ls -la"),
         );
         assert!(!trek.visible(cx, ("tool-out", ls)));
+        // A row that has output says it opens.
+        assert!(trek.visible(cx, ("tool-chevron", ls)));
         trek.click(cx, ("tool", ls));
         assert!(trek.visible(cx, ("tool-out", ls)));
         // Tool calls stay out of the Markdown export.

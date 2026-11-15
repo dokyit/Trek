@@ -205,7 +205,21 @@ pub struct WatchedVideo {
 impl RenderOnce for WatchedVideo {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let Some(w) = watched(&self.output, cx) else {
-            return div().into_any_element();
+            // The call named its files but they're gone (the cache was cleared): say so, rather
+            // than leave a row that ends with nothing under it.
+            return if media::manifest_in(&self.output).is_some() {
+                div()
+                    .id(("video-cleared", self.ix))
+                    .test_support()
+                    .pl_8()
+                    .pb_2()
+                    .text_size(to_rems(text::META))
+                    .text_color(cx.theme().muted_foreground)
+                    .child("The video and its frames were cleared from the cache.")
+                    .into_any_element()
+            } else {
+                div().into_any_element()
+            };
         };
         let player = w
             .doc

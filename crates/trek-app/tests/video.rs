@@ -162,6 +162,31 @@ fn a_watched_video_plays_under_its_row_with_the_frames_the_model_saw() {
     });
 }
 
+/// The files a finished watch named have been cleared: the row says so instead of ending bare.
+#[test]
+fn a_watch_whose_files_are_gone_says_so() {
+    run(async |cx| {
+        fake_web(true).unwrap();
+        let trek = open(cx);
+        let (_, manifest) = watched_folder("cleared");
+        std::fs::remove_file(&manifest).unwrap();
+        thread_of(
+            &trek,
+            cx,
+            vec![
+                user("What's in the clip?"),
+                watch_call(&manifest, ToolStatus::Done),
+                Item::Assistant {
+                    text: "A test pattern.".into(),
+                },
+            ],
+        )
+        .await;
+        assert!(trek.visible(cx, ("video-cleared", 1usize)));
+        assert_eq!(frames_shown(&trek, cx), 0);
+    });
+}
+
 #[test]
 fn a_running_or_failed_watch_has_no_player() {
     run(async |cx| {

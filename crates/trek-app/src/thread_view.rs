@@ -3256,6 +3256,23 @@ impl ThreadView {
                             .when_some(lines, |el, (a, r)| {
                                 el.child(crate::working_bar::lines_chip(a, r, cx))
                             })
+                            // A row with output opens: its chevron says so, as a group's does.
+                            .when(has_output, |el| {
+                                el.child(
+                                    div()
+                                        .id(("tool-chevron", ix))
+                                        .test_support()
+                                        .child(
+                                            Icon::new(if open {
+                                                IconName::ChevronDown
+                                            } else {
+                                                IconName::ChevronRight
+                                            })
+                                            .xsmall()
+                                            .opacity(CHEVRON),
+                                        ),
+                                )
+                            })
                             .child(status_el),
                     )
                     .when(open && has_output, |el| {
