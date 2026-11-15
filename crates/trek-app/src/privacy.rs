@@ -267,6 +267,7 @@ pub fn count_tool(tool: crate::workspace::PanelTool) {
         PanelTool::SideChat => "side-chat",
         PanelTool::Simulator => "simulator",
         PanelTool::Phone => "iphone",
+        PanelTool::Plugin => "plugin",
     };
     trek_telemetry::count(trek_telemetry::Feature::Tool, name);
 }

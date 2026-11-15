@@ -302,6 +302,13 @@ impl TrekWindow {
                             .update(cx, |ws, cx| ws.set_mode(crate::workspace::Mode::Agents, cx));
                         this.terminal_dock.update(cx, |d, cx| d.show(window, cx));
                     }
+                    WorkspaceEvent::OpenPluginPanel { plugin, panel } => {
+                        let (plugin, panel) = (plugin.clone(), panel.clone());
+                        this.workspace
+                            .update(cx, |ws, cx| ws.set_mode(crate::workspace::Mode::Agents, cx));
+                        this.right_panel
+                            .update(cx, |p, cx| p.open_plugin_panel(&plugin, &panel, window, cx));
+                    }
                     WorkspaceEvent::OpenTool(tool) => {
                         let tool = *tool;
                         this.workspace

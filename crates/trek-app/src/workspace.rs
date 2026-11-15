@@ -1536,6 +1536,9 @@ pub enum PanelTool {
     /// The user's real iPhone: on a Mac its screen live and agents driving it; on Windows its
     /// apps and files.
     Phone,
+    /// A plugin's panel (`[[panel]]`): opened by the plugin's own actions and the palette, not
+    /// from the tools' list.
+    Plugin,
 }
 
 impl PanelTool {
@@ -1571,6 +1574,7 @@ impl PanelTool {
             PanelTool::SideChat => "Side chat",
             PanelTool::Simulator => "Simulator",
             PanelTool::Phone => "iPhone",
+            PanelTool::Plugin => "Plugin",
         }
     }
 }
@@ -1605,6 +1609,11 @@ pub enum EditorCommand {
 }
 
 pub enum WorkspaceEvent {
+    /// Open a plugin's panel beside the thread (`crate::plugins::open_panel`).
+    OpenPluginPanel {
+        plugin: String,
+        panel: String,
+    },
     /// Open (or focus) a right-panel tool.
     OpenTool(PanelTool),
     /// The agent of `thread` drove a simulator; `follow`: the Simulator tool may come forward to

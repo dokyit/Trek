@@ -57,6 +57,7 @@ enum Action {
     /// A plugin's command, a plugin's page, or a plugin turned on or off.
     PluginCommand(String, String),
     PluginPage(String, String),
+    PluginPanel(String, String),
     PluginSwitch(String, bool),
     HandHolding(HandHolding),
     Settle(String),
@@ -1338,6 +1339,20 @@ impl CommandPalette {
                     ),
                     &format!("page plugin mod {plugin}"),
                 ),
+                PaletteEntry::Panel {
+                    plugin,
+                    panel,
+                    title,
+                    icon: name,
+                } => add(
+                    Entry::new(
+                        c,
+                        icon(Icon::empty().path(crate::plugins::icon_path(&name))),
+                        format!("Open {title} beside the thread"),
+                        Action::PluginPanel(plugin.clone(), panel),
+                    ),
+                    &format!("panel plugin mod tool {plugin}"),
+                ),
                 PaletteEntry::Switch { plugin, name, on } => add(
                     Entry::new(
                         c,
@@ -1607,6 +1622,9 @@ impl CommandPalette {
                 crate::plugins::run_command(&plugin, &command, &ws, window, cx)
             }
             Action::PluginPage(plugin, page) => crate::plugins::open_page(&plugin, &page, &ws, cx),
+            Action::PluginPanel(plugin, panel) => {
+                crate::plugins::open_panel(&plugin, &panel, &ws, cx)
+            }
             Action::PluginSwitch(plugin, on) => crate::plugins::set_on(&plugin, on, &ws, cx),
             Action::HandHolding(level) => ws.update(cx, |ws, cx| {
                 let id = ws.focused_thread().map(str::to_string);

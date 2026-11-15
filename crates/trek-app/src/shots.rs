@@ -3930,6 +3930,14 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                     crate::plugins::run_command(&id, &command, &ws2, window, cx)
                 })?;
             }
+            "panel" => {
+                let (plugin, panel) = rest.split_once(' ').unwrap_or((rest, rest));
+                anyhow::ensure!(
+                    crate::plugins::page::page_of(plugin, panel.trim(), cx).is_some(),
+                    "plugin panel {rest}: no such panel of a running plugin"
+                );
+                crate::plugins::open_panel(plugin, panel.trim(), &ws, cx);
+            }
             "on" => crate::plugins::set_on(rest, true, &ws, cx),
             "off" => crate::plugins::set_on(rest, false, &ws, cx),
             "reread" => crate::plugins::reread(&ws, cx),

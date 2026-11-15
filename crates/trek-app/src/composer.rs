@@ -2857,6 +2857,20 @@ impl Composer {
     fn plus_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         use crate::photos::Source;
         let me = cx.entity();
+        // What plugins add to the menu (the main window's composer only).
+        let plugin_place = crate::plugins::render::Place {
+            thread: self
+                .workspace
+                .read(cx)
+                .thread_id_in(&self.scope)
+                .map(str::to_string),
+            ..crate::plugins::render::Place::of(&self.workspace)
+        };
+        let plugin_items = if self.scope == crate::workspace::Scope::Main {
+            crate::plugins::render::plus_items(&plugin_place, cx)
+        } else {
+            Vec::new()
+        };
         let theme = cx.theme().clone();
         let restate = self.restate;
         look::quiet_button(gpui_kit::component::button::Button::new("attach"), cx)
@@ -2973,6 +2987,24 @@ impl Composer {
                                 })
                             }),
                     )
+                    .map(|mut menu| {
+                        if !plugin_items.is_empty() {
+                            menu = menu.separator();
+                        }
+                        for (plugin, label, action) in plugin_items.clone() {
+                            let place = plugin_place.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(label)
+                                    .icon(crate::assets::Lucide::Puzzle)
+                                    .on_click(move |_, window, cx| {
+                                        crate::plugins::render::run(
+                                            &plugin, &action, &place, window, cx,
+                                        )
+                                    }),
+                            );
+                        }
+                        menu
+                    })
             })
     }
 
@@ -4725,7 +4757,7 @@ impl Render for Composer {
                         .is_ok(),
                     None => false,
                 }
-            })).children(pickers::slash_ghost_overlay(self, cx)) }))
+            })).children(pickers::slash_ghost_overlay(self, cx)).children(crate::plugins::render::text_effects(&self.input, cx)) }))
             .when_some(voice_row, |el, row| el.child(row))
             .when(!self.voice.row(), |el| el.child(
                 // 30 px controls, 5 px apart, 13 px in from the card's edges.

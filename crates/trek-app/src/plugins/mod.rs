@@ -40,6 +40,8 @@ pub struct Plugins {
     slots: BTreeMap<Slot, Vec<Placed>>,
     /// The surfaces a running plugin replaces, as the user chose (`State::replace`).
     replacements: BTreeMap<trek_core::plugins::Surface, Placed>,
+    /// The running plugins' text effects over the composer's draft.
+    effects: Rc<Vec<trek_core::plugins::TextEffect>>,
     /// The plugin whose log Settings shows, and its last lines (read when it's opened or the
     /// folder changes, never while drawing).
     pub log: Option<(String, Vec<String>)>,
@@ -55,6 +57,13 @@ impl Plugins {
     fn index(&mut self) {
         self.slots.clear();
         self.replacements.clear();
+        self.effects = Rc::new(
+            self.plugins
+                .iter()
+                .filter(|p| self.state.running(&p.manifest))
+                .flat_map(|p| p.manifest.effects.iter().cloned())
+                .collect(),
+        );
         for (surface, id) in &self.state.replace {
             let Some(p) = self.plugins.iter().find(|p| &p.manifest.id == id) else {
                 continue;
@@ -130,6 +139,13 @@ pub fn slot(slot: Slot, cx: &App) -> &[Placed] {
         .and_then(|p| p.slots.get(&slot))
         .map(Vec::as_slice)
         .unwrap_or(&[])
+}
+
+/// The running plugins' text effects (none, usually).
+pub fn text_effects(cx: &App) -> Rc<Vec<trek_core::plugins::TextEffect>> {
+    cx.try_global::<Plugins>()
+        .map(|p| p.effects.clone())
+        .unwrap_or_default()
 }
 
 /// The running plugin's surface the user chose in place of Trek's `surface`, if any.
@@ -212,6 +228,7 @@ pub fn init(ws: &Entity<Workspace>, cx: &mut App) {
         fingerprint,
         slots: BTreeMap::new(),
         replacements: BTreeMap::new(),
+        effects: Default::default(),
         log: None,
         states: HashMap::new(),
         generation: 0,
@@ -462,6 +479,12 @@ pub enum PaletteEntry {
         title: String,
         icon: String,
     },
+    Panel {
+        plugin: String,
+        panel: String,
+        title: String,
+        icon: String,
+    },
     Switch {
         plugin: String,
         name: String,
@@ -492,6 +515,14 @@ pub fn palette_entries(cx: &App) -> Vec<PaletteEntry> {
                     page: page.id.clone(),
                     title: page.title.clone(),
                     icon: page.icon.clone(),
+                });
+            }
+            for panel in &m.panels {
+                out.push(PaletteEntry::Panel {
+                    plugin: m.id.clone(),
+                    panel: panel.id.clone(),
+                    title: panel.title.clone(),
+                    icon: panel.icon.clone(),
                 });
             }
         }
@@ -695,6 +726,17 @@ pub fn open_page(plugin: &str, page: &str, ws: &Entity<Workspace>, cx: &mut App)
         page: page.to_string(),
     };
     ws.update(cx, |ws, cx| ws.navigate(route, cx));
+}
+
+/// Open plugin `plugin`'s panel `panel` beside the thread.
+pub fn open_panel(plugin: &str, panel: &str, ws: &Entity<Workspace>, cx: &mut App) {
+    if page::page_of(plugin, panel, cx).is_none() {
+        return;
+    }
+    let (plugin, panel) = (plugin.to_string(), panel.to_string());
+    ws.update(cx, |_, cx| {
+        cx.emit(WorkspaceEvent::OpenPluginPanel { plugin, panel })
+    });
 }
 
 /// Send `text` to thread `thread` as plugin `plugin` (which was given `threads:send`): to the

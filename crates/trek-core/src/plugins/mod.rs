@@ -277,6 +277,30 @@ struct ManifestFile {
     replace: Vec<ReplaceEntry>,
     #[serde(default)]
     command: Vec<CommandEntry>,
+    #[serde(default)]
+    effect: Vec<EffectEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EffectEntry {
+    /// The words it marks, as written (capitals matter).
+    #[serde(rename = "match")]
+    pattern: String,
+    #[serde(default)]
+    color: Option<String>,
+    /// "highlight" (a wash behind the words) or "underline".
+    #[serde(default)]
+    style: Option<String>,
+}
+
+/// A paint-only rule over what's typed in the composer: every place `pattern` appears is
+/// washed or underlined in `paint`. It changes nothing of the text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextEffect {
+    pub pattern: String,
+    pub paint: ui::Paint,
+    pub underline: bool,
 }
 
 fn first_version() -> String {
@@ -405,6 +429,7 @@ pub struct Manifest {
     pub panels: Vec<Page>,
     pub replacements: Vec<Replacement>,
     pub commands: Vec<Command>,
+    pub effects: Vec<TextEffect>,
 }
 
 impl Manifest {
@@ -429,6 +454,7 @@ impl Manifest {
             n(self.panels.len(), "a panel", "panels"),
             n(self.replacements.len(), "a replacement", "replacements"),
             n(self.commands.len(), "a command", "commands"),
+            n(self.effects.len(), "a text effect", "text effects"),
             self.main.as_ref().map(|_| "logic".to_string()),
         ]
         .into_iter()
@@ -623,6 +649,12 @@ pub fn parse(text: &str, dir: &Path, folder_id: &str) -> Result<Manifest, String
                     .into(),
             );
         }
+        if slot == Slot::ComposerPlus && !matches!(node.kind, ui::Kind::Button { .. }) {
+            return Err(
+                "[[slot]] composer.plus: an item of the + menu is a button (its text and what it does)"
+                    .into(),
+            );
+        }
         slots.push(SlotUi {
             slot,
             tree: node,
@@ -728,6 +760,34 @@ pub fn parse(text: &str, dir: &Path, folder_id: &str) -> Result<Manifest, String
             run,
         });
     }
+    let mut effects = Vec::new();
+    for e in &file.effect {
+        let n = e.pattern.chars().count();
+        if !(1..=40).contains(&n) || e.pattern.contains('\n') {
+            return Err(format!(
+                "[[effect]] match = \"{}\": the words to mark, 1 to 40 characters on one line",
+                e.pattern
+            ));
+        }
+        let underline = match e.style.as_deref() {
+            None | Some("highlight") => false,
+            Some("underline") => true,
+            Some(other) => {
+                return Err(format!(
+                    "[[effect]] style = \"{other}\": highlight or underline"
+                ));
+            }
+        };
+        effects.push(TextEffect {
+            pattern: e.pattern.clone(),
+            paint: ui::Paint::parse(e.color.as_deref().unwrap_or("accent"))
+                .map_err(|err| format!("[[effect]] color: {err}"))?,
+            underline,
+        });
+    }
+    if effects.len() > 12 {
+        return Err("[[effect]]: at most 12 text effects a plugin".into());
+    }
     let manifest = Manifest {
         id,
         name,
@@ -744,6 +804,7 @@ pub fn parse(text: &str, dir: &Path, folder_id: &str) -> Result<Manifest, String
         panels,
         replacements,
         commands,
+        effects,
     };
     check_actions(&manifest)?;
     Ok(manifest)
@@ -780,6 +841,11 @@ fn check_actions(m: &Manifest) -> Result<(), String> {
             }
             ui::Action::Page(id) if !m.pages.iter().any(|p| &p.id == id) => {
                 return Err(format!("{at}: page:{id}, but it has no [[page]] \"{id}\""));
+            }
+            ui::Action::Panel(id) if !m.panels.iter().any(|p| &p.id == id) => {
+                return Err(format!(
+                    "{at}: panel:{id}, but it has no [[panel]] \"{id}\""
+                ));
             }
             ui::Action::Open(_) | ui::Action::NewThread if !m.wants(&Permission::ThreadsOpen) => {
                 return Err(format!(

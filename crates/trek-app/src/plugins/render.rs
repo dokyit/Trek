@@ -110,6 +110,99 @@ pub fn slot(slot: trek_core::plugins::Slot, place: &Place, cx: &App) -> Vec<AnyE
         .collect()
 }
 
+/// The most a draft may hold for text effects to look through it, and the most places marked.
+const EFFECT_TEXT: usize = 20_000;
+const EFFECT_MARKS: usize = 60;
+
+/// Plugins' text effects over the composer's draft: each place a rule's words appear is washed
+/// or underlined, painted over the textarea from its own layout (it owns no text and takes no
+/// clicks). `None`, and nothing made, when no running plugin has an effect.
+pub fn text_effects(
+    input: &Entity<gpui_kit::component::input::TextareaState>,
+    cx: &App,
+) -> Option<AnyElement> {
+    let effects = super::text_effects(cx);
+    if effects.is_empty() {
+        return None;
+    }
+    let colours: Vec<Hsla> = effects.iter().map(|e| paint(e.paint, cx)).collect();
+    let input = input.clone();
+    Some(
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, cx| {
+                let s = input.read(cx);
+                let text = s.value();
+                if text.is_empty() || text.len() > EFFECT_TEXT {
+                    return;
+                }
+                let bounds = s.input_bounds();
+                let mut marks = 0;
+                window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                    for (effect, colour) in effects.iter().zip(&colours) {
+                        for (at, found) in text.match_indices(effect.pattern.as_str()) {
+                            if marks >= EFFECT_MARKS {
+                                return;
+                            }
+                            let Some(b) = s.range_to_bounds(&(at..at + found.len())) else {
+                                continue;
+                            };
+                            // Words that wrap across lines aren't marked: a box round both
+                            // would cover what's between.
+                            if b.size.width <= px(0.) {
+                                continue;
+                            }
+                            marks += 1;
+                            if effect.underline {
+                                window.paint_quad(fill(
+                                    Bounds::new(
+                                        point(b.origin.x, b.origin.y + b.size.height - px(2.)),
+                                        size(b.size.width, px(1.5)),
+                                    ),
+                                    *colour,
+                                ));
+                            } else {
+                                window.paint_quad(
+                                    fill(
+                                        Bounds::new(
+                                            point(b.origin.x - px(1.), b.origin.y + px(1.)),
+                                            size(b.size.width + px(2.), b.size.height - px(2.)),
+                                        ),
+                                        colour.opacity(0.24 * colour.a),
+                                    )
+                                    .corner_radii(px(3.)),
+                                );
+                            }
+                        }
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_full()
+        .into_any_element(),
+    )
+}
+
+/// The + menu's items from plugins (`composer.plus`, each a button): whose it is, its label, and
+/// what it does.
+pub fn plus_items(place: &Place, cx: &App) -> Vec<(Rc<str>, String, Resolved)> {
+    super::slot(trek_core::plugins::Slot::ComposerPlus, cx)
+        .iter()
+        .filter_map(|p| {
+            let Kind::Button { label, on } = &p.tree.kind else {
+                return None;
+            };
+            let data = data(&p.plugin, place, cx);
+            let scope = Scope {
+                root: &data,
+                items: Vec::new(),
+            };
+            Some((p.plugin.clone(), scope.text(label), resolve(on, &scope)))
+        })
+        .collect()
+}
+
 /// One plugin's tree, drawn for `place`; `key` keeps its elements' ids apart from others'.
 pub fn tree(p: &Placed, place: &Place, key: &str, cx: &App) -> AnyElement {
     let data = data(&p.plugin, place, cx);
@@ -436,6 +529,8 @@ pub enum Resolved {
     Command(String),
     Open(String),
     Page(String),
+    Panel(String),
+    Insert(String),
     NewThread,
     Set(String, String),
     Trek(Component, String),
@@ -446,6 +541,8 @@ fn resolve(a: &Action, scope: &Scope) -> Resolved {
         Action::Command(id) => Resolved::Command(id.clone()),
         Action::Open(t) => Resolved::Open(scope.text(t)),
         Action::Page(p) => Resolved::Page(p.clone()),
+        Action::Panel(p) => Resolved::Panel(p.clone()),
+        Action::Insert(t) => Resolved::Insert(scope.text(t)),
         Action::NewThread => Resolved::NewThread,
         Action::Set(k, v) => Resolved::Set(k.clone(), v.clone()),
         Action::Trek(c, verb) => Resolved::Trek(*c, verb.clone()),
@@ -464,6 +561,13 @@ pub fn run(plugin: &str, a: &Resolved, place: &Place, window: &mut Window, cx: &
             }
         }
         Resolved::Page(page) => super::open_page(plugin, page, &ws, cx),
+        Resolved::Panel(panel) => super::open_panel(plugin, panel, &ws, cx),
+        Resolved::Insert(text) => {
+            let text = text.clone();
+            ws.update(cx, |_, cx| {
+                cx.emit(crate::workspace::WorkspaceEvent::InsertIntoComposer(text))
+            });
+        }
         Resolved::NewThread => {
             let project = place.project.clone();
             ws.update(cx, |ws, cx| ws.navigate(Route::Draft { project }, cx));

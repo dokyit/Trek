@@ -39,6 +39,7 @@ pub fn tool_icon(tool: PanelTool) -> Icon {
         PanelTool::Git => Icon::new(crate::assets::Lucide::GitBranch),
         PanelTool::Simulator => Icon::new(crate::assets::Lucide::Smartphone),
         PanelTool::Phone => Icon::new(crate::assets::Lucide::Smartphone),
+        PanelTool::Plugin => Icon::new(crate::assets::Lucide::Puzzle),
     }
 }
 
@@ -52,6 +53,7 @@ pub fn tool_blurb(tool: PanelTool) -> &'static str {
         PanelTool::Explorer => "Browse the project's files",
         PanelTool::SideChat => "Ask on the side, off the thread",
         PanelTool::Git => "Changes, commits and branches",
+        PanelTool::Plugin => "A plugin's panel",
     }
 }
 
@@ -78,6 +80,8 @@ enum View {
     Simulator(Entity<simulator::SimulatorPanel>),
     #[cfg(any(target_os = "macos", windows))]
     Phone(Entity<phone::PhonePanel>),
+    /// A plugin's panel: its page in a fenced web view (`plugins::page`).
+    Plugin(Entity<crate::plugins::page::PageHost>),
 }
 
 struct Tab {
@@ -201,10 +205,49 @@ impl RightPanel {
             // Not offered off macOS and Windows.
             #[cfg(not(any(target_os = "macos", windows)))]
             PanelTool::Phone => return,
+            // A plugin's panel names its plugin: `open_plugin_panel`.
+            PanelTool::Plugin => return,
         };
         let id = self.next_id;
         self.next_id += 1;
         self.tabs.push(Tab { id, tool, view });
+        self.active = Some(id);
+        self.after_activate(window, cx);
+    }
+
+    /// Open plugin `plugin`'s panel `panel` in a tab (the one it has, if it's open already).
+    pub fn open_plugin_panel(
+        &mut self,
+        plugin: &str,
+        panel: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open = true;
+        self.launcher_open = false;
+        let there = self.tabs.iter().find(|t| match &t.view {
+            View::Plugin(host) => host.read(cx).shows(plugin, panel),
+            _ => false,
+        });
+        if let Some(t) = there {
+            self.active = Some(t.id);
+            self.after_activate(window, cx);
+            return;
+        }
+        let (ws, plugin, panel) = (
+            self.workspace.clone(),
+            plugin.to_string(),
+            panel.to_string(),
+        );
+        let host =
+            cx.new(|cx| crate::plugins::page::PageHost::panel(ws, plugin, panel, window, cx));
+        let id = self.next_id;
+        self.next_id += 1;
+        self.tabs.push(Tab {
+            id,
+            tool: PanelTool::Plugin,
+            view: View::Plugin(host),
+        });
         self.active = Some(id);
         self.after_activate(window, cx);
     }
@@ -515,6 +558,11 @@ impl RightPanel {
                     let show = open && active == Some(t.id);
                     s.update(cx, |s, cx| s.set_visible(show, cx));
                 }
+                // A web view: hidden under a menu, as the Browser's is.
+                View::Plugin(host) => {
+                    let show = open && active == Some(t.id) && !menu_open;
+                    host.update(cx, |h, cx| h.set_active(show, cx));
+                }
                 #[cfg(any(target_os = "macos", windows))]
                 View::Phone(p) => {
                     let show = open && active == Some(t.id);
@@ -661,7 +709,10 @@ impl Render for RightPanel {
                 let id = t.id;
                 let is_active = Some(id) == active;
                 let icon_only = compact && !is_active;
-                let label = t.tool.label();
+                let label: SharedString = match &t.view {
+                    View::Plugin(host) => host.read(cx).title().into(),
+                    _ => t.tool.label().into(),
+                };
                 h_flex()
                     .id(("panel-tab", id as usize))
                     .test_support()
@@ -679,10 +730,14 @@ impl Render for RightPanel {
                         el.text_color(theme.muted_foreground)
                             .hover(|s| s.bg(theme.foreground.opacity(0.05)))
                     })
-                    .when(icon_only, |el| {
-                        el.tooltip(move |window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(label).build(window, cx)
-                        })
+                    .when(icon_only, {
+                        let label = label.clone();
+                        move |el| {
+                            el.tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(label.clone())
+                                    .build(window, cx)
+                            })
+                        }
                     })
                     .child(tool_icon(t.tool).xsmall())
                     .when(!icon_only, |el| el.child(label))
@@ -860,6 +915,7 @@ impl Render for RightPanel {
                 View::Simulator(v) => v.clone().into_any_element(),
                 #[cfg(any(target_os = "macos", windows))]
                 View::Phone(v) => v.clone().into_any_element(),
+                View::Plugin(v) => v.clone().into_any_element(),
             },
             None => self.tool_grid(cx),
         };

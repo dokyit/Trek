@@ -150,6 +150,10 @@ pub enum Action {
     Open(Template),
     /// Open one of the plugin's pages.
     Page(String),
+    /// Open one of the plugin's panels beside the thread.
+    Panel(String),
+    /// Put this text into the composer, at the cursor.
+    Insert(Template),
     /// A new thread (`threads:open`).
     NewThread,
     /// Set a key of the plugin's state, with no logic: `set:running=true`.
@@ -195,6 +199,10 @@ impl Action {
             "command" => Ok(Action::Command(need("a command's id")?)),
             "open" => Ok(Action::Open(Template::parse(&need("a thread's id")?)?)),
             "page" => Ok(Action::Page(need("a page's id")?)),
+            "panel" => Ok(Action::Panel(need("a panel's id")?)),
+            "insert" => Ok(Action::Insert(Template::parse(&need(
+                "the text to insert",
+            )?)?)),
             "new-thread" => Ok(Action::NewThread),
             "set" => {
                 let rest = need("key=value")?;
@@ -204,7 +212,7 @@ impl Action {
                 Ok(Action::Set(k.trim().to_string(), v.trim().to_string()))
             }
             _ => Err(format!(
-                "\"{text}\" isn't an action; use command:<id>, open:<thread id>, page:<id>, new-thread or set:key=value"
+                "\"{text}\" isn't an action; use command:<id>, open:<thread id>, page:<id>, panel:<id>, insert:<text>, new-thread, set:key=value or trek:<component>.<verb>"
             )),
         }
     }

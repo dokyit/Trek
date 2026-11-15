@@ -41,6 +41,8 @@ enum Web {
 
 /// What a page's view is made with.
 pub struct Spec {
+    /// The plugin's id, for its log.
+    pub plugin: String,
     pub origin: String,
     /// The page's address under the origin.
     pub start: String,
@@ -58,6 +60,11 @@ pub struct Spec {
 /// The page open in the main pane.
 pub struct PageHost {
     ws: Entity<Workspace>,
+    /// A panel's host shows this one (plugin, panel) whatever the route; the main pane's follows
+    /// the route.
+    fixed: Option<(String, String)>,
+    /// A panel's tab is the one in front.
+    active: bool,
     /// (plugin, page): what's open.
     open: Option<(String, String)>,
     title: String,
@@ -162,6 +169,8 @@ impl PageHost {
             vec![cx.observe_in(&ws, window, |this, _, window, cx| this.sync(window, cx))];
         Self {
             ws,
+            fixed: None,
+            active: false,
             open: None,
             title: String::new(),
             web: Web::None,
@@ -175,6 +184,51 @@ impl PageHost {
         }
     }
 
+    /// A host for plugin `plugin`'s panel `panel`, in the right panel: its view lives while its
+    /// tab does.
+    pub fn panel(
+        ws: Entity<Workspace>,
+        plugin: String,
+        panel: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::new(ws, window, cx);
+        this.fixed = Some((plugin, panel));
+        this.sync(window, cx);
+        this
+    }
+
+    /// Whether this is the host of plugin `plugin`'s panel `panel`.
+    pub fn shows(&self, plugin: &str, panel: &str) -> bool {
+        self.fixed
+            .as_ref()
+            .is_some_and(|(p, g)| p == plugin && g == panel)
+    }
+
+    pub fn title(&self) -> String {
+        self.title.clone()
+    }
+
+    /// A panel's tab came to the front, or left it (or a menu covers it).
+    pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.active != active {
+            self.active = active;
+            self.show_or_hide(cx);
+        }
+    }
+
+    fn show_or_hide(&mut self, cx: &mut Context<Self>) {
+        let overlay = self.ws.read(cx).overlay_open;
+        let shown = self.open.is_some() && !overlay && (self.fixed.is_none() || self.active);
+        if shown != self.shown {
+            self.shown = shown;
+            if let Web::Made(web) = &self.web {
+                web.set_shown(shown, cx);
+            }
+        }
+    }
+
     /// Whether a page's web view exists (a check's question: none unless a page is open).
     pub fn has_view(&self) -> bool {
         matches!(self.web, Web::Made(_))
@@ -183,13 +237,10 @@ impl PageHost {
     /// The route decides: its page is opened, another's (or none) closes this one, an overlay
     /// hides it, a plugin edited on disk reloads it.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (want, overlay) = {
-            let ws = self.ws.read(cx);
-            let want = match &ws.route {
-                Route::Page { plugin, page } => Some((plugin.clone(), page.clone())),
-                _ => None,
-            };
-            (want, ws.overlay_open)
+        let want = match (&self.fixed, &self.ws.read(cx).route) {
+            (Some(fixed), _) => Some(fixed.clone()),
+            (None, Route::Page { plugin, page }) => Some((plugin.clone(), page.clone())),
+            _ => None,
         };
         // A page whose plugin stopped running, or dropped the page, closes.
         let want = want.filter(|(plugin, page)| page_of(plugin, page, cx).is_some());
@@ -206,13 +257,7 @@ impl PageHost {
                 web.run("location.reload()", cx);
             }
         }
-        let shown = self.open.is_some() && !overlay;
-        if shown != self.shown {
-            self.shown = shown;
-            if let Web::Made(web) = &self.web {
-                web.set_shown(shown, cx);
-            }
-        }
+        self.show_or_hide(cx);
     }
 
     /// Close the page: the keys go back to Trek's view first, then the view goes.
@@ -248,6 +293,7 @@ impl PageHost {
         let (tx, rx) = async_channel::unbounded::<String>();
         let bg = Rgba::from(cx.theme().background);
         let spec = Spec {
+            plugin: plugin.clone(),
             start: core::url(&origin, &entry),
             origin,
             dir,
@@ -596,6 +642,7 @@ mod native {
         parent: &crate::panels::browser::ParentWindow,
     ) -> Option<wry::WebView> {
         let Spec {
+            plugin,
             origin,
             start,
             dir,
@@ -637,10 +684,20 @@ mod native {
             .with_asynchronous_custom_protocol(core::SCHEME.into(), move |_, request, responder| {
                 let (dir, csp, theme_css) = (dir.clone(), csp.clone(), theme_css.clone());
                 let path = request.uri().path().to_string();
+                let plugin = plugin.clone();
                 // Files are read off the UI thread.
                 std::thread::spawn(move || {
                     let css = theme_css.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                    responder.respond(respond(&dir, &path, &csp, &css))
+                    let answer = respond(&dir, &path, &csp, &css);
+                    // A file the page asked for that isn't there is said in the plugin's log:
+                    // it's how its author finds a wrong path.
+                    if answer.status() != 200 && path != "/favicon.ico" {
+                        trek_core::plugins::log(
+                            &plugin,
+                            &format!("page asked for {path}: {}", answer.status()),
+                        );
+                    }
+                    responder.respond(answer)
                 });
             })
             .with_ipc_handler(move |request| {
