@@ -532,6 +532,17 @@ impl Composer {
             cx.notify();
             return;
         }
+        // A file's path is this Mac's: another machine can't open it, so the message doesn't go
+        // with it. The message stays as it is.
+        if !self.outbox.files.is_empty()
+            && let Some(machine) = self.workspace.read(cx).machine_named_for_send(&self.scope)
+        {
+            self.toast(
+                format!("Files can't go to {machine} yet. Take them off, or start the thread on this Mac."),
+                cx,
+            );
+            return;
+        }
         // Files on the strip go as `@path` mentions after what's typed, as agents read them.
         let text = with_files(&state.read(cx).value(), &self.outbox.files);
         if text.trim().is_empty() && self.outbox.paths.is_empty() {
@@ -2625,8 +2636,7 @@ impl Composer {
         self.snapshotting = true;
         let prefs = self.workspace.read(cx).settings.snapshots.clone();
         let jpg = prefs.format == trek_core::settings::SnapshotFormat::Jpg;
-        let path = mentions::snapshot_path().with_extension(if jpg { "jpg" } else { "png" });
-        let out = path.clone();
+        let out = mentions::snapshot_path().with_extension(if jpg { "jpg" } else { "png" });
         if prefs.hide_trek {
             cx.hide();
         }
@@ -2637,7 +2647,7 @@ impl Composer {
                     .timer(std::time::Duration::from_millis(250))
                     .await;
             }
-            let ok = cx
+            let taken = cx
                 .background_executor()
                 .spawn(async move {
                     let mut cmd = std::process::Command::new("/usr/sbin/screencapture");
@@ -2653,10 +2663,12 @@ impl Composer {
                         cmd.arg("-x");
                     }
                     cmd.args(["-t", if jpg { "jpg" } else { "png" }]);
-                    cmd.arg(&out).status().map(|s| s.success()).unwrap_or(false)
+                    let ok = cmd.arg(&out).status().map(|s| s.success()).unwrap_or(false)
                         && std::fs::metadata(&out)
                             .map(|m| m.len() > 0)
-                            .unwrap_or(false)
+                            .unwrap_or(false);
+                    // A screen of a large display is over what agents take: made smaller here.
+                    ok.then(|| attachments::fit_in_place(&out))
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -2664,8 +2676,10 @@ impl Composer {
                 if prefs.hide_trek {
                     crate::system::activate(cx);
                 }
-                if ok {
-                    this.outbox.add([path]);
+                match taken {
+                    Some(Ok(path)) => this.outbox.add([path]),
+                    Some(Err(e)) => this.toast(format!("Couldn't attach the snapshot: {e}."), cx),
+                    None => {}
                 }
                 cx.notify();
             });
@@ -2728,7 +2742,7 @@ impl Composer {
             let saved = match arrived {
                 Some(clip) => {
                     let out = path.clone();
-                    Some(cx.background_executor().spawn(async move { screenclip::to_png(clip).and_then(|png| Ok(std::fs::write(&out, png)?)) }).await)
+                    Some(cx.background_executor().spawn(async move { screenclip::to_png(clip).and_then(|png| Ok(std::fs::write(&out, png)?)).and_then(|()| attachments::fit_in_place(&out)) }).await)
                 }
                 None => None,
             };
@@ -2739,7 +2753,7 @@ impl Composer {
                     task.detach();
                 }
                 match saved {
-                    Some(Ok(())) => this.outbox.add([path]),
+                    Some(Ok(path)) => this.outbox.add([path]),
                     Some(Err(e)) => this.toast(format!("Couldn't attach the snapshot: {e}."), cx),
                     None => this.toast(crate::keys::localize("Nothing was picked in a minute, so no snapshot was attached. ⌘⇧S tries again.").into_owned(), cx),
                 }

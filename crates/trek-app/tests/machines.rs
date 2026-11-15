@@ -220,6 +220,47 @@ fn a_new_thread_in_no_project_starts_on_a_paired_machine() {
     });
 }
 
+/// A file's path is this Mac's: a message to another machine doesn't go with one. It stays in the
+/// composer with its tile, and a toast says why.
+#[test]
+fn a_file_tile_keeps_the_message_from_going_to_another_machine() {
+    run(async |cx| {
+        let trek = open(cx);
+        let link = serve_as_machine_b(&trek, cx);
+        pair(&trek, cx, link).await;
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: None }, cx));
+        trek.render(cx);
+        trek.update(cx, |ws, cx| {
+            ws.set_draft_machine(None, Some("machine-b".into()), cx)
+        });
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.machine_named_for_send(&Scope::Main))
+                .as_deref(),
+            Some("Machine B")
+        );
+        let (heard, _sub) = listen(&trek, cx);
+        let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+        let pdf = std::env::temp_dir().join(format!("trek-tile-{}.pdf", std::process::id()));
+        std::fs::write(&pdf, b"%PDF-1.4").unwrap();
+        trek.type_text(cx, "please read this");
+        composer.update(cx, |c, cx| c.add_files(std::slice::from_ref(&pdf), cx));
+        trek.press(cx, "enter");
+        trek.render(cx);
+        assert!(trek.read(cx, |ws, _| matches!(ws.route, Route::Draft { .. })));
+        assert_eq!(trek.composer_text(cx), "please read this");
+        assert_eq!(cx.read(|cx| composer.read(cx).attached_files()), [pdf.clone()]);
+        {
+            let heard = heard.lock().unwrap();
+            assert!(
+                heard.toasts.iter().any(|t| t.contains("Files can't go to Machine B")),
+                "{:?}",
+                heard.toasts
+            );
+        }
+        let _ = std::fs::remove_file(&pdf);
+    });
+}
+
 /// Settings › Phone & Machines, scrolled down to its Machines.
 fn machines_page(trek: &Trek, cx: &mut TestAppContext) {
     use gpui_kit::test::TestWindowExt as _;
@@ -1184,6 +1225,8 @@ fn a_machine_that_stops_answering_holds_its_threads_still_and_says_why() {
 struct Heard {
     toasts: Vec<String>,
     given_back: Vec<String>,
+    /// Pictures given back to the strip.
+    attached: Vec<std::path::PathBuf>,
     sent_draft: usize,
 }
 
@@ -1197,6 +1240,7 @@ fn listen(trek: &Trek, cx: &mut TestAppContext) -> (Arc<Mutex<Heard>>, gpui_kit:
             match e {
                 WorkspaceEvent::Toast { message, .. } => heard.toasts.push(message.clone()),
                 WorkspaceEvent::InsertIntoComposer(text) => heard.given_back.push(text.clone()),
+                WorkspaceEvent::AttachImage(path) => heard.attached.push(path.clone()),
                 WorkspaceEvent::SendDraft => heard.sent_draft += 1,
                 _ => {}
             }
@@ -1260,19 +1304,21 @@ fn nothing_is_asked_of_a_machine_out_of_reach_it_is_refused_and_given_back() {
                 .iter()
                 .any(|p| p.request_id == card)
         }));
-        // A new thread there: its text goes back too.
+        // A new thread there: its text goes back too, and its pictures.
+        let picture = std::path::PathBuf::from("/tmp/trek-picture.png");
         trek.update(cx, |ws, cx| {
             ws.machine_start_thread(
                 "machine-b",
                 Some(project.clone()),
                 "start it".into(),
-                vec![],
+                vec![picture.clone()],
                 cx,
             )
         });
         {
             let heard = heard.lock().unwrap();
             assert_eq!(heard.given_back, ["are you there", "start it"]);
+            assert_eq!(heard.attached, [picture]);
             assert_eq!(heard.toasts.len(), 4);
         }
         // A clone: fails at once, not "Cloning…" for as long as it's away.

@@ -265,6 +265,127 @@ pub fn convert_to(path: &Path, out: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The most one picture may weigh as it goes to an agent. The providers refuse an image over about
+/// 5 MB (counted after base64, which adds a third), and the whole turn fails with it.
+pub const MAX_IMAGE_BYTES: u64 = 3_500_000;
+/// The longest side a picture may have as it goes (providers stop at 8000 px and shrink past
+/// about 1600 on their side anyway, so detail beyond this is only weight).
+pub const MAX_IMAGE_EDGE: u32 = 4096;
+/// What a picture over a limit is shrunk to, on its longest side, before it is tried again at
+/// less.
+const FIT_EDGE: u32 = 2560;
+
+/// Whether the picture at `path` is over what agents can take (`MAX_IMAGE_BYTES`,
+/// `MAX_IMAGE_EDGE`): a screenshot of a large display, a camera photo converted to PNG.
+pub fn needs_fit(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_IMAGE_BYTES)
+        || image::image_dimensions(path).is_ok_and(|(w, h)| w.max(h) > MAX_IMAGE_EDGE)
+}
+
+/// `path` itself when agents can take it, else a smaller copy in `dir` (the original stays):
+/// scaled to fit `FIT_EDGE`, as PNG where that is light enough (and it has transparency or came
+/// as PNG), else as JPEG, and on down in steps until it is under `MAX_IMAGE_BYTES`. Says why when
+/// it can't be read or won't get small enough, so the attach fails with a reason instead of the
+/// turn failing at the provider.
+pub fn fit_file(path: &Path, dir: &Path) -> Result<PathBuf> {
+    if !needs_fit(path) {
+        return Ok(path.to_path_buf());
+    }
+    let size = std::fs::metadata(path).map_or(0, |m| m.len());
+    let decoded = image::open(path).map_err(|_| {
+        anyhow::anyhow!(
+            "it is {} and Trek can't read it to make it smaller",
+            size_label(size)
+        )
+    })?;
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("{} couldn't be created", dir.display()))?;
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "image".into());
+    let was_png = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("png"));
+    let alpha = decoded.color().has_alpha();
+    let mut edge = decoded.width().max(decoded.height()).min(FIT_EDGE);
+    for _ in 0..8 {
+        let scaled = if decoded.width().max(decoded.height()) > edge {
+            decoded.resize(edge, edge, image::imageops::FilterType::Lanczos3)
+        } else {
+            decoded.clone()
+        };
+        let png = (alpha || was_png)
+            .then(|| encoded_png(&scaled))
+            .transpose()?
+            .filter(|b| b.len() as u64 <= MAX_IMAGE_BYTES);
+        let (bytes, ext) = match png {
+            Some(bytes) => (bytes, "png"),
+            None => (encoded_jpeg(&scaled)?, "jpg"),
+        };
+        if bytes.len() as u64 <= MAX_IMAGE_BYTES {
+            let out = dir.join(format!("{stem}-{}.{ext}", timestamp()));
+            std::fs::write(&out, bytes)
+                .with_context(|| format!("{} couldn't be written", out.display()))?;
+            return Ok(out);
+        }
+        edge = edge * 4 / 5;
+    }
+    bail!(
+        "it is still over {} after making it smaller",
+        size_label(MAX_IMAGE_BYTES)
+    )
+}
+
+fn encoded_png(img: &image::DynamicImage) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .context("it couldn't be made smaller")?;
+    Ok(out)
+}
+
+/// JPEG at 85, transparency laid on white (JPEG has none).
+fn encoded_jpeg(img: &image::DynamicImage) -> Result<Vec<u8>> {
+    let rgba = img.to_rgba8();
+    let mut rgb = image::RgbImage::new(rgba.width(), rgba.height());
+    for (x, y, p) in rgba.enumerate_pixels() {
+        let a = u32::from(p[3]);
+        let on_white = |c: u8| ((u32::from(c) * a + 255 * (255 - a)) / 255) as u8;
+        rgb.put_pixel(x, y, image::Rgb([on_white(p[0]), on_white(p[1]), on_white(p[2])]));
+    }
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85)
+        .encode_image(&rgb)
+        .context("it couldn't be made smaller")?;
+    Ok(out)
+}
+
+/// `fit_file` for a picture Trek made itself (a snapshot): beside it, and the big original goes.
+pub fn fit_in_place(path: &Path) -> Result<PathBuf> {
+    let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let fitted = fit_file(path, &dir)?;
+    if fitted != path {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(fitted)
+}
+
+/// `path` made ready as an attachment in `dir`: converted if agents can't read its kind, then
+/// made smaller if it is too big (`fit_file`). Never touches `path`; the conversion's own
+/// intermediate copy goes once the smaller one is made.
+pub fn prepare_file(path: &Path, dir: &Path) -> Result<PathBuf> {
+    let ready = if needs_conversion(path) {
+        convert_file(path, dir)?
+    } else {
+        path.to_path_buf()
+    };
+    let fitted = fit_file(&ready, dir);
+    if ready != path && fitted.as_ref().map_or(true, |f| *f != ready) {
+        let _ = std::fs::remove_file(&ready);
+    }
+    fitted
+}
+
 /// A HEIC or HEIF photo, by its name.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn is_heif(path: &Path) -> bool {
@@ -496,8 +617,15 @@ enum Job {
 impl Job {
     fn run(&self, dir: &Path) -> Result<PathBuf> {
         match self {
-            Job::Data(image) => save_image(image, dir),
-            Job::File(path) => convert_file(path, dir),
+            Job::Data(image) => {
+                let saved = save_image(image, dir)?;
+                let fitted = fit_file(&saved, dir);
+                if fitted.as_ref().map_or(true, |f| *f != saved) {
+                    let _ = std::fs::remove_file(&saved);
+                }
+                fitted
+            }
+            Job::File(path) => prepare_file(path, dir),
         }
     }
 
@@ -617,7 +745,9 @@ pub fn attach_files<T: Attaching>(
     cx: &mut Context<T>,
 ) {
     let (convert, ready): (Vec<PathBuf>, Vec<PathBuf>) =
-        images.into_iter().partition(|p| needs_conversion(p));
+        images
+            .into_iter()
+            .partition(|p| needs_conversion(p) || needs_fit(p));
     this.outbox().add(ready);
     save(
         this,
@@ -1736,6 +1866,89 @@ mod tests {
             unpremultiply(&mut half);
             assert_eq!(half, [99, 199, 0, 128, 7, 8, 9, 255, 0, 0, 0, 0]);
         }
+    }
+
+    /// Noise that PNG can't squeeze: `w`×`h` of pseudo-random pixels, written as `name`.
+    fn noise_png(dir: &std::path::Path, name: &str, w: u32, h: u32) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let img = image::RgbImage::from_fn(w, h, |_, _| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            image::Rgb([seed as u8, (seed >> 8) as u8, (seed >> 16) as u8])
+        });
+        let path = dir.join(name);
+        img.save(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_picture_over_the_byte_limit_is_made_smaller_before_it_goes() {
+        let dir = temp_dir("fit-bytes");
+        let big = noise_png(&dir, "shot.png", 1400, 1000);
+        assert!(std::fs::metadata(&big).unwrap().len() > super::MAX_IMAGE_BYTES);
+        assert!(super::needs_fit(&big));
+        let out = super::fit_file(&big, &dir.join("snapshots")).unwrap();
+        assert_ne!(out, big);
+        assert!(std::fs::metadata(&out).unwrap().len() <= super::MAX_IMAGE_BYTES);
+        assert!(!super::needs_fit(&out));
+        // Still a picture agents read, and the original is left alone.
+        assert!(crate::mentions::is_image(&out));
+        assert!(image::open(&out).is_ok());
+        assert!(big.is_file());
+    }
+
+    #[test]
+    fn a_picture_over_the_edge_limit_is_scaled_down() {
+        let dir = temp_dir("fit-edge");
+        std::fs::create_dir_all(&dir).unwrap();
+        let wide = dir.join("wide.png");
+        image::RgbImage::from_pixel(5000, 40, image::Rgb([10, 20, 30]))
+            .save(&wide)
+            .unwrap();
+        assert!(std::fs::metadata(&wide).unwrap().len() < super::MAX_IMAGE_BYTES);
+        assert!(super::needs_fit(&wide));
+        let out = super::fit_file(&wide, &dir).unwrap();
+        let (w, h) = image::image_dimensions(&out).unwrap();
+        assert!(w <= 2560 && h > 0, "{w}x{h}");
+    }
+
+    #[test]
+    fn a_picture_agents_can_take_is_left_as_it_is() {
+        let dir = temp_dir("fit-small");
+        let small = noise_png(&dir, "small.png", 40, 30);
+        assert!(!super::needs_fit(&small));
+        assert_eq!(super::fit_file(&small, &dir).unwrap(), small);
+    }
+
+    #[test]
+    fn a_big_file_that_cannot_be_read_says_so() {
+        let dir = temp_dir("fit-unreadable");
+        std::fs::create_dir_all(&dir).unwrap();
+        let junk = dir.join("junk.png");
+        std::fs::write(&junk, vec![7u8; super::MAX_IMAGE_BYTES as usize + 10]).unwrap();
+        let said = super::fit_file(&junk, &dir).unwrap_err().to_string();
+        assert!(said.contains("can't read it to make it smaller"), "{said}");
+        assert!(said.contains("MB"), "{said}");
+    }
+
+    #[test]
+    fn a_pasted_screenshot_over_the_limit_is_saved_smaller() {
+        let dir = temp_dir("fit-paste");
+        let big = noise_png(&dir, "src.png", 1400, 1000);
+        let job = super::Job::Data(Image::from_bytes(
+            ImageFormat::Png,
+            std::fs::read(&big).unwrap(),
+        ));
+        let out = job.run(&dir.join("snapshots")).unwrap();
+        assert!(!super::needs_fit(&out));
+        // The big intermediate copy isn't left behind.
+        let left: Vec<_> = std::fs::read_dir(dir.join("snapshots"))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(left.len(), 1, "{left:?}");
     }
 
     #[test]

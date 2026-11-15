@@ -198,16 +198,27 @@ pub fn keep(from: &Path, dir: &Path, name: &str) -> Result<PathBuf> {
 }
 
 /// A kept pick as it's attached: a photo agents can't read (HEIC, TIFF, RAW) becomes a PNG beside
-/// it, and the original goes; anything else is as it was.
+/// it, and the original goes; a photo too big for agents is made smaller (`attachments::fit_file`);
+/// anything else is as it was.
 pub fn ready(pick: Pick) -> Result<PathBuf> {
-    let readable = crate::mentions::is_image(&pick.path);
-    if !pick.photo || readable {
+    if !pick.photo {
         return Ok(pick.path);
     }
-    let png = unique(pick.path.with_extension("png"));
-    crate::attachments::convert_to(&pick.path, &png)?;
-    let _ = std::fs::remove_file(&pick.path);
-    Ok(png)
+    let path = if crate::mentions::is_image(&pick.path) {
+        pick.path
+    } else {
+        let png = unique(pick.path.with_extension("png"));
+        crate::attachments::convert_to(&pick.path, &png)?;
+        let _ = std::fs::remove_file(&pick.path);
+        png
+    };
+    // A camera photo or a large screenshot is made smaller beside it: agents refuse a big one.
+    let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let fitted = crate::attachments::fit_file(&path, &dir)?;
+    if fitted != path {
+        let _ = std::fs::remove_file(&path);
+    }
+    Ok(fitted)
 }
 
 /// `path`, or `name-2.ext`… beside it when it's taken.

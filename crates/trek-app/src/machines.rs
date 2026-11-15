@@ -1609,7 +1609,16 @@ impl Workspace {
             trek_core::settings::FollowUp::Steer => tr::SendMode::Steer,
             trek_core::settings::FollowUp::Queue => tr::SendMode::Queue,
         });
-        let images = uploads(&images);
+        let (images, left_out) = uploads(&images);
+        if !left_out.is_empty() {
+            let machine = split_id(id)
+                .and_then(|(host, _)| self.machines.get(host))
+                .map_or_else(|| "the other machine".to_string(), |m| m.entry.name.clone());
+            cx.emit(WorkspaceEvent::Toast {
+                message: not_sent(&left_out, &machine),
+                undo: None,
+            });
+        }
         self.machine_request(
             id,
             "send the message",
@@ -1776,6 +1785,20 @@ impl Workspace {
         .filter(|m| self.machines.get(m).is_some())
     }
 
+    /// The name of the machine a message sent from `scope` goes to, when it isn't this Mac's: the
+    /// thread's own machine, or the one the main window's draft starts on.
+    pub fn machine_named_for_send(&self, scope: &Scope) -> Option<String> {
+        let host = match self.thread_id_in(scope) {
+            Some(id) => split_id(id).map(|(host, _)| host.to_string()),
+            None if matches!(scope, Scope::Main) => match &self.route {
+                Route::Draft { project } => self.draft_machine(project.as_deref()),
+                _ => None,
+            },
+            None => None,
+        }?;
+        self.machines.get(&host).map(|m| m.entry.name.clone())
+    }
+
     /// Where new threads in `project` (none: no project) start: on machine `host`, or on this
     /// Mac (`None`).
     pub fn set_draft_machine(
@@ -1856,22 +1879,36 @@ impl Workspace {
         if text.is_empty() && images.is_empty() {
             return;
         }
-        let give_back = move |ws: &mut Self, why: String, text: String, cx: &mut Context<Self>| {
+        let give_back = move |ws: &mut Self,
+                              why: String,
+                              text: String,
+                              images: Vec<PathBuf>,
+                              cx: &mut Context<Self>| {
             cx.emit(WorkspaceEvent::Toast {
                 message: why,
                 undo: None,
             });
             if give_back {
                 cx.emit(WorkspaceEvent::InsertIntoComposer(text));
+                // Its pictures with it, as a message to a thread that is out of reach gets them back.
+                for image in images {
+                    cx.emit(WorkspaceEvent::AttachImage(image));
+                }
             }
             let _ = ws;
         };
         let Some(m) = self.machines.get(host) else {
-            return give_back(self, "That machine isn't paired any more.".into(), text, cx);
+            return give_back(
+                self,
+                "That machine isn't paired any more.".into(),
+                text,
+                images,
+                cx,
+            );
         };
         let machine = m.entry.name.clone();
         if let Some(why) = self.machine_unavailable_why(host) {
-            return give_back(self, why, text, cx);
+            return give_back(self, why, text, images, cx);
         }
         let Some(client) = m.client.clone() else {
             return;
@@ -1898,6 +1935,7 @@ impl Workspace {
                             "{name} isn't on {machine} yet. Choose “Add to another machine…” to clone it there."
                         ),
                         text,
+                        images,
                         cx,
                     );
                 };
@@ -1927,6 +1965,7 @@ impl Workspace {
                 .unwrap_or_else(|| prefs.agent.display_name()),
             agent.and_then(|a| a.logo.as_deref()),
         );
+        let (uploaded, left_out) = uploads(&images);
         let req = tr::NewThreadRequest {
             project_id: project_id.clone(),
             agent: agent_key,
@@ -1937,9 +1976,15 @@ impl Workspace {
             effort: Some(prefs.effort.as_str().to_string()),
             access: Some(access_of(prefs.hand_holding)),
             plan: prefs.plan,
-            images: uploads(&images),
+            images: uploaded,
             files: vec![],
         };
+        if !left_out.is_empty() {
+            cx.emit(WorkspaceEvent::Toast {
+                message: not_sent(&left_out, &machine),
+                undo: None,
+            });
+        }
         let host = host.to_string();
         cx.spawn(async move |this, cx| {
             let reply = client.request(tr::ClientMessage::NewThread(req)).await;
@@ -1977,12 +2022,14 @@ impl Workspace {
                     ws,
                     format!("{machine} didn't start the thread ({})", tr_kind(&other)),
                     text,
+                    images,
                     cx,
                 ),
                 Err(e) => give_back(
                     ws,
                     format!("Couldn't start the thread on {machine}: {e}"),
                     text,
+                    images,
                     cx,
                 ),
             });
@@ -2288,24 +2335,49 @@ fn pump(
 }
 
 /// Images attached to a message, as the machine takes them (JPEG and PNG; others are left out).
-fn uploads(images: &[PathBuf]) -> Vec<tr::ImageUpload> {
-    images
-        .iter()
-        .filter_map(|p| {
-            let bytes = std::fs::read(p).ok()?;
-            let mime = if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-                "image/jpeg"
-            } else if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
-                "image/png"
-            } else {
-                return None;
-            };
-            Some(tr::ImageUpload {
-                mime: mime.into(),
-                data: tr::base64(&bytes),
-            })
-        })
-        .collect()
+/// The pictures as the protocol takes them (JPEG or PNG: a GIF or WebP goes as a PNG), and the
+/// names of the ones that couldn't be read, to say so.
+fn uploads(images: &[PathBuf]) -> (Vec<tr::ImageUpload>, Vec<String>) {
+    let mut sent = Vec::new();
+    let mut left_out = Vec::new();
+    for path in images {
+        match upload_of(path) {
+            Some(upload) => sent.push(upload),
+            None => left_out.push(
+                path.file_name()
+                    .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().to_string()),
+            ),
+        }
+    }
+    (sent, left_out)
+}
+
+fn upload_of(path: &Path) -> Option<tr::ImageUpload> {
+    let bytes = std::fs::read(path).ok()?;
+    let (mime, bytes) = if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        ("image/jpeg", bytes)
+    } else if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        ("image/png", bytes)
+    } else {
+        let decoded = image::load_from_memory(&bytes).ok()?;
+        let mut png = Vec::new();
+        decoded
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .ok()?;
+        ("image/png", png)
+    };
+    Some(tr::ImageUpload {
+        mime: mime.into(),
+        data: tr::base64(&bytes),
+    })
+}
+
+/// "IMG_1.gif couldn't be sent to Studio."
+fn not_sent(names: &[String], machine: &str) -> String {
+    match names {
+        [one] => format!("{one} couldn't be sent to {machine}."),
+        many => format!("{} pictures couldn't be sent to {machine}.", many.len()),
+    }
 }
 
 fn tr_kind(msg: &tr::ServerMessage) -> String {
@@ -2318,6 +2390,41 @@ fn tr_kind(msg: &tr::ServerMessage) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pictures_go_to_another_machine_as_jpeg_or_png_and_the_unreadable_are_named() {
+        let dir = std::env::temp_dir().join(format!("trek-uploads-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = image::RgbaImage::from_pixel(3, 2, image::Rgba([200, 30, 30, 255]));
+        let write = |name: &str, format| {
+            let path = dir.join(name);
+            image::DynamicImage::ImageRgba8(img.clone())
+                .save_with_format(&path, format)
+                .unwrap();
+            path
+        };
+        let png = write("a.png", image::ImageFormat::Png);
+        let gif = write("b.gif", image::ImageFormat::Gif);
+        let webp = write("c.webp", image::ImageFormat::WebP);
+        let junk = dir.join("d.gif");
+        std::fs::write(&junk, b"not a picture").unwrap();
+        let (sent, left_out) = uploads(&[png, gif, webp, junk]);
+        // The GIF and the WebP are sent, as PNGs the other Mac accepts.
+        assert_eq!(sent.len(), 3);
+        for upload in &sent {
+            assert!(upload.decode().is_ok(), "{}", upload.mime);
+        }
+        assert_eq!(left_out, ["d.gif"]);
+        assert_eq!(
+            not_sent(&left_out, "Studio"),
+            "d.gif couldn't be sent to Studio."
+        );
+        assert_eq!(
+            not_sent(&["a".into(), "b".into()], "Studio"),
+            "2 pictures couldn't be sent to Studio."
+        );
+    }
 
     #[test]
     fn a_tool_running_when_its_machine_went_away_shows_as_ended() {
