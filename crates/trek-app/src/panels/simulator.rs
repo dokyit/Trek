@@ -54,6 +54,22 @@ const SCROLL_DEBOUNCE: Duration = Duration::from_millis(140);
 const TAP_SLOP: f32 = 6.;
 const LONG_PRESS: Duration = Duration::from_millis(450);
 
+/// How long a helper's passing error stays up.
+const LINK_ERROR_FOR: Duration = Duration::from_secs(5);
+/// How often AXe is looked for while the banner asks for it.
+const AXE_LOOK: Duration = Duration::from_secs(3);
+/// Where Homebrew is got, for a Mac without it (AXe installs with it).
+const HOMEBREW: &str = "https://brew.sh";
+
+/// Whether Homebrew is on this Mac: on the login PATH, or where its installer puts it (a PATH
+/// read when Trek started doesn't have one installed since).
+fn brew_installed() -> bool {
+    trek_core::detect::which_now("brew").is_some()
+        || ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+            .iter()
+            .any(|p| Path::new(p).exists())
+}
+
 const NEEDS_AXE: &str = "Needs AXe for touch input — install it from the banner";
 
 /// How often the folder of test run logs is looked at.
@@ -544,6 +560,35 @@ fn normalize_url(input: &str) -> String {
     }
 }
 
+/// `devices` in groups of one runtime each, in the order they come.
+fn by_runtime(devices: &[Device]) -> Vec<(&str, Vec<&Device>)> {
+    let mut groups: Vec<(&str, Vec<&Device>)> = vec![];
+    for d in devices {
+        match groups.iter_mut().find(|(r, _)| *r == d.runtime) {
+            Some((_, list)) => list.push(d),
+            None => groups.push((&d.runtime, vec![d])),
+        }
+    }
+    groups
+}
+
+/// How long after a launch the app is looked for again: one that crashes at launch has gone.
+const CRASH_LOOK: Duration = Duration::from_millis(1500);
+
+/// The process `simctl launch` started, from what it says ("dev.trek.App: 4242").
+fn launched_pid(out: &str) -> Option<u32> {
+    out.trim().rsplit(':').next()?.trim().parse().ok()
+}
+
+/// Whether process `pid` still runs (a simulator's apps are this Mac's processes).
+fn running(pid: u32) -> bool {
+    Command::new("/bin/kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 fn bundle_id(app: &Path) -> Option<String> {
     let plist = app.join("Info.plist");
     let out = Command::new("/usr/bin/plutil")
@@ -632,6 +677,11 @@ pub struct SimulatorPanel {
     error: Option<SharedString>,
     axe: Option<PathBuf>,
     axe_checking: bool,
+    /// When AXe was last looked for: again every few seconds while the banner asks for it, so
+    /// it goes once the install in the terminal is done.
+    axe_checked: Option<Instant>,
+    /// Homebrew is on this Mac (AXe installs with it); `true` until looked at.
+    brew: bool,
     /// Screen scale per device type (0 = unknown, use a heuristic).
     scales: HashMap<String, f64>,
     /// Appearance per UDID (`None` = not supported by the runtime).
@@ -659,6 +709,9 @@ pub struct SimulatorPanel {
     url_input: Entity<InputState>,
     url_open: bool,
     focus: FocusHandle,
+    /// What had the keys before a click on the mirror took them: they go back there on Esc or a
+    /// click outside the tool.
+    keys_before: Option<FocusHandle>,
     axe_tx: async_channel::Sender<AxeJob>,
     /// The resident helper: its binary once built, the open link, and whether streaming is paused.
     helper: Option<Result<std::path::PathBuf, String>>,
@@ -759,6 +812,8 @@ impl SimulatorPanel {
             error: None,
             axe: None,
             axe_checking: false,
+            axe_checked: None,
+            brew: true,
             scales: HashMap::new(),
             dark: HashMap::new(),
             info_pending: HashSet::new(),
@@ -780,6 +835,7 @@ impl SimulatorPanel {
             url_input,
             url_open: false,
             focus: cx.focus_handle(),
+            keys_before: None,
             axe_tx,
             helper: None,
             helper_building: false,
@@ -953,6 +1009,10 @@ impl SimulatorPanel {
             }
             return;
         }
+        // The AXe banner is up: look for it now and then, so it goes once it's installed.
+        if self.axe.is_none() && self.axe_checked.is_none_or(|t| t.elapsed() >= AXE_LOOK) {
+            self.check_axe(cx);
+        }
         self.manage_link(window, cx);
         if self.link_ready {
             if self.link_paused {
@@ -1006,15 +1066,17 @@ impl SimulatorPanel {
             return;
         }
         self.axe_checking = true;
+        self.axe_checked = Some(Instant::now());
         cx.spawn(async move |this, cx| {
-            let found = cx
+            let (found, brew) = cx
                 .background_executor()
-                .spawn(async move { crate::integrations::axe_path() })
+                .spawn(async move { (crate::integrations::axe_path(), brew_installed()) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.axe_checking = false;
-                if this.axe != found {
+                if this.axe != found || this.brew != brew {
                     this.axe = found;
+                    this.brew = brew;
                     cx.notify();
                 }
             });
@@ -1223,7 +1285,18 @@ impl SimulatorPanel {
             }
             LinkEvent::Error(e) => {
                 // Input errors are transient (e.g. the device is mid-boot); show them briefly.
-                self.fail(format!("Simulator: {e}"), cx);
+                let message: SharedString = format!("Simulator: {e}").into();
+                self.fail(message.clone(), cx);
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(LINK_ERROR_FOR).await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.error.as_ref() == Some(&message) {
+                            this.error = None;
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
             }
             LinkEvent::Exited => {
                 self.drop_link();
@@ -1441,28 +1514,52 @@ impl SimulatorPanel {
             prompt: Some("Install".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else { return };
-            let Some(app) = paths.into_iter().next() else { return };
-            let _ = this.update_in(cx, |this, window, cx| {
-                if app.extension().and_then(|e| e.to_str()) != Some("app") || !app.is_dir() {
-                    this.fail("Install: pick a built .app bundle (e.g. DerivedData/…/Debug-iphonesimulator/MyApp.app)", cx);
-                    return;
-                }
-                this.action("Install", window, cx, move |u| {
-                    let path = app.to_string_lossy().to_string();
-                    run_simctl(&["install", &u, &path])?;
-                    let name = app.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                    match bundle_id(&app) {
-                        Some(id) => {
-                            run_simctl(&["launch", "--terminate-running-process", &u, &id])?;
-                            Ok(format!("Installed and launched {name}"))
-                        }
-                        None => Ok(format!("Installed {name}")),
-                    }
-                });
-            });
+            let Ok(Ok(Some(paths))) = rx.await else {
+                return;
+            };
+            let Some(app) = paths.into_iter().next() else {
+                return;
+            };
+            let _ = this.update_in(cx, |this, window, cx| this.install(app, window, cx));
         })
         .detach();
+    }
+
+    /// An app dropped on the simulator: installed and launched, as the install button does.
+    fn dropped(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(app) = paths.paths().first() {
+            self.install(app.clone(), window, cx);
+        }
+    }
+
+    /// Install a built `.app` on the simulator on show and launch it.
+    fn install(&mut self, app: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if app.extension().and_then(|e| e.to_str()) != Some("app") || !app.is_dir() {
+            self.fail("Install: pick a built .app bundle (e.g. DerivedData/…/Debug-iphonesimulator/MyApp.app)", cx);
+            return;
+        }
+        self.action("Install", window, cx, move |u| {
+            let path = app.to_string_lossy().to_string();
+            run_simctl(&["install", &u, &path])?;
+            let name = app.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            match bundle_id(&app) {
+                Some(id) => {
+                    let out =
+                        run_simctl(&["launch", "--terminate-running-process", &u, &id])?;
+                    // An app that crashes at once still launched: look a moment later.
+                    if let Some(pid) = launched_pid(&out) {
+                        std::thread::sleep(CRASH_LOOK);
+                        if !running(pid) {
+                            return Err(format!(
+                                "{name} quit right after it opened. Its crash report is in the Console app, under Crash Reports."
+                            ));
+                        }
+                    }
+                    Ok(format!("Installed and launched {name}"))
+                }
+                None => Ok(format!("Installed {name}")),
+            }
+        });
     }
 
     fn open_simulator_app(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1552,9 +1649,8 @@ impl SimulatorPanel {
         let k = &event.keystroke;
         let m = &k.modifiers;
         if k.key == "escape" && !m.modified() {
-            window.blur(cx);
+            self.give_keys_back(window, cx);
             cx.stop_propagation();
-            cx.notify();
             return;
         }
         if (self.axe.is_none() && self.ready_link().is_none()) || self.live().is_none() {
@@ -1650,8 +1746,30 @@ impl SimulatorPanel {
         Some(window_to_points(screen, per_px, pts, p))
     }
 
-    fn pointer_down(&mut self, p: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+    /// The mirror takes the keys, remembering what had them.
+    fn take_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus.is_focused(window) {
+            return;
+        }
+        self.keys_before = window.focused(cx);
         self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// The keys go back to what had them before the mirror took them (the composer, say).
+    fn give_keys_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus.is_focused(window) {
+            return;
+        }
+        match self.keys_before.take() {
+            Some(before) => window.focus(&before, cx),
+            None => window.blur(cx),
+        }
+        cx.notify();
+    }
+
+    fn pointer_down(&mut self, p: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        self.take_keys(window, cx);
         if self.axe.is_none() {
             return;
         }
@@ -2174,6 +2292,11 @@ impl SimulatorPanel {
                 cx.listener(|this, e: &MouseUpEvent, _, cx| this.pointer_up(e.position, cx)),
             )
             .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| this.scroll(e, cx)))
+            // A built .app dropped on the screen is installed and launched.
+            .drag_over::<ExternalPaths>(|s, _, _, cx| s.bg(cx.theme().foreground.opacity(0.04)))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.dropped(paths, window, cx)
+            }))
             .child(measure)
             .when_some(layout, |el, (l, image)| {
                 let s = l.screen;
@@ -2237,6 +2360,7 @@ impl SimulatorPanel {
 
     fn axe_banner(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
+        let brew = self.brew;
         h_flex()
             .flex_none()
             .mx_2()
@@ -2267,10 +2391,14 @@ impl SimulatorPanel {
                         div()
                             .text_size(to_rems(text::META))
                             .text_color(theme.muted_foreground)
-                            .child("Taps, swipes, typing and hardware buttons"),
+                            .child(if brew {
+                                "Taps, swipes, typing and hardware buttons"
+                            } else {
+                                "It installs with Homebrew, which isn't on this Mac yet"
+                            }),
                     ),
             )
-            .child(
+            .child(if brew {
                 Button::new("sim-install-axe")
                     .small()
                     .primary()
@@ -2283,8 +2411,17 @@ impl SimulatorPanel {
                                 cwd: None,
                             })
                         });
-                    })),
-            )
+                    }))
+            } else {
+                Button::new("sim-get-brew")
+                    .small()
+                    .primary()
+                    .label("Get Homebrew")
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.stop_propagation();
+                        cx.open_url(HOMEBREW);
+                    }))
+            })
             .into_any_element()
     }
 
@@ -2404,17 +2541,21 @@ impl SimulatorPanel {
             if list.is_empty() {
                 continue;
             }
-            col = col.child(
-                div()
-                    .px_1()
-                    .pt_2()
-                    .text_size(to_rems(text::META))
-                    .font_medium()
-                    .text_color(theme.muted_foreground)
-                    .child(family.label()),
-            );
-            for d in &list {
-                col = col.child(self.device_card(d, cx));
+            // One heading a runtime (newest first, as listed), so the same names under each
+            // read as the versions they are.
+            for (runtime, devices) in by_runtime(&list) {
+                col = col.child(
+                    div()
+                        .px_1()
+                        .pt_2()
+                        .text_size(to_rems(text::META))
+                        .font_medium()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("{} · {runtime}", family.label())),
+                );
+                for d in devices {
+                    col = col.child(self.device_card(d, cx));
+                }
             }
         }
         #[cfg(target_os = "macos")]
@@ -2515,6 +2656,8 @@ impl Render for SimulatorPanel {
         let error = self.error.clone();
         v_flex()
             .size_full()
+            // A click anywhere outside the tool gives the keys back.
+            .on_mouse_down_out(cx.listener(|this, _, window, cx| this.give_keys_back(window, cx)))
             .child(self.header(cx))
             .when_some(error, |el, e| {
                 el.child(
@@ -2751,7 +2894,10 @@ impl SimulatorPanel {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's glob exports its own `test` attribute.
-    use super::{Family, clean_error, fit, normalize_url, parse_devices, window_to_points};
+    use super::{
+        Family, by_runtime, clean_error, fit, launched_pid, normalize_url, parse_devices,
+        window_to_points,
+    };
     use gpui_kit::{Bounds, point, px, size};
 
     #[test]
@@ -2784,6 +2930,31 @@ mod tests {
             ]
         );
         assert_eq!(d[4].runtime, "visionOS 3.0");
+    }
+
+    #[test]
+    fn devices_are_grouped_by_runtime_in_order() {
+        let json = r#"{"devices":{
+            "com.apple.CoreSimulator.SimRuntime.iOS-27-2":[{"name":"iPhone 17","udid":"A","state":"Shutdown","isAvailable":true},{"name":"iPhone Air","udid":"B","state":"Shutdown","isAvailable":true}],
+            "com.apple.CoreSimulator.SimRuntime.iOS-27-0":[{"name":"iPhone 17","udid":"C","state":"Shutdown","isAvailable":true}]}}"#;
+        let (devices, _) = parse_devices(json).unwrap();
+        let groups = by_runtime(&devices);
+        let shape: Vec<(&str, Vec<&str>)> = groups
+            .iter()
+            .map(|(r, ds)| (*r, ds.iter().map(|d| d.udid.as_str()).collect()))
+            .collect();
+        assert_eq!(shape.len(), 2, "{shape:?}");
+        assert_eq!(shape[0].1, ["A", "B"]);
+        assert_eq!(shape[1].1, ["C"]);
+        assert_ne!(shape[0].0, shape[1].0);
+    }
+
+    #[test]
+    fn a_launch_says_its_process() {
+        assert_eq!(launched_pid("dev.trek.App: 4242\n"), Some(4242));
+        assert_eq!(launched_pid("com.example.app:  77"), Some(77));
+        assert_eq!(launched_pid("An error was encountered"), None);
+        assert_eq!(launched_pid(""), None);
     }
 
     #[test]

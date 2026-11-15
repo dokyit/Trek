@@ -8,7 +8,7 @@ Agents read the screen before they look at it. `sim_elements` gives AXe's `descr
 
 ## Reach it as a user
 
-Press ⌘J and choose **Simulator**. Pick or boot a device, install AXe if prompted, then use the mirrored screen and header actions. Drop an `.app`/`.ipa` or use the install and URL fields.
+Press ⌘J and choose **Simulator**. Pick or boot a device, install AXe if prompted, then use the mirrored screen and header actions. Drop a built `.app` on the screen (or use the install button) to install and launch it, and open URLs from the toolbar.
 
 ## Reach it with the CLI
 
