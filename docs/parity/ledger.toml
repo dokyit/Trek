@@ -1014,12 +1014,23 @@ code = ["crates/trek-app/src/ide/preview.rs"]
 [[feature]]
 id = "alerts-and-push"
 area = "Notifications"
-what = "An alert sound, a push to the phone (ntfy), and knowing when you're away"
+what = "An alert sound, a push to the phone (the web remote's notifications, or ntfy), and knowing when you're away"
 macos = "yes"
 windows = "yes"
 live = ["route settings:phone", "wait 300", "reveal push-on", "count push-on 1", "route settings:notifications", "wait 300", "reveal notify-mode*", "count notify-mode* 2+"]
 how = { macos = "macOS's idle time and screen lock.", windows = "Windows' idle time and session lock." }
 code = ["crates/trek-app/src/push.rs"]
+
+[[feature]]
+id = "phone-web-push"
+area = "Notifications"
+what = "Banners on a phone's web remote, sent by the computer itself through the browser's push service (Web Push), with no account or other app"
+macos = "yes"
+windows = "yes"
+live = ["route settings:phone", "wait 300", "reveal push-on", "count push-on 1"]
+how = { macos = "Shared code: the computer's own key pair and RFC 8291 encryption (trek_remote::webpush), sent with reqwest.", windows = "The same." }
+code = ["crates/trek-remote/src/webpush.rs", "crates/trek-app/src/push.rs"]
+tests = ["crates/trek-remote/tests/web.rs"]
 
 [[feature]]
 id = "agent-tool-families"
