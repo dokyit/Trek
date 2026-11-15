@@ -303,7 +303,7 @@ pub struct LocalServer {
     pub models: Vec<String>,
     /// Its command-line tool is installed (it can be started from here).
     pub installed: bool,
-    /// Not switched off in Settings › Agents.
+    /// Not switched off (here or in Settings › Local Models).
     pub enabled: bool,
 }
 
@@ -335,6 +335,21 @@ pub fn local_cli(id: &str) -> &'static [&'static str] {
         "llamacpp" => &["llama-server", "mlx_lm.server"],
         _ => &[],
     }
+}
+
+/// The ids of the local model servers whose command-line tool is installed. Reads PATH: not on the
+/// main thread.
+pub fn installed_local_clis() -> HashSet<String> {
+    DIRECT_PROVIDERS
+        .iter()
+        .filter(|p| p.local)
+        .filter(|p| {
+            local_cli(p.id)
+                .iter()
+                .any(|bin| trek_core::detect::which(bin).is_some())
+        })
+        .map(|p| p.id.to_string())
+        .collect()
 }
 
 /// The local model servers: running ones (with the models they serve) from the scan, the rest
@@ -418,6 +433,9 @@ pub struct Onboarding {
     all_missing: bool,
     /// The API keys step lists every provider, not just the featured ones.
     all_providers: bool,
+    /// The phone step pairs a phone's browser (the web remote) rather than Trek on iPhone. First on
+    /// Windows, as in Settings.
+    pair_in_browser: bool,
     key_inputs: HashMap<&'static str, Entity<InputState>>,
     glass_slider: Entity<gpui_kit::component::slider::SliderState>,
     /// What each permission was when last looked (every second while the step is open).
@@ -471,6 +489,22 @@ impl Onboarding {
             }
             cx.notify()
         })];
+        // Return in a key's field saves it, as Save does.
+        for (&id, input) in &key_inputs {
+            subs.push(cx.subscribe_in(
+                input,
+                window,
+                move |this: &mut Self,
+                      _,
+                      event: &gpui_kit::component::input::InputEvent,
+                      window,
+                      cx| {
+                    if matches!(event, gpui_kit::component::input::InputEvent::PressEnter { .. }) {
+                        this.save_key(id, window, cx);
+                    }
+                },
+            ));
+        }
         // The glass follows the slider as it moves; the setting is saved when it's let go.
         subs.push(cx.subscribe(
             &glass_slider,
@@ -500,6 +534,7 @@ impl Onboarding {
             last_step_change: std::time::Instant::now() - Duration::from_secs(1),
             all_missing: false,
             all_providers: false,
+            pair_in_browser: crate::words::is_windows(),
             key_inputs,
             glass_slider,
             perms: HashMap::new(),
@@ -684,18 +719,7 @@ impl Onboarding {
 
     /// Which local servers' CLIs are installed, looked for off the main thread (it reads PATH).
     fn find_local_clis(&mut self, cx: &mut Context<Self>) {
-        let task = cx.background_spawn(async move {
-            DIRECT_PROVIDERS
-                .iter()
-                .filter(|p| p.local)
-                .filter(|p| {
-                    local_cli(p.id)
-                        .iter()
-                        .any(|bin| trek_core::detect::which(bin).is_some())
-                })
-                .map(|p| p.id.to_string())
-                .collect::<HashSet<String>>()
-        });
+        let task = cx.background_spawn(async move { installed_local_clis() });
         cx.spawn(async move |this, cx| {
             let found = task.await;
             let _ = this.update(cx, |this, cx| {

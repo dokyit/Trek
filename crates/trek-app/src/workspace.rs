@@ -1994,6 +1994,17 @@ pub struct Workspace {
     pub direct_models: HashMap<String, Vec<ModelInfo>>,
     /// Direct model fetches currently in flight, by provider id.
     pub direct_inflight: HashSet<String>,
+    /// When each command Trek ran in a terminal for setup (an agent's install or sign-in) last
+    /// ended, by the command's line: Settings stops saying "Installing…" at once.
+    pub setup_ended: HashMap<String, std::time::Instant>,
+    /// Agents (`install_hint` keys) whose install ended in a terminal, to say how it went once
+    /// they've been looked for again.
+    installs_awaited: Vec<&'static str>,
+    /// A scan was asked for while one ran: another follows, so what it finds is current.
+    detect_again: bool,
+    /// What asking each provider about the key just saved found: `None` while it is asked
+    /// (`check_api_key`; Settings › API Keys and onboarding say it).
+    pub key_checks: HashMap<String, Option<trek_agents::KeyCheck>>,
     /// What checking each of the user's MCP servers found, by name (`check_mcp_server`).
     pub mcp_checks: HashMap<String, McpCheck>,
     pub detecting: bool,
@@ -2554,6 +2565,10 @@ impl Workspace {
             codex_models: vec![],
             direct_models: trek_agents::load_all_cached_direct_models(),
             direct_inflight: HashSet::new(),
+            setup_ended: HashMap::new(),
+            installs_awaited: Vec::new(),
+            detect_again: false,
+            key_checks: HashMap::new(),
             mcp_checks: HashMap::new(),
             detecting: false,
             keyed_providers: std::cell::RefCell::new(None),
@@ -4938,7 +4953,72 @@ impl Workspace {
         }
         self.save_settings(cx);
         self.fetch_direct_models(id, cx);
+        self.check_api_key(id, key, cx);
         Ok(())
+    }
+
+    /// Ask the provider whether the key just saved is valid, with its model list (nothing is
+    /// spent). The key stays saved either way; the answer is said beside it and, for a refusal,
+    /// in a toast.
+    fn check_api_key(&mut self, id: &str, key: &str, cx: &mut Context<Self>) {
+        if trek_core::paths::isolated() {
+            return;
+        }
+        self.key_checks.insert(id.to_string(), None);
+        let (id, key) = (id.to_string(), key.to_string());
+        let (tx, rx) = async_channel::bounded(1);
+        let asked = id.clone();
+        trek_core::runtime().spawn(async move {
+            let _ = tx.send(trek_agents::check_api_key(&asked, &key).await).await;
+        });
+        let task = cx.spawn(async move |this, cx| {
+            if let Ok(found) = rx.recv().await {
+                let _ = this.update(cx, |this, cx| this.key_checked(&id, found, cx));
+            }
+        });
+        self.keep(task);
+        cx.notify();
+    }
+
+    /// The provider answered about `id`'s key. Ignored if the key was removed meanwhile.
+    pub fn key_checked(
+        &mut self,
+        id: &str,
+        found: trek_agents::KeyCheck,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.key_checks.contains_key(id) {
+            return;
+        }
+        if let trek_agents::KeyCheck::Refused(_) = found {
+            let name = catalog::direct_provider(id).map_or(id, |p| p.name);
+            cx.emit(WorkspaceEvent::Toast {
+                message: format!("{name} says this key isn't valid. It's saved; paste another to replace it."),
+                undo: None,
+            });
+        }
+        self.key_checks.insert(id.to_string(), Some(found));
+        cx.notify();
+    }
+
+    /// What the last check of provider `id`'s key found, in a few words for beside the key, and
+    /// whether it is bad news.
+    pub fn key_check_note(&self, id: &str) -> Option<(String, bool)> {
+        use trek_agents::KeyCheck;
+        let name = catalog::direct_provider(id).map_or(id, |p| p.name);
+        let found = self.key_checks.get(id)?;
+        let bad = matches!(found, Some(KeyCheck::Refused(_)));
+        Some((
+            match found {
+                None => "Checking…".to_string(),
+                Some(KeyCheck::Works(0)) => "Works".to_string(),
+                Some(KeyCheck::Works(1)) => "Works · 1 model".to_string(),
+                Some(KeyCheck::Works(n)) => format!("Works · {n} models"),
+                Some(KeyCheck::Refused(_)) => format!("{name} says it isn't valid"),
+                Some(KeyCheck::Unchecked(_)) => "Saved, not checked".to_string(),
+            },
+            bad,
+        ))
     }
 
     /// Remove provider `id`'s key and turn it off. A key that is already gone (removed in
@@ -4953,6 +5033,7 @@ impl Workspace {
         self.forget_keyed_providers();
         self.settings.api_providers.retain(|p| p != id);
         self.direct_models.remove(id);
+        self.key_checks.remove(id);
         self.save_settings(cx);
         Ok(())
     }
@@ -9697,7 +9778,12 @@ impl Workspace {
     /// Look for installed agents, then ask the ones found about their models, logins and usage.
     /// Not in an isolated (test) process: that would run the user's own CLIs.
     pub fn detect_agents(&mut self, cx: &mut Context<Self>) {
-        if self.detecting || trek_core::paths::isolated() {
+        if trek_core::paths::isolated() {
+            return;
+        }
+        if self.detecting {
+            // What the running scan finds may predate what asked (an install that just ended).
+            self.detect_again = true;
             return;
         }
         self.detecting = true;
@@ -9752,11 +9838,47 @@ impl Workspace {
                                 }
                             }
                         }
+                        if std::mem::take(&mut this.detect_again) {
+                            this.detect_agents(cx);
+                        } else {
+                            this.say_how_installs_went(cx);
+                        }
                         cx.notify();
                     });
             }
         });
         self.keep(task);
+    }
+
+    /// Installs that ended in a terminal, now that the agents were looked for again: each is
+    /// found (and may want signing in to) or isn't, which the terminal shows why.
+    pub fn say_how_installs_went(&mut self, cx: &mut Context<Self>) {
+        for key in std::mem::take(&mut self.installs_awaited) {
+            let id = if trek_core::catalog::ACP_AGENTS.iter().any(|a| a.id == key) {
+                AgentId::Acp(key.into())
+            } else {
+                AgentId::from_key(key)
+            };
+            let name = match &id {
+                AgentId::Acp(acp) => catalog::acp_display_name(acp),
+                other => other.display_name(),
+            };
+            let found = self
+                .agents
+                .iter()
+                .find(|a| a.agent == id && a.availability != Availability::NotInstalled);
+            let message = match found.map(|a| &a.availability) {
+                None => format!("{name} didn't install. The terminal shows why."),
+                Some(Availability::NeedsLogin) => {
+                    format!("{name} is installed. Sign in to start using it.")
+                }
+                Some(_) => format!("{name} is installed."),
+            };
+            cx.emit(WorkspaceEvent::Toast {
+                message,
+                undo: None,
+            });
+        }
     }
 
     /// Spend one granted rate-limit reset (Usage › "Use reset"), then re-read the plan.
@@ -9954,7 +10076,11 @@ impl Workspace {
                         }
                         Err(e) => {
                             cx.emit(WorkspaceEvent::Toast {
-                                message: format!("Authentication failed: {e}"),
+                                message: format!(
+                                    "Couldn't sign in to {}: {}",
+                                    trek_core::catalog::acp_display_name(&probe_id),
+                                    e.lines().next().unwrap_or("it didn't answer")
+                                ),
                                 undo: None,
                             });
                         }
@@ -10388,8 +10514,13 @@ impl Workspace {
     pub fn finish_onboarding(&mut self, project: Option<PathBuf>, cx: &mut Context<Self>) {
         let first_time = !self.settings.onboarding.completed;
         self.settings.onboarding.finish();
-        self.settings.general.hand_holding = self.draft_prefs.hand_holding;
-        self.settings.general.default_agent = self.draft_prefs.agent.key();
+        // A first run's draft was seeded from what the scan found; a re-run must not turn
+        // whatever the live draft holds (a one-off agent or Full access) into the defaults. The
+        // Approvals step saves its own choice.
+        if first_time {
+            self.settings.general.hand_holding = self.draft_prefs.hand_holding;
+            self.settings.general.default_agent = self.draft_prefs.agent.key();
+        }
         self.save_settings(cx);
         // Someone new hasn't had their threads brought over yet (launch does it once set up).
         if first_time && self.import_summary.is_none() && !self.importing {

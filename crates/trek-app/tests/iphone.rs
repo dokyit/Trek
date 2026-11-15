@@ -566,11 +566,11 @@ fn settings_say_what_the_iphone_tools_do_here() {
             );
             let mobile = said(&trek, cx, SettingsPage::Mobile);
             assert!(
-                mobile.iter().any(|s| s.contains("with Xcode on macOS")),
+                mobile.iter().any(|s| s.contains("in its browser")),
                 "{mobile:?}"
             );
             assert!(
-                mobile.iter().all(|s| !s.contains("Build it from ios/")),
+                mobile.iter().all(|s| !s.contains("ios/")),
                 "{mobile:?}"
             );
         }
@@ -586,8 +586,9 @@ fn settings_say_what_the_iphone_tools_do_here() {
         assert!(!has(&tools, pc::SETTINGS_TOOLS), "{tools:?}");
         let mobile = said(&trek, cx, SettingsPage::Mobile);
         assert!(
-            mobile.iter().any(|s| s.contains("Build it from ios/")),
+            mobile.iter().any(|s| s.contains("in its browser")),
             "{mobile:?}"
         );
+        assert!(mobile.iter().all(|s| !s.contains("ios/")), "{mobile:?}");
     });
 }

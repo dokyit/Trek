@@ -610,6 +610,76 @@ async fn codex_logged_in(path: &Path) -> bool {
     }
 }
 
+/// Where Ollama answers: `OLLAMA_HOST` as Ollama's own client reads it (a bare `host`, `host:port`,
+/// `:port` or a URL; `0.0.0.0` means this computer), else its usual port here. A Mac app doesn't
+/// get a shell's exports, so the login shell is asked once, as for PATH.
+pub fn ollama_base() -> String {
+    static HOST: OnceLock<Option<String>> = OnceLock::new();
+    let host = HOST.get_or_init(|| login_var("OLLAMA_HOST"));
+    ollama_base_from(host.as_deref())
+}
+
+/// `ollama_base` for the value `host` of `OLLAMA_HOST`.
+pub fn ollama_base_from(host: Option<&str>) -> String {
+    let Some(host) = host.map(str::trim).filter(|h| !h.is_empty()) else {
+        return "http://127.0.0.1:11434/v1".into();
+    };
+    let (scheme, rest) = match host.split_once("://") {
+        Some((scheme, rest)) => (scheme.to_ascii_lowercase(), rest),
+        None => ("http".to_string(), host),
+    };
+    let (hostport, path) = match rest.split_once('/') {
+        Some((hostport, path)) => (hostport, path.trim_end_matches('/')),
+        None => (rest, ""),
+    };
+    let (name, port) = match hostport.rsplit_once(':') {
+        Some((name, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => {
+            (name, port.to_string())
+        }
+        _ => (
+            hostport,
+            if scheme == "https" { "443" } else { "11434" }.to_string(),
+        ),
+    };
+    // Where a server listens, not where to ask it.
+    let name = match name {
+        "" | "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
+        name => name,
+    };
+    let path = if path.is_empty() {
+        String::new()
+    } else {
+        format!("/{path}")
+    };
+    format!("{scheme}://{name}:{port}{path}/v1")
+}
+
+/// The environment variable `name` as a terminal would have it: this process's, else the login
+/// shell's (asked once a launch by the caller's cache). Never on Windows, whose apps inherit it.
+fn login_var(name: &str) -> Option<String> {
+    if let Some(v) = std::env::var(name).ok().filter(|v| !v.trim().is_empty()) {
+        return Some(v);
+    }
+    login_shell_var(name)
+}
+
+#[cfg(unix)]
+fn login_shell_var(name: &str) -> Option<String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    shell_output(
+        crate::procs::command(shell).args(["-ilc", &format!("printf %s \"${name}\"")]),
+        LOGIN_SHELL_TIMEOUT,
+    )
+    .and_then(|o| String::from_utf8(o).ok())
+    .map(|s| s.lines().last().unwrap_or_default().trim().to_string())
+    .filter(|s| !s.is_empty())
+}
+
+#[cfg(not(unix))]
+fn login_shell_var(_: &str) -> Option<String> {
+    None
+}
+
 async fn local_server(id: &str) -> DetectedAgent {
     let provider = crate::catalog::direct_provider(id).expect("known provider");
     let client = reqwest::Client::builder()
@@ -617,7 +687,7 @@ async fn local_server(id: &str) -> DetectedAgent {
         .build()
         .unwrap();
     let models: Option<Vec<String>> = if id == "ollama" {
-        let url = provider.base_url.trim_end_matches("/v1").to_string() + "/api/tags";
+        let url = provider.url().trim_end_matches("/v1").to_string() + "/api/tags";
         match client.get(url).send().await {
             Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok().map(|v| {
                 v["models"]
@@ -631,7 +701,7 @@ async fn local_server(id: &str) -> DetectedAgent {
         }
     } else {
         match client
-            .get(format!("{}/models", provider.base_url))
+            .get(format!("{}/models", provider.url()))
             .send()
             .await
         {
@@ -765,6 +835,21 @@ mod tests {
 #[cfg(test)]
 mod tests_paths {
     use super::*;
+
+    #[test]
+    fn ollama_is_found_where_ollama_host_says() {
+        let at = |host: Option<&str>| ollama_base_from(host);
+        assert_eq!(at(None), "http://127.0.0.1:11434/v1");
+        assert_eq!(at(Some("  ")), "http://127.0.0.1:11434/v1");
+        assert_eq!(at(Some("gpu-box")), "http://gpu-box:11434/v1");
+        assert_eq!(at(Some("gpu-box:8080")), "http://gpu-box:8080/v1");
+        assert_eq!(at(Some(":9000")), "http://127.0.0.1:9000/v1");
+        assert_eq!(at(Some("0.0.0.0:11500")), "http://127.0.0.1:11500/v1");
+        assert_eq!(at(Some("http://10.0.0.5:11434/")), "http://10.0.0.5:11434/v1");
+        assert_eq!(at(Some("https://ollama.example.com")), "https://ollama.example.com:443/v1");
+        assert_eq!(at(Some("[::1]:11434")), "http://[::1]:11434/v1");
+        assert_eq!(at(Some("http://host:1/api")), "http://host:1/api/v1");
+    }
 
     /// A folder of its own, removed when dropped (trek-core has no `tempfile`).
     struct TempDir(PathBuf);

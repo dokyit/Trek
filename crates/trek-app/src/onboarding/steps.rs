@@ -993,7 +993,10 @@ impl Onboarding {
                     std::env::var(k).is_ok_and(|v| !v.is_empty())
                 });
                 let status: SharedString = match state {
-                    KeyState::Saved => format!("Saved in {store}").into(),
+                    KeyState::Saved => match self.workspace.read(cx).key_check_note(id) {
+                        Some((note, _)) => format!("Saved in {store} · {note}").into(),
+                        None => format!("Saved in {store}").into(),
+                    },
                     KeyState::FromEnv(k) => format!("Using ${k} from your shell").into(),
                     KeyState::NotSet => "Not set".into(),
                 };
@@ -1097,12 +1100,13 @@ impl Onboarding {
     }
 
     /// Save the key typed for `id` (in the platform's secret store, as Settings › API Keys does).
-    fn save_key(&mut self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn save_key(&mut self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(input) = self.key_inputs.get(id).cloned() else {
             return;
         };
         let key = input.read(cx).value().trim().to_string();
         if key.is_empty() {
+            crate::toast::push(window, "Paste a key first", cx);
             return;
         }
         match self
@@ -1298,7 +1302,7 @@ impl Onboarding {
 
     pub(super) fn approvals_step(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let current = self.workspace.read(cx).draft_prefs.hand_holding;
+        let current = self.workspace.read(cx).settings.general.hand_holding;
         let ember = palette::ember(cx);
         let rows: Vec<AnyElement> = HandHolding::ALL
             .into_iter()
@@ -1335,6 +1339,8 @@ impl Onboarding {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.workspace.update(cx, |ws, cx| {
                                     ws.draft_prefs.hand_holding = h;
+                                    ws.settings.general.hand_holding = h;
+                                    ws.save_settings(cx);
                                     cx.notify();
                                 })
                             }))
@@ -1374,29 +1380,88 @@ impl Onboarding {
             (true, None) => Some(note("Starting the phone server…", cx)),
             (true, Some((Some(offer), _))) => {
                 let ws = ws_entity.clone();
-                Some(
+                // A phone's browser (Android, or an iPhone without the app) takes the web remote's
+                // link; Trek on iPhone takes the code.
+                let browser = self.pair_in_browser && offer.web_url.is_some();
+                let chooser = offer.web_url.is_some().then(|| {
+                    let view = cx.entity().downgrade();
                     h_flex()
+                        .px(px(16.))
+                        .pt(px(14.))
+                        .child(ui::segmented(
+                            "ob-pair-for",
+                            vec![(false, "Trek on iPhone"), (true, "A phone's browser")],
+                            browser,
+                            move |v, _, cx| {
+                                let _ = view.update(cx, |this, cx| {
+                                    this.pair_in_browser = v;
+                                    cx.notify();
+                                });
+                            },
+                            cx,
+                        ))
+                });
+                let (title, how, code) = if browser {
+                    (
+                        "Scan this with your phone's camera",
+                        format!("It opens Trek's web remote in the phone's browser, which pairs with {this}. When the browser asks to look for devices on your network, allow it. No camera? Open this link on the phone (it holds the code, so send it only to yourself):"),
+                        offer.web_url.clone().unwrap_or_default(),
+                    )
+                } else {
+                    (
+                        "Scan this with Trek on your iPhone",
+                        "No camera? Choose “Enter address and code” on the phone and type:".to_string(),
+                        offer.code.clone(),
+                    )
+                };
+                let qr = if browser {
+                    crate::settings_view::qr_low(&code, 3.)
+                } else {
+                    crate::settings_view::qr(&offer.url, 3.)
+                };
+                Some(
+                    v_flex()
                         .id("ob-pairing")
                         .test_support()
-                        .px(px(16.))
-                        .py(px(14.))
-                        .gap(px(20.))
-                        .items_start()
-                        .child(crate::settings_view::qr(&offer.url, 3.))
+                        .children(chooser)
                         .child(
-                            v_flex()
-                                .gap(px(8.))
-                                .flex_1()
-                                .min_w_0()
-                                .child(div().text_size(px(text::TITLE)).font_medium().child("Scan this with Trek on your iPhone"))
-                                .child(div().text_size(px(text::BODY)).text_color(theme.muted_foreground).child("No camera? Choose “Enter address and code” on the phone and type:"))
-                                .child(div().text_size(px(text::DISPLAY_S)).font_semibold().font_family(theme.mono_font_family.clone()).child(offer.code.clone()))
+                            h_flex()
+                                .px(px(16.))
+                                .py(px(14.))
+                                .gap(px(20.))
+                                .items_start()
+                                .child(qr)
                                 .child(
-                                    Button::new("ob-pair-cancel")
-                                        .small()
-                                        .ghost()
-                                        .label("Cancel")
-                                        .on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.cancel_pairing(cx))),
+                                    v_flex()
+                                        .gap(px(8.))
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(div().text_size(px(text::TITLE)).font_medium().child(title))
+                                        .child(div().text_size(px(text::BODY)).text_color(theme.muted_foreground).child(how))
+                                        .child(if browser {
+                                            div()
+                                                .id("ob-pair-web-link")
+                                                .test_support()
+                                                .text_size(px(text::META))
+                                                .font_family(theme.mono_font_family.clone())
+                                                .truncate()
+                                                .child(code)
+                                                .into_any_element()
+                                        } else {
+                                            div()
+                                                .text_size(px(text::DISPLAY_S))
+                                                .font_semibold()
+                                                .font_family(theme.mono_font_family.clone())
+                                                .child(code)
+                                                .into_any_element()
+                                        })
+                                        .child(
+                                            Button::new("ob-pair-cancel")
+                                                .small()
+                                                .ghost()
+                                                .label("Cancel")
+                                                .on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.cancel_pairing(cx))),
+                                        ),
                                 ),
                         )
                         .into_any_element(),
@@ -1410,9 +1475,9 @@ impl Onboarding {
                         if devices > 0 {
                             format!("{devices} paired")
                         } else {
-                            "Pair your iPhone".to_string()
+                            "Pair a phone".to_string()
                         },
-                        "A code to scan with Trek on iPhone; it works once, for a few minutes.",
+                        "A code to scan with a phone, in Trek on iPhone or in its browser; it works once, for a few minutes.",
                         Button::new("ob-pair")
                             .small()
                             .outline()
@@ -1458,7 +1523,7 @@ impl Onboarding {
                 cx,
             ))
             .child(card(rows, cx))
-            .child(note("Trek on iPhone isn't on the App Store yet: build it from ios/ in Trek's repository. All of this is in Settings › Phone & Machines.", cx))
+            .child(note("Trek on iPhone isn't on the App Store yet; any phone's browser works meanwhile. All of this is in Settings › Phone & Machines.", cx))
             .into_any_element()
     }
 

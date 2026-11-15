@@ -26,8 +26,8 @@ pub use claude::Replay as ClaudeReplay;
 pub use codex::SANDBOX_SETUP_NOTICE as CODEX_SANDBOX_SETUP_NOTICE;
 pub use codex::list_models as codex_models;
 pub use direct::{
-    cache_direct_models, cached_direct_models, direct_provider_models, level_would_ask,
-    load_all_cached_direct_models,
+    KeyCheck, cache_direct_models, cached_direct_models, check_api_key, direct_provider_models,
+    level_would_ask, load_all_cached_direct_models,
 };
 /// The Direct harness's agent loop with its options exposed: a key given rather than read from
 /// the keychain, another endpoint, the tools run elsewhere (`ToolExecutor`), and an `Observer`
@@ -185,6 +185,16 @@ impl McpServer {
                 serde_json::json!({ "type": "http", "url": url, "headers": map(headers) })
             }
         }
+    }
+}
+
+/// What a thread says when an agent's program isn't there: where Trek installs it, and the
+/// line that does (the catalog's, as Settings runs it).
+pub(crate) fn not_installed(name: &str, key: &str) -> String {
+    let at = "Settings › Agents & Subscriptions";
+    match trek_core::catalog::install_hint(key) {
+        Some(hint) => format!("{name} isn't installed. Install it in {at}, or run: {}", hint.here()),
+        None => format!("{name} isn't installed. Install it in {at}."),
     }
 }
 
@@ -1808,6 +1818,19 @@ pub(crate) fn load_image(path: &std::path::Path) -> anyhow::Result<(&'static str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_agent_is_told_the_install_line_trek_uses() {
+        let said = not_installed("Claude Code", "claude-code");
+        assert!(said.starts_with("Claude Code isn't installed. Install it in Settings"), "{said}");
+        assert!(said.contains(trek_core::catalog::install_hint("claude-code").unwrap().here()));
+        assert!(!said.contains("npm i -g @anthropic-ai"), "{said}");
+        // One with no install line of its own just points at Settings.
+        assert_eq!(
+            not_installed("Mystery", "mystery"),
+            "Mystery isn't installed. Install it in Settings › Agents & Subscriptions."
+        );
+    }
 
     fn env_of(command: &tokio::process::Command, var: &str) -> Option<std::ffi::OsString> {
         command

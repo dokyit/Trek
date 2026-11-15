@@ -57,6 +57,27 @@ impl ModelInfo {
     }
 }
 
+/// Whether the effort setting does anything for `model` run through `agent`, so the composer
+/// offers it only then. A model that lists its levels takes them; a model on this computer
+/// (Ollama, LM Studio, llama.cpp) is sent none; one its provider says doesn't reason takes none.
+/// Anything else (an agent that hasn't reported its levels yet) is left to offer them.
+pub fn takes_effort(agent: &AgentId, model: Option<&ModelInfo>) -> bool {
+    if model.is_some_and(|m| !m.efforts.is_empty()) {
+        return true;
+    }
+    if matches!(agent, AgentId::Direct(p) if is_local_provider(p)) {
+        return false;
+    }
+    !model
+        .and_then(|m| m.caps.as_ref())
+        .is_some_and(|c| c.reasoning == Some(false))
+}
+
+/// A provider whose models run on this computer.
+pub fn is_local_provider(provider: &str) -> bool {
+    matches!(provider, "ollama" | "lmstudio" | "llamacpp")
+}
+
 /// The context window Trek assumes for a model whose provider didn't say, by its id (with any
 /// `vendor/` prefix, as OpenRouter names models): conservative, so a Direct session starts a
 /// fresh context before the provider refuses the request.
@@ -257,6 +278,18 @@ pub struct DirectProvider {
     /// Environment variable commonly holding the key (used for detection only).
     pub env_key: Option<&'static str>,
     pub local: bool,
+}
+
+impl DirectProvider {
+    /// Where it answers now: `base_url`, but Ollama's is `OLLAMA_HOST`'s when that is set
+    /// (`detect::ollama_base`).
+    pub fn url(&self) -> String {
+        if self.id == "ollama" {
+            crate::detect::ollama_base()
+        } else {
+            self.base_url.to_string()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -659,12 +692,18 @@ pub fn install_hint(key: &str) -> Option<Hint> {
         .map(|(_, hint)| *hint)
 }
 
+/// The key (`install_hint`'s) of the agent whose install line on this platform `line` is.
+pub fn install_key(line: &str) -> Option<&'static str> {
+    INSTALL_HINTS
+        .iter()
+        .find(|(_, hint)| hint.here() == line.trim())
+        .map(|(key, _)| *key)
+}
+
 /// The name of the agent whose install line on this platform `line` is ("Pi").
 pub fn installed_by(line: &str) -> Option<String> {
-    let (key, _) = INSTALL_HINTS
-        .iter()
-        .find(|(_, hint)| hint.here() == line.trim())?;
-    Some(if ACP_AGENTS.iter().any(|a| a.id == *key) {
+    let key = install_key(line)?;
+    Some(if ACP_AGENTS.iter().any(|a| a.id == key) {
         acp_display_name(key)
     } else {
         AgentId::from_key(key).display_name()
@@ -732,6 +771,30 @@ pub fn added_agent(id: &str) -> Option<AddedAgent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The composer offers an effort only where it does something: a model on this computer takes
+    /// none, one its provider says doesn't reason takes none, and one that lists levels takes them.
+    #[test]
+    fn effort_is_offered_only_for_models_that_take_it() {
+        let direct = |p: &str| AgentId::Direct(p.into());
+        let plain = |id: &str| ModelInfo::new(id, id, 0, &[]);
+        let leveled = ModelInfo::new("m", "m", 0, &[Effort::Low, Effort::High]);
+        let mut silent = plain("s");
+        silent.caps = Some(ModelCaps {
+            reasoning: Some(false),
+            ..Default::default()
+        });
+        // On this computer: none, however it is listed.
+        assert!(!takes_effort(&direct("ollama"), Some(&plain("llama3"))));
+        assert!(!takes_effort(&direct("lmstudio"), None));
+        // Its provider says it doesn't reason.
+        assert!(!takes_effort(&direct("openrouter"), Some(&silent)));
+        // Levels listed, or nothing known yet: offered.
+        assert!(takes_effort(&direct("openrouter"), Some(&leveled)));
+        assert!(takes_effort(&direct("openrouter"), Some(&plain("x"))));
+        assert!(takes_effort(&AgentId::ClaudeCode, None));
+        assert!(takes_effort(&AgentId::Codex, Some(&plain("gpt"))));
+    }
 
     /// The dress changes what the mock agent is called and nothing else, and a malformed
     /// `dress` argument is refused. (The names are read through `mock_names`, so this doesn't

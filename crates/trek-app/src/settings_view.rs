@@ -5,12 +5,13 @@ mod accounts;
 mod backgrounds;
 mod coming_from;
 mod connections;
+mod local_models;
 mod mobile;
 mod pages;
 mod plugins;
 pub mod privacy;
 pub(crate) mod rules;
-pub(crate) use mobile::qr;
+pub(crate) use mobile::{qr, qr_low};
 pub(crate) use pages::theme_tiles;
 
 /// What the settings pages said, in words, since the last `take`: row titles and descriptions,
@@ -343,6 +344,8 @@ pub struct SettingsView {
     /// Whether the Figma desktop app's MCP server answers (Tools › Connections).
     figma_desktop: Probe<bool>,
     snapshots: Probe<SnapshotsProbe>,
+    /// Local Models: which servers' tools are installed, and where Ollama answers.
+    local: Probe<local_models::LocalProbe>,
     /// iPhone page, on Windows: what the firewall does to a phone dialing in on each network this
     /// PC is on (`remote::firewall`; `None` inside when it couldn't be read).
     pub(super) firewall: Probe<Option<crate::remote::firewall::Firewall>>,
@@ -369,6 +372,19 @@ pub struct SettingsView {
 type Started = std::rc::Rc<std::cell::RefCell<HashMap<String, std::time::Instant>>>;
 
 const STARTED_FOR: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Whether `key`'s `command` is still going: started a moment ago, and not seen to end since
+/// (`Workspace::setup_ended`), however it ended.
+fn is_running(
+    set: &Started,
+    key: &str,
+    command: &str,
+    ended: &HashMap<String, std::time::Instant>,
+) -> bool {
+    set.borrow().get(key).is_some_and(|at| {
+        at.elapsed() < STARTED_FOR && ended.get(command.trim()).is_none_or(|end| end < at)
+    })
+}
 
 fn is_started(set: &Started, key: &str) -> bool {
     set.borrow()
@@ -499,6 +515,19 @@ impl SettingsView {
             saved_keys.insert(p.id, SavedKey::of(&secrets::stored_api_key_lookup(p.id)));
         }
         let subs = vec![cx.observe(&workspace, |_, _, cx| cx.notify())];
+        let mut subs = subs;
+        // Return in a key's field saves it, as Save does.
+        for (&id, input) in &key_inputs {
+            subs.push(cx.subscribe_in(
+                input,
+                window,
+                move |this: &mut Self, _, event: &gpui_kit::component::input::InputEvent, window, cx| {
+                    if matches!(event, gpui_kit::component::input::InputEvent::PressEnter { .. }) {
+                        this.save_key(id, window, cx);
+                    }
+                },
+            ));
+        }
         let mcp_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. github"));
         let mcp_command = cx.new(|cx| {
             InputState::new(window, cx).placeholder("A command, a URL, or a server's JSON config")
@@ -517,7 +546,6 @@ impl SettingsView {
             cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. Review pull requests"));
         let skill_desc =
             cx.new(|cx| InputState::new(window, cx).placeholder("When should an agent use it?"));
-        let mut subs = subs;
         subs.push(cx.observe(&skill_filter, |_, _, cx| cx.notify()));
         // The Browser's ad blocker: an import or a compile under way, done, or failed.
         let adblock = crate::panels::browser_adblock::AdBlocker::get(cx);
@@ -551,6 +579,9 @@ impl SettingsView {
             }
             if route != Route::Settings(SettingsPage::Snapshots) {
                 this.snapshots.invalidate();
+            }
+            if route != Route::Settings(SettingsPage::LocalModels) {
+                this.local.invalidate();
             }
             if route != Route::Settings(SettingsPage::Project) {
                 this.icon_file.invalidate();
@@ -733,6 +764,7 @@ impl SettingsView {
             unlocking_secrets: false,
             figma_desktop: Probe::default(),
             snapshots: Probe::default(),
+            local: Probe::default(),
             icon_file: Probe::default(),
             firewall: Probe::default(),
             pair_in_browser: crate::words::is_windows(),
@@ -780,6 +812,9 @@ impl SettingsView {
                 self.scan_locked_secrets(cx);
             }
             SettingsPage::Agents => self.scan_locked_secrets(cx),
+            SettingsPage::LocalModels => {
+                self.probe(|this| &mut this.local, local_models::LocalProbe::read, cx)
+            }
             SettingsPage::Snapshots => {
                 self.probe(|this| &mut this.snapshots, SnapshotsProbe::read, cx)
             }
@@ -1351,7 +1386,14 @@ impl SettingsView {
                 self.signing_in_agents.borrow_mut().remove(&key);
             }
             let is_signing = self.workspace.read(cx).authenticating_agents.contains(&key)
-                || is_started(&self.signing_in_agents, &key);
+                || setup.is_some_and(|s| {
+                    is_running(
+                        &self.signing_in_agents,
+                        &key,
+                        s.login,
+                        &self.workspace.read(cx).setup_ended,
+                    )
+                });
             let signing_ref = self.signing_in_agents.clone();
             let k_sign = key.clone();
             let is_acp = matches!(a.agent, AgentId::Acp(_));
@@ -1541,7 +1583,12 @@ impl SettingsView {
                         return Self::row(title, install, menu, cx);
                     }
                     let cmd = install.clone();
-                    let is_installing = is_started(&self.installing_agents, &key);
+                    let is_installing = is_running(
+                        &self.installing_agents,
+                        &key,
+                        &install,
+                        &self.workspace.read(cx).setup_ended,
+                    );
                     let install_ref = self.installing_agents.clone();
                     let k_inst = key.clone();
                     let button = Button::new(SharedString::from(format!("install-{key}")))
@@ -2558,78 +2605,7 @@ impl SettingsView {
             SettingsPage::Skills => out.extend(self.skills_page(cx)),
             SettingsPage::Snapshots => out.extend(self.snapshots_page(&s, cx)),
             SettingsPage::ApiKeys => out.extend(self.api_keys_page(cx)),
-            SettingsPage::LocalModels => {
-                let ws = self.workspace.read(cx);
-                let detecting = ws.detecting;
-                let locals: Vec<_> = ws
-                    .agents
-                    .iter()
-                    .filter(|a| matches!(a.agent, AgentId::Direct(_)))
-                    .cloned()
-                    .collect();
-                // Nothing up yet: say how servers get here, under it the ones found offline.
-                let up = locals.iter().any(|a| a.availability == Availability::Ready);
-                if !up {
-                    out.push(Self::note(
-                        &if detecting {
-                            "Looking for model servers…".to_string()
-                        } else {
-                            format!("No model servers running. {} show up here on their own once they're running on their usual ports — there's nothing to set up.", crate::words::words().local_servers)
-                        },
-                        cx,
-                    ));
-                }
-                if !locals.is_empty() {
-                    let rows = locals
-                        .into_iter()
-                        .map(|a| {
-                            let (status, detail) = match a.availability {
-                                Availability::Ready if a.models.is_empty() => (
-                                    Self::status_dot(palette::amber(cx), "No models"),
-                                    "Running. Pull a model, e.g. ollama pull qwen3-coder"
-                                        .to_string(),
-                                ),
-                                Availability::Ready => (
-                                    Self::status_dot(palette::emerald(cx), "Ready"),
-                                    a.models.join(", "),
-                                ),
-                                _ => (
-                                    Self::status_dot(muted.opacity(0.5), "Not running"),
-                                    String::new(),
-                                ),
-                            };
-                            let title = h_flex()
-                                .gap(px(10.))
-                                .child(ui::agent_logo(&a.agent, px(18.), cx))
-                                .child(
-                                    div()
-                                        .text_size(px(text::TITLE))
-                                        .font_medium()
-                                        .child(a.name.clone()),
-                                );
-                            Self::row(title, detail, status, cx)
-                        })
-                        .collect();
-                    out.push(ui::group(rows, cx));
-                }
-                if !up {
-                    out.push(
-                        h_flex()
-                            .child(
-                                Button::new("rescan-local")
-                                    .small()
-                                    .outline()
-                                    .loading(detecting)
-                                    .icon(IconName::RefreshCw)
-                                    .label("Scan again")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.workspace.update(cx, |ws, cx| ws.detect_agents(cx))
-                                    })),
-                            )
-                            .into_any_element(),
-                    );
-                }
-            }
+            SettingsPage::LocalModels => out.extend(self.local_models_page(cx)),
             SettingsPage::Permissions => out.extend(self.permissions_page(&s, cx)),
             SettingsPage::Import => {
                 let ws = self.workspace.read(cx);
@@ -3040,6 +3016,27 @@ mod tests {
             .expect("an hour has passed since boot");
         set.borrow_mut().insert("droid".into(), long_ago);
         assert!(!is_started(&set, "droid"));
+    }
+
+    #[test]
+    fn an_install_that_ended_stops_counting_at_once() {
+        use super::is_running;
+        let set = Started::default();
+        let mut ended = std::collections::HashMap::new();
+        let before = std::time::Instant::now();
+        set.borrow_mut().insert("droid".into(), before);
+        assert!(is_running(&set, "droid", "curl x | sh", &ended));
+        // Another command ending says nothing of this one.
+        ended.insert("other".to_string(), std::time::Instant::now());
+        assert!(is_running(&set, "droid", "curl x | sh", &ended));
+        ended.insert("curl x | sh".to_string(), std::time::Instant::now());
+        assert!(!is_running(&set, "droid", "curl x | sh", &ended));
+        // Tried again after it ended: running again.
+        set.borrow_mut().insert(
+            "droid".into(),
+            std::time::Instant::now() + std::time::Duration::from_millis(5),
+        );
+        assert!(is_running(&set, "droid", "curl x | sh", &ended));
     }
 
     #[test]

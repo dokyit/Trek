@@ -14,10 +14,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use trek_core::settings::{Reach, Settings};
 
-/// What the page says of Trek's iPhone app before the phone server runs; on Windows, where it
-/// can't be built (that takes Xcode), the same without telling the user to build it.
-const PHONE_APP_NOTE: &str = "Trek on iPhone shows every thread and what it needs from you, and lets you answer approvals and questions, review plans, send follow-ups and start threads, while the agents keep running here. Build it from ios/ in Trek's repository; it isn't on the App Store yet.";
-const PHONE_APP_NOTE_PC: &str = "Trek on iPhone shows every thread and what it needs from you, and lets you answer approvals and questions, review plans, send follow-ups and start threads, while the agents keep running here. It isn't on the App Store yet: it's built from ios/ in Trek's repository, with Xcode on macOS.";
+/// What the page says of Trek's iPhone app before the phone server runs: it isn't on the App Store
+/// yet, and any phone's browser does the same meanwhile.
+const PHONE_APP_NOTE: &str = "Trek on iPhone shows every thread and what it needs from you, and lets you answer approvals and questions, review plans, send follow-ups and start threads, while the agents keep running here. It isn't on the App Store yet. Meanwhile any phone, iPhone or Android, can do the same in its browser: turn this on and pair a phone's browser.";
 
 /// The paired devices as the page lists them: the iPhone app's pairings (one from before devices
 /// said what they are is a phone's, as the sidebar has it), then the machines that paired with
@@ -323,12 +322,7 @@ impl SettingsView {
         out.extend(self.push_section(s, cx));
         let Some((offer, addresses, advertise, routes, devices, connected)) = running else {
             out.push(div().h(px(16.)).into_any_element());
-            let note = if crate::words::is_windows() {
-                PHONE_APP_NOTE_PC
-            } else {
-                PHONE_APP_NOTE
-            };
-            out.push(Self::note(note, cx));
+            out.push(Self::note(PHONE_APP_NOTE, cx));
             out.extend(self.phone_update_section(&[], cx));
             out.extend(self.machines_section(cx));
             return out;

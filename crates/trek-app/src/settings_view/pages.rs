@@ -944,6 +944,12 @@ impl SettingsView {
                 .env_key
                 .filter(|k| std::env::var(k).is_ok_and(|v| !v.is_empty()));
             let id = p.id;
+            // What asking the provider about a key just saved found.
+            let check = self
+                .workspace
+                .read(cx)
+                .key_check_note(id)
+                .filter(|_| saved);
             let status: SharedString = match (state, from_env) {
                 // Where to find it: Keychain Access lists it by its service name, not "Trek".
                 (SavedKey::Saved, _) if cfg!(target_os = "macos") => format!(
@@ -984,13 +990,37 @@ impl SettingsView {
                     v_flex()
                         .flex_1()
                         .min_w_0()
-                        .child(div().text_size(px(text::TITLE)).font_medium().child(p.name))
+                        .child(
+                            h_flex()
+                                .gap(px(10.))
+                                .child(div().text_size(px(text::TITLE)).font_medium().child(p.name))
+                                .children(
+                                    crate::onboarding::key_page(id)
+                                        .filter(|_| !saved)
+                                        .map(|url| {
+                                            ui::web_link(
+                                                SharedString::from(format!("key-page-{id}")),
+                                                "Get a key",
+                                                url.to_string(),
+                                                cx,
+                                            )
+                                        }),
+                                ),
+                        )
                         .child(
                             div()
                                 .text_size(px(text::LABEL))
                                 .text_color(muted)
                                 .child(status),
-                        ),
+                        )
+                        .children(check.map(|(note, bad)| {
+                            div()
+                                .id(SharedString::from(format!("key-check-{id}")))
+                                .test_support()
+                                .text_size(px(text::LABEL))
+                                .text_color(if bad { palette::red(cx) } else { muted })
+                                .child(note)
+                        })),
                 );
             let control = if saved {
                 h_flex()
@@ -1067,35 +1097,7 @@ impl SettingsView {
                             .outline()
                             .label("Save")
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                let Some(input) = this.key_inputs.get(id).cloned() else {
-                                    return;
-                                };
-                                let key = input.read(cx).value().trim().to_string();
-                                if key.is_empty() {
-                                    return;
-                                }
-                                match this
-                                    .workspace
-                                    .update(cx, |ws, cx| ws.save_api_key(id, &key, cx))
-                                {
-                                    Ok(()) => {
-                                        this.saved_keys.insert(id, SavedKey::Saved);
-                                        input.update(cx, |s, cx| s.set_value("", window, cx));
-                                        crate::toast::push(
-                                            window,
-                                            format!(
-                                                "Saved to {}",
-                                                crate::words::words().your_credential_store
-                                            ),
-                                            cx,
-                                        );
-                                    }
-                                    Err(e) => crate::toast::push(
-                                        window,
-                                        format!("Couldn't save the key: {e}"),
-                                        cx,
-                                    ),
-                                }
+                                this.save_key(id, window, cx)
                             })),
                     )
                     .when(
@@ -1128,6 +1130,34 @@ impl SettingsView {
         }
         out.push(ui::group(rows, cx));
         out
+    }
+
+    /// Save the key typed for `id` (Save, or Return in the field): into the platform's secret
+    /// store, then the provider is asked whether it is valid (`Workspace::save_api_key`).
+    pub(super) fn save_key(&mut self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(input) = self.key_inputs.get(id).cloned() else {
+            return;
+        };
+        let key = input.read(cx).value().trim().to_string();
+        if key.is_empty() {
+            crate::toast::push(window, "Paste a key first", cx);
+            return;
+        }
+        match self
+            .workspace
+            .update(cx, |ws, cx| ws.save_api_key(id, &key, cx))
+        {
+            Ok(()) => {
+                self.saved_keys.insert(id, SavedKey::Saved);
+                input.update(cx, |s, cx| s.set_value("", window, cx));
+                crate::toast::push(
+                    window,
+                    format!("Saved to {}", crate::words::words().your_credential_store),
+                    cx,
+                );
+            }
+            Err(e) => crate::toast::push(window, format!("Couldn't save the key: {e}"), cx),
+        }
     }
 
     /// Allow access to `id`'s locked key: macOS asks the user's login password (Trek's note
@@ -1753,6 +1783,37 @@ impl SettingsView {
                             crate::words::words().os_name
                         ),
                         copy,
+                        cx,
+                    ),
+                    Self::row(
+                        "Links",
+                        "",
+                        h_flex()
+                            .gap(px(14.))
+                            .child(ui::web_link(
+                                "about-website",
+                                "Website",
+                                "https://trekdesktop.com".into(),
+                                cx,
+                            ))
+                            .child(ui::web_link(
+                                "about-source",
+                                "Source code",
+                                "https://github.com/dokyit/Trek".into(),
+                                cx,
+                            ))
+                            .child(ui::web_link(
+                                "about-licenses",
+                                "Licenses",
+                                "https://github.com/dokyit/Trek/blob/main/NOTICE".into(),
+                                cx,
+                            ))
+                            .child(ui::web_link(
+                                "about-support",
+                                "Support",
+                                "mailto:support@trekdesktop.com".into(),
+                                cx,
+                            )),
                         cx,
                     ),
                     Self::row(
@@ -2418,11 +2479,26 @@ impl SettingsView {
             .or_else(|| projects.first().cloned());
         let Some(project) = selected else {
             return vec![
-                div()
+                v_flex()
                     .py(px(24.))
-                    .text_size(px(text::BODY))
-                    .text_color(theme.muted_foreground)
-                    .child("No projects yet. Add one with Add project, at the top of the sidebar.")
+                    .gap(px(12.))
+                    .items_start()
+                    .child(
+                        div()
+                            .text_size(px(text::BODY))
+                            .text_color(theme.muted_foreground)
+                            .child("No projects yet."),
+                    )
+                    .child(
+                        Button::new("project-add")
+                            .small()
+                            .outline()
+                            .icon(IconName::Plus)
+                            .label("Add project…")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.workspace.update(cx, |ws, cx| ws.open_folder(cx))
+                            })),
+                    )
                     .into_any_element(),
             ];
         };

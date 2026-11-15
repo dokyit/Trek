@@ -1537,7 +1537,7 @@ pub async fn run(
     events: async_channel::Sender<AgentEvent>,
 ) -> Result<()> {
     let bin = detect::which("claude")
-        .context("Claude Code isn't installed (npm i -g @anthropic-ai/claude-code)")?;
+        .with_context(|| crate::not_installed("Claude Code", "claude-code"))?;
     let (mut config, mut recap) = check_resume_point(config).await;
     if recap.is_some() {
         let _ = events

@@ -141,7 +141,7 @@ pub(crate) async fn start_app_server(
     opt_out: &[&str],
     backlog: &mut Vec<Value>,
 ) -> Result<(GroupChild, Rpc, RpcLines, StderrTail)> {
-    let bin = detect::which("codex").context("Codex isn't installed (npm i -g @openai/codex)")?;
+    let bin = detect::which("codex").with_context(|| crate::not_installed("Codex", "codex"))?;
     let mut command = trek_core::procs::async_command(bin);
     command
         .arg("app-server")

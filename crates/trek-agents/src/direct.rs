@@ -748,7 +748,7 @@ pub fn endpoint(provider: &DirectProvider, base_url: Option<&str>) -> String {
     let Some(base) = base_url.map(|b| b.trim_end_matches('/')) else {
         return match provider.wire {
             Wire::Anthropic => ANTHROPIC_MESSAGES_URL.to_string(),
-            _ => provider.base_url.to_string(),
+            _ => provider.url(),
         };
     };
     match provider.wire {
@@ -5203,7 +5203,7 @@ pub async fn direct_provider_models(
         .build()?;
 
     if provider.id == "ollama" {
-        let url = provider.base_url.trim_end_matches("/v1").to_string() + "/api/tags";
+        let url = provider.url().trim_end_matches("/v1").to_string() + "/api/tags";
         let res = client.get(url).send().await?;
         if !res.status().is_success() {
             bail!("ollama returned {}", res.status());
@@ -5242,7 +5242,7 @@ pub async fn direct_provider_models(
         return Ok(parse_direct_models(&v));
     }
 
-    let mut req = client.get(format!("{}/models", provider.base_url));
+    let mut req = client.get(format!("{}/models", provider.url()));
     if let Some(ref k) = key {
         req = req.bearer_auth(k);
     }
@@ -5252,6 +5252,70 @@ pub async fn direct_provider_models(
     }
     let v: Value = res.json().await?;
     Ok(parse_direct_models(&v))
+}
+
+/// What asking a provider about a key found: it works, the provider says it's wrong, or the
+/// provider couldn't be asked (offline, down, rate limited: nothing to say about the key).
+#[derive(Debug, Clone, PartialEq)]
+pub enum KeyCheck {
+    /// The provider accepted it, and listed this many models for it (OpenRouter's list answers
+    /// anyone, so its key endpoint is asked instead and the count is 0).
+    Works(usize),
+    /// The provider answered that the key is not valid (its HTTP status).
+    Refused(u16),
+    /// The provider could not be asked, or answered something that says nothing of the key.
+    Unchecked(String),
+}
+
+/// Ask provider `provider_id` whether `key` is valid, with a request that spends nothing: its
+/// model list (OpenRouter's key endpoint).
+pub async fn check_api_key(provider_id: &str, key: &str) -> KeyCheck {
+    check_api_key_at(provider_id, key, None).await
+}
+
+async fn check_api_key_at(provider_id: &str, key: &str, base: Option<&str>) -> KeyCheck {
+    let Some(provider) = direct_provider(provider_id) else {
+        return KeyCheck::Unchecked(format!("unknown provider {provider_id}"));
+    };
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return KeyCheck::Unchecked(e.to_string()),
+    };
+    let base = base.unwrap_or(provider.base_url).trim_end_matches('/');
+    let req = if provider.wire == Wire::Anthropic {
+        client
+            .get(format!("{base}/v1/models"))
+            .header("x-api-key", key)
+            .header("anthropic-version", "2023-06-01")
+    } else if provider.id == "openrouter" {
+        client.get(format!("{base}/auth/key")).bearer_auth(key)
+    } else {
+        client.get(format!("{base}/models")).bearer_auth(key)
+    };
+    let res = match req.send().await {
+        Ok(r) => r,
+        Err(e) => return KeyCheck::Unchecked(e.without_url().to_string()),
+    };
+    let status = res.status();
+    // Google answers a key it doesn't know with 400.
+    if matches!(status.as_u16(), 400 | 401 | 403) {
+        return KeyCheck::Refused(status.as_u16());
+    }
+    if !status.is_success() {
+        return KeyCheck::Unchecked(format!("{} answered {status}", provider.name));
+    }
+    let models = if provider.id == "openrouter" {
+        0
+    } else {
+        res.json::<Value>()
+            .await
+            .map(|v| parse_direct_models(&v).len())
+            .unwrap_or(0)
+    };
+    KeyCheck::Works(models)
 }
 
 /// What a provider's model list says a model can take. `None` when it says nothing, as most do.
@@ -5545,6 +5609,92 @@ mod tests {
             let _ = socket.shutdown().await;
         });
         url
+    }
+
+    /// A server that answers the one request it gets with `status` and `body`, and hands back
+    /// the request head it read.
+    async fn status_server(
+        status: &'static str,
+        body: &'static str,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut head = vec![];
+            let mut buf = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                match socket.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => head.extend_from_slice(&buf[..n]),
+                }
+            }
+            let _ = tx.send(String::from_utf8_lossy(&head).to_lowercase());
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            let _ = socket.shutdown().await;
+        });
+        (url, rx)
+    }
+
+    #[tokio::test]
+    async fn a_key_is_checked_with_the_model_list_and_a_refusal_is_said() {
+        // A good key: the list answers, and the key went as a bearer token to /models.
+        let (url, head) =
+            status_server("200 OK", r#"{"data":[{"id":"gpt-x"},{"id":"gpt-y"}]}"#).await;
+        assert_eq!(
+            check_api_key_at("openai", "sk-good", Some(&url)).await,
+            KeyCheck::Works(2)
+        );
+        let head = head.await.unwrap();
+        assert!(head.starts_with("get /models "), "{head}");
+        assert!(head.contains("authorization: bearer sk-good"), "{head}");
+
+        // Anthropic's own header and version.
+        let (url, head) = status_server("200 OK", r#"{"data":[]}"#).await;
+        assert_eq!(
+            check_api_key_at("anthropic", "sk-ant", Some(&url)).await,
+            KeyCheck::Works(0)
+        );
+        let head = head.await.unwrap();
+        assert!(head.starts_with("get /v1/models "), "{head}");
+        assert!(head.contains("x-api-key: sk-ant"), "{head}");
+
+        // OpenRouter's list answers anyone, so its key endpoint is asked.
+        let (url, head) = status_server("200 OK", r#"{"data":{"label":"k"}}"#).await;
+        assert_eq!(
+            check_api_key_at("openrouter", "sk-or", Some(&url)).await,
+            KeyCheck::Works(0)
+        );
+        assert!(head.await.unwrap().starts_with("get /auth/key "));
+
+        // A wrong key is refused, whichever way the provider says so.
+        let (url, _) = status_server("401 Unauthorized", "{}").await;
+        assert_eq!(
+            check_api_key_at("openai", "nope", Some(&url)).await,
+            KeyCheck::Refused(401)
+        );
+        let (url, _) = status_server("400 Bad Request", "{}").await;
+        assert_eq!(
+            check_api_key_at("google", "nope", Some(&url)).await,
+            KeyCheck::Refused(400)
+        );
+
+        // A busy provider or no answer at all says nothing about the key.
+        let (url, _) = status_server("429 Too Many Requests", "{}").await;
+        assert!(matches!(
+            check_api_key_at("openai", "k", Some(&url)).await,
+            KeyCheck::Unchecked(_)
+        ));
+        assert!(matches!(
+            check_api_key_at("openai", "k", Some("http://127.0.0.1:1")).await,
+            KeyCheck::Unchecked(_)
+        ));
     }
 
     #[test]
