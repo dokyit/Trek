@@ -248,6 +248,9 @@ pub struct PrChecks {
     /// (thread, url) whose log is being fetched to send.
     sending: HashSet<(String, String)>,
     poller: Option<Task<()>>,
+    /// The failure `gh` has been seen to have that the user was told about (no login, no `gh`):
+    /// said once, again only after a look has worked in between.
+    told: Option<GhFailure>,
 }
 
 impl PrChecks {
@@ -333,8 +336,23 @@ impl PrChecks {
                     until: now + RATE_LOOK_MS,
                 });
             }
-            GhFailure::Gone | GhFailure::Other => {}
+            GhFailure::Gone | GhFailure::SignedOut | GhFailure::NoGh | GhFailure::Other => {}
         }
+    }
+
+    /// What to tell the user about `failure`: its words the first time it's seen, `None` while
+    /// it's the same news and for failures with nothing to say.
+    pub fn gh_news(&mut self, failure: GhFailure) -> Option<&'static str> {
+        let why = failure.explain()?;
+        (self.told != Some(failure)).then(|| {
+            self.told = Some(failure);
+            why
+        })
+    }
+
+    /// A look worked: `gh` is fine, and a later failure is news again.
+    pub fn gh_fine(&mut self) {
+        self.told = None;
     }
 
     /// What GitHub said about its limit (`gh api rate_limit`).
@@ -1074,6 +1092,7 @@ impl Workspace {
         let now = now_ms();
         match result {
             Ok(next) => {
+                self.pr_checks.gh_fine();
                 let row = self
                     .pr_checks
                     .get_mut(id, url)
@@ -1088,6 +1107,14 @@ impl Workspace {
             }
             Err(failure) => {
                 self.pr_checks.gh_failed(failure, Some(url), now);
+                // A watch that can't see anything says so, once, rather than showing a card that
+                // never changes.
+                if let Some(why) = self.pr_checks.gh_news(failure) {
+                    cx.emit(WorkspaceEvent::Toast {
+                        message: format!("Not watching your pull request's checks. {why}"),
+                        undo: None,
+                    });
+                }
                 // It says nothing about this PR; it's just not known yet.
                 if let Some(w) = self.pr_checks.get_mut(id, url) {
                     w.quiet_looks = w.quiet_looks.saturating_add(1);
@@ -1153,6 +1180,24 @@ mod tests {
             name: name.into(),
             state,
         }
+    }
+
+    #[test]
+    fn a_gh_with_no_login_or_no_gh_is_said_once_until_a_look_works() {
+        let mut p = PrChecks::default();
+        let first = p.gh_news(GhFailure::SignedOut);
+        assert!(first.unwrap().contains("gh auth login"));
+        assert_eq!(
+            p.gh_news(GhFailure::SignedOut),
+            None,
+            "the same news isn't repeated"
+        );
+        // Another reason is news; offline and the like have nothing to say.
+        assert!(p.gh_news(GhFailure::NoGh).is_some());
+        assert_eq!(p.gh_news(GhFailure::Offline), None);
+        // After a look that worked, losing the login again is news again.
+        p.gh_fine();
+        assert!(p.gh_news(GhFailure::NoGh).is_some());
     }
 
     fn card(oid: &str, checks: Vec<Check>) -> Card {

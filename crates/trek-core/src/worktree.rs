@@ -265,8 +265,25 @@ fn fields(s: &str) -> impl Iterator<Item = &str> {
     s.split('\0').filter(|f| !f.is_empty())
 }
 
+/// The largest untracked file that's read to count or show its lines: the list is read again
+/// whenever the files change, and an agent's log or a dataset left in the folder can run to
+/// gigabytes.
+pub const UNTRACKED_READ: u64 = 4 << 20;
+
+/// An untracked file's text, or why it isn't shown (the words a diff pane puts in its place).
+pub fn read_untracked(path: &Path) -> std::result::Result<String, &'static str> {
+    let size = std::fs::metadata(path)
+        .map_err(|_| "Unreadable file")?
+        .len();
+    if size > UNTRACKED_READ {
+        return Err("Too large to show");
+    }
+    let bytes = std::fs::read(path).map_err(|_| "Unreadable file")?;
+    String::from_utf8(bytes).map_err(|_| "Binary file")
+}
+
 fn line_count(path: &Path) -> i64 {
-    std::fs::read_to_string(path)
+    read_untracked(path)
         .map(|s| s.lines().count() as i64)
         .unwrap_or(0)
 }
@@ -345,20 +362,25 @@ pub fn review(wt: &Worktree) -> Result<Review> {
 /// The diff of one changed file against the merge base (an untracked file, all added).
 pub fn file_diff(wt: &Worktree, merge_base: &str, change: &Change) -> String {
     if change.status == 'U' {
-        return match std::fs::read_to_string(wt.path.join(&change.path)) {
+        return match read_untracked(&wt.path.join(&change.path)) {
             Ok(s) => s
                 .lines()
                 .map(|l| format!("+{l}"))
                 .collect::<Vec<_>>()
                 .join("\n"),
-            Err(_) => "Binary or unreadable file".into(),
+            Err(why) => why.into(),
         };
     }
-    git(
+    let diff = git(
         &wt.path,
         &["diff", "--no-renames", merge_base, "--", &change.path],
     )
-    .unwrap_or_default()
+    .unwrap_or_default();
+    // A tracked binary is git's one line about it: said as the other paths say it.
+    if diff.lines().any(|l| l.starts_with("Binary files ")) {
+        return "Binary file".into();
+    }
+    diff
 }
 
 /// Put one file back as it was at the merge base: changes and commits to it are undone in the
@@ -455,6 +477,51 @@ fn gh_at(bin: &Path, dir: &Path, args: &[&str]) -> Result<String> {
     }
 }
 
+/// Why a pull request can't be opened from here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrBlock {
+    /// There's no GitHub CLI to open one with.
+    NoGh,
+    /// `origin` isn't a GitHub repository.
+    NotGithub,
+    /// The GitHub CLI has no login.
+    SignedOut,
+}
+
+impl PrBlock {
+    /// What to tell the user, in a sentence that says what to do about it.
+    pub fn explain(self) -> &'static str {
+        match self {
+            PrBlock::NoGh => {
+                "Pull requests need the GitHub CLI (cli.github.com). Install it, then try again."
+            }
+            PrBlock::NotGithub => "Pull requests need a GitHub remote named origin.",
+            PrBlock::SignedOut => {
+                "The GitHub CLI isn't signed in. Run gh auth login in a terminal, then try again."
+            }
+        }
+    }
+}
+
+/// What stands in the way of opening a pull request for `repo`'s branch, if anything: no `gh`,
+/// an origin that isn't on GitHub, or a `gh` with no login (`gh auth token`: answered from the
+/// local config, with no request to GitHub).
+pub fn pr_block(repo: &Path) -> Option<PrBlock> {
+    pr_block_with(crate::detect::which("gh").as_deref(), repo)
+}
+
+fn pr_block_with(gh: Option<&Path>, repo: &Path) -> Option<PrBlock> {
+    let Some(gh) = gh else {
+        return Some(PrBlock::NoGh);
+    };
+    if !github_origin(repo) {
+        return Some(PrBlock::NotGithub);
+    }
+    gh_at(gh, repo, &["auth", "token"])
+        .is_err()
+        .then_some(PrBlock::SignedOut)
+}
+
 /// The open pull request for the branch, if there is one.
 pub fn find_pr(wt: &Worktree) -> Option<String> {
     find_pr_with(&crate::detect::which("gh")?, wt)
@@ -480,6 +547,10 @@ fn find_pr_with(gh: &Path, wt: &Worktree) -> Option<String> {
 
 /// Push the branch and open a pull request into its base. Returns the pull request's URL.
 pub fn create_pr(wt: &Worktree, title: &str, body: &str) -> Result<String> {
+    // Before the push: a branch pushed for a pull request that then can't be opened is a surprise.
+    if let Some(block) = pr_block_with(crate::detect::which("gh").as_deref(), &wt.path) {
+        bail!(block.explain());
+    }
     let bin = crate::detect::which("gh").context("The GitHub CLI (gh) isn't installed.")?;
     create_pr_with(&bin, wt, title, body)
 }
@@ -1287,5 +1358,93 @@ mod tests {
         assert_eq!(review(&wt).unwrap().unpushed, Some(0));
         assert!(git(&remote, &["show-ref", "--verify", "refs/heads/trek/push"]).is_ok());
         assert_eq!(commit_subjects(&wt), ["X"]);
+    }
+
+    #[test]
+    fn an_untracked_file_too_big_or_not_text_is_named_not_read() {
+        let r = repo("big-untracked");
+        let wt = create(&r, "big", &[]).unwrap();
+        write(&wt.path, "small.txt", "a\nb\n");
+        std::fs::write(wt.path.join("blob.bin"), [0xff_u8, 0xfe, 0, 1]).unwrap();
+        // One byte over the cap: never read (it would be gigabytes in real life).
+        let big = std::fs::File::create(wt.path.join("data.csv")).unwrap();
+        big.set_len(UNTRACKED_READ + 1).unwrap();
+        let rv = review(&wt).unwrap();
+        let lines = |p: &str| rv.files.iter().find(|f| f.path == p).unwrap().additions;
+        assert_eq!(
+            (lines("small.txt"), lines("blob.bin"), lines("data.csv")),
+            (2, 0, 0)
+        );
+        let change = |p: &str| Change {
+            path: p.into(),
+            status: 'U',
+            additions: 0,
+            deletions: 0,
+        };
+        assert_eq!(
+            file_diff(&wt, &rv.merge_base, &change("small.txt")),
+            "+a\n+b"
+        );
+        assert_eq!(
+            file_diff(&wt, &rv.merge_base, &change("blob.bin")),
+            "Binary file"
+        );
+        assert_eq!(
+            file_diff(&wt, &rv.merge_base, &change("data.csv")),
+            "Too large to show"
+        );
+        // A tracked binary is said the same way.
+        std::fs::write(wt.path.join("img.png"), [0_u8, 1, 2, 0xff]).unwrap();
+        commit(&wt.path, "Add image").unwrap();
+        std::fs::write(wt.path.join("img.png"), [0_u8, 9, 9, 0xff]).unwrap();
+        let rv = review(&wt).unwrap();
+        let tracked = Change {
+            path: "img.png".into(),
+            status: 'M',
+            additions: 0,
+            deletions: 0,
+        };
+        assert_eq!(file_diff(&wt, &rv.merge_base, &tracked), "Binary file");
+    }
+
+    #[test]
+    fn a_pull_request_that_cant_be_opened_says_why() {
+        let r = repo("pr-block");
+        // No gh at all, whatever the origin.
+        assert_eq!(pr_block_with(None, &r), Some(PrBlock::NoGh));
+        let signed_in = fake_gh(&tmp(), "echo token", "echo token");
+        let signed_out = fake_gh(
+            &tmp(),
+            "echo 'not logged in' >&2; exit 1",
+            "echo no 1>&2\nexit /b 1",
+        );
+        // No origin, or one that isn't GitHub's.
+        assert_eq!(
+            pr_block_with(Some(&signed_in), &r),
+            Some(PrBlock::NotGithub)
+        );
+        git(
+            &r,
+            &["remote", "add", "origin", "https://example.com/o/r.git"],
+        )
+        .unwrap();
+        assert_eq!(
+            pr_block_with(Some(&signed_in), &r),
+            Some(PrBlock::NotGithub)
+        );
+        git(
+            &r,
+            &["remote", "set-url", "origin", "https://github.com/o/r.git"],
+        )
+        .unwrap();
+        // A GitHub origin: only the login is left to check.
+        assert_eq!(
+            pr_block_with(Some(&signed_out), &r),
+            Some(PrBlock::SignedOut)
+        );
+        assert_eq!(pr_block_with(Some(&signed_in), &r), None);
+        for block in [PrBlock::NoGh, PrBlock::NotGithub, PrBlock::SignedOut] {
+            assert!(!block.explain().contains('\n') && block.explain().ends_with('.'));
+        }
     }
 }

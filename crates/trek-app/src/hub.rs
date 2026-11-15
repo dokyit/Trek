@@ -1166,6 +1166,31 @@ fn card(
                                 .child(why),
                         );
                     }
+                    let new_branch = {
+                        let (ws, cwd, pop) = (ws.clone(), cwd.clone(), pop.clone());
+                        let blocked = m.switch_blocked.is_some();
+                        sub_row("hub-branch-new", false, cx)
+                            .test_support()
+                            .when(blocked, |el| el.opacity(0.5).cursor_default())
+                            .child(
+                                Icon::new(Lucide::Plus)
+                                    .size(px(12.))
+                                    .text_color(theme.muted_foreground),
+                            )
+                            .child(label("New branch…"))
+                            .when(!blocked, |el| {
+                                el.on_click(move |_, window, cx| {
+                                    close(&pop, window, cx);
+                                    crate::panels::git::open_new_branch_dialog(
+                                        ws.clone(),
+                                        cwd.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                })
+                            })
+                    };
+                    git = git.child(new_branch);
                     let list = g.branches.iter().enumerate().map(|(i, b)| {
                         let current = g.branch.as_ref() == Some(b);
                         // Git won't check out a branch another worktree has (a worktree thread's).

@@ -1638,7 +1638,24 @@ pub enum GhFailure {
     RateLimited,
     /// There's no such pull request, or no access to it any more.
     Gone,
+    /// `gh` has no login (or GitHub turned it down): nothing it asks will be answered.
+    SignedOut,
+    /// There is no `gh` to ask.
+    NoGh,
     Other,
+}
+
+impl GhFailure {
+    /// What to tell the user when watching can't go on for this reason, and what to do about it.
+    pub fn explain(self) -> Option<&'static str> {
+        match self {
+            GhFailure::SignedOut => {
+                Some("The GitHub CLI isn't signed in. Run gh auth login in a terminal.")
+            }
+            GhFailure::NoGh => Some("The GitHub CLI isn't installed (cli.github.com)."),
+            _ => None,
+        }
+    }
 }
 
 /// Why `gh` failed, from what it wrote to stderr.
@@ -1660,6 +1677,14 @@ pub fn gh_failure(stderr: &str) -> GhFailure {
         "dial tcp",
     ]) {
         GhFailure::Offline
+    } else if says(&[
+        "gh auth login",
+        "not logged in",
+        "authentication required",
+        "bad credentials",
+        "http 401",
+    ]) {
+        GhFailure::SignedOut
     } else if says(&[
         "could not resolve to a pullrequest",
         "no pull requests found",
@@ -1957,7 +1982,7 @@ fn fetch_pr(card: &Card, dir: &Path, gh_path: Option<&Path>) -> Result<Card, GhF
         .clone()
         .or_else(|| card.number.map(|n| n.to_string()));
     let out = gh_with(gh_path, dir)
-        .ok_or(GhFailure::Other)?
+        .ok_or(GhFailure::NoGh)?
         .args(["pr", "view"])
         .args(pr.as_slice())
         .args(["--json", PR_FIELDS])
@@ -6094,10 +6119,28 @@ mod tests {
             gh_failure("GraphQL: Could not resolve to a PullRequest with the number of 12."),
             GhFailure::Gone
         );
+        // No login is its own failure, with words for it; other trouble stays unnamed.
         assert_eq!(
             gh_failure("gh: To use GitHub CLI, run: gh auth login"),
-            GhFailure::Other
+            GhFailure::SignedOut
         );
+        assert_eq!(
+            gh_failure("HTTP 401: Bad credentials (https://api.github.com/graphql)"),
+            GhFailure::SignedOut
+        );
+        assert!(
+            GhFailure::SignedOut
+                .explain()
+                .unwrap()
+                .contains("gh auth login")
+        );
+        assert!(
+            GhFailure::NoGh
+                .explain()
+                .unwrap()
+                .contains("isn't installed")
+        );
+        assert_eq!(GhFailure::Other.explain(), None);
     }
 
     #[test]

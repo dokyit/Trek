@@ -39,6 +39,8 @@ pub struct Snapshot {
     pub branch: String,
     /// (behind, ahead) its upstream.
     pub upstream: Option<(u32, u32)>,
+    /// The repository has a remote at all, to push to.
+    pub has_remote: bool,
     pub files: Vec<FileChange>,
 }
 
@@ -49,6 +51,8 @@ enum LineKind {
     Hunk,
     Meta,
     Ctx,
+    /// Something Trek says about the diff (it was cut short), not a line of it.
+    Note,
 }
 
 pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
@@ -119,6 +123,108 @@ pub(crate) fn failure_toast(raw: &str, fallback: &str) -> crate::toast::Toast {
         })
 }
 
+/// "New branch…": ask for a name, then `git switch -c` in `cwd` (a dirty tree comes along, as git
+/// does it). Said by toast, plainly; the branch chip and the overview read the new branch at once.
+pub fn open_new_branch_dialog(
+    ws: Entity<Workspace>,
+    cwd: PathBuf,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
+    use gpui_kit::component::input::InputEvent;
+    let input = cx.new(|cx| InputState::new(window, cx).placeholder("Branch name"));
+    {
+        let (ws, cwd) = (ws.clone(), cwd.clone());
+        window
+            .subscribe(&input, cx, move |input, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    let name = input.read(cx).value().to_string();
+                    if create_branch(ws.clone(), cwd.clone(), &name, window, cx) {
+                        window.close_dialog(cx);
+                    }
+                }
+            })
+            .detach();
+    }
+    let focus = input.clone();
+    window.defer(cx, move |window, cx| {
+        focus.update(cx, |s, cx| s.focus(window, cx))
+    });
+    window.open_dialog(cx, move |dialog, _, _| {
+        let (input2, ws, cwd) = (input.clone(), ws.clone(), cwd.clone());
+        dialog
+            .title("New branch")
+            .w(px(440.))
+            .child(Input::new(&input))
+            .footer(
+                DialogFooter::new()
+                    .gap_2()
+                    .child(
+                        DialogClose::new()
+                            .child(Button::new("cancel-new-branch").outline().label("Cancel")),
+                    )
+                    .child(
+                        DialogAction::new().child(
+                            Button::new("do-new-branch")
+                                .primary()
+                                .label("Create")
+                                .on_click(move |_, window, cx| {
+                                    let name = input2.read(cx).value().to_string();
+                                    create_branch(ws.clone(), cwd.clone(), &name, window, cx);
+                                }),
+                        ),
+                    ),
+            )
+    });
+}
+
+/// A branch name as typed: runs of spaces become dashes (git won't take them); `None` when
+/// there's nothing to make a branch of.
+fn branch_name(typed: &str) -> Option<String> {
+    let name = typed.split_whitespace().collect::<Vec<_>>().join("-");
+    (!name.is_empty() && !name.starts_with('-')).then_some(name)
+}
+
+/// Make the branch and switch to it; false (and a word on why) when it can't be tried.
+fn create_branch(
+    ws: Entity<Workspace>,
+    cwd: PathBuf,
+    typed: &str,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let Some(name) = branch_name(typed) else {
+        crate::toast::push(window, "Give the branch a name first", cx);
+        return false;
+    };
+    if let Some(why) = ws.read(cx).switch_blocked(&cwd) {
+        crate::toast::push(window, why, cx);
+        return false;
+    }
+    let (dir, branch) = (cwd.clone(), name.clone());
+    let work = cx
+        .background_executor()
+        .spawn(async move { git(&dir, &["switch", "-c", &branch]) });
+    window
+        .spawn(cx, async move |cx| {
+            let result = work.await;
+            let _ = cx.update(|window, cx| {
+                match result {
+                    Ok(_) => crate::toast::push(window, format!("On a new branch, {name}"), cx),
+                    Err(e) => crate::toast::push(
+                        window,
+                        failure_toast(&e, "Couldn't make the branch"),
+                        cx,
+                    ),
+                }
+                ws.update(cx, |ws, cx| ws.refresh_checkout(cwd, cx));
+            });
+        })
+        .detach();
+    true
+}
+
 /// The top of the repository holding `cwd`: `git status` and `git diff` name paths from it, and
 /// `cwd` can be a folder inside the repository. `cwd` itself when git doesn't say.
 fn repo_top(cwd: &Path) -> PathBuf {
@@ -172,11 +278,75 @@ pub fn snapshot(cwd: &Path) -> Snapshot {
             deletions,
         });
     }
+    let has_remote = git_read(cwd, &["remote"]).is_ok_and(|r| !r.trim().is_empty());
     Snapshot {
         is_repo: true,
         branch,
         upstream,
+        has_remote,
         files,
+    }
+}
+
+/// The line under a worktree's Create pull request button: why it can't be pressed, or what a
+/// pull request made now leaves out (what isn't committed isn't in it).
+fn pr_note(
+    no_pr_yet: bool,
+    block: Option<worktree::PrBlock>,
+    ahead: usize,
+    uncommitted: usize,
+) -> Option<String> {
+    if !no_pr_yet || ahead == 0 {
+        return None;
+    }
+    match block {
+        Some(block) => Some(block.explain().to_string()),
+        None if uncommitted > 0 => Some(format!(
+            "{} not committed, so not in the pull request.",
+            if uncommitted == 1 {
+                "1 change is".to_string()
+            } else {
+                format!("{uncommitted} changes are")
+            }
+        )),
+        None => None,
+    }
+}
+
+/// What the footer's Push button is for the working tree on show, and what to say beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PushState {
+    pub label: String,
+    pub enabled: bool,
+    pub note: Option<&'static str>,
+}
+
+pub(crate) fn push_state(snap: &Snapshot) -> PushState {
+    let state = |label: &str, enabled, note| PushState {
+        label: label.to_string(),
+        enabled,
+        note,
+    };
+    if !snap.has_remote {
+        state(
+            "Push",
+            false,
+            Some("No remote yet. Add one with git remote add origin <url> to push."),
+        )
+    } else if snap.branch.is_empty() {
+        state(
+            "Push",
+            false,
+            Some("Not on a branch: switch to one to push."),
+        )
+    } else {
+        match snap.upstream {
+            // On the remote already: only what's ahead of it is left to push.
+            Some((_, ahead)) if ahead > 0 => state(&format!("Push {ahead}"), true, None),
+            Some(_) => state("Push", false, None),
+            // The remote hasn't seen this branch: the first push starts it tracking.
+            None => state("Publish branch", true, None),
+        }
     }
 }
 
@@ -264,8 +434,9 @@ fn diff_lines(text: &str) -> Vec<(LineKind, String)> {
 /// `---` and `+++` lines are a file's header only before its first hunk: inside one they are a
 /// removed line starting `--` or an added line starting `++`.
 fn diff_body(text: &str, mut in_hunk: bool) -> Vec<(LineKind, String)> {
-    text.lines()
-        .take(5000)
+    let mut lines: Vec<(LineKind, String)> = text
+        .lines()
+        .take(DIFF_LINES)
         .map(|l| {
             if l.starts_with("diff ") {
                 in_hunk = false;
@@ -291,8 +462,20 @@ fn diff_body(text: &str, mut in_hunk: bool) -> Vec<(LineKind, String)> {
             (kind, l.to_string())
         })
         .filter(|(k, _)| *k != LineKind::Meta)
-        .collect()
+        .collect();
+    // Said, not silent: what's past the cut is neither shown nor commented on.
+    let total = text.lines().count();
+    if total > DIFF_LINES {
+        lines.push((
+            LineKind::Note,
+            format!("Showing the first {DIFF_LINES} of {total} lines."),
+        ));
+    }
+    lines
 }
+
+/// The most lines of one file's diff the panel draws.
+const DIFF_LINES: usize = 5000;
 
 /// How tall a line of the diff is (`uniform_list`: every row the same).
 const DIFF_ROW: f32 = 19.;
@@ -382,35 +565,35 @@ fn hunk_starts(head: &str) -> Option<(u32, u32)> {
     Some((side(old)?, side(new)?))
 }
 
-/// The largest untracked file that's read to count or show its lines: the list is read again
-/// whenever the files change, and an agent's log or a dataset left in the folder can run to
-/// gigabytes.
-const UNTRACKED_READ: u64 = 4 << 20;
-
-/// An untracked file's text, when it's text and no larger than `UNTRACKED_READ`.
+/// An untracked file's text, when it's text and no larger than the cap `trek_core::worktree`
+/// reads (the list is read again whenever the files change, and an agent's log or a dataset left
+/// in the folder can run to gigabytes).
 fn untracked_text(path: &Path) -> Option<String> {
-    let size = std::fs::metadata(path).ok()?.len();
-    (size <= UNTRACKED_READ)
-        .then(|| std::fs::read_to_string(path).ok())
-        .flatten()
+    trek_core::worktree::read_untracked(path).ok()
 }
 
 fn file_diff(cwd: &Path, file: &FileChange) -> Vec<(LineKind, String)> {
     // The paths are the repository's, whatever folder `cwd` is in.
     let top = repo_top(cwd);
     let text = if file.status == "??" {
-        match untracked_text(&top.join(&file.path)) {
-            Some(s) => s
+        match trek_core::worktree::read_untracked(&top.join(&file.path)) {
+            Ok(s) => s
                 .lines()
                 .map(|l| format!("+{l}"))
                 .collect::<Vec<_>>()
                 .join("\n"),
-            None => "Binary, unreadable, or too large to show".into(),
+            Err(why) => why.into(),
         }
     } else {
-        git_read(&top, &["diff", "HEAD", "--", &file.path])
+        let diff = git_read(&top, &["diff", "HEAD", "--", &file.path])
             .or_else(|_| git_read(&top, &["diff", "--", &file.path]))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // A tracked binary is git's one line about it: said as the other paths say it.
+        if diff.lines().any(|l| l.starts_with("Binary files ")) {
+            "Binary file".into()
+        } else {
+            diff
+        }
     };
     // An untracked file's lines are all added ones, with no header: a `++i` is `+++i`.
     diff_body(&text, file.status == "??")
@@ -525,8 +708,8 @@ fn turn_files(
 struct ReviewState {
     review: Review,
     merge_block: Option<MergeBlock>,
-    /// `gh` is installed and the project's origin is on GitHub.
-    can_pr: bool,
+    /// What stands in the way of a pull request (no `gh`, no GitHub origin, no login), if anything.
+    pr_block: Option<worktree::PrBlock>,
 }
 
 pub struct GitPanel {
@@ -818,6 +1001,9 @@ impl GitPanel {
 
     fn refresh_review(&mut self, target: Target, cx: &mut Context<Self>) {
         let lookup_pr = !self.prs.contains_key(&target.wt.branch);
+        // Once `gh` has been found signed in for this branch it isn't asked again; until then each
+        // read asks (it's a local question), so a login made meanwhile is noticed.
+        let pr_ready = !lookup_pr && matches!(&self.review, Some(Ok(s)) if s.pr_block.is_none());
         self._task = Some(cx.spawn(async move |this, cx| {
             let t = target.clone();
             let state = cx
@@ -827,16 +1013,19 @@ impl GitPanel {
                         return Err("missing".to_string());
                     }
                     let review = worktree::review(&t.wt).map_err(|e| e.to_string())?;
-                    let can_pr = trek_core::detect::which("gh").is_some()
-                        && worktree::github_origin(&t.project);
+                    let pr_block = if pr_ready {
+                        None
+                    } else {
+                        worktree::pr_block(&t.project)
+                    };
                     Ok(ReviewState {
                         merge_block: worktree::merge_check(&t.project, &t.wt),
-                        can_pr,
+                        pr_block,
                         review,
                     })
                 })
                 .await;
-            let can_pr = state.as_ref().is_ok_and(|s| s.can_pr);
+            let can_pr = state.as_ref().is_ok_and(|s| s.pr_block.is_none());
             let _ = this.update(cx, |this, cx| {
                 if this.target.as_ref() != Some(&target) {
                     return;
@@ -846,6 +1035,7 @@ impl GitPanel {
                     is_repo: true,
                     branch: target.wt.branch.clone(),
                     upstream: None,
+                    has_remote: true,
                     files: state
                         .as_ref()
                         .map(|s| review_files(&s.review))
@@ -1123,6 +1313,30 @@ impl GitPanel {
             vec!["push".into(), "-u".into(), "origin".into(), "HEAD".into()]
         };
         self.run("Push", vec![step], window, cx);
+    }
+
+    /// Fast-forward to the upstream; one that would need a merge says so (`failure_text`).
+    fn pull(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let busy_elsewhere = self.cwd.as_deref().is_some_and(|cwd| {
+            self.workspace
+                .read(cx)
+                .working_in_checkout(cwd, "")
+                .is_some()
+        });
+        if busy_elsewhere {
+            crate::toast::push(
+                window,
+                "A thread is working in this folder: pull once it's done.",
+                cx,
+            );
+            return;
+        }
+        self.run(
+            "Pull",
+            vec![vec!["pull".into(), "--ff-only".into()]],
+            window,
+            cx,
+        );
     }
 
     /// Write a commit message from the worktree's diff with a small model.
@@ -1669,7 +1883,7 @@ impl GitPanel {
                         .text_size(px(text::LABEL))
                         .when(*kind == LineKind::Add, |el| el.bg(add_bg))
                         .when(*kind == LineKind::Del, |el| el.bg(del_bg))
-                        .when(*kind == LineKind::Hunk, |el| {
+                        .when(matches!(kind, LineKind::Hunk | LineKind::Note), |el| {
                             el.text_color(theme.muted_foreground).bg(theme.muted)
                         })
                         .child(text.clone());
@@ -2163,7 +2377,7 @@ impl GitPanel {
             parts.push(format!("{} uncommitted", review.uncommitted));
         }
         let pr = self.prs.get(&t.wt.branch).cloned().flatten();
-        let can_pr = state.as_ref().is_some_and(|s| s.can_pr);
+        let pr_block = state.as_ref().and_then(|s| s.pr_block);
         let block = state.as_ref().and_then(|s| s.merge_block.clone());
         let nothing_to_merge = block.as_ref() == Some(&MergeBlock::NothingToMerge);
         let generate = self.workspace.read(cx).can_write_with_claude();
@@ -2259,7 +2473,7 @@ impl GitPanel {
                             .small()
                             .outline()
                             .loading(busy == Some("Push"))
-                            .disabled(review.ahead == 0)
+                            .disabled(review.ahead == 0 || review.unpushed == Some(0))
                             .icon(IconName::ArrowUp)
                             .label(match review.unpushed {
                                 Some(n) if n > 0 => format!("Push {n}"),
@@ -2271,14 +2485,14 @@ impl GitPanel {
             .child(
                 h_flex()
                     .gap_2()
-                    .when(pr.is_none() && can_pr, |el| {
+                    .when(pr.is_none(), |el| {
                         el.child(
                             Button::new("git-pr")
                                 .small()
                                 .outline()
                                 .flex_1()
                                 .loading(busy == Some("Pull request"))
-                                .disabled(review.ahead == 0)
+                                .disabled(review.ahead == 0 || pr_block.is_some())
                                 .icon(crate::assets::Lucide::GitPullRequestCreate)
                                 .label("Create pull request")
                                 .on_click(
@@ -2297,6 +2511,18 @@ impl GitPanel {
                             .label(format!("Merge into {base}"))
                             .on_click(cx.listener(|this, _, window, cx| this.merge(window, cx))),
                     ),
+            )
+            // Why there's no pull request to open, or what it would leave out.
+            .when_some(
+                pr_note(pr.is_none(), pr_block, review.ahead, review.uncommitted),
+                |el, note| {
+                    el.child(
+                        div()
+                            .text_size(to_rems(text::META))
+                            .text_color(theme.muted_foreground)
+                            .child(note),
+                    )
+                },
             )
             // What stands in the way of merging (nothing to say when there's nothing to merge).
             .when_some(
@@ -2581,6 +2807,8 @@ impl Render for GitPanel {
         let files = self.file_list(summary, cx);
         let diff = self.diff_view("No changes. The working tree is clean.", window, cx);
 
+        let push = push_state(&self.snap);
+        let behind = self.snap.upstream.map_or(0, |(behind, _)| behind);
         let commit = v_flex()
             .p_3()
             .gap_2()
@@ -2605,11 +2833,32 @@ impl Render for GitPanel {
                             .small()
                             .outline()
                             .loading(self.busy == Some("Push"))
+                            .disabled(!push.enabled)
                             .icon(IconName::ArrowUp)
-                            .label("Push")
+                            .label(push.label.clone())
                             .on_click(cx.listener(|this, _, window, cx| this.push(window, cx))),
-                    ),
-            );
+                    )
+                    // Behind its upstream: a pull that only fast-forwards.
+                    .when(behind > 0, |el| {
+                        el.child(
+                            Button::new("git-pull")
+                                .small()
+                                .outline()
+                                .loading(self.busy == Some("Pull"))
+                                .icon(IconName::ArrowDown)
+                                .label(format!("Pull {behind}"))
+                                .on_click(cx.listener(|this, _, window, cx| this.pull(window, cx))),
+                        )
+                    }),
+            )
+            .when_some(push.note, |el, note| {
+                el.child(
+                    div()
+                        .text_size(to_rems(text::META))
+                        .text_color(muted)
+                        .child(note),
+                )
+            });
 
         v_flex()
             .size_full()
@@ -2842,6 +3091,100 @@ mod tests {
                 ("R".to_string(), "b.c".to_string()),
                 ("M".to_string(), "zzzz.txt".to_string())
             ]
+        );
+    }
+
+    #[test]
+    fn the_push_button_says_what_pushing_would_do() {
+        use super::{Snapshot, push_state};
+        let snap = |remote, branch: &str, upstream| Snapshot {
+            is_repo: true,
+            branch: branch.into(),
+            upstream,
+            has_remote: remote,
+            files: vec![],
+        };
+        // Nowhere to push: disabled, with the way to add one.
+        let none = push_state(&snap(false, "main", None));
+        assert!(!none.enabled && none.note.unwrap().contains("No remote"));
+        // A remote that hasn't seen the branch: the first push publishes it.
+        let new = push_state(&snap(true, "feat", None));
+        assert_eq!(
+            (new.label.as_str(), new.enabled, new.note),
+            ("Publish branch", true, None)
+        );
+        // Tracking: the count ahead, and nothing to push when level or only behind.
+        assert_eq!(
+            push_state(&snap(true, "main", Some((0, 3)))).label,
+            "Push 3"
+        );
+        assert!(!push_state(&snap(true, "main", Some((2, 0)))).enabled);
+        assert!(!push_state(&snap(true, "", None)).enabled, "detached");
+    }
+
+    #[test]
+    fn the_pull_request_button_says_why_it_cant_be_pressed_or_what_it_leaves_out() {
+        use super::pr_note;
+        use trek_core::worktree::PrBlock;
+        let said = |no_pr, block, ahead, dirty| pr_note(no_pr, block, ahead, dirty);
+        assert!(
+            said(true, Some(PrBlock::SignedOut), 2, 0)
+                .unwrap()
+                .contains("gh auth login")
+        );
+        assert!(
+            said(true, Some(PrBlock::NoGh), 2, 0)
+                .unwrap()
+                .contains("GitHub CLI")
+        );
+        // Nothing to open one for, or one is open already: nothing to say.
+        assert_eq!(said(true, Some(PrBlock::NoGh), 0, 0), None);
+        assert_eq!(said(false, Some(PrBlock::NoGh), 2, 0), None);
+        // Open to open, with work left out of it.
+        assert_eq!(
+            said(true, None, 1, 1).as_deref(),
+            Some("1 change is not committed, so not in the pull request.")
+        );
+        assert_eq!(
+            said(true, None, 1, 3).as_deref(),
+            Some("3 changes are not committed, so not in the pull request.")
+        );
+        assert_eq!(said(true, None, 1, 0), None);
+    }
+
+    #[test]
+    fn a_new_branch_name_has_no_spaces_and_is_never_an_option() {
+        use super::branch_name;
+        assert_eq!(
+            branch_name("  fix the  parser "),
+            Some("fix-the-parser".into())
+        );
+        assert_eq!(branch_name("feature/login"), Some("feature/login".into()));
+        assert_eq!(branch_name("   "), None);
+        assert_eq!(branch_name("--force"), None);
+    }
+
+    #[test]
+    fn a_diff_past_the_cap_says_it_was_cut_and_the_note_is_no_line_to_comment_on() {
+        let mut text = String::from("@@ -0,0 +1,6000 @@");
+        for i in 0..6000 {
+            text.push_str(&format!("\n+line {i}"));
+        }
+        let lines = diff_lines(&text);
+        assert_eq!(
+            lines.len(),
+            5001,
+            "the cap's worth of lines (head included) and the note"
+        );
+        let (kind, note) = lines.last().unwrap();
+        assert_eq!(*kind, LineKind::Note);
+        assert_eq!(note, "Showing the first 5000 of 6001 lines.");
+        assert_eq!(*line_nav(&lines).last().unwrap(), Nav::Skip);
+        // A short one has no note.
+        assert!(
+            diff_lines("@@ -1 +1 @@\n-a\n+b")
+                .iter()
+                .all(|(k, _)| *k != LineKind::Note)
         );
     }
 
