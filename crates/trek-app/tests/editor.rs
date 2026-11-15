@@ -232,6 +232,101 @@ fn clicking_a_file_in_the_explorer_opens_it_in_the_editor() {
     });
 }
 
+/// The tools panel's Explorer has a header: Refresh shows a file made outside Trek, New File
+/// makes one where the name is typed, Collapse folders shuts what's open.
+#[test]
+fn the_tools_panels_explorer_refreshes_makes_files_and_collapses() {
+    run(async |cx| {
+        let trek = open(cx);
+        let src = trek.project.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.rs"), "\n").unwrap();
+        let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
+        trek.window(cx, |window, cx| {
+            panel.update(cx, |p, cx| p.open_tool(PanelTool::Explorer, window, cx))
+        });
+        trek.render(cx);
+        trek.render(cx);
+        let made = trek.project.join("made-in-a-terminal.txt");
+        std::fs::write(&made, "").unwrap();
+        trek.render(cx);
+        assert!(!trek.visible(cx, made.display().to_string()));
+        trek.click(cx, "explorer-refresh");
+        trek.render(cx);
+        trek.render(cx);
+        assert!(trek.visible(cx, made.display().to_string()), "refreshed");
+
+        trek.click(cx, "explorer-new-file");
+        trek.render(cx);
+        assert!(trek.visible(cx, "explorer-edit"));
+        trek.type_text(cx, "new.rs");
+        trek.press(cx, "enter");
+        trek.render(cx);
+        assert!(trek.project.join("new.rs").is_file(), "made");
+
+        // Back to the thread's draft: src opened, then shut again from the header.
+        let project = trek.project.clone();
+        trek.update(cx, |ws, cx| {
+            ws.navigate(
+                Route::Draft {
+                    project: Some(project),
+                },
+                cx,
+            )
+        });
+        trek.render(cx);
+        trek.click(cx, src.display().to_string());
+        trek.render(cx);
+        trek.render(cx);
+        let a = src.join("a.rs");
+        assert!(trek.visible(cx, a.display().to_string()));
+        trek.click(cx, "explorer-collapse");
+        trek.render(cx);
+        assert!(!trek.visible(cx, a.display().to_string()), "collapsed");
+    });
+}
+
+/// A file deep in a folder clicked in the Explorer: the tree stays rooted where it was with its
+/// folders open, rather than starting again at the file's folder.
+#[test]
+fn opening_a_file_from_the_explorer_keeps_the_tree_where_it_was() {
+    run(async |cx| {
+        let trek = open(cx);
+        let src = trek.project.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("main.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let top = trek.project.join("top.rs");
+        std::fs::write(&top, "\n").unwrap();
+        let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
+        trek.window(cx, |window, cx| {
+            panel.update(cx, |p, cx| p.open_tool(PanelTool::Explorer, window, cx))
+        });
+        trek.render(cx);
+        trek.render(cx);
+        trek.click(cx, src.display().to_string());
+        trek.render(cx);
+        trek.render(cx);
+        trek.click(cx, file.display().to_string());
+        trek.render(cx);
+        assert!(matches!(
+            trek.read(cx, |ws, _| ws.route.clone()),
+            Route::Editor { path } if path == file
+        ));
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.current_cwd()).as_deref(),
+            Some(trek.project.as_path()),
+            "the project's folder, not the file's"
+        );
+        trek.render(cx);
+        assert!(trek.visible(cx, top.display().to_string()));
+        assert!(
+            trek.visible(cx, file.display().to_string()),
+            "src stays open"
+        );
+    });
+}
+
 /// The editor in front, once its file is read (off the main thread).
 async fn loaded(
     trek: &common::Trek,

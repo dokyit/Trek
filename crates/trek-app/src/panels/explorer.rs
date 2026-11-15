@@ -1,11 +1,13 @@
 //! Explorer: the project's file tree. A file opens in the in-app editor; a folder expands.
 //!
 //! Folders are read off the main thread and kept: a frame draws what was read last, and the
-//! tree reads again when files changed under it (a turn finished, a checkout, a rewind) or the
-//! user asks (Refresh); in the editor also when FSEvents says files moved (`ide::watch`). Files
-//! git ignores are left out, as `.gitignore` (and the repository's excludes) say. In the editor
-//! the tree also shows git status: a letter and a colour per changed file, a dot on folders
-//! holding changes; and a row's context menu adds it to the AI side bar's chat.
+//! tree reads again when files changed under it (a turn finished, a checkout, a rewind), when
+//! the folder watcher says files came or went in a folder on show (made in a terminal, another
+//! editor; in the editor the workbench's own watcher says it, `ide::watch`), or the user asks
+//! (Refresh). Files git ignores are left out, as `.gitignore` (and the repository's excludes)
+//! say. A row's context menu makes, renames and trashes files. In the editor the tree also shows
+//! git status: a letter and a colour per changed file, a dot on folders holding changes; and the
+//! menu adds a row to the AI side bar's chat.
 
 use crate::fluent;
 use crate::scale::{radius, text, to_rems};
@@ -23,6 +25,40 @@ const HIDDEN: &[&str] = &[".git", ".DS_Store"];
 
 /// Rows drawn at most: a tree opened that far is beyond reading anyway.
 const MAX_ROWS: usize = 4000;
+
+/// How long the folder watcher gathers changes before the tree reads again.
+const GATHER: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Whether a batch of paths the folder watcher names (by their real path under `real`, the
+/// folder `given` as the tree knows it) changes what the tree shows: an entry come or gone in a
+/// folder on show (`shown`). What happens inside `.git`, or in folders shut, doesn't.
+pub fn changes_shown(
+    paths: &[PathBuf],
+    real: &Path,
+    given: &Path,
+    shown: impl Fn(&Path) -> bool,
+) -> bool {
+    paths.iter().any(|p| {
+        let Some(rel) = p
+            .strip_prefix(real)
+            .ok()
+            .or_else(|| p.strip_prefix(given).ok())
+        else {
+            return false;
+        };
+        if rel.as_os_str().is_empty() || rel.components().any(|c| c.as_os_str() == ".git") {
+            return false;
+        }
+        given.join(rel).parent().is_some_and(&shown)
+    })
+}
+
+/// The Agents-mode tree's watch on its folder.
+struct Watch {
+    root: PathBuf,
+    _watcher: notify::RecommendedWatcher,
+    _task: Task<()>,
+}
 
 /// `dir`'s entries, folders first, leaving out what git ignores there (`.gitignore` files up to
 /// the repository's top, its excludes and the user's) — outside a repository, everything. With
@@ -259,6 +295,8 @@ pub struct ExplorerPanel {
     git_dirs: HashSet<PathBuf>,
     /// Reading folders in the background; a newer read replaces it.
     _read: Option<Task<()>>,
+    /// Agents mode's watch on the folder (Editor mode's workbench watches its own).
+    watch: Option<Watch>,
     _subscription: Subscription,
 }
 
@@ -306,6 +344,7 @@ impl ExplorerPanel {
                 this.selected = None;
                 this.files_seen = files;
                 this.refresh(cx);
+                this.watch(cx);
             } else if files != this.files_seen {
                 this.files_seen = files;
                 this.refresh(cx);
@@ -325,10 +364,72 @@ impl ExplorerPanel {
             git: HashMap::new(),
             git_dirs: HashSet::new(),
             _read: None,
+            watch: None,
             _subscription: sub,
         };
         this.refresh(cx);
+        this.watch(cx);
         this
+    }
+
+    /// Watch the folder (again, when it moved), so files made or removed there outside Trek's
+    /// agents (in a terminal, another editor) show without waiting for a turn. Not in the editor,
+    /// whose workbench watches its folder itself, nor in tests, whose frames depend on what the
+    /// test does alone.
+    fn watch(&mut self, cx: &mut Context<Self>) {
+        if self.ide || cfg!(any(test, feature = "test-support")) {
+            return;
+        }
+        if self.watch.as_ref().map(|w| &w.root) == self.root.as_ref() {
+            return;
+        }
+        self.watch = None;
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        let (tx, rx) = async_channel::unbounded::<Vec<PathBuf>>();
+        let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            if let Ok(e) = event {
+                let _ = tx.try_send(e.paths);
+            }
+        });
+        let mut watcher = match watcher {
+            Ok(w) => w,
+            Err(e) => return tracing::warn!("watch {}: {e}", root.display()),
+        };
+        if let Err(e) =
+            notify::Watcher::watch(&mut watcher, &root, notify::RecursiveMode::Recursive)
+        {
+            return tracing::warn!("watch {}: {e}", root.display());
+        }
+        // FSEvents names files by their real path (`/private/var/…` for `/var/…`).
+        let real = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+        let given = root.clone();
+        let task = cx.spawn(async move |this, cx| {
+            while let Ok(first) = rx.recv().await {
+                let mut paths = first;
+                cx.background_executor().timer(GATHER).await;
+                while let Ok(more) = rx.try_recv() {
+                    paths.extend(more);
+                }
+                let gone = this
+                    .update(cx, |this, cx| {
+                        let entries = &this.entries;
+                        if changes_shown(&paths, &real, &given, |d| entries.contains_key(d)) {
+                            this.refresh(cx);
+                        }
+                    })
+                    .is_err();
+                if gone {
+                    break;
+                }
+            }
+        });
+        self.watch = Some(Watch {
+            root,
+            _watcher: watcher,
+            _task: task,
+        });
     }
 
     fn files_now(ws: &Workspace) -> u64 {
@@ -726,8 +827,9 @@ impl ExplorerPanel {
     }
 }
 
-/// A row's context menu in the editor: Add to Chat, New File and New Folder (in the folder, or
-/// beside the file), Rename and Delete, then Finder and the clipboard.
+/// A row's context menu: New File and New Folder (in the folder, or beside the file), Rename and
+/// Delete, then Finder and the clipboard. In the editor (`ide`) it starts with Add to Chat, for
+/// the AI side bar's chat.
 fn row_menu(
     menu: PopupMenu,
     me: WeakEntity<ExplorerPanel>,
@@ -735,6 +837,7 @@ fn row_menu(
     path: &Path,
     is_dir: bool,
     root: &Path,
+    ide: bool,
 ) -> PopupMenu {
     let copy = |label: &'static str, text: String| {
         PopupMenuItem::new(label).on_click(move |_, _, cx| {
@@ -763,15 +866,19 @@ fn row_menu(
         };
     let (d1, d2, rename, delete) = (dir.clone(), dir, path.to_path_buf(), path.to_path_buf());
     let at_root = path == root;
-    let menu = menu
-        .min_w(px(200.))
-        .item(PopupMenuItem::new("Add to Chat").on_click(move |_, _, cx| {
+    let menu = menu.min_w(px(200.));
+    let menu = if ide {
+        menu.item(PopupMenuItem::new("Add to Chat").on_click(move |_, _, cx| {
             let chip = crate::ide::ai::context::ContextChip::File { path: chip.clone() };
             ws.update(cx, |_, cx| {
                 cx.emit(crate::workspace::WorkspaceEvent::AddToChat(chip))
             });
         }))
         .separator()
+    } else {
+        menu
+    };
+    let menu = menu
         .item(act(
             "New File…",
             Box::new(move |this, window, cx| this.begin_new(d1.clone(), false, window, cx)),
@@ -842,11 +949,80 @@ impl Render for ExplorerPanel {
             .children(lead)
             .children(elements);
 
-        v_flex().size_full().child(tree).into_any_element()
+        // In the editor the side bar's section header has these (`ide::activity`).
+        let header = (!ide).then(|| self.header(&root, cx));
+        v_flex()
+            .size_full()
+            .children(header)
+            .child(tree)
+            .into_any_element()
     }
 }
 
 impl ExplorerPanel {
+    /// The tools panel's header: the folder's name, then New File, New Folder, Refresh and
+    /// Collapse folders.
+    fn header(&self, root: &Path, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let name = root
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| root.display().to_string());
+        h_flex()
+            .flex_none()
+            .pl_3()
+            .pr_1()
+            .h(px(36.))
+            .gap_1()
+            .border_b_1()
+            .border_color(theme.border)
+            .text_size(to_rems(text::LABEL))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.muted_foreground)
+                    .child(name),
+            )
+            .child(
+                crate::ui::icon_button(
+                    "explorer-new-file",
+                    crate::assets::Lucide::FilePlus,
+                    "New File…",
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    if let Some(dir) = this.target_dir() {
+                        this.begin_new(dir, false, window, cx);
+                    }
+                })),
+            )
+            .child(
+                crate::ui::icon_button(
+                    "explorer-new-folder",
+                    crate::assets::Lucide::FolderPlus,
+                    "New Folder…",
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    if let Some(dir) = this.target_dir() {
+                        this.begin_new(dir, true, window, cx);
+                    }
+                })),
+            )
+            .child(
+                crate::ui::icon_button("explorer-refresh", IconName::RefreshCw, "Refresh")
+                    .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+            )
+            .child(
+                crate::ui::icon_button(
+                    "explorer-collapse",
+                    crate::assets::Lucide::ChevronsDownUp,
+                    "Collapse folders",
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.collapse_all(cx))),
+            )
+    }
+
     /// One row of the tree.
     #[allow(clippy::too_many_arguments)]
     fn tree_row(
@@ -950,12 +1126,9 @@ impl ExplorerPanel {
                         cx.notify();
                     }
                 }));
-            if !ide {
-                return row.into_any_element();
-            }
             let (ws, root, me) = (self.workspace.clone(), root.to_path_buf(), cx.weak_entity());
             row.context_menu(move |menu, _, _| {
-                row_menu(menu, me.clone(), &ws, &path, is_dir, &root)
+                row_menu(menu, me.clone(), &ws, &path, is_dir, &root, ide)
             })
             .into_any_element()
         }
@@ -964,7 +1137,8 @@ impl ExplorerPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{GitMark, git_marks, invalid_name, name_problem};
+    use super::{GitMark, changes_shown, git_marks, invalid_name, name_problem};
+    use std::path::{Path, PathBuf};
 
     /// A new item or a rename stays in its folder under either platform's rules, and the Windows
     /// ones are checked on the Mac's CI too: `..\x` and `C:\x` would land outside the folder,
@@ -1087,5 +1261,27 @@ mod tests {
             .any(|(p, m)| p.ends_with("zzzz.txt") && *m == GitMark::Modified);
         assert!(modified, "{marks:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The watcher's paths, by their real path or the tree's, change the tree when an entry came
+    /// or went in a folder on show; not inside `.git`, in a folder shut, or outside the folder.
+    #[test]
+    fn the_watcher_reads_again_only_for_folders_on_show() {
+        let (real, given) = (Path::new("/private/var/p"), Path::new("/var/p"));
+        let shown = |d: &Path| d == Path::new("/var/p") || d == Path::new("/var/p/src");
+        let changed = |paths: &[&str]| {
+            let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+            changes_shown(&paths, real, given, shown)
+        };
+        assert!(changed(&["/private/var/p/new.txt"]), "by its real path");
+        assert!(changed(&["/var/p/src/main.rs"]), "by the tree's");
+        assert!(!changed(&["/private/var/p/.git/index"]));
+        assert!(
+            !changed(&["/private/var/p/target/debug/x.o"]),
+            "a folder shut"
+        );
+        assert!(!changed(&["/private/var/p"]), "the folder itself");
+        assert!(!changed(&["/elsewhere/a.txt"]));
+        assert!(changed(&["/private/var/p/target/x", "/private/var/p/b.rs"]));
     }
 }

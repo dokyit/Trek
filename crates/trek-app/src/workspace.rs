@@ -1828,6 +1828,11 @@ pub struct GitInfo {
     /// The commit checked out: when it moves, files on disk changed under open editors.
     pub head: Option<String>,
     pub remote: Option<String>,
+    /// The repository has a remote at all (any name): without one there's nothing to pull from
+    /// or push to.
+    pub has_remote: bool,
+    /// The branch has an upstream to pull from and push to.
+    pub has_upstream: bool,
 }
 
 impl GitInfo {
@@ -1846,7 +1851,7 @@ pub fn read_git_info(cwd: &std::path::Path) -> GitInfo {
     // The rest are independent reads, each a process of its own: one after another they're ten
     // spawns, which on Windows (a hundred milliseconds apiece, or more under a virus scanner) kept
     // the branch chip off the composer for over a second. Side by side it waits for the slowest.
-    let (branch, worktrees, head, status, ahead, behind, default_branch, branches, remote) =
+    let (branch, worktrees, head, status, ahead, behind, default_branch, branches, remote, remotes) =
         std::thread::scope(|s| {
             let branch = s.spawn(|| run(&["branch", "--show-current"]).filter(|b| !b.is_empty()));
             let worktrees = s.spawn(|| run(&["worktree", "list", "--porcelain"]));
@@ -1876,6 +1881,7 @@ pub fn read_git_info(cwd: &std::path::Path) -> GitInfo {
                 ])
             });
             let remote = s.spawn(|| trek_core::store::git_remote(cwd));
+            let remotes = s.spawn(|| run(&["remote"]));
             (
                 branch.join().unwrap_or_default(),
                 worktrees.join().unwrap_or_default(),
@@ -1886,6 +1892,7 @@ pub fn read_git_info(cwd: &std::path::Path) -> GitInfo {
                 default_branch.join().unwrap_or_default(),
                 branches.join().unwrap_or_default(),
                 remote.join().unwrap_or_default(),
+                remotes.join().unwrap_or_default(),
             )
         });
     let elsewhere = worktrees
@@ -1903,6 +1910,8 @@ pub fn read_git_info(cwd: &std::path::Path) -> GitInfo {
         elsewhere,
         branch,
         changed: status.map(|s| s.lines().count()).unwrap_or(0),
+        has_upstream: ahead.is_some(),
+        has_remote: remotes.is_some_and(|r| !r.trim().is_empty()),
         ahead: ahead.and_then(|s| s.parse().ok()).unwrap_or(0),
         behind: behind.and_then(|s| s.parse().ok()).unwrap_or(0),
         default_branch,
@@ -4749,7 +4758,17 @@ impl Workspace {
         match &self.route {
             Route::Thread(id) => self.thread(id).and_then(|t| t.cwd.clone()),
             Route::Draft { project } => project.clone(),
-            Route::Editor { path } => path.parent().map(|d| d.to_path_buf()),
+            // The folder of the thread or draft it was opened from, while the file is in it (so the
+            // Explorer the file was clicked in, and a new shell, stay there); else its project's.
+            Route::Editor { path } => {
+                let from = match &self.editor_back {
+                    Some(Route::Thread(id)) => self.thread(id).and_then(|t| t.cwd.clone()),
+                    Some(Route::Draft { project }) => project.clone(),
+                    _ => None,
+                };
+                from.filter(|d| path.starts_with(d))
+                    .or_else(|| path.parent().map(trek_core::store::project_root))
+            }
             _ => None,
         }
     }
