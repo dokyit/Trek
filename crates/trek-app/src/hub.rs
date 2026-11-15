@@ -128,8 +128,13 @@ impl RenderOnce for Hub {
 }
 
 /// The main window's hub button: shows and hides the pinned column (`column`), which stays until
-/// it's clicked again (`settings.layout.hub_open`, on to begin with).
-pub fn toggle(ws: Entity<Workspace>, open: bool) -> impl IntoElement {
+/// it's clicked again (`settings.layout.hub_open`, on to begin with). Where the window has no
+/// room for the column (the tools panel is open, or it's narrow) there is nothing to show or
+/// hide: the button opens the card over the window instead, as a thread's own window does.
+pub fn toggle(ws: Entity<Workspace>, scope: Scope, open: bool, room: bool) -> AnyElement {
+    if !room {
+        return button(ws, scope).into_any_element();
+    }
     Button::new("hub")
         .ghost()
         .small()
@@ -147,6 +152,7 @@ pub fn toggle(ws: Entity<Workspace>, open: bool) -> impl IntoElement {
                 cx.notify();
             })
         })
+        .into_any_element()
 }
 
 /// The hub pinned at the main window's right edge, under the tabs, for `scope`: the card's

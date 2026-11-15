@@ -4051,6 +4051,21 @@ impl Composer {
                                 menu.check_side(gpui_kit::component::Side::Right)
                             })
                             .label(blocked.clone().unwrap_or_else(|| "Switch branch".into()));
+                        if let Some(cwd) = cwd.clone() {
+                            let ws = ws_entity.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new("New branch…")
+                                    .disabled(blocked.is_some())
+                                    .on_click(move |_, window, cx| {
+                                        crate::panels::git::open_new_branch_dialog(
+                                            ws.clone(),
+                                            cwd.clone(),
+                                            window,
+                                            cx,
+                                        )
+                                    }),
+                            );
+                        }
                         for b in branches.clone() {
                             let (ws, cwd) = (ws_entity.clone(), cwd.clone());
                             let is_current = Some(&b) == current.as_ref();

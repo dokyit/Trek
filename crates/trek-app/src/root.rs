@@ -1154,6 +1154,8 @@ impl Render for WindowTitle {
         // Where the thread or draft works, and what it has to hand (Open in, Run, git…).
         let hub = crate::hub::shown(ws, &ws.harness_scope());
         let hub_open = ws.settings.layout.hub_open;
+        let hub_scope = ws.harness_scope();
+        let hub_room = ws.hub_room.get();
         let transparent = self.workspace.read(cx).see_through();
         // A narrow window keeps what the bar does and drops what repeats: the wordmark and the
         // project's name beside its badge.
@@ -1273,7 +1275,12 @@ impl Render for WindowTitle {
                     .when(hub, |el| {
                         el.child(crate::chrome::no_drag(
                             "hub",
-                            crate::hub::toggle(self.workspace.clone(), hub_open),
+                            crate::hub::toggle(
+                                self.workspace.clone(),
+                                hub_scope.clone(),
+                                hub_open,
+                                hub_room,
+                            ),
                         ))
                     })
                     .when(!crate::fluent::WINDOWS, |el| {
@@ -2731,6 +2738,7 @@ impl TrekWindow {
         } else {
             room >= HUB_ROOM
         };
+        self.workspace.read(cx).hub_room.set(hub_room);
         let hub_col = {
             let ws = self.workspace.read(cx);
             ws.settings.layout.hub_open && hub_room && crate::hub::shown(ws, &hub_scope)

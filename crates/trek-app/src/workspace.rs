@@ -2134,6 +2134,8 @@ pub struct Workspace {
     pub split: Option<split::Split>,
     /// The main area's width as last drawn: whether two panes fit.
     pub split_room: std::cell::Cell<f32>,
+    /// The main window has room for the overview's pinned column (set as the window draws).
+    pub hub_room: std::cell::Cell<bool>,
     /// The chat tabs as last kept in the store for the IDE folder (`chats_moved`).
     ide_chats_saved: Option<String>,
     /// What the language servers last said about each open file, for Problems and the status bar.
@@ -2555,6 +2557,7 @@ impl Workspace {
             side_chat: IdeChat::new(draft_prefs.clone()),
             split: None,
             split_room: std::cell::Cell::new(f32::INFINITY),
+            hub_room: std::cell::Cell::new(true),
             ide_chats_saved: None,
             draft_prefs,
             study: Default::default(),
