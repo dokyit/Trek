@@ -123,7 +123,7 @@ struct SideChatSheet: View {
         let uploads = composer.photos.compactMap(\.upload)
         guard !starting, !text.isEmpty || !uploads.isEmpty else { return }
         guard model.link(for: parent)?.connection == .connected else {
-            model.show(AppModel.notConnected, error: true)
+            model.show(AppModel.notConnected(model.link(for: parent)), error: true)
             return
         }
         starting = true

@@ -112,6 +112,9 @@ final class AppModel {
     var toast: Toast?
     var pairing = false
     var pairingError: String?
+    /// A machine whose pairing is dead (the Mac forgot this iPhone, or its certificate changed),
+    /// being paired again: its scanner is up. The old pairing stays until the new one is made.
+    var pairingAgain: HostLink?
     /// A pairing link (deep link or QR code) waiting for the user to confirm it.
     var pendingLink: PairingLink?
     /// The host that asked the phone to open its new-thread sheet (`/new` sent to a thread), and
@@ -313,6 +316,8 @@ final class AppModel {
             guard let self, let client else { return }
             self.pairing = false
             self.pairingClient = nil
+            self.pairingError = nil
+            self.pairingAgain = nil
             // Re-pairing a host this phone already knows swaps its record; the link is made fresh.
             if let old = self.link(id: host.id) { self.detach(old) }
             // Pairing from the demo leaves it: its sample machine must not sit beside the real one
@@ -339,8 +344,9 @@ final class AppModel {
                 self.pairing = false
                 self.pairingClient = nil
                 client.stop()
+                // The pairing screen, or the scanner sheet the pairing came from, says it where it is.
+                self.pairingError = why
                 if self.links.isEmpty {
-                    self.pairingError = why
                     self.mode = .unpaired
                 } else {
                     self.show(why, error: true)
@@ -352,6 +358,13 @@ final class AppModel {
         client.onMessage = { _ in }
         pairingClient = client
         client.start()
+    }
+
+    /// Pair with `link` again, from a new code: its scanner opens over what's showing, and the
+    /// machine, its cached threads and its place in the list stay until the new pairing replaces them.
+    func pairAgain(_ link: HostLink) {
+        pairingError = nil
+        pairingAgain = link
     }
 
     /// The app came back to the front.
@@ -378,6 +391,7 @@ final class AppModel {
     func leave(_ link: HostLink) {
         detach(link)
         PairedMac.remove(hostId: link.id)
+        pairingError = nil
         if links.isEmpty { mode = .unpaired }
     }
 
@@ -387,6 +401,8 @@ final class AppModel {
         links = []
         pairingClient?.stop()
         pairingClient = nil
+        pairingError = nil
+        pairingAgain = nil
         reset()
     }
 
@@ -761,6 +777,19 @@ final class AppModel {
 
     static let notConnected = "Not connected to that machine."
 
+    /// Why nothing could be sent to `link`, in words that name it.
+    static func notConnected(_ link: HostLink?) -> String {
+        guard let link else { return notConnected }
+        return "\(link.name) isn't connected."
+    }
+
+    /// The machines this iPhone is paired with and can't reach right now (live pairings only:
+    /// the demo's sample machine is always there).
+    var unreachable: [HostLink] {
+        mode == .live || Launch.demoOffline != nil || Launch.demoConnection != nil
+            ? links.filter { $0.connection != .connected && $0.connection != .idle } : []
+    }
+
     /// Failures of an action become a toast; `ok` runs on success.
     func act(_ message: ClientMessage, on link: HostLink? = nil, ok: ((ServerMessage) -> Void)? = nil) {
         request(message, on: link) { [weak self] reply in
@@ -1077,7 +1106,14 @@ final class AppModel {
         guard let link = link ?? selected else { return }
         link.notesAsked = true
         link.request(.notes) { [weak link] reply in
-            if case .notes(_, let list) = reply { withAnimation(.snappy) { link?.notes = list } }
+            switch reply {
+            case .notes(_, let list):
+                link?.notesFailed = false
+                link?.notesLoaded = true
+                withAnimation(.snappy) { link?.notes = list }
+            case .error: link?.notesFailed = true
+            default: break
+            }
         }
     }
 

@@ -113,7 +113,7 @@ struct CardChipRow: View {
                     Spacer(minLength: 0)
                     Button {
                         guard model.link(for: store.id)?.connection == .connected else {
-                            return model.show(AppModel.notConnected, error: true)
+                            return model.show(AppModel.notConnected(model.link(for: store.id)), error: true)
                         }
                         creating = true
                         model.send(CreatePR.message, to: store.id, mode: nil)

@@ -49,6 +49,10 @@ final class HostLink: Identifiable, Equatable {
     var basecampLoading: Set<BasecampRange> = []
     @ObservationIgnored var basecampAsked: Set<BasecampRange> = []
     var notes: [NoteSummary] = []
+    /// The Mac has sent its notes at least once (so "no notes" is its word, not silence), or the
+    /// last ask failed (it couldn't be reached, or doesn't serve notes).
+    var notesLoaded = false
+    var notesFailed = false
     var openNotes: [String: Note] = [:]
     @ObservationIgnored var notesAsked = false
     @ObservationIgnored var notesSaving: Set<String> = []

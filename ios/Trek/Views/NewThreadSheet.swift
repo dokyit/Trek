@@ -71,6 +71,13 @@ struct NewThreadSheet: View {
                             .multilineTextAlignment(.center)
                             .minimumScaleFactor(0.7)
                     }
+                    if let why = cantStart {
+                        Label(why, systemImage: "wifi.exclamationmark")
+                            .font(.ui(.footnote))
+                            .foregroundStyle(Trek.approval)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 24)
+                    }
                 }
                 Spacer()
                 card
@@ -131,10 +138,10 @@ struct NewThreadSheet: View {
                     }
                     .foregroundStyle(Trek.background)
                     .frame(width: 36, height: 36)
-                    .background(Circle().fill(empty ? Trek.muted.opacity(0.35) : Trek.foreground))
+                    .background(Circle().fill(empty || cantStart != nil ? Trek.muted.opacity(0.35) : Trek.foreground))
                 }
                 .buttonStyle(.pressRound)
-                .disabled(empty || sending)
+                .disabled(empty || sending || cantStart != nil)
                 .accessibilityLabel(uploading ? "Sending its files" : "Start thread")
                 // Felt as it goes, as a message sent in a thread is.
                 .sensoryFeedback(.impact(weight: .light), trigger: sending) { _, now in now }
@@ -180,6 +187,15 @@ struct NewThreadSheet: View {
         }
         .buttonStyle(.press)
         .accessibilityLabel(plan ? "Plan first: on" : "Plan first: off")
+    }
+
+    /// Why a thread can't be started yet: the machine can't be reached, or hasn't said which agents
+    /// it has. Nil when it can.
+    private var cantStart: String? {
+        guard let link else { return "No machine is paired." }
+        if link.connection != .connected { return "\(link.name) isn't connected. Start the thread once it is." }
+        if link.agents.isEmpty { return "\(link.name) hasn't listed its agents yet." }
+        return nil
     }
 
     private var empty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && photos.isEmpty && files.isEmpty }
@@ -274,7 +290,7 @@ struct NewThreadSheet: View {
     }
 
     private func start() {
-        guard let pid = project?.id ?? (isNoProject ? noProjectID : nil), let agent else { return }
+        guard cantStart == nil, let pid = project?.id ?? (isNoProject ? noProjectID : nil), let agent else { return }
         let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let images = photos.compactMap(\.upload)
         let begin = { (ids: [String], failed: ((ErrorCode) -> Void)?) in
@@ -298,7 +314,7 @@ struct NewThreadSheet: View {
         }
         guard let link, link.connection == .connected else {
             sending = false
-            model.show(AppModel.notConnected, error: true)
+            model.show(AppModel.notConnected(link), error: true)
             return
         }
         // Videos and files go up first; the sheet stays, as it is, until the thread starts.

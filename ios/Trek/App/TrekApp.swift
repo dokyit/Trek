@@ -191,6 +191,14 @@ struct RootView: View {
         .sheet(item: $model.pendingLink) { link in
             PairingConfirmSheet(link: link)
         }
+        // "Pair again" on a machine that refused this iPhone: its old pairing stays until the new
+        // one replaces it.
+        .sheet(item: $model.pairingAgain) { machine in
+            ScannerSheet(again: machine) { link in
+                model.pairingAgain = nil
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { model.offer(link) }
+            }
+        }
         .preferredColorScheme(scheme)
         .modifier(TextSizeModifier(size: TextSizeChoice(rawValue: Launch.textSize ?? textSize)?.dynamicType))
         // A theme that holds still is Trek's Reduce motion; a compact one has compact rows.
@@ -435,7 +443,15 @@ struct NewThreadAccessory: View {
                     .accessibilityLabel("\(needsYou) waiting on you")
                     .accessibilityHint(needsYou == 1 ? "Opens it" : "Lists them")
                 }
-                if working > 0 {
+                if !away.isEmpty {
+                    // Every tab has this pill, so it's where a machine that can't be reached is said:
+                    // beacons for work the phone can no longer see would claim more than it knows.
+                    HStack(spacing: 6) {
+                        Image(systemName: "wifi.exclamationmark").foregroundStyle(Trek.approval)
+                        Text(Self.away(away)).font(.ui(.footnote).weight(.medium)).foregroundStyle(Trek.muted).lineLimit(1)
+                    }
+                    .accessibilityElement(children: .combine)
+                } else if working > 0 {
                     HStack(spacing: 6) {
                         BeaconDot(color: Trek.working, pulses: true, size: 6)
                         Text("\(working) working").font(.ui(.footnote).weight(.medium)).foregroundStyle(Trek.muted)
@@ -457,6 +473,13 @@ struct NewThreadAccessory: View {
             }
         }
     }
+
+    /// "Can't reach Toby's Mac", or how many machines can't be reached.
+    static func away(_ links: [HostLink]) -> String {
+        links.count == 1 ? "Can't reach \(MachineTag.short(links[0].name))" : "\(links.count) machines offline"
+    }
+
+    private var away: [HostLink] { model.unreachable }
 
     /// One thread waiting: open it. More: say which.
     private func openWaiting() {

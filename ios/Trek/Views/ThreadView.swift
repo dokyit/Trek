@@ -63,6 +63,14 @@ final class ComposerState {
         if let i = files.firstIndex(where: { $0.id == id }) { f(&files[i]) }
     }
 
+    /// A message that didn't go comes back, ahead of anything typed since.
+    func restore(text: String, photos kept: [PickedPhoto]) {
+        sent = nil
+        let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        draft = typed.isEmpty ? text : text + "\n" + draft
+        photos = kept + photos
+    }
+
     /// A message put back on purpose (undo, rewind, Edit): not an echo, however soon.
     func put(_ text: String) {
         sent = nil
@@ -112,10 +120,21 @@ private struct ThreadScreen: View {
     @State private var deleteAsk: DeleteAsk?
     @State private var room: CGFloat = 0
     @State private var stripHeight: CGFloat = 0
+    /// The Mac has said its list and this thread isn't in it any more.
+    @State private var gone = false
     @Environment(\.dismiss) private var dismiss
 
     private var threadID: String { store.id }
     private var thread: ThreadSummary? { store.summary }
+    /// The machine this thread is on, once it can't be reached (not while it's still connecting:
+    /// the banner would come and go with every reconnect).
+    private var unreachable: HostLink? {
+        guard let link = model.link(for: threadID) else { return nil }
+        switch link.connection {
+        case .offline, .unauthorized, .identityChanged: return link
+        case .idle, .connecting, .connected: return nil
+        }
+    }
 
     var body: some View {
         let t = thread
@@ -126,11 +145,19 @@ private struct ThreadScreen: View {
             .environment(\.liveThreadID, threadID)
             .background(RidgeBackdrop(surface: .thread))
             .safeAreaBar(edge: .top, spacing: 0) {
-                if let t {
-                    ThreadStatusStrip(thread: t)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 6)
-                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { stripHeight = $0 }
+                let link = unreachable
+                if t != nil || link != nil {
+                    VStack(spacing: 6) {
+                        // The machine's own banner, as the list has it: what's wrong, and Try now.
+                        if let link {
+                            ConnectionBanner(state: link.connection, detail: link.connectionText, host: link.name,
+                                             retry: { model.retryNow(link) }) { model.pairAgain(link) }
+                        }
+                        if let t { ThreadStatusStrip(thread: t) }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { stripHeight = $0 }
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -143,6 +170,19 @@ private struct ThreadScreen: View {
             // Between the title bar and the keyboard (or the screen's foot): what the requests
             // over the composer may take, the strip under the title kept clear.
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { room = $0 }
+            // Not in the Mac's list any more (deleted or archived there): nothing here can be sent.
+            .overlay {
+                if gone { MissingThread(machine: model.link(for: threadID)?.name) { dismiss() } }
+            }
+            .task(id: t == nil) {
+                guard side == nil, t == nil else { gone = false; return }
+                // The list may not have come yet (a notification opened this first): wait for it.
+                for _ in 0..<15 {
+                    try? await Task.sleep(for: .seconds(1))
+                    if Task.isCancelled || thread != nil { return }
+                    if model.link(for: threadID)?.listed == true { gone = true; return }
+                }
+            }
             .navigationTitle(t?.title ?? "Thread")
             .navigationSubtitle(subtitle)
             .navigationBarTitleDisplayMode(.inline)
@@ -425,7 +465,15 @@ private struct TranscriptList: View, nonisolated Equatable {
         rows.reserveCapacity(blocks.count + 3)
         rows.append(.header(store))
         if !store.loaded {
-            rows.append(.loading)
+            // Not in the cache, and the machine can't be asked: say so, rather than spin for ever.
+            var waiting: LoadingWait?
+            if let link = model.link(for: store.id) {
+                switch link.connection {
+                case .offline, .unauthorized, .identityChanged: waiting = LoadingWait(thread: store.id, machine: link.name)
+                default: break
+                }
+            }
+            rows.append(.loading(waiting: waiting))
         } else if store.more {
             rows.append(.earlier(loading: store.loadingEarlier))
         }
@@ -475,7 +523,8 @@ private struct TranscriptList: View, nonisolated Equatable {
         case .rewind(let user, let edit):
             confirming = Confirmation(action: .rewind, item: user, edit: edit)
         case .goAhead(let text):
-            guard model.link(for: store.id)?.connection == .connected else { return model.show(AppModel.notConnected, error: true) }
+            let link = model.link(for: store.id)
+            guard link?.connection == .connected else { return model.show(AppModel.notConnected(link), error: true) }
             model.send(text, to: store.id, mode: nil)
         case .correct:
             composer.focusRequest += 1
@@ -493,12 +542,65 @@ private struct TranscriptList: View, nonisolated Equatable {
     }
 }
 
+/// Over a thread the Mac doesn't list any more.
+struct MissingThread: View {
+    var machine: String?
+    var back: () -> Void
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("This thread is gone", systemImage: "tray")
+        } description: {
+            Text("\(machine ?? "Your Mac") doesn't list it any more. It was deleted or archived there.")
+        } actions: {
+            Button("Back to threads", action: back).buttonStyle(.glass)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Trek.background.ignoresSafeArea())
+    }
+}
+
+/// A transcript that can't be fetched: which thread, and the machine it's on.
+nonisolated struct LoadingWait: Hashable {
+    var thread: String
+    var machine: String
+}
+
+/// Where the spinner would be when the transcript isn't on this iPhone and its machine can't be
+/// reached: what's wrong, and a way to try again.
+struct TranscriptWaiting: View {
+    var wait: LoadingWait
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "wifi.exclamationmark")
+                .font(.system(size: 28, weight: .regular))
+                .foregroundStyle(Trek.muted)
+            Text("Can't reach \(wait.machine)").font(.ui(.headline))
+            Text("This thread isn't kept on this iPhone yet. It opens as soon as \(wait.machine) is back.")
+                .font(.ui(.subheadline))
+                .foregroundStyle(Trek.muted)
+                .multilineTextAlignment(.center)
+            if let link = model.link(for: wait.thread) {
+                Button("Try now") { model.retryNow(link) }
+                    .buttonStyle(.glass)
+                    .padding(.top, 4)
+            }
+        }
+        .padding(.horizontal, 32)
+        .padding(.top, 70)
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .contain)
+    }
+}
+
 /// One row of the transcript's list: what's above the transcript (where this thread came from),
 /// the spinner or marker for earlier items, a block, and what's under it (who's working).
 enum TranscriptRow: View, nonisolated Equatable, Identifiable {
     case header(ThreadStore)
-    /// The transcript isn't in yet.
-    case loading
+    /// The transcript isn't in yet; `waiting`: the machine it comes from can't be reached.
+    case loading(waiting: LoadingWait?)
     case earlier(loading: Bool)
     case block(BlockRow)
     case footer(ThreadStore)
@@ -540,7 +642,7 @@ enum TranscriptRow: View, nonisolated Equatable, Identifiable {
     nonisolated static func == (a: TranscriptRow, b: TranscriptRow) -> Bool {
         switch (a, b) {
         case (.header(let x), .header(let y)), (.footer(let x), .footer(let y)): x === y
-        case (.loading, .loading): true
+        case (.loading(let x), .loading(let y)): x == y
         case (.earlier(let x), .earlier(let y)): x == y
         case (.block(let x), .block(let y)): x == y
         default: false
@@ -550,7 +652,8 @@ enum TranscriptRow: View, nonisolated Equatable, Identifiable {
     var body: some View {
         switch self {
         case .header(let store): LineageHeader(store: store)
-        case .loading: ProgressView().frame(maxWidth: .infinity).padding(.top, 80)
+        case .loading(let waiting):
+            if let waiting { TranscriptWaiting(wait: waiting) } else { ProgressView().frame(maxWidth: .infinity).padding(.top, 80) }
         case .earlier(let loading): EarlierMarker(loading: loading)
         case .block(let row): row.equatable()
         case .footer(let store): WorkingFooter(store: store)
@@ -574,7 +677,7 @@ enum TranscriptRow: View, nonisolated Equatable, Identifiable {
         func lines(_ text: some StringProtocol, per: Int) -> CGFloat { CGFloat(max(1, (text.count + per - 1) / per)) }
         switch self {
         case .header, .footer: return 0
-        case .loading: return 100
+        case .loading(let waiting): return waiting == nil ? 100 : 220
         case .earlier: return 28
         case .block(let row):
             var h: CGFloat
@@ -1112,6 +1215,12 @@ private struct ComposerArea: View {
     /// Felt, and the card gone, as the finger lifts; the Mac's word decides whether it stays gone.
     /// `kid`: the request is a sub-agent's, pinned here: the answer goes to its thread.
     private func answer(_ id: String, requestId rid: String, _ response: AnswerResponse, in kid: String? = nil) {
+        // The Mac can't hear it: the card stays, with its answer, until it can.
+        let machine = model.link(for: kid ?? threadID)
+        guard machine?.connection == .connected else {
+            model.show("\(AppModel.notConnected(machine)) Answer once it's back.", error: true)
+            return
+        }
         felt = Felt(feedback: Self.goesAhead(response) ? .impact(weight: .medium) : .impact(weight: .light))
         let key = SubAgentAsk.key(id, in: kid)
         answered.insert(key)
@@ -1146,7 +1255,7 @@ private struct ComposerArea: View {
         guard !composer.uploading, !text.isEmpty || !composer.photos.isEmpty || !composer.files.isEmpty else { return }
         // Nothing can go while the Mac is out of reach: what's typed stays in the composer.
         guard let link = model.link(for: threadID), link.connection == .connected else {
-            model.show(AppModel.notConnected, error: true)
+            model.show("\(AppModel.notConnected(model.link(for: threadID))) What you typed stays here.", error: true)
             return
         }
         // `/side`: the side chat's sheet opens over the thread, with what followed the command as
@@ -1176,9 +1285,16 @@ private struct ComposerArea: View {
         let consult = model.serves(.consult, on: threadID) ? composer.consult : nil
         guard !files.isEmpty else {
             newPromptSent(prompt)
-            model.send(words, to: threadID, mode: mode, images: uploads, consult: consult)
-            composer.consult = nil
+            // Cleared first, as it goes, and put back if the Mac doesn't take it: the failure may
+            // come back at once (not connected), so the clearing must already have happened.
+            let held = (text: composer.draft, photos: composer.photos)
             composer.cleared(after: composer.draft)
+            let box = composer
+            model.send(words, to: threadID, mode: mode, images: uploads, consult: consult, failed: { _ in
+                box.restore(text: held.text, photos: held.photos)
+            }, sent: {
+                box.consult = nil
+            })
             return
         }
         // Videos and files go up first, a piece at a time; the message waits as it is (and stays

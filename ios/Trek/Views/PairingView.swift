@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 import VisionKit
 
@@ -7,10 +8,6 @@ struct PairingView: View {
     @Environment(AppModel.self) private var model
     @State private var scanning = false
     @State private var manual = false
-    @State private var address = ""
-    @State private var code = ""
-    @State private var fingerprint = ""
-    @State private var confirmPlain = false
 
     var body: some View {
         ZStack {
@@ -55,7 +52,7 @@ struct PairingView: View {
                         }
 
                         if manual {
-                            manualForm.transition(.opacity.combined(with: .move(edge: .top)))
+                            ManualPairForm().transition(.opacity.combined(with: .move(edge: .top)))
                         } else {
                             Button {
                                 withAnimation(.snappy) { manual = true }
@@ -92,18 +89,12 @@ struct PairingView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { model.offer(link) }
             }
         }
-        .alert("Unencrypted connection", isPresented: $confirmPlain) {
-            Button("Connect without encryption", role: .destructive) { pairTyped(.plain) }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(Self.plainWarning)
-        }
     }
 
     private var steps: some View {
         VStack(alignment: .leading, spacing: 14) {
             // The Mac's page is "Phone & Machines" (settings_view/mobile.rs); "Phone" alone isn't there.
-            step(1, "Open Trek on your Mac", "Settings › Phone & Machines")
+            step(1, "Open Trek on your Mac", "Settings › Phone & Machines, then turn on Let your phone connect")
             step(2, "Scan the code it shows", "Same Wi-Fi, or anywhere over Tailscale")
             step(3, "Approve, steer and start work", "Agents keep running on the Mac")
         }
@@ -126,9 +117,32 @@ struct PairingView: View {
             }
         }
     }
+}
 
-    private var manualForm: some View {
+extension PairingView {
+    static let plainWarning = "Without a fingerprint this iPhone can't check that it's really talking to your Mac, and everything you send and see, approvals included, crosses the network unencrypted. Only continue for an older Trek on a network you trust."
+}
+
+/// The address, pairing code and fingerprint a Mac shows beside its QR code, for a phone that
+/// can't scan it.
+struct ManualPairForm: View {
+    /// Says why a pairing failed under the form (the scanner's sheet has no other place for it).
+    var showsError = false
+    @Environment(AppModel.self) private var model
+    @State private var address = ""
+    @State private var code = ""
+    @State private var fingerprint = ""
+    @State private var confirmPlain = false
+
+    var body: some View {
         VStack(spacing: 10) {
+            if showsError, let error = model.pairingError {
+                Label(error, systemImage: "exclamationmark.circle.fill")
+                    .font(.ui(.footnote))
+                    .foregroundStyle(Trek.failed)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Divider()
+            }
             TextField("Mac address, e.g. 192.168.1.20:7420", text: $address)
                 .textContentType(.URL)
                 .keyboardType(.URL)
@@ -173,11 +187,13 @@ struct PairingView: View {
         }
         .padding(16)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .alert("Unencrypted connection", isPresented: $confirmPlain) {
+            Button("Connect without encryption", role: .destructive) { pairTyped(.plain) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(PairingView.plainWarning)
+        }
     }
-}
-
-extension PairingView {
-    static let plainWarning = "Without a fingerprint this iPhone can't check that it's really talking to your Mac, and everything you send and see, approvals included, crosses the network unencrypted. Only continue for an older Trek on a network you trust."
 
     private var canPair: Bool {
         !address.trimmingCharacters(in: .whitespaces).isEmpty && code.count >= 8 && !fingerprintInvalid
@@ -298,35 +314,119 @@ struct PairingConfirmSheet: View {
 }
 
 
-/// The camera, looking for a `trek://pair` QR code.
+/// The camera, looking for a `trek://pair` QR code. Without one (or without leave to use it) the
+/// address and code can be typed here; `again`: the machine being paired again.
 struct ScannerSheet: View {
+    var again: HostLink? = nil
     var found: (PairingLink) -> Void
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
+    @Environment(AppModel.self) private var model
+    @State private var typing = false
+    /// A code that isn't Trek's was seen: said under the viewfinder for a few seconds.
+    @State private var notTrek = false
+    @State private var notTrekTask: Task<Void, Never>?
+
+    private var cameraAvailable: Bool { DataScannerViewController.isSupported && DataScannerViewController.isAvailable }
+    /// The camera is there but this iPhone's owner has turned Trek's access off.
+    private var cameraOff: Bool {
+        let status = AVCaptureDevice.authorizationStatus(for: .video)
+        return status == .denied || status == .restricted
+    }
 
     var body: some View {
         NavigationStack {
             Group {
-                if DataScannerViewController.isSupported && DataScannerViewController.isAvailable {
-                    QRScanner(found: found).ignoresSafeArea()
+                if typing {
+                    ScrollView {
+                        ManualPairForm(showsError: true)
+                            .padding(16)
+                    }
+                    .scrollDismissesKeyboard(.interactively)
+                    .background(Trek.background)
+                } else if cameraAvailable {
+                    QRScanner(found: found, unrecognized: sawOtherCode)
+                        .ignoresSafeArea()
+                        .overlay(alignment: .bottom) { scannerFoot }
                 } else {
-                    ContentUnavailableView("No camera here",
-                                           systemImage: "camera.metering.unknown",
-                                           description: Text("Scanning needs a camera. Enter the address and code your Mac shows instead."))
+                    ContentUnavailableView {
+                        Label(cameraOff ? "Camera access is off" : "No camera here", systemImage: "camera.metering.unknown")
+                    } description: {
+                        Text(cameraOff
+                             ? "Trek needs the camera to scan the code your Mac shows. Turn it on in Settings › Apps › Trek, or enter the address and code instead."
+                             : "Scanning needs a camera. Enter the address and code your Mac shows instead.")
+                    } actions: {
+                        Button("Enter address and code") { withAnimation(.snappy) { typing = true } }
+                            .buttonStyle(.glassProminent)
+                            .tint(Trek.foreground)
+                        if cameraOff, let url = URL(string: UIApplication.openSettingsURLString) {
+                            Button("Open Settings") { openURL(url) }.buttonStyle(.glass)
+                        }
+                    }
                 }
             }
-            .navigationTitle("Scan pairing code")
+            .navigationTitle(typing ? "Enter address and code" : again.map { "Pair \($0.name) again" } ?? "Scan pairing code")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { dismiss() } label: { Image(systemName: "xmark") }
+                        .accessibilityLabel("Close")
+                }
+                if typing, cameraAvailable {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Scan") { withAnimation(.snappy) { typing = false } }
+                    }
                 }
             }
+        }
+        .overlay {
+            if model.pairing {
+                Color.black.opacity(0.2).ignoresSafeArea()
+                ProgressView("Pairing…")
+                    .padding(24)
+                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20))
+            }
+        }
+        // A typed pairing that went through closes the sheet; one that failed keeps it, with why.
+        .onChange(of: model.pairing) { was, now in
+            if was, !now, model.pairingError == nil { dismiss() }
+        }
+        .onDisappear { notTrekTask?.cancel() }
+    }
+
+    /// Under the viewfinder: what a code that isn't Trek's means, and the way to type instead.
+    private var scannerFoot: some View {
+        VStack(spacing: 10) {
+            if notTrek {
+                Text("That isn't a Trek pairing code. On your Mac, open Settings › Phone & Machines and show the code for Trek on iPhone.")
+                    .font(.ui(.footnote).weight(.medium))
+                    .multilineTextAlignment(.center)
+                    .padding(12)
+                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .transition(.opacity)
+            }
+            Button("Enter address and code") { withAnimation(.snappy) { typing = true } }
+                .font(.ui(.subheadline).weight(.semibold))
+                .buttonStyle(.glass)
+                .controlSize(.large)
+        }
+        .padding(.horizontal, 24)
+        .padding(.bottom, 24)
+    }
+
+    private func sawOtherCode() {
+        withAnimation(.snappy) { notTrek = true }
+        notTrekTask?.cancel()
+        notTrekTask = Task {
+            try? await Task.sleep(for: .seconds(5))
+            if !Task.isCancelled { withAnimation(.snappy) { notTrek = false } }
         }
     }
 }
 
 private struct QRScanner: UIViewControllerRepresentable {
     var found: (PairingLink) -> Void
+    var unrecognized: () -> Void
 
     func makeUIViewController(context: Context) -> DataScannerViewController {
         let vc = DataScannerViewController(recognizedDataTypes: [.barcode(symbologies: [.qr])], qualityLevel: .balanced,
@@ -338,20 +438,27 @@ private struct QRScanner: UIViewControllerRepresentable {
 
     func updateUIViewController(_ vc: DataScannerViewController, context: Context) {}
 
-    func makeCoordinator() -> Coordinator { Coordinator(found: found) }
+    func makeCoordinator() -> Coordinator { Coordinator(found: found, unrecognized: unrecognized) }
 
     final class Coordinator: NSObject, DataScannerViewControllerDelegate {
         var found: (PairingLink) -> Void
+        var unrecognized: () -> Void
         var done = false
 
-        init(found: @escaping (PairingLink) -> Void) { self.found = found }
+        init(found: @escaping (PairingLink) -> Void, unrecognized: @escaping () -> Void) {
+            self.found = found
+            self.unrecognized = unrecognized
+        }
 
         func dataScanner(_ scanner: DataScannerViewController, didAdd items: [RecognizedItem], allItems: [RecognizedItem]) {
             for item in items {
-                if case .barcode(let code) = item, let s = code.payloadStringValue, let link = PairingLink(s), !done {
+                guard case .barcode(let code) = item, let s = code.payloadStringValue, !done else { continue }
+                if let link = PairingLink(s) {
                     done = true
                     scanner.stopScanning()
                     found(link)
+                } else {
+                    unrecognized()
                 }
             }
         }

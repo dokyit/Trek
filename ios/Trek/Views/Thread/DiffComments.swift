@@ -113,13 +113,19 @@ struct DiffCommenting: ViewModifier {
                     model.show(why, error: true)
                     return
                 }
+                guard connected else {
+                    model.show("\(AppModel.notConnected(model.link(for: threadID))) Your comments are kept.", error: true)
+                    return
+                }
                 let working = thread?.runState == .working
-                model.send(DiffComments.message(comments.list), to: threadID, mode: working ? model.followUpMode : nil)
-                comments.clear()
-                model.show("Sent to \(thread?.agent.name ?? "the agent")")
-                dismiss()
+                // Kept until the Mac takes them: a refusal leaves them here to send again.
+                model.send(DiffComments.message(comments.list), to: threadID, mode: working ? model.followUpMode : nil, sent: {
+                    comments.clear()
+                    model.show("Sent to \(thread?.agent.name ?? "the agent")")
+                    dismiss()
+                })
             } label: {
-                Text(connected ? "Send \(n) comment\(n == 1 ? "" : "s") to \(thread?.agent.name ?? "the agent")" : AppModel.notConnected)
+                Text(connected ? "Send \(n) comment\(n == 1 ? "" : "s") to \(thread?.agent.name ?? "the agent")" : AppModel.notConnected(model.link(for: threadID)))
                     .font(.ui(.subheadline).weight(.semibold))
                     .foregroundStyle(connected ? Trek.onEmber : Trek.muted)
                     .lineLimit(1)

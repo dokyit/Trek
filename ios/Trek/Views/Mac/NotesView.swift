@@ -47,7 +47,21 @@ struct NotesView: View {
             .background(RidgeBackdrop(height: 300, surface: .pane))
             .overlay {
                 if shown.isEmpty {
-                    if query.isEmpty {
+                    if query.isEmpty, let link, !link.notesLoaded {
+                        // Not the Mac's word yet: still asking, or it can't be reached.
+                        if link.notesFailed || link.connection != .connected {
+                            ContentUnavailableView {
+                                Label("Can't load your notes", systemImage: "wifi.exclamationmark")
+                            } description: {
+                                Text("\(link.name) isn't answering. Your notes are on it.")
+                            } actions: {
+                                Button("Try again") { model.retryNow(link); model.loadNotes(on: link) }
+                                    .buttonStyle(.glass)
+                            }
+                        } else {
+                            ProgressView()
+                        }
+                    } else if query.isEmpty {
                         ContentUnavailableView {
                             Label("No notes yet", systemImage: "note.text")
                         } description: {
@@ -68,9 +82,12 @@ struct NotesView: View {
                 ToolbarItem(placement: .topBarTrailing) { MachinePicker() }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("New note", systemImage: "square.and.pencil", action: newNote)
+                        .disabled(link?.connection != .connected)
                 }
             }
             .task(id: link?.id) { model.loadNotes(on: link) }
+            // Back in reach: ask again for what an unanswered ask left out.
+            .onChange(of: link?.connection) { _, now in if now == .connected, link?.notesLoaded != true { model.loadNotes(on: link) } }
             .navigationDestination(for: String.self) { id in
                 NoteEditor(noteID: id, isNew: made.contains(id))
             }

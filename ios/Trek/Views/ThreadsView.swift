@@ -43,6 +43,9 @@ struct ThreadsView: View {
     private static let needsShown = 4
     private static let needsKey = "needs"
 
+    /// A project or a machine is picked: the list shows part of what the phone has.
+    private var filtering: Bool { projectFilter != nil || machineFilter != nil }
+
     private var grouping: ThreadGrouping { ThreadGrouping(rawValue: Launch.grouping ?? groupingRaw) ?? .project }
 
     var body: some View {
@@ -60,6 +63,19 @@ struct ThreadsView: View {
                     switch grouping {
                     case .project: byProject
                     case .status: byStatus
+                    }
+                    if filtering, filtered(model.threads).isEmpty, !model.threads.isEmpty {
+                        // The filter, not the inbox, is why nothing shows.
+                        ContentUnavailableView {
+                            Label("No threads here", systemImage: "line.3.horizontal.decrease")
+                        } description: {
+                            Text("Nothing matches the project or machine you picked.")
+                        } actions: {
+                            Button("Show every thread") { projectFilter = nil; pickedMachine = nil }
+                                .buttonStyle(.glass)
+                        }
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
                     }
                     if model.threads.isEmpty, model.connection == .connected {
                         ContentUnavailableView("No threads yet", systemImage: "bubble.left.and.text.bubble.right",
@@ -215,7 +231,7 @@ struct ThreadsView: View {
                 projectSection(group)
             }
         }
-        if groups.isEmpty, active.isEmpty, pinned.isEmpty, filtered(model.needsYou).isEmpty, !model.threads.isEmpty,
+        if groups.isEmpty, active.isEmpty, pinned.isEmpty, filtered(model.needsYou).isEmpty, !model.threads.isEmpty, !list.isEmpty || !filtering,
            model.connection == .connected || model.mode == .demo {
             // The Mac's words for an empty inbox.
             ContentUnavailableView("Inbox zero", systemImage: "checkmark.circle",
@@ -981,6 +997,13 @@ struct ConnectionBanner: View {
     var pairAgain: (() -> Void)? = nil
 
     private var waiting: Bool { if case .offline = state { true } else { false } }
+    /// The Mac won't have this iPhone as it is: forgotten, or its certificate changed.
+    private var refused: Bool {
+        switch state {
+        case .unauthorized, .identityChanged: true
+        default: false
+        }
+    }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -999,7 +1022,7 @@ struct ConnectionBanner: View {
                     .transaction { $0.animation = nil }
             }
             Spacer()
-            if case .unauthorized = state, let pairAgain {
+            if refused, let pairAgain {
                 Button("Pair again", action: pairAgain)
                     .font(.ui(.subheadline).weight(.semibold))
                     .buttonStyle(.glass)
@@ -1101,11 +1124,11 @@ struct ThreadsHeader: View {
             ForEach(unreachable) { link in
                 Group {
                     if case .identityChanged(let expected, let seen) = link.connection {
-                        IdentityChangedCard(host: link.name, expected: expected, seen: seen) { model.leave(link) }
+                        IdentityChangedCard(host: link.name, expected: expected, seen: seen) { model.pairAgain(link) }
                     } else {
                         ConnectionBanner(state: link.connection, detail: link.connectionText,
                                          host: link.name,
-                                         retry: { model.retryNow(link) }) { model.leave(link) }
+                                         retry: { model.retryNow(link) }) { model.pairAgain(link) }
                     }
                 }
                 .padding(.horizontal, 16)

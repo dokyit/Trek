@@ -190,8 +190,8 @@ struct SettingsView: View {
             Text("Notifications")
         } footer: {
             Text(TurnActivities.installed
-                 ? "Your Mac tells this iPhone when a thread needs you. iOS soon stops Trek once you leave it, so the Live Activity says when it last heard from your Mac."
-                 : "Your Mac tells this iPhone when a thread needs you, through the free ntfy app.")
+                 ? "Your Mac can tell this iPhone when a thread needs you, through the ntfy app if you use it; the web remote on the Home Screen has notifications of its own. iOS soon stops Trek once you leave it, so the Live Activity says when it last heard from your Mac."
+                 : "Your Mac can tell this iPhone when a thread needs you, through the ntfy app if you use it. The web remote on the Home Screen has notifications of its own.")
                 .font(.ui(.footnote))
         }
     }
@@ -206,11 +206,6 @@ struct SettingsView: View {
                 SettingsLabel(title: "Allow for a session", symbol: ownerMethod == "Touch ID" ? "touchid" : "faceid")
             }
             SettingsValueRow {
-                Text("Never")
-            } label: {
-                SettingsLabel(title: "Requests time out", symbol: "hourglass")
-            }
-            SettingsValueRow {
                 connectionValue
             } label: {
                 SettingsLabel(title: "Connection", symbol: "lock")
@@ -218,7 +213,7 @@ struct SettingsView: View {
         } header: {
             Text("Approvals and security")
         } footer: {
-            Text("Trek never answers for you: an approval or question waits on the Mac and here until someone decides. Your Mac decides whether this iPhone may allow a request for a whole session.")
+            Text("Trek never answers for you: an approval or question waits on the Mac and here, with no time limit, until someone decides. Your Mac decides whether this iPhone may allow a request for a whole session.")
                 .font(.ui(.footnote))
         }
     }
@@ -418,7 +413,7 @@ struct MachineView: View {
                     case .offline:
                         Button("Try now") { model.retryNow(link) }
                     case .unauthorized, .identityChanged:
-                        Button("Pair again") { model.leave(link) }
+                        Button("Pair again") { model.pairAgain(link) }
                     default: EmptyView()
                     }
                     // Each way to the Mac, the one in use ticked: Wi-Fi at home, the tailnet

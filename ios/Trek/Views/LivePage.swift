@@ -107,9 +107,12 @@ struct LivePageCard: View {
                 model.show("Open the thread to send from this page", error: true)
                 return
             }
-            model.send(text, to: threadID, mode: .steer)
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-            model.show("Sent from \(title ?? "the page")")
+            // Said once the Mac has taken it: a send that fails says so, and only that.
+            let name = title ?? "the page"
+            model.send(text, to: threadID, mode: .steer, sent: { [weak model] in
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                model?.show("Sent from \(name)")
+            })
         case .copy(let text):
             UIPasteboard.general.string = text
             UINotificationFeedbackGenerator().notificationOccurred(.success)
