@@ -44,8 +44,8 @@ const COLUMN: f32 = 760.;
 const SESSION_ROWS: usize = 6;
 /// File cards shown before "N more".
 const FILE_CARDS: usize = 6;
-/// Notes offered in the Note menu, the most recently changed first.
-const NOTE_ROWS: usize = 12;
+/// Notes offered in the Note menu, the most recently changed first: the menu scrolls.
+const NOTE_ROWS: usize = 200;
 /// Characters of a file's name a card shows; longer names lose their middle, so the end (often
 /// the part that tells files apart: a date, a number, the extension) shows.
 const NAME_CHARS: usize = 34;
@@ -288,7 +288,8 @@ impl StudyView {
                 .tooltip("Give the tutor one of your Trek notes")
                 .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, cx| {
                     let picked = me.read(cx).workspace.read(cx).study.picked.clone();
-                    notes.iter().fold(menu.min_w(px(240.)), |menu, n| {
+                    let menu = menu.min_w(px(240.)).max_h(px(320.)).scrollable(true);
+                    notes.iter().fold(menu, |menu, n| {
                         let (me, path) = (me.clone(), n.path.clone());
                         menu.item(
                             PopupMenuItem::new(n.title.clone())
@@ -746,11 +747,11 @@ impl StudyView {
                     .size(px(14.))
                     .text_color(theme.muted_foreground),
             )
-            .child(
-                div().flex_1().min_w_0().child(
-                    "Each session leaves a map of what you learned; the next one builds on it.",
-                ),
-            )
+            .child(div().flex_1().min_w_0().child(
+                "Learn starts from what you already know; Practice sets problems that adapt to \
+                     your working. Each session opens as a thread in the sidebar and leaves a map \
+                     of what you learned, which the next one builds on.",
+            ))
             .into_any_element()
     }
 }

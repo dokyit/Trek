@@ -151,8 +151,24 @@ impl Workspace {
                 words
             }
         };
+        let (files, failed) = study::add_sources_reporting(&dir, &topic, &attached);
+        // The session starts with what did go in; what didn't is named, not dropped quietly.
+        if !failed.is_empty() {
+            let names: Vec<String> = failed
+                .iter()
+                .filter_map(|f| f.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .collect();
+            cx.emit(WorkspaceEvent::Toast {
+                message: format!(
+                    "Couldn't add {} to the session's sources.",
+                    names.join(", ")
+                ),
+                undo: None,
+            });
+        }
         let with = study::Material {
-            files: study::add_sources(&dir, &topic, &attached),
+            files,
             folders,
             links,
         };

@@ -325,9 +325,20 @@ pub fn topic_slug(topic: &str) -> String {
 /// that can't be read is left out. A copy that already exists with the same size is reused, so
 /// attaching the same notes twice doesn't double them.
 pub fn add_sources(dir: &Path, topic: &str, files: &[PathBuf]) -> Vec<PathBuf> {
+    add_sources_reporting(dir, topic, files).0
+}
+
+/// `add_sources`, and the files that exist but couldn't be copied in (a full disk, a read-only
+/// folder, an unreadable file), for the learner to be told.
+pub fn add_sources_reporting(
+    dir: &Path,
+    topic: &str,
+    files: &[PathBuf],
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let root = sources_dir(dir);
     let into = root.join(topic_slug(topic));
     let mut out: Vec<PathBuf> = vec![];
+    let mut failed: Vec<PathBuf> = vec![];
     for file in files {
         if !file.is_file() {
             continue;
@@ -341,10 +352,12 @@ pub fn add_sources(dir: &Path, topic: &str, files: &[PathBuf]) -> Vec<PathBuf> {
             continue;
         }
         let Some(name) = copy_name(file) else {
+            failed.push(file.clone());
             continue;
         };
         let name = name.as_os_str();
         if std::fs::create_dir_all(&into).is_err() {
+            failed.push(file.clone());
             continue;
         }
         let size = |p: &Path| std::fs::metadata(p).map(|m| m.len()).ok();
@@ -367,6 +380,8 @@ pub fn add_sources(dir: &Path, topic: &str, files: &[PathBuf]) -> Vec<PathBuf> {
             if !out.contains(&dest) {
                 out.push(dest);
             }
+        } else {
+            failed.push(file.clone());
         }
     }
     // Committed as Trek's doing, so what the session changes is only the session's. Only what's
@@ -381,7 +396,7 @@ pub fn add_sources(dir: &Path, topic: &str, files: &[PathBuf]) -> Vec<PathBuf> {
         let rel: Vec<&str> = rel.iter().map(String::as_str).collect();
         commit(dir, &rel, &format!("Add sources: {}", topic_slug(topic)));
     }
-    out
+    (out, failed)
 }
 
 /// What a learner's material is named as in `sources/`: its own name, or for a Trek note (a file
@@ -801,6 +816,28 @@ mod tests {
             links_in("see (https://a.b/c). and http://x.y, https://a.b/c and https://"),
             vec!["https://a.b/c".to_string(), "http://x.y".to_string()]
         );
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_copied_in_is_reported_not_dropped_quietly() {
+        let dir = std::env::temp_dir().join(format!("trek-study-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // `sources` is a plain file, so nothing can be made under it.
+        std::fs::write(dir.join("sources"), "in the way").unwrap();
+        let outside = std::env::temp_dir().join(format!("trek-out-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&outside).unwrap();
+        let paper = outside.join("paper.pdf");
+        std::fs::write(&paper, "pdf").unwrap();
+        let missing = outside.join("never-there.pdf");
+        let (kept, failed) = add_sources_reporting(&dir, "attention", &[paper.clone(), missing]);
+        assert!(kept.is_empty());
+        assert_eq!(
+            failed,
+            vec![paper],
+            "a file that isn't there isn't a failure"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(outside);
     }
 
     #[test]
