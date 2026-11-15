@@ -386,9 +386,8 @@ impl Workspace {
                         e.kind()
                     ))));
                 }
-                cx.emit(WorkspaceEvent::Toast {
+                cx.emit(WorkspaceEvent::Failure {
                     message: format!("Trek couldn't save {name}."),
-                    undo: None,
                 });
             }
         }

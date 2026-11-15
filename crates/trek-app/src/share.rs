@@ -373,9 +373,8 @@ impl ShareSheet {
         if let Err(e) = system::share_text(window, &title, &text) {
             tracing::warn!("share: Windows' share window: {e}");
             self.workspace.update(cx, |_, cx| {
-                cx.emit(WorkspaceEvent::Toast {
+                cx.emit(WorkspaceEvent::Failure {
                     message: "Windows' share window couldn't open".into(),
-                    undo: None,
                 })
             });
         }

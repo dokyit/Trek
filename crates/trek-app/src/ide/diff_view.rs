@@ -1012,12 +1012,11 @@ impl DiffView {
             let _ = this.update_in(cx, |this, window, cx| {
                 if let Err(e) = result {
                     let verb = if reverse { "Unstage" } else { "Stage" };
-                    this.workspace.update(cx, |_, cx| {
-                        cx.emit(WorkspaceEvent::Toast {
-                            message: format!("{verb} failed: {e}"),
-                            undo: None,
-                        })
-                    });
+                    crate::toast::push(
+                        window,
+                        crate::panels::git::failure_toast(&e, &format!("{verb} failed.")),
+                        cx,
+                    );
                     return;
                 }
                 this.reload(cx);

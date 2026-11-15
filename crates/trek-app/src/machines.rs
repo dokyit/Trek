@@ -1575,9 +1575,8 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             if let Err(e) = client.request(msg).await {
                 let _ = this.update(cx, |_, cx| {
-                    cx.emit(WorkspaceEvent::Toast {
+                    cx.emit(WorkspaceEvent::Failure {
                         message: format!("Couldn't {what} on {name}: {e}"),
-                        undo: None,
                     })
                 });
             }

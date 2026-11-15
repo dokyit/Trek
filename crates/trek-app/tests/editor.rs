@@ -539,7 +539,7 @@ fn a_file_that_changes_on_disk_again_warns_again_before_its_overwritten() {
             cx.subscribe(
                 &trek.ws,
                 move |_, event: &trek_app::workspace::WorkspaceEvent, _| {
-                    if let trek_app::workspace::WorkspaceEvent::Toast { message, .. } = event {
+                    if let trek_app::workspace::WorkspaceEvent::Toast { message, .. } | trek_app::workspace::WorkspaceEvent::Failure { message } = event {
                         if message.contains("Save again") {
                             *sink.borrow_mut() += 1;
                         }

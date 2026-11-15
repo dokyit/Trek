@@ -357,7 +357,7 @@ impl Workspace {
                         let message = if *branch_deleted { format!("Removed the worktree and {}", wt.branch) } else { format!("Removed the worktree; {} is kept", wt.branch) };
                         cx.emit(WorkspaceEvent::Toast { message, undo: None });
                     }
-                    Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't remove the worktree: {e}"), undo: None }),
+                    Err(e) => cx.emit(WorkspaceEvent::Failure { message: format!("Couldn't remove the worktree: {e}") }),
                 }
                 // What waited goes out: in the project folder, or the worktree that stayed.
                 for t in &threads {

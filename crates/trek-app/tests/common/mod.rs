@@ -828,8 +828,16 @@ pub fn toasts(
         cx.subscribe(
             &trek.ws,
             move |_, event: &trek_app::workspace::WorkspaceEvent, _| {
-                if let trek_app::workspace::WorkspaceEvent::Toast { message, undo } = event {
-                    sink.borrow_mut().push((message.clone(), undo.clone()));
+                use trek_app::workspace::WorkspaceEvent;
+                // What went wrong is a toast too, with no undo.
+                match event {
+                    WorkspaceEvent::Toast { message, undo } => {
+                        sink.borrow_mut().push((message.clone(), undo.clone()))
+                    }
+                    WorkspaceEvent::Failure { message } => {
+                        sink.borrow_mut().push((message.clone(), None))
+                    }
+                    _ => {}
                 }
             },
         )

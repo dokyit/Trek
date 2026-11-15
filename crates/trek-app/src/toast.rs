@@ -67,6 +67,12 @@ impl Toast {
         }
     }
 
+    /// Mark it as something that went wrong: the error icon, whatever draws the body.
+    pub fn failed(mut self) -> Self {
+        self.error = true;
+        self
+    }
+
     /// One drawn by `content` rather than a message.
     pub fn content(content: impl Fn(&mut Window, &mut App) -> AnyElement + 'static) -> Self {
         Toast {
@@ -264,6 +270,8 @@ impl Toasts {
             .when(toast.error, |el| {
                 el.child(
                     div()
+                        .id("toast-error")
+                        .test_support()
                         .absolute()
                         .top(px(18.))
                         .left_4()

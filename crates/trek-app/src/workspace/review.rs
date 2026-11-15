@@ -541,9 +541,8 @@ impl Workspace {
                         ws.review_counted(&tid, cx);
                     }
                     // Not kept: they're still pending (the count puts them back on the list).
-                    Err(e) => cx.emit(WorkspaceEvent::Toast {
+                    Err(e) => cx.emit(WorkspaceEvent::Failure {
                         message: format!("Couldn't keep the changes: {e:#}"),
-                        undo: None,
                     }),
                 }
                 ws.review_moved(&tid, cx);
@@ -671,7 +670,7 @@ impl Workspace {
                         ws.refresh_git_at(top, cx);
                         ws.forget_turn_changes(&tid, false, cx);
                     }
-                    Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't undo the changes: {e:#}"), undo: None }),
+                    Err(e) => cx.emit(WorkspaceEvent::Failure { message: format!("Couldn't undo the changes: {e:#}") }),
                 }
                 ws.review_moved(&tid, cx);
                 cx.notify();
@@ -733,9 +732,8 @@ impl Workspace {
                         review.base = Some(tree);
                         ws.save_review(&tid);
                     }
-                    Err(e) => cx.emit(WorkspaceEvent::Toast {
+                    Err(e) => cx.emit(WorkspaceEvent::Failure {
                         message: format!("Couldn't keep that change to {rel}: {e:#}"),
-                        undo: None,
                     }),
                 }
                 ws.review_moved(&tid, cx);
@@ -805,9 +803,8 @@ impl Workspace {
                         ws.refresh_git_at(top, cx);
                         ws.forget_turn_changes(&tid, false, cx);
                     }
-                    Err(e) => cx.emit(WorkspaceEvent::Toast {
+                    Err(e) => cx.emit(WorkspaceEvent::Failure {
                         message: format!("Couldn't undo that change to {rel}: {e:#}"),
-                        undo: None,
                     }),
                 }
                 ws.review_moved(&tid, cx);

@@ -85,7 +85,7 @@ fn events(trek: &Trek, cx: &mut TestAppContext) -> Rc<RefCell<Vec<String>>> {
     let sink = seen.clone();
     cx.update(|cx| {
         cx.subscribe(&trek.ws, move |_, event: &WorkspaceEvent, _| match event {
-            WorkspaceEvent::Attention { message, .. } | WorkspaceEvent::Toast { message, .. } => {
+            WorkspaceEvent::Attention { message, .. } | WorkspaceEvent::Toast { message, .. } | WorkspaceEvent::Failure { message } => {
                 sink.borrow_mut().push(message.clone())
             }
             _ => {}

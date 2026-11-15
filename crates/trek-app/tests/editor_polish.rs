@@ -272,7 +272,7 @@ fn toasts(trek: &Trek, cx: &mut TestAppContext) -> Rc<RefCell<Vec<String>>> {
         cx.subscribe(
             &trek.ws,
             move |_, event: &trek_app::workspace::WorkspaceEvent, _| {
-                if let trek_app::workspace::WorkspaceEvent::Toast { message, .. } = event {
+                if let trek_app::workspace::WorkspaceEvent::Toast { message, .. } | trek_app::workspace::WorkspaceEvent::Failure { message } = event {
                     sink.borrow_mut().push(message.clone());
                 }
             },

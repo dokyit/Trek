@@ -360,12 +360,12 @@ impl ScmView {
                 this.busy = None;
                 match result {
                     Ok(()) => done(this, window, cx),
-                    Err(e) => this.workspace.update(cx, |_, cx| {
-                        cx.emit(crate::workspace::WorkspaceEvent::Toast {
-                            message: format!("{label} failed: {e}"),
-                            undo: None,
-                        })
-                    }),
+                    // What git said, in a line, and a click for all of it.
+                    Err(e) => crate::toast::push(
+                        window,
+                        crate::panels::git::failure_toast(&e, &format!("{label} failed.")),
+                        cx,
+                    ),
                 }
                 this.git_moved(window, cx);
             });

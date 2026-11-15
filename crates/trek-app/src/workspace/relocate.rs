@@ -195,11 +195,10 @@ impl Workspace {
             Err(e) => {
                 tracing::warn!("relocation: {e}");
                 self.moving = Moving::No;
-                cx.emit(WorkspaceEvent::Toast {
+                cx.emit(WorkspaceEvent::Failure {
                     message: format!(
                         "Trek couldn't move itself to its own folder: {e}. Nothing was changed."
                     ),
-                    undo: None,
                 });
                 cx.notify();
             }
@@ -282,7 +281,7 @@ impl Workspace {
         self.moving = Moving::No;
         if let Err(e) = (self.mover.start)(&prepared, crate::system::app_is_active()) {
             tracing::warn!("relocation: {e:#}");
-            cx.emit(WorkspaceEvent::Toast { message: format!("Trek couldn't start from {}: {e:#}. It's still running here, and nothing was changed.", prepared.to.display()), undo: None });
+            cx.emit(WorkspaceEvent::Failure { message: format!("Trek couldn't start from {}: {e:#}. It's still running here, and nothing was changed.", prepared.to.display()) });
             cx.notify();
             return;
         }

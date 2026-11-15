@@ -915,7 +915,7 @@ impl Workspace {
                     Err(e) if ws.settings.mobile.enabled => {
                         let message = format!("{e:#}");
                         if ws.remote_error.as_deref() != Some(message.as_str()) {
-                            cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't start the phone server: {message}. Trying again."), undo: None });
+                            cx.emit(WorkspaceEvent::Failure { message: format!("Couldn't start the phone server: {message}. Trying again.") });
                         }
                         ws.remote_error = Some(message);
                         ws.remote_retry = Some(cx.spawn(async move |this, cx| {

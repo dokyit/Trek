@@ -969,9 +969,8 @@ impl EditorView {
                 self.refresh_diff(cx);
             }
             Err(e) => self.workspace.update(cx, |ws, cx| {
-                cx.emit(WorkspaceEvent::Toast {
+                cx.emit(WorkspaceEvent::Failure {
                     message: format!("Couldn't save {}: {e}", self.path.display()).into(),
-                    undo: None,
                 });
                 let _ = ws;
             }),

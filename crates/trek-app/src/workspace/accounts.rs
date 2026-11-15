@@ -280,9 +280,8 @@ impl Workspace {
         };
         // The agent wants its folder to be there (Codex refuses a `CODEX_HOME` that isn't).
         if account.open().is_none() {
-            cx.emit(WorkspaceEvent::Toast {
+            cx.emit(WorkspaceEvent::Failure {
                 message: "Couldn't make this account's folder".into(),
-                undo: None,
             });
             return;
         }

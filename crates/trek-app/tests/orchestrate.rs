@@ -1172,7 +1172,7 @@ fn consulting_is_offered_only_where_the_agent_gets_the_tools() {
         let sink = seen.clone();
         cx.update(|cx| {
             cx.subscribe(&trek.ws, move |_, event: &WorkspaceEvent, _| {
-                if let WorkspaceEvent::Toast { message, .. } = event {
+                if let WorkspaceEvent::Toast { message, .. } | WorkspaceEvent::Failure { message } = event {
                     sink.borrow_mut().push(message.clone());
                 }
             })

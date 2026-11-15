@@ -1350,7 +1350,7 @@ fn undoing_a_restore_waits_for_the_running_turn() {
             cx.subscribe(
                 &trek.ws,
                 move |_, event: &trek_app::workspace::WorkspaceEvent, _| {
-                    if let trek_app::workspace::WorkspaceEvent::Toast { message, .. } = event {
+                    if let trek_app::workspace::WorkspaceEvent::Toast { message, .. } | trek_app::workspace::WorkspaceEvent::Failure { message } = event {
                         sink.borrow_mut().push(message.clone());
                     }
                 },

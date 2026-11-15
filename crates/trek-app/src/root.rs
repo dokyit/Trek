@@ -257,6 +257,7 @@ impl TrekWindow {
                 window,
                 |this, _, event: &WorkspaceEvent, window, cx| match event {
                     WorkspaceEvent::Toast { .. }
+                    | WorkspaceEvent::Failure { .. }
                     | WorkspaceEvent::Attention { .. }
                     | WorkspaceEvent::ActivateMain
                     | WorkspaceEvent::OpenPalette => {}
@@ -1474,7 +1475,10 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
         reveal_now(&ws, thread, cx);
     });
     cx.subscribe(&workspace, |ws, event: &WorkspaceEvent, cx| match event {
-        WorkspaceEvent::Toast { message, undo } => toast(&ws, message.clone(), undo.clone(), cx),
+        WorkspaceEvent::Toast { message, undo } => {
+            toast(&ws, message.clone(), undo.clone(), false, cx)
+        }
+        WorkspaceEvent::Failure { message } => toast(&ws, message.clone(), None, true, cx),
         WorkspaceEvent::Attention {
             message,
             thread,
@@ -2119,7 +2123,13 @@ pub fn toast_lifetime(message: &str, undo: bool) -> std::time::Duration {
     }
 }
 
-fn toast(workspace: &Entity<Workspace>, message: String, undo: Option<UndoAction>, cx: &mut App) {
+fn toast(
+    workspace: &Entity<Workspace>,
+    message: String,
+    undo: Option<UndoAction>,
+    failed: bool,
+    cx: &mut App,
+) {
     let front = key_window(cx);
     let Some(target) = notice_window(workspace, front, cx) else {
         return;
@@ -2133,7 +2143,13 @@ fn toast(workspace: &Entity<Workspace>, message: String, undo: Option<UndoAction
     let lifetime = if restore {
         UNDO_RESTORE_TOAST
     } else {
-        toast_lifetime(&message, undo.is_some())
+        let read = toast_lifetime(&message, undo.is_some());
+        // Something that went wrong stays up long enough to read the reason.
+        if failed {
+            read.max(FAILURE_TOAST)
+        } else {
+            read
+        }
     };
     let action = undo.map(|action| {
         let label = toast_button_label(&action);
@@ -2178,6 +2194,7 @@ fn toast(workspace: &Entity<Workspace>, message: String, undo: Option<UndoAction
     })
     .key(key)
     .lifetime(lifetime);
+    let note = if failed { note.failed() } else { note };
     let _ = target.update(cx, |_, window, cx| crate::toast::push(window, note, cx));
 }
 
@@ -2196,6 +2213,9 @@ pub fn toast_button_label(action: &UndoAction) -> &'static str {
         _ => "Undo",
     }
 }
+
+/// The least a failure toast stays up.
+pub const FAILURE_TOAST: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// How long a toast whose Undo puts files back stays up.
 pub const UNDO_RESTORE_TOAST: std::time::Duration = std::time::Duration::from_secs(30);

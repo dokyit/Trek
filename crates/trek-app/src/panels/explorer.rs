@@ -664,6 +664,12 @@ impl ExplorerPanel {
         });
     }
 
+    /// Something that went wrong, as a toast with the error face.
+    fn failure(&self, message: String, cx: &mut Context<Self>) {
+        self.workspace
+            .update(cx, |_, cx| cx.emit(WorkspaceEvent::Failure { message }));
+    }
+
     /// The name typed goes: the file or folder is made (a new file opens), or renamed. A name
     /// that won't do keeps the input up, saying why.
     pub fn commit_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -706,7 +712,7 @@ impl ExplorerPanel {
             EditKind::Rename(from) => std::fs::rename(from, &to),
         };
         if let Err(e) = made {
-            return self.toast(
+            return self.failure(
                 format!(
                     "Couldn't {} “{name}”: {e}",
                     if matches!(kind, EditKind::Rename(_)) {
@@ -776,7 +782,7 @@ impl ExplorerPanel {
                             this.selected = None;
                         }
                     }
-                    Err(e) => this.toast(format!("Couldn't move “{name}” to the Trash: {e:#}"), cx),
+                    Err(e) => this.failure(format!("Couldn't move “{name}” to the Trash: {e:#}"), cx),
                 }
                 this.refresh(cx);
             });

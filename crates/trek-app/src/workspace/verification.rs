@@ -145,9 +145,8 @@ impl Workspace {
         let guide = match guide {
             Ok(g) => g,
             Err(e) => {
-                cx.emit(WorkspaceEvent::Toast {
+                cx.emit(WorkspaceEvent::Failure {
                     message: format!("Couldn't write Trek's verification guide: {e}"),
-                    undo: None,
                 });
                 return;
             }
