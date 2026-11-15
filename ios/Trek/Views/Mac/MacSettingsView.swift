@@ -268,7 +268,7 @@ struct PhoneNotificationsSection: View {
             Toggle(isOn: Binding(get: { push.enabled }, set: { model.changeSettings(SettingsChange(push: $0), on: link) })) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Tell my phone when a thread needs me")
-                    Text("Also when one finishes or fails, through the free ntfy app")
+                    Text("Also when one finishes or fails: on the Home Screen web remote once its Notifications are on, and through the ntfy app if you use it")
                         .font(.ui(.footnote))
                         .foregroundStyle(Trek.muted)
                 }
@@ -324,7 +324,7 @@ struct PhoneNotificationsSection: View {
                 }
                 .padding(.vertical, 4)
             } header: {
-                Text("Set up ntfy")
+                Text("Also through the ntfy app (optional)")
             } footer: {
                 Text("Keep the topic to yourself: anyone who has it can read what's sent.")
                     .font(.ui(.footnote))
