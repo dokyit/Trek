@@ -14,10 +14,14 @@
 use crate::fluent::{self, PillExt as _};
 use crate::scale::{radius, text, to_rems};
 use crate::workspace::Workspace;
-use gpui_kit::component::input::{InputEvent, Redo, Textarea, TextareaState, Undo};
+use gpui_kit::component::input::{
+    Input, InputEvent, InputState, Redo, Textarea, TextareaState, Undo,
+};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::ops::Range;
@@ -259,6 +263,8 @@ pub struct NotesView {
     notes: Vec<Note>,
     current: Option<String>,
     editor: Entity<TextareaState>,
+    /// The words the list is narrowed to.
+    filter: Entity<InputState>,
     mode: Mode,
     colors_open: bool,
     /// The toolbar's width as last laid out (0 before): it gives up room below `TOOLBAR_*`.
@@ -285,6 +291,7 @@ impl NotesView {
                 // Return is ours: it carries a list on (see `newline`); ⇧Return is a plain new line.
                 .submit_on_enter(true)
         });
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Search notes"));
         // What's typed in the moment before quitting is kept.
         cx.on_app_quit(|this: &mut Self, _| {
             this.flush();
@@ -316,6 +323,11 @@ impl NotesView {
                 _ => {}
             },
         )];
+        subscriptions.push(cx.subscribe(&filter, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        }));
         // A phone changed the notes: read them again.
         subscriptions.push(
             cx.observe_in(&workspace, window, |this: &mut Self, ws, window, cx| {
@@ -332,6 +344,7 @@ impl NotesView {
             notes: notes::list_in(&notes::notes_dir()),
             current: None,
             editor,
+            filter,
             mode: Mode::Split,
             colors_open: false,
             toolbar_width: Default::default(),
@@ -375,7 +388,21 @@ impl NotesView {
     }
 
     fn open(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.flush();
+        // A note that won't save stays on screen, where its text is and the save is tried
+        // again: leaving it would drop what was typed.
+        if let Err(e) = self.save() {
+            if self.current.as_deref() != Some(id) {
+                self.workspace.update(cx, |_, cx| {
+                    cx.emit(crate::workspace::WorkspaceEvent::Toast {
+                        message: format!(
+                            "Couldn't save the note: {e}. It stays open until it saves."
+                        ),
+                        undo: None,
+                    })
+                });
+            }
+            return;
+        }
         self.current = Some(id.to_string());
         let body = self.note().map(|n| n.body.clone()).unwrap_or_default();
         self.editor.update(cx, |s, cx| {
@@ -471,7 +498,14 @@ impl NotesView {
             return;
         };
         let note = self.notes.remove(at);
-        if let Err(e) = notes::delete(&note) {
+        // What was typed in the last moment goes with it, so Undo brings back all of it.
+        let gone = (if self.dirty {
+            notes::save(&note)
+        } else {
+            Ok(())
+        })
+        .and_then(|()| notes::delete(&note).map(|_| ()));
+        if let Err(e) = gone {
             self.notes.insert(at, note);
             self.workspace.update(cx, |_, cx| {
                 cx.emit(crate::workspace::WorkspaceEvent::Toast {
@@ -497,8 +531,8 @@ impl NotesView {
         let title = note.title();
         self.workspace.update(cx, |_, cx| {
             cx.emit(crate::workspace::WorkspaceEvent::Toast {
-                message: format!("Deleted “{title}” (kept in the notes folder's Deleted)"),
-                undo: None,
+                message: format!("Deleted “{title}”"),
+                undo: Some(crate::workspace::UndoAction::RestoreNote(note)),
             })
         });
     }
@@ -826,6 +860,14 @@ impl NotesView {
             window,
             cx,
         );
+    }
+
+    /// Narrow the list to the notes with `words` (the driver's `note search`).
+    #[cfg_attr(not(any(test, feature = "shots")), allow(dead_code))]
+    pub fn set_filter(&mut self, words: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter
+            .update(cx, |input, cx| input.set_value(words, window, cx));
+        cx.notify();
     }
 
     fn tool(
@@ -1169,6 +1211,13 @@ impl NotesView {
 
     fn list(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
+        let query = self.filter.read(cx).value().trim().to_string();
+        let shown: Vec<Note> = self
+            .notes
+            .iter()
+            .filter(|n| notes::matches(n, &query))
+            .cloned()
+            .collect();
         v_flex()
             .w(px(250.))
             .flex_none()
@@ -1192,11 +1241,44 @@ impl NotesView {
                     )
                     .child(
                         crate::ui::icon_button(
+                            "note-folder",
+                            crate::assets::Lucide::FolderOpen,
+                            "Show the notes folder",
+                        )
+                        .on_click(|_, _, cx| {
+                            let dir = notes::notes_dir();
+                            let _ = std::fs::create_dir_all(&dir);
+                            cx.open_with_system(&dir);
+                        }),
+                    )
+                    .child(
+                        crate::ui::icon_button(
                             "note-new",
                             crate::assets::Lucide::SquarePen,
                             crate::keys::shared("New note (⌘N)"),
                         )
                         .on_click(cx.listener(|this, _, window, cx| this.new_note(window, cx))),
+                    ),
+            )
+            .child(
+                div()
+                    .id("note-search")
+                    .test_support()
+                    .flex_none()
+                    .px(px(10.))
+                    .py(px(4.))
+                    .border_b_1()
+                    .border_color(theme.foreground.opacity(0.06))
+                    .child(
+                        Input::new(&self.filter)
+                            .small()
+                            .appearance(false)
+                            .cleanable(true)
+                            .prefix(
+                                Icon::new(IconName::Search)
+                                    .small()
+                                    .text_color(theme.muted_foreground),
+                            ),
                     ),
             )
             .child(
@@ -1219,7 +1301,18 @@ impl NotesView {
                                 )),
                         )
                     })
-                    .children(self.notes.iter().map(|n| {
+                    .when(shown.is_empty() && !self.notes.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .id("note-search-empty")
+                                .test_support()
+                                .p(px(12.))
+                                .text_size(to_rems(text::META))
+                                .text_color(theme.muted_foreground)
+                                .child(format!("No note has “{query}”.")),
+                        )
+                    })
+                    .children(shown.iter().map(|n| {
                         let active = Some(&n.id) == self.current.as_ref();
                         let id = n.id.clone();
                         let preview = n.preview();

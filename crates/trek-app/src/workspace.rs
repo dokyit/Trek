@@ -1809,6 +1809,8 @@ pub enum UndoAction {
     RestartToUpdate,
     /// Not an undo: chats are running, so the same restart, once they finish.
     InstallWhenFree,
+    /// Bring a deleted note back from the notes folder's `Deleted/`, with its pictures.
+    RestoreNote(trek_core::notes::Note),
     /// Put back the comments Clear took off a diff (`diff_review`).
     RestoreComments {
         key: String,
@@ -9478,6 +9480,17 @@ impl Workspace {
                 self.updater.later = None;
                 self.restart_to_update(cx)
             }
+            UndoAction::RestoreNote(note) => match trek_core::notes::restore(&note) {
+                // The Notes screen reads the folder again, as when a phone changes it.
+                Ok(()) => {
+                    self.notes_epoch += 1;
+                    cx.notify();
+                }
+                Err(e) => cx.emit(WorkspaceEvent::Toast {
+                    message: format!("Couldn't bring the note back: {e}"),
+                    undo: None,
+                }),
+            },
             UndoAction::RestoreComments { key, drafts } => self.restore_comments(&key, drafts, cx),
             UndoAction::CancelRestart => {
                 self.restart_wanted = false;

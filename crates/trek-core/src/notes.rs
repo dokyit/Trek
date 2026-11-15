@@ -72,6 +72,14 @@ pub fn list_in(dir: &Path) -> Vec<Note> {
     notes
 }
 
+/// Whether `note` has every word of `query` in its text, in any case. An empty query matches all.
+pub fn matches(note: &Note, query: &str) -> bool {
+    let body = note.body.to_lowercase();
+    query
+        .split_whitespace()
+        .all(|word| body.contains(&word.to_lowercase()))
+}
+
 /// A new, empty note in `dir`.
 pub fn create_in(dir: &Path) -> std::io::Result<Note> {
     std::fs::create_dir_all(dir)?;
@@ -125,6 +133,41 @@ pub fn delete(note: &Note) -> std::io::Result<PathBuf> {
         }
     }
     Ok(to)
+}
+
+/// Bring a note `delete` moved to `Deleted/` back where it was, with its images: the ones only it
+/// showed move back, the ones a copy was left of are already there. A note that's since been
+/// made again under the same name is never overwritten.
+pub fn restore(note: &Note) -> std::io::Result<()> {
+    let dir = note.path.parent().unwrap_or(Path::new("."));
+    let bin = dir.join("Deleted");
+    let from = bin.join(note.path.file_name().unwrap_or_default());
+    if note.path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "a note with that name is already there",
+        ));
+    }
+    std::fs::rename(&from, &note.path)?;
+    let (kept, back) = (attachments_dir(&bin), attachments_dir(dir));
+    for name in attachment_names(&note.body) {
+        let src = kept.join(&name);
+        if !std::fs::symlink_metadata(&src).is_ok_and(|m| m.is_file()) {
+            continue;
+        }
+        let dst = back.join(&name);
+        let moved = std::fs::create_dir_all(&back).and_then(|_| {
+            if dst.exists() {
+                std::fs::remove_file(&src)
+            } else {
+                std::fs::rename(&src, &dst)
+            }
+        });
+        if let Err(e) = moved {
+            tracing::warn!("note image {name}: {e}");
+        }
+    }
+    Ok(())
 }
 
 /// Save `note` whole or not at all: written beside it, then moved over it.
@@ -1212,6 +1255,53 @@ mod tests {
         let body = "![a](attachments/one.png) [link](./attachments/two.jpg) <img src=\"attachments/three.gif\">\n\
                     ![x](old-attachments/no.png) ![y](/elsewhere/attachments/no2.png) ![z](attachments/../../../etc/passwd) ![again](attachments/one.png)";
         assert_eq!(attachment_names(body), ["one.png", "two.jpg", "three.gif"]);
+    }
+
+    #[test]
+    fn a_search_wants_every_word_in_any_case() {
+        let note = Note {
+            id: "a".into(),
+            path: PathBuf::from("a.md"),
+            body: "Trip to Lisbon\nBook the Tram tickets".into(),
+            modified: 0,
+        };
+        assert!(matches(&note, ""));
+        assert!(matches(&note, "lisbon"));
+        assert!(matches(&note, "tram LISBON"));
+        assert!(!matches(&note, "lisbon train"));
+    }
+
+    #[test]
+    fn a_deleted_note_comes_back_with_its_images() {
+        let dir = temp_notes("restore");
+        let only = add_image(&dir, b"only mine", "png").unwrap();
+        let shared = add_image(&dir, b"shared", "png").unwrap();
+        let mut a = create_in(&dir).unwrap();
+        a.body = format!(
+            "A\n{}\n{}",
+            image_markdown("", &only),
+            image_markdown("", &shared)
+        );
+        save(&a).unwrap();
+        let mut b = create_in(&dir).unwrap();
+        b.body = format!("B\n{}", image_markdown("", &shared));
+        save(&b).unwrap();
+        delete(&a).unwrap();
+        assert!(!a.path.exists() && !dir.join(&only).exists());
+        restore(&a).unwrap();
+        assert_eq!(std::fs::read_to_string(&a.path).unwrap(), a.body);
+        assert_eq!(std::fs::read(dir.join(&only)).unwrap(), b"only mine");
+        assert_eq!(std::fs::read(dir.join(&shared)).unwrap(), b"shared");
+        assert!(
+            !dir.join("Deleted").join(&only).exists(),
+            "what came back isn't also left in Deleted"
+        );
+        // A note made again under the same name isn't overwritten.
+        delete(&a).unwrap();
+        std::fs::write(&a.path, "new").unwrap();
+        assert!(restore(&a).is_err());
+        assert_eq!(std::fs::read_to_string(&a.path).unwrap(), "new");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

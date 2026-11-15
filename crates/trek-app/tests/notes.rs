@@ -368,3 +368,138 @@ fn a_note_that_could_not_be_saved_stays_unsaved_and_is_tried_again() {
         assert!(!cx.read(|cx| notes.read(cx).listed().1));
     });
 }
+
+/// With the folder read-only, switching notes keeps the unsaved one on screen (its text is only
+/// in memory), and it saves once the folder lets it.
+#[cfg(unix)]
+#[test]
+fn a_note_that_cannot_be_saved_is_not_left_for_another() {
+    use std::os::unix::fs::PermissionsExt;
+    run(async |cx| {
+        let trek = open(cx);
+        trek.click(cx, "open-notes");
+        trek.render(cx);
+        let notes = notes_view(&trek, cx);
+        let dir = trek_core::notes::notes_dir();
+        trek.window(cx, |window, cx| {
+            notes.update(cx, |n, cx| n.set_text("first".into(), window, cx))
+        });
+        saved(cx);
+        trek.click(cx, "note-new");
+        trek.window(cx, |window, cx| {
+            notes.update(cx, |n, cx| n.set_text("second".into(), window, cx))
+        });
+        saved(cx);
+        let both: Vec<String> = trek_core::notes::list_in(&dir)
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
+        assert_eq!(both.len(), 2);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if std::fs::write(dir.join("probe"), "").is_ok() {
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return; // permissions don't bind this user
+        }
+        // Typed into the newest note, which won't save; then the older one is clicked.
+        trek.window(cx, |window, cx| {
+            notes.update(cx, |n, cx| n.set_text("second, edited".into(), window, cx))
+        });
+        saved(cx);
+        let older = both
+            .iter()
+            .find(|id| {
+                trek_core::notes::list_in(&dir)
+                    .iter()
+                    .any(|n| &n.id == *id && n.body == "first")
+            })
+            .cloned()
+            .expect("the first note");
+        trek.click(cx, gpui_kit::SharedString::from(format!("note-{older}")));
+        cx.run_until_parked();
+        let (listed, unsaved) = cx.read(|cx| notes.read(cx).listed());
+        assert!(unsaved, "still unsaved, and still the note on screen");
+        assert!(listed.iter().any(|b| b == "second, edited"));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(6));
+        cx.run_until_parked();
+        assert_eq!(saved(cx), "second, edited");
+        assert!(!cx.read(|cx| notes.read(cx).listed().1));
+    });
+}
+
+#[test]
+fn a_deleted_note_can_be_brought_back_from_its_toast() {
+    run(async |cx| {
+        let trek = open(cx);
+        let toasts = common::toasts(&trek, cx);
+        trek.click(cx, "open-notes");
+        trek.render(cx);
+        let notes = notes_view(&trek, cx);
+        trek.window(cx, |window, cx| {
+            notes.update(cx, |n, cx| n.set_text("Groceries\nmilk".into(), window, cx))
+        });
+        // Deleted straight after typing: the last words are in the copy that comes back.
+        trek.click(cx, "note-delete");
+        cx.run_until_parked();
+        assert!(trek_core::notes::list_in(&trek_core::notes::notes_dir()).is_empty());
+        let undo = {
+            let seen = toasts.borrow();
+            let (message, undo) = seen.last().expect("a toast").clone();
+            assert_eq!(message, "Deleted “Groceries”");
+            undo.expect("it has an Undo")
+        };
+        trek.update(cx, |ws, cx| ws.undo(undo, cx));
+        trek.render(cx);
+        let back = trek_core::notes::list_in(&trek_core::notes::notes_dir());
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].body, "Groceries\nmilk");
+        // The Notes screen lists it again without being reopened.
+        assert_eq!(cx.read(|cx| notes.read(cx).listed().0), ["Groceries\nmilk"]);
+    });
+}
+
+#[test]
+fn the_list_narrows_to_the_notes_that_have_the_words_typed() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.click(cx, "open-notes");
+        trek.render(cx);
+        let notes = notes_view(&trek, cx);
+        trek.window(cx, |window, cx| {
+            notes.update(cx, |n, cx| {
+                n.set_text("Trip to Lisbon\ntickets".into(), window, cx)
+            })
+        });
+        saved(cx);
+        trek.click(cx, "note-new");
+        trek.window(cx, |window, cx| {
+            notes.update(cx, |n, cx| n.set_text("Groceries\nmilk".into(), window, cx))
+        });
+        saved(cx);
+        trek.render(cx);
+        assert!(trek.visible(cx, "note-search"));
+        let ids: Vec<String> = trek_core::notes::list_in(&trek_core::notes::notes_dir())
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
+        assert_eq!(ids.len(), 2);
+        let listed = |trek: &Trek, cx: &mut TestAppContext| {
+            ids.iter()
+                .filter(|id| trek.visible(cx, gpui_kit::SharedString::from(format!("note-{id}"))))
+                .count()
+        };
+        assert_eq!(listed(&trek, cx), 2);
+        trek.window(cx, |window, cx| {
+            notes.update(cx, |n, cx| n.set_filter("lisbon", window, cx))
+        });
+        trek.render(cx);
+        assert_eq!(listed(&trek, cx), 1, "only the Lisbon note is listed");
+        trek.window(cx, |window, cx| {
+            notes.update(cx, |n, cx| n.set_filter("zebra", window, cx))
+        });
+        trek.render(cx);
+        assert_eq!(listed(&trek, cx), 0);
+        assert!(trek.visible(cx, "note-search-empty"));
+    });
+}
