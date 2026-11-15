@@ -26,7 +26,7 @@ struct FeedbackView: View {
             if sent {
                 Section {
                     Label("Thanks, it's sent", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
+                        .foregroundStyle(Trek.done)
                 } footer: {
                     Text(feedback.trimmedEmail.isEmpty
                          ? "It went to Trek's developer."
@@ -53,7 +53,7 @@ struct FeedbackView: View {
                         .autocorrectionDisabled()
                 } footer: {
                     if let problem {
-                        Text(problem).font(.ui(.footnote)).foregroundStyle(.red)
+                        Text(problem).font(.ui(.footnote)).foregroundStyle(Trek.failed)
                     }
                 }
                 Section {
@@ -79,7 +79,7 @@ struct FeedbackView: View {
                         if check() { openURL(shown.githubIssueURL) }
                     }
                 } footer: {
-                    Text(status).font(.ui(.footnote)).foregroundStyle(failure == nil ? Trek.muted : .red)
+                    Text(status).font(.ui(.footnote)).foregroundStyle(failure == nil ? Trek.muted : Trek.failed)
                 }
             }
         }
