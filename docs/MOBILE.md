@@ -1394,7 +1394,7 @@ service. There is no account, no key from anyone and no server of Trek's (`trek_
     `exp` 12 hours ahead and `sub` set to `https://trekdesktop.com`.
   - It POSTs the note with `TTL: 86400`. `Urgency` is `high` for what needs the user and `normal`
     for the rest.
-  - A 404 or 410 drops the subscription. A 429 or 5xx is tried again (4 s, 20 s). Anything else
+  - A 403 (made with a key this computer no longer has), 404 or 410 drops the subscription. A 429 or 5xx is tried again (4 s, 20 s). Anything else
     is logged.
   - The note is `{title, body, thread, host, tag}`, at most 3993 bytes. It holds the words the
     ntfy note would have, so with names off it doesn't say which thread.

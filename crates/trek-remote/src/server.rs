@@ -480,7 +480,8 @@ impl RemoteHandle {
         self.inner.push_enabled.store(on, Ordering::Relaxed);
     }
 
-    /// The push service said `endpoint` is gone (404, 410): forget it for `device_id`.
+    /// The push service said `endpoint` is gone or not ours (403, 404, 410): forget it for
+    /// `device_id`.
     pub fn drop_push(&self, device_id: &str, endpoint: &str) {
         self.inner.lock().registry.drop_push(device_id, endpoint);
     }

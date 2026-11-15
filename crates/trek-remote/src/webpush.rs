@@ -314,12 +314,14 @@ fn seal(
 pub enum Outcome {
     /// Taken (201, or any 2xx).
     Sent,
-    /// The subscription is gone (404, 410): the phone unsubscribed, or its browser dropped it.
-    /// Forget it.
+    /// The subscription is no good any more: gone (404, 410), as the phone unsubscribed or its
+    /// browser dropped it, or not this computer's to use (403), as it was made with a key this
+    /// computer no longer has. Forget it; the phone's Settings then offers to turn notifications
+    /// on again.
     Gone,
     /// Busy or down (429, 5xx): worth another try in a moment.
     Retry,
-    /// Refused (400, 403, 413…): trying again won't help, but the subscription may still be good.
+    /// Refused (400, 413…): trying again won't help, but the subscription may still be good.
     Refused,
 }
 
@@ -327,7 +329,7 @@ impl Outcome {
     pub fn of(status: u16) -> Self {
         match status {
             200..=299 => Self::Sent,
-            404 | 410 => Self::Gone,
+            403 | 404 | 410 => Self::Gone,
             429 | 500..=599 => Self::Retry,
             _ => Self::Refused,
         }
@@ -518,7 +520,8 @@ mod tests {
         assert_eq!(Outcome::of(410), Outcome::Gone);
         assert_eq!(Outcome::of(429), Outcome::Retry);
         assert_eq!(Outcome::of(503), Outcome::Retry);
-        assert_eq!(Outcome::of(403), Outcome::Refused);
+        assert_eq!(Outcome::of(403), Outcome::Gone, "made with a key this computer lost");
+        assert_eq!(Outcome::of(400), Outcome::Refused);
         assert_eq!(Outcome::of(413), Outcome::Refused);
     }
 

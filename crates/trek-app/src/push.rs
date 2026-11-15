@@ -301,7 +301,8 @@ pub fn web_note(note: &Note, thread: Option<&str>, host: &str) -> (webpush::Push
 }
 
 /// Send `note` to one phone's browser through its push service, trying again after a failure that
-/// may pass (`tries` in all). A subscription the service says is gone (404, 410) is forgotten.
+/// may pass (`tries` in all). A subscription the service says is gone or not ours (403, 404, 410)
+/// is forgotten.
 pub fn send_web_push(
     remote: trek_remote::RemoteHandle,
     device_id: String,
