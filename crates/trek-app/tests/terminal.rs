@@ -554,3 +554,96 @@ fn scrolled_back_a_pill_says_so_and_takes_the_view_down() {
         );
     });
 }
+
+/// The composer has the keyboard.
+fn composer_focused(trek: &Trek, cx: &mut TestAppContext) -> bool {
+    let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+    trek.window(cx, |window, cx| composer.read(cx).is_focused(window, cx))
+}
+
+fn focused(trek: &Trek, cx: &mut TestAppContext, term: &Entity<TerminalPanel>) -> bool {
+    trek.window(cx, |window, cx| {
+        term.read(cx).focus_handle().is_focused(window)
+    })
+}
+
+/// A shell in the tools panel with the keys goes off screen (⌘J, or its tab closed with ×):
+/// the keys go back to the composer, and what's typed lands there, not nowhere.
+#[test]
+fn hiding_or_closing_the_tools_panels_shell_gives_the_keys_back() {
+    run(async |cx| {
+        let trek = open(cx);
+        let panel = trek.root.read_with(cx, |r, _| r.right_panel.clone());
+        let open_terminal = |cx: &mut TestAppContext| {
+            trek.window(cx, |window, cx| {
+                panel.update(cx, |p, cx| p.open_tool(PanelTool::Terminal, window, cx))
+            });
+            trek.render(cx);
+            panel
+                .read_with(cx, |p, _| p.shown_terminal())
+                .expect("the panel's terminal")
+        };
+        let tab = open_terminal(cx);
+        assert!(focused(&trek, cx, &tab), "a new shell takes the keys");
+        trek.press(cx, "secondary-j");
+        trek.render(cx);
+        assert!(!panel.read_with(cx, |p, _| p.open));
+        assert!(composer_focused(&trek, cx), "hidden: back to the composer");
+        trek.type_text(cx, "hi");
+        assert_eq!(trek.composer_text(cx), "hi");
+
+        // Another shell, its tab closed: the tab in front after it takes no keys (Explorer).
+        trek.window(cx, |window, cx| {
+            panel.update(cx, |p, cx| p.open_tool(PanelTool::Explorer, window, cx))
+        });
+        let tab = open_terminal(cx);
+        assert!(focused(&trek, cx, &tab));
+        let id = panel
+            .read_with(cx, |p, _| p.active_id())
+            .expect("a tab in front");
+        trek.click(cx, ("panel-tab-close", id as usize));
+        trek.render(cx);
+        assert!(composer_focused(&trek, cx), "closed: back to the composer");
+    });
+}
+
+/// Editor mode's bottom panel hidden with its shell in focus (⌘J): the keys go back to the file.
+#[test]
+fn hiding_the_editors_bottom_panel_gives_the_keys_back_to_the_file() {
+    use gpui_kit::Focusable as _;
+    run(async |cx| {
+        let trek = open(cx);
+        let file = trek.project.join("a.rs");
+        std::fs::write(&file, "a\n").unwrap();
+        trek.update(cx, |ws, cx| {
+            ws.set_mode(trek_app::workspace::Mode::Editor, cx)
+        });
+        trek.update(cx, |ws, cx| ws.open_editor(file.clone(), None, cx));
+        trek.render(cx);
+        let ide = trek.root.read_with(cx, |r, _| r.ide.clone());
+        trek.window(cx, |window, cx| {
+            ide.update(cx, |ide, cx| {
+                ide.show_panel(trek_app::ide::PanelTab::Terminal, window, cx)
+            })
+        });
+        trek.render(cx);
+        let editor = trek
+            .root
+            .read_with(cx, |r, cx| r.editor(cx))
+            .expect("the file open");
+        let editor_focused = |trek: &Trek, cx: &mut TestAppContext| {
+            trek.window(cx, |window, cx| {
+                editor
+                    .read(cx)
+                    .text_state()
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            })
+        };
+        assert!(!editor_focused(&trek, cx), "the shell has the keys");
+        trek.press(cx, "secondary-j");
+        trek.render(cx);
+        assert!(editor_focused(&trek, cx), "hidden: back to the file");
+    });
+}

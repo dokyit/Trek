@@ -403,6 +403,104 @@ fn closing_a_dirty_tab_asks_first_and_the_close_button_only_closes() {
     });
 }
 
+/// The editor in front with `text` typed into `file` (written as "a\n" first), not saved.
+fn unsaved_edit(trek: &Trek, cx: &mut TestAppContext, file: &std::path::Path, text: &str) {
+    std::fs::write(file, "a\n").unwrap();
+    editor_on_draft(trek, cx);
+    trek.update(cx, |ws, cx| ws.open_editor(file.to_path_buf(), None, cx));
+    trek.render(cx);
+    let editor = trek.root.read_with(cx, |r, cx| r.editor(cx)).unwrap();
+    trek.window(cx, |window, cx| {
+        editor.update(cx, |e, cx| {
+            e.text_state()
+                .update(cx, |s, cx| s.insert(text, window, cx))
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(trek.read(cx, |ws, cx| ws.unsaved_files(cx)), 1);
+}
+
+/// Quitting with unsaved edits asks as closing their tab does: Cancel stays, Don't Save quits
+/// with the file as it was.
+#[test]
+fn quitting_with_unsaved_edits_asks_first() {
+    run(async |cx| {
+        let trek = open(cx);
+        let a = trek.project.join("a.rs");
+        unsaved_edit(&trek, cx, &a, "edit ");
+        cx.update(|cx| trek_app::root::quit(cx));
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt(), "quitting asks first");
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert!(!trek.read(cx, |ws, _| ws.quitting), "Cancel stays");
+        cx.update(|cx| trek_app::root::quit(cx));
+        cx.run_until_parked();
+        cx.simulate_prompt_answer("Don't Save");
+        cx.run_until_parked();
+        assert!(trek.read(cx, |ws, _| ws.quitting), "Don't Save quits");
+        assert_eq!(
+            std::fs::read_to_string(&a).unwrap(),
+            "a\n",
+            "nothing written"
+        );
+    });
+}
+
+/// The main window's close button takes the editor with it (the Mac's, where Trek stays up): with
+/// nothing unsaved it just closes; with unsaved edits it asks, and Save writes them, then closes.
+#[test]
+fn closing_the_main_window_with_unsaved_edits_asks_first() {
+    run(async |cx| {
+        let trek = open(cx);
+        let a = trek.project.join("a.rs");
+        unsaved_edit(&trek, cx, &a, "saved ");
+        let close = |cx: &mut TestAppContext| {
+            gpui_kit::VisualTestContext::from_window(trek.window, cx).simulate_close()
+        };
+        assert!(!close(cx), "it doesn't close at once");
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt(), "it asks first");
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| cx.windows().len()), 1, "Cancel keeps it");
+        assert!(!close(cx));
+        cx.run_until_parked();
+        cx.simulate_prompt_answer("Save");
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "saved a\n");
+        assert!(cx.update(|cx| cx.windows().is_empty()), "then it closes");
+    });
+}
+
+#[test]
+fn closing_the_main_window_with_nothing_unsaved_just_closes() {
+    run(async |cx| {
+        let trek = open(cx);
+        assert!(gpui_kit::VisualTestContext::from_window(trek.window, cx).simulate_close());
+        assert!(!cx.has_pending_prompt());
+    });
+}
+
+#[test]
+fn the_unsaved_question_names_one_file_or_counts_them() {
+    let names = |n: &[&str]| n.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        trek_app::root::unsaved_question(&names(&["main.rs"])),
+        (
+            "Do you want to save the changes you made to main.rs?".to_string(),
+            &["Save", "Don't Save", "Cancel"][..]
+        )
+    );
+    assert_eq!(
+        trek_app::root::unsaved_question(&names(&["a.rs", "b.rs"])),
+        (
+            "Do you want to save the changes you made to 2 files?".to_string(),
+            &["Save All", "Don't Save", "Cancel"][..]
+        )
+    );
+}
+
 #[test]
 fn explorer_clicks_preview_and_edits_keep_the_tab() {
     run(async |cx| {

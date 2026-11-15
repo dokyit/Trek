@@ -157,6 +157,9 @@ fn toggle_sidebar(
 
 impl TrekWindow {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // Its close button asks about unsaved edits, and where the app ends with its main window
+        // it's the Quit command, which asks about agents at work (`main_window_should_close`).
+        window.on_window_should_close(cx, main_window_should_close);
         let sidebar = cx.new(|cx| Sidebar::new(workspace.clone(), window, cx));
         let composer = cx.new(|cx| Composer::new(workspace.clone(), Scope::Main, window, cx));
         let thread_view = cx.new(|cx| ThreadView::new(workspace.clone(), Scope::Main, window, cx));
@@ -483,7 +486,10 @@ impl TrekWindow {
                     | WorkspaceEvent::CardChanged { .. } => {}
                 },
             ),
-            cx.on_focus_lost(window, |this, window, cx| this.focus.focus(window, cx)),
+            // What had the keys left the screen (a tool panel hidden or its tab closed, the dock
+            // hidden, a field that went with its card): they go where the screen takes them, not
+            // nowhere.
+            cx.on_focus_lost(window, |this, window, cx| this.focus_screen(window, cx)),
             // A split coming or going.
             cx.observe_in(&workspace, window, |this, _, window, cx| {
                 this.sync_split(window, cx)
@@ -583,21 +589,7 @@ impl TrekWindow {
         // (a fork's) or follow-ups to hand back.
         cx.defer_in(window, |this, window, cx| {
             let ws = this.workspace.clone();
-            match ws.read(cx).route.clone() {
-                // Study's starter is the composer too.
-                Route::Thread(_) | Route::Draft { .. } | Route::Study => this
-                    .focused_composer(window, cx)
-                    .update(cx, |c, cx| c.focus(window, cx)),
-                Route::Basecamp => this.basecamp.read(cx).focus_handle().focus(window, cx),
-                Route::Notes => this.notes.read(cx).focus_handle(cx).focus(window, cx),
-                Route::Page { .. } => this.page_host.read(cx).focus_handle(cx).focus(window, cx),
-                Route::Editor { .. } => {
-                    if let Some(ev) = this.editor(cx) {
-                        ev.update(cx, |e, cx| e.focus(window, cx));
-                    }
-                }
-                Route::Settings(_) | Route::Onboarding => this.focus.focus(window, cx),
-            }
+            this.focus_screen(window, cx);
             let pending = ws.update(cx, |ws, _| ws.pending_compose.take());
             if let Some((thread, text, images)) = pending
                 && let Some(composer) = this.composer_showing(&thread, window, cx)
@@ -647,6 +639,35 @@ impl TrekWindow {
             mode_fading: false,
             _hidden_frames: hidden_frames,
             _subscriptions: subscriptions,
+        }
+    }
+
+    /// Give the keys to what the screen on show is for: the composer, the note, Basecamp, the
+    /// editor's file (Editor mode's in front); else the focus anchor, inside the window's action
+    /// handlers (Settings, Onboarding, an editor with no file open).
+    pub fn focus_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let route = self.workspace.read(cx).route.clone();
+        let screen = matches!(route, Route::Settings(_) | Route::Onboarding);
+        if self.workspace.read(cx).ide() && !screen {
+            match self.editor(cx) {
+                Some(ev) => ev.update(cx, |e, cx| e.focus(window, cx)),
+                None => self.focus.focus(window, cx),
+            }
+            return;
+        }
+        match route {
+            // Study's starter is the composer too.
+            Route::Thread(_) | Route::Draft { .. } | Route::Study => self
+                .focused_composer(window, cx)
+                .update(cx, |c, cx| c.focus(window, cx)),
+            Route::Basecamp => self.basecamp.read(cx).focus_handle().focus(window, cx),
+            Route::Notes => self.notes.read(cx).focus_handle(cx).focus(window, cx),
+            Route::Page { .. } => self.page_host.read(cx).focus_handle(cx).focus(window, cx),
+            Route::Editor { .. } => match self.editor(cx) {
+                Some(ev) => ev.update(cx, |e, cx| e.focus(window, cx)),
+                None => self.focus.focus(window, cx),
+            },
+            Route::Settings(_) | Route::Onboarding => self.focus.focus(window, cx),
         }
     }
 
@@ -1342,15 +1363,6 @@ pub fn open_main(workspace: Entity<Workspace>, focus: bool, cx: &mut App) -> any
         if let Some(error) = workspace.update(cx, |ws, _| ws.store_error.take()) {
             window.on_next_frame(move |window, cx| database_error(&error, window, cx));
         }
-        // Where the app ends with its main window, its close button is the Quit command, the
-        // same way out as the menu's: `quit` closes the windows itself and ends the app after.
-        // With agents at work it asks first (`close_main`).
-        if cx.has_global::<QuitWithMainWindow>() {
-            window.on_window_should_close(cx, |window, cx| {
-                close_main(window, cx);
-                false
-            });
-        }
         cx.new(|cx| TrekWindow::new(workspace, window, cx))
     })?;
     Ok(())
@@ -1479,14 +1491,15 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
 pub fn close_main(window: &mut Window, cx: &mut App) {
     let ws = crate::workspace::workspace_global(cx);
     // Kept in the tray, its icon there to bring the window back: the windows close and Trek stays
-    // up whatever is at work, as a Mac's does in the Dock.
+    // up whatever is at work, as a Mac's does in the Dock. The editor goes with the window, so
+    // unsaved edits are asked about first.
     let stays = {
         let settings = &ws.read(cx).settings;
         settings.general.stay_in_tray && settings.notifications.menu_bar_icon
     };
     if stays {
         // Once the window's own update is over: inside it, the window can't be closed.
-        cx.defer(|cx| keep_working(STAY, cx));
+        settle_unsaved(window, cx, |cx| cx.defer(|cx| keep_working(STAY, cx)));
         return;
     }
     let (titles, updating) = {
@@ -1511,11 +1524,111 @@ pub fn close_main(window: &mut Window, cx: &mut App) {
         &["Keep Working", "Quit", "Cancel"],
         cx,
     );
+    let main = window.window_handle();
     cx.spawn(async move |cx| {
         let choice = answer.await;
         let _ = cx.update(|cx| match choice {
-            Ok(0) => keep_working(BACKGROUND_GRACE, cx),
+            // The windows close and the editor with them: unsaved edits are asked about first.
+            Ok(0) => {
+                let asked = main.update(cx, |_, window, cx| {
+                    settle_unsaved(window, cx, |cx| {
+                        cx.defer(|cx| keep_working(BACKGROUND_GRACE, cx))
+                    })
+                });
+                if asked.is_err() {
+                    keep_working(BACKGROUND_GRACE, cx);
+                }
+            }
             Ok(1) => cx.defer(|cx| cx.dispatch_action(&crate::Quit)),
+            _ => {}
+        });
+    })
+    .detach();
+}
+
+/// The main window's close button. Where the app ends with its main window it's the Quit command
+/// (`close_main`). Elsewhere (the Mac) the window just closes, taking the editor with it, so
+/// unsaved edits are asked about first (`settle_unsaved`).
+pub fn main_window_should_close(window: &mut Window, cx: &mut App) -> bool {
+    if cx.has_global::<QuitWithMainWindow>() {
+        close_main(window, cx);
+        return false;
+    }
+    if crate::workspace::workspace_global(cx)
+        .read(cx)
+        .unsaved_files(cx)
+        == 0
+    {
+        return true;
+    }
+    let handle = window.window_handle();
+    settle_unsaved(window, cx, move |cx| {
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        })
+    });
+    false
+}
+
+/// The question a quit asks with edits not saved in `names` (one file's name, or several): the
+/// title and the buttons, as closing an editor tab asks it.
+pub fn unsaved_question(names: &[String]) -> (String, &'static [&'static str]) {
+    match names {
+        [one] => (
+            format!("Do you want to save the changes you made to {one}?"),
+            &["Save", "Don't Save", "Cancel"],
+        ),
+        many => (
+            format!(
+                "Do you want to save the changes you made to {} files?",
+                many.len()
+            ),
+            &["Save All", "Don't Save", "Cancel"],
+        ),
+    }
+}
+
+/// Before Trek quits or its editor closes with the window: with files that have unsaved edits,
+/// ask in `window` to save them, not to, or to stay. `then` runs once that's settled: at once when
+/// nothing is unsaved, after Save once every file saved (a save that didn't land says why in a
+/// toast, and nothing closes), or after Don't Save. Cancel runs nothing.
+pub fn settle_unsaved(window: &mut Window, cx: &mut App, then: impl FnOnce(&mut App) + 'static) {
+    let ws = crate::workspace::workspace_global(cx);
+    let editors = ws.read(cx).unsaved_editors(cx);
+    if editors.is_empty() {
+        then(cx);
+        return;
+    }
+    let names: Vec<String> = editors
+        .iter()
+        .map(|e| {
+            e.read(cx)
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default()
+        })
+        .collect();
+    let (title, buttons) = unsaved_question(&names);
+    let answer = window.prompt(
+        PromptLevel::Warning,
+        &title,
+        Some("Your changes will be lost if you don't save them."),
+        buttons,
+        cx,
+    );
+    cx.spawn(async move |cx| {
+        let choice = answer.await;
+        let _ = cx.update(|cx| match choice {
+            Ok(0) => {
+                let saved = editors.iter().fold(true, |all, e| {
+                    e.update(cx, |e, cx| e.save_for_close(cx)) && all
+                });
+                if saved {
+                    then(cx);
+                }
+            }
+            Ok(1) => then(cx),
             _ => {}
         });
     })
@@ -1670,6 +1783,31 @@ pub fn quit_with_main_window(cx: &mut App) {
 /// for what's left of the quit, so the moment is as long as that takes, three seconds at most;
 /// and the display is given a moment to leave before the app does (see `test_display::end`).
 pub fn quit(cx: &mut App) {
+    // Files with unsaved edits: asked about first, in the main window (else whichever is open),
+    // after the update the Quit command runs in, as that window may be the one being updated.
+    let ws = crate::workspace::workspace_global(cx);
+    if ws.read(cx).unsaved_files(cx) > 0 {
+        let window = ws
+            .read(cx)
+            .main_window
+            .or_else(|| cx.windows().into_iter().next());
+        if let Some(window) = window {
+            cx.defer(move |cx| {
+                let asked = window.update(cx, |_, window, cx| {
+                    settle_unsaved(window, cx, |cx| cx.defer(quit_now))
+                });
+                if asked.is_err() {
+                    quit_now(cx);
+                }
+            });
+            return;
+        }
+    }
+    quit_now(cx);
+}
+
+/// `quit`, once nothing unsaved is in the way.
+fn quit_now(cx: &mut App) {
     crate::workspace::workspace_global(cx).update(cx, |ws, _| {
         ws.quitting = true;
         ws.shutdown_sessions()

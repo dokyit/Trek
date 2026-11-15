@@ -745,6 +745,7 @@ impl Render for RightPanel {
                         el.child(
                             div()
                                 .id(("panel-tab-close", id as usize))
+                                .test_support()
                                 .size(px(18.))
                                 .flex()
                                 .items_center()

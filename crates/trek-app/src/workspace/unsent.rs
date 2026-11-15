@@ -275,6 +275,11 @@ impl Workspace {
 
     /// Files open in the editor with edits not saved. A scratch buffer has nowhere to go.
     pub fn unsaved_files(&self, cx: &App) -> usize {
+        self.unsaved_editors(cx).len()
+    }
+
+    /// The editors of `unsaved_files`, to save them before a quit.
+    pub fn unsaved_editors(&self, cx: &App) -> Vec<gpui_kit::Entity<crate::editor::EditorView>> {
         self.editors
             .iter()
             .filter_map(|e| e.upgrade())
@@ -282,7 +287,7 @@ impl Workspace {
                 let e = e.read(cx);
                 e.dirty && !e.scratch
             })
-            .count()
+            .collect()
     }
 }
 
