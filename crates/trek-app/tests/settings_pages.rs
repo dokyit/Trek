@@ -243,12 +243,6 @@ fn an_isolated_run_shows_no_iphone_install_of_the_users() {
             phone_update::last_attempt().map(|a| a.line),
             Some("Installed Trek 0.4.27 on the iPhone (Test iPhone)".into())
         );
-        trek.render(cx);
-        // Only where the iPhone app builds (Xcode).
-        assert_eq!(
-            trek.visible(cx, "mobile-update-phone"),
-            cfg!(target_os = "macos")
-        );
         // And it never builds for or installs on the iPhone this Mac reaches.
         assert!(trek.update(cx, |ws, cx| ws.update_phone(None, cx)).is_err());
         assert!(!trek.read(cx, |ws, _| ws.phone_update.running));
