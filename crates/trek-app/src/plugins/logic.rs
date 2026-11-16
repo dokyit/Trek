@@ -67,7 +67,8 @@ fn ensure(ws: &Entity<Workspace>, cx: &mut App) {
         while let Ok(job) = rx.recv().await {
             let Some(ws) = ws.upgrade() else { break };
             // What the call is given, read on the UI thread; then the call, off it.
-            let Some((main, call_state, data)) = cx.update(|cx| inputs(&job.plugin, &ws, cx))
+            let Some((main, call_state, data, sealed)) =
+                cx.update(|cx| inputs(&job.plugin, &ws, cx))
             else {
                 continue;
             };
@@ -83,6 +84,18 @@ fn ensure(ws: &Entity<Workspace>, cx: &mut App) {
                             };
                         }
                     };
+                    // A plugin with permissions runs only as the user allowed it: its files read
+                    // after the source must hash as they did then. One edited since waits for the
+                    // folder's next read, which asks the user again.
+                    if let Some((dir, hash)) = &sealed
+                        && trek_core::plugins::grant::content_hash(dir).as_ref() != Some(hash)
+                    {
+                        trek_core::plugins::log(
+                            &plugin,
+                            "not run: its files changed since it was allowed",
+                        );
+                        return PluginRun::default();
+                    }
                     let call = PluginCall {
                         source,
                         handler: job.handler,
@@ -123,12 +136,16 @@ impl ThemeDark for App {
     }
 }
 
-/// What a call of `plugin`'s logic is given: its `main.js`, its state, and what it may read.
+/// The folder and file hash a call of a plugin's must still find, when it has permissions.
+type Sealed = Option<(std::path::PathBuf, String)>;
+
+/// What a call of `plugin`'s logic is given: its `main.js`, its state, what it may read, and
+/// (when it has permissions) the hash its grant was sealed over.
 fn inputs(
     plugin: &str,
     ws: &Entity<Workspace>,
     cx: &App,
-) -> Option<(std::path::PathBuf, Value, Value)> {
+) -> Option<(std::path::PathBuf, Value, Value, Sealed)> {
     let p = cx.try_global::<Plugins>()?;
     let pl = p.find(plugin)?;
     if !p.state.running(&pl.manifest) {
@@ -157,7 +174,13 @@ fn inputs(
         "theme".into(),
         json!({ "dark": cx.theme_is_dark(), "id": crate::themes::shown_id(cx) }),
     );
-    Some((main, state, Value::Object(data)))
+    let sealed = if pl.manifest.permissions.is_empty() {
+        None
+    } else {
+        // Running with permissions means sealed over this hash (`State::verify`).
+        Some((pl.dir.clone(), pl.hash.clone()?))
+    };
+    Some((main, state, Value::Object(data), sealed))
 }
 
 /// Take what a call left: its state, what it asked for (by its permissions), or its failure.

@@ -365,6 +365,47 @@ fn a_plugin_too_big_to_seal_says_so_and_waits() {
 }
 
 #[test]
+fn an_allowed_plugin_s_logic_edited_since_doesn_t_run_before_it_asks_again() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    run(async |cx| {
+        let trek = start(cx);
+        let dir = trek_core::plugins::dir().join("nosy");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.toml"),
+            "name = \"Nosy\"\npermissions = [\"threads:read\"]\nmain = \"main.js\"\n\
+             [[command]]\nid = \"go\"\ntitle = \"Go\"\nrun = \"go\"\n",
+        )
+        .unwrap();
+        let main = |v: u32| format!("trek.command(\"go\", () => trek.state.set({{ v: {v} }}));\n");
+        std::fs::write(dir.join("main.js"), main(1)).unwrap();
+        cx.update(|cx| trek_app::plugins::reread(&trek.ws, cx));
+        cx.update(|cx| trek_app::plugins::set_on("nosy", true, &trek.ws, cx));
+        let ws = trek.ws.clone();
+        let go = |cx: &mut TestAppContext| {
+            trek.window(cx, |window, cx| {
+                trek_app::plugins::run_command("nosy", "go", &ws, window, cx)
+            });
+            cx.run_until_parked();
+            cx.update(|cx| {
+                cx.global::<trek_app::plugins::Plugins>()
+                    .states
+                    .get("nosy")
+                    .and_then(|s| s.get("v"))
+                    .and_then(|v| v.as_u64())
+            })
+        };
+        assert_eq!(go(cx), Some(1), "as allowed, it runs");
+
+        // Its logic is rewritten before Trek looks at the folder again: it doesn't run.
+        std::fs::write(dir.join("main.js"), main(2)).unwrap();
+        assert_eq!(go(cx), Some(1), "the edited logic didn't run");
+        cx.update(|cx| trek_app::plugins::reread(&trek.ws, cx));
+        cx.update(|cx| assert!(!trek_app::plugins::running("nosy", cx), "it asks again"));
+    });
+}
+
+#[test]
 fn a_plugin_key_that_is_trek_s_own_stays_trek_s() {
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     run(async |cx| {
