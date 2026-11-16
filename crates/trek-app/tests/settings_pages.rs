@@ -256,6 +256,32 @@ fn an_isolated_run_shows_no_iphone_install_of_the_users() {
 }
 
 #[test]
+fn phone_notifications_say_a_phones_browser_needs_the_phone_server() {
+    run(async |cx| {
+        let trek = common::open_with(cx, |s| {
+            s.mobile.enabled = false;
+            s.mobile.push = true;
+        });
+        trek.update(cx, |ws, cx| {
+            ws.navigate(Route::Settings(SettingsPage::Mobile), cx)
+        });
+        trek.render(cx);
+        scroll_settings(&trek, cx, 300.);
+        assert!(trek.visible(cx, "push-web-off"), "says why none gets them");
+        assert!(!trek.visible(cx, "push-web-none"));
+        // With phones let in, it says how to pair one instead.
+        trek.update(cx, |ws, cx| {
+            ws.settings.mobile.enabled = true;
+            ws.start_test_remote();
+            cx.notify();
+        });
+        trek.render(cx);
+        assert!(!trek.visible(cx, "push-web-off"));
+        assert!(trek.visible(cx, "push-web-none"));
+    });
+}
+
+#[test]
 fn the_settings_scroll_container_can_be_found_by_the_driver() {
     run(async |cx| {
         let trek = open(cx);

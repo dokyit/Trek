@@ -77,13 +77,19 @@ impl SettingsView {
         let theme = cx.theme().clone();
         let m = &s.mobile;
         let ws = self.workspace.clone();
+        // A phone's browser is reached through the phone server; ntfy isn't.
+        let needs_server = if m.enabled {
+            ""
+        } else {
+            " A phone's browser gets them only while Let your phone connect is on."
+        };
         let mut out = vec![
             Self::heading("Notifications on your phone", cx),
             ui::group(
                 vec![Self::row(
                     "Tell my phone when a thread needs me",
                     format!(
-                        "Also when one finishes or fails: what {this} would alert you for. Tapping one opens the thread on the phone."
+                        "Also when one finishes or fails: what {this} would alert you for. Tapping one opens the thread on the phone.{needs_server}"
                     ),
                     gpui_kit::component::switch::Switch::new("push-on")
                         .checked(m.push)
@@ -150,7 +156,14 @@ impl SettingsView {
                 .border_color(theme.border)
                 .text_size(px(text::BODY))
                 .child(div().text_size(px(text::TITLE)).font_semibold().child("On your phone"))
-                .child(if phones.is_empty() {
+                .child(if !m.enabled {
+                    div()
+                        .id("push-web-off")
+                        .test_support()
+                        .text_color(muted)
+                        .child("No phone gets them while Let your phone connect is off. Turn it on above, then pair a phone's browser with Show pairing code › A phone's browser.")
+                        .into_any_element()
+                } else if phones.is_empty() {
                     div()
                         .id("push-web-none")
                         .test_support()
