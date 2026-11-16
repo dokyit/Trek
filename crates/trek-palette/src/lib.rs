@@ -70,6 +70,15 @@ pub fn ember(cx: &App) -> Hsla {
     }
     pick(cx, EMBER)
 }
+/// Ember as a fill under [`on_ember`] text (a count badge, a small button): the theme's primary
+/// fill, which on Paper is a shade deeper than the ember of marks so white reads on it; a theme
+/// with its own accent brings it.
+pub fn ember_fill(cx: &App) -> Hsla {
+    if let Some(a) = theme_accent(cx) {
+        return a.accent;
+    }
+    cx.theme().primary
+}
 pub fn amber(cx: &App) -> Hsla {
     pick(cx, AMBER)
 }
@@ -327,5 +336,22 @@ mod tests {
         let c = contrast(ink, EMBER.0);
         assert!(c >= 4.5, "Night's text on ember is {c:.2}:1");
         assert!(contrast(0xFFFFFF, EMBER.0) < 4.5);
+    }
+
+    #[test]
+    fn text_on_an_ember_fill_reads_in_each_theme() {
+        // `ember_fill` is the theme's primary fill and `on_ember` its primary text. On Paper the
+        // ember of marks is too light for white (3.5:1), so fills under text take the deeper one.
+        for name in ["Trek Night", "Trek Paper"] {
+            let c = contrast(
+                colour(name, "primary.foreground"),
+                colour(name, "primary.background"),
+            );
+            assert!(c >= 4.5, "{name}: text on its ember fill is {c:.2}:1");
+        }
+        assert!(
+            contrast(0xFFFFFF, EMBER.1) < 4.5,
+            "why marks and fills differ"
+        );
     }
 }

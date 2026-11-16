@@ -618,7 +618,7 @@ pub fn toolbar(
                         .right(px(0.))
                         .px(px(3.))
                         .rounded(px(radius::TAG))
-                        .bg(crate::palette::ember(cx))
+                        .bg(crate::palette::ember_fill(cx))
                         .text_color(crate::palette::on_ember(cx))
                         .text_size(px(text::META))
                         .line_height(px(11.))

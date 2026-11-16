@@ -1425,7 +1425,7 @@ impl EditorView {
             .review
             .as_ref()
             .is_some_and(|r| self.workspace.read(cx).turn_running(&r.thread));
-        let ember = palette::ember(cx);
+        let ember = palette::ember_fill(cx);
         let (added, removed) = hunk.counts();
         let removed_text = hunk.removed_text();
         let button = |id: &'static str| {

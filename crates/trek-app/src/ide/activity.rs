@@ -73,7 +73,7 @@ impl IdeWorkbench {
             .as_ref()
             .and_then(|r| ws.git_info.get(r))
             .map_or(0, |g| g.changed);
-        let ember = crate::palette::ember(cx);
+        let ember = crate::palette::ember_fill(cx);
         h_flex()
             .h(px(36.))
             .flex_none()
