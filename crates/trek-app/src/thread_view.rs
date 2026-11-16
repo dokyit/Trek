@@ -1874,6 +1874,229 @@ impl ThreadView {
 
     /// One transcript row. `row_ix` is its place in the list (tool rows inside a group pass the
     /// group's); `flash` tints it for a moment after a search result scrolled to it.
+    /// A group of tool calls as one summary line, open or closed, drawn apart from `render_row`
+    /// to keep that function's frame small (see `tool_row`).
+    fn closed_group(
+        g: ClosedGroup,
+        children: Vec<AnyElement>,
+        view: &WeakEntity<ThreadView>,
+        row_ix: usize,
+        cx: &App,
+    ) -> Div {
+        let ClosedGroup {
+            ix,
+            key,
+            summary,
+            trouble,
+            kind,
+            running,
+            open,
+        } = g;
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        v_flex()
+            .py(px(3.))
+            .child(
+                h_flex()
+                    .id(("tool-group", ix))
+                    .test_support()
+                    .gap_2()
+                    .py_1()
+                    .text_size(to_rems(text::LABEL))
+                    .text_color(muted)
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(theme.foreground))
+                    .child(crate::activity::group_icon(kind).small())
+                    .child(
+                        div()
+                            .when(running, |el| el.text_color(theme.foreground.opacity(0.85)))
+                            .child(summary),
+                    )
+                    // A closed group still says when a call in it went wrong.
+                    .children(trouble.map(|t| {
+                        div()
+                            .id(("tool-group-trouble", ix))
+                            .test_support()
+                            .text_color(palette::red(cx))
+                            .child(format!("· {t}"))
+                    }))
+                    .child(
+                        Icon::new(if open {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .xsmall()
+                        .opacity(CHEVRON),
+                    )
+                    .on_click(toggle_row(view.clone(), key.clone(), row_ix)),
+            )
+            .when(open, |el| {
+                el.child(
+                    v_flex()
+                        .ml(px(7.))
+                        .pl_4()
+                        .border_l_1()
+                        .border_color(theme.border)
+                        .children(children),
+                )
+            })
+    }
+
+    /// A tool call's row, drawn apart from `render_row` so that function's frame stays small
+    /// enough for a test thread's stack (and Windows' main thread) in an unoptimized build. The
+    /// caller puts a watched video's card under it.
+    fn tool_row(
+        t: ToolRow,
+        view: &WeakEntity<ThreadView>,
+        row_ix: usize,
+        cx: &App,
+    ) -> (Div, Option<crate::video::WatchedVideo>) {
+        let ToolRow {
+            ix,
+            key,
+            open,
+            activity,
+            title,
+            detail,
+            output,
+            status,
+            lines,
+        } = t;
+        let theme = cx.theme();
+        let kind = tool_kind(&title);
+        let icon = kind_icon(kind);
+        // Files read or changed get their type's badge; changes, the lines they touched.
+        let file = matches!(kind, ToolKind::Read | ToolKind::Edit)
+            .then(|| detail.split(", ").next().unwrap_or_default().to_string())
+            .filter(|f| !f.is_empty());
+        let status_el = match status {
+            ToolStatus::Running => Icon::new(crate::assets::Lucide::LoaderCircle)
+                .xsmall()
+                .text_color(theme.muted_foreground)
+                .into_any_element(),
+            ToolStatus::Done => Icon::new(IconName::Check)
+                .xsmall()
+                .text_color(theme.muted_foreground)
+                .into_any_element(),
+            ToolStatus::Failed | ToolStatus::Denied => Icon::new(IconName::CircleX)
+                .xsmall()
+                .text_color(palette::red(cx))
+                .into_any_element(),
+        };
+        let has_output = !output.is_empty();
+        // A finished `watch_video` row has the video and its frames under it.
+        let watched =
+            (trek_core::media::is_watch_call(&title) && status == ToolStatus::Done).then(|| {
+                crate::video::WatchedVideo {
+                    output: output.clone(),
+                    ix,
+                }
+            });
+        let subagent = title == "Subagent";
+        // Trek's own orchestration tools read as what they did; their arguments are noise.
+        let ours = orch::tool_label(&title).or_else(|| orch::spawn_failed_label(&title));
+        let label = SharedString::from(match ours {
+            Some(l) => l.to_string(),
+            None if subagent => detail.clone(),
+            None => title,
+        });
+        let code = activity.is_none();
+        let detail = match activity {
+            Some(a) => a,
+            None if subagent || ours.is_some() => SharedString::default(),
+            None => detail.into(),
+        };
+        let row = v_flex()
+            .py(px(1.))
+            .child(
+                h_flex()
+                    .id(("tool", ix))
+                    .test_support()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded(px(fluent::control(theme.radius.as_f32())))
+                    .text_size(to_rems(text::LABEL))
+                    .when(has_output, |el| {
+                        el.cursor_pointer()
+                            .hover(|s| s.bg(theme.list_hover))
+                            .on_click(toggle_row(view.clone(), key.clone(), row_ix))
+                    })
+                    .child(icon.small().text_color(theme.muted_foreground))
+                    .child(
+                        div()
+                            .font_medium()
+                            .flex_none()
+                            .max_w(relative(0.5))
+                            .truncate()
+                            .child(label),
+                    )
+                    // A file read or changed sits in a chip of its type's colour.
+                    .map(|el| match file {
+                        Some(f) => el.child(
+                            div().flex_1().min_w_0().flex().child(
+                                crate::file_icon::chip(
+                                    ("tool-file", ix),
+                                    &f,
+                                    detail.clone(),
+                                    px(11.5),
+                                    cx,
+                                )
+                                .when(fluent::WINDOWS, |el| el.rounded(px(fluent::CONTROL_RADIUS))),
+                            ),
+                        ),
+                        None => el.child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .when(code, |el| el.font_family(theme.mono_font_family.clone()))
+                                .text_size(to_rems(text::META))
+                                .text_color(theme.muted_foreground)
+                                .child(detail),
+                        ),
+                    })
+                    .when_some(lines, |el, (a, r)| {
+                        el.child(crate::working_bar::lines_chip(a, r, cx))
+                    })
+                    // A row with output opens: its chevron says so, as a group's does.
+                    .when(has_output, |el| {
+                        el.child(
+                            div().id(("tool-chevron", ix)).test_support().child(
+                                Icon::new(if open {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .xsmall()
+                                .opacity(CHEVRON),
+                            ),
+                        )
+                    })
+                    .child(status_el),
+            )
+            .when(open && has_output, |el| {
+                el.child(
+                    div()
+                        .id(("tool-out", ix))
+                        .test_support()
+                        .mt_1()
+                        .ml_8()
+                        .max_h(px(260.))
+                        .overflow_y_scroll()
+                        .p_3()
+                        .rounded(px(fluent::surface(theme.radius.as_f32())))
+                        .bg(theme.muted)
+                        .font_family(theme.mono_font_family.clone())
+                        .text_size(to_rems(text::META))
+                        .whitespace_normal()
+                        .child(output),
+                )
+            });
+        (row, watched)
+    }
+
     fn render_row(
         row: Row,
         row_ix: usize,
@@ -1941,7 +2164,26 @@ impl ThreadView {
                 .update(cx, |ws, cx| ws.load_turn_changes(&at.thread, *ix, cx)),
             _ => None,
         };
-        let cx: &App = cx;
+        Self::draw_row(row, row_ix, flash, view, at, md, children, changes, cx)
+    }
+
+    /// The row itself, once `render_row` has its nested rows: apart from it because this
+    /// function's frame is large in an unoptimized build (hundreds of KB), and a group's rows
+    /// are drawn by `render_row` again, so only one of these frames is on the stack at a time,
+    /// not one per level: a test thread's stack, and Windows' main thread, hold one.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn draw_row(
+        row: Row,
+        row_ix: usize,
+        flash: Option<u64>,
+        view: &WeakEntity<ThreadView>,
+        at: &RowContext,
+        md: Option<Entity<TextViewState>>,
+        children: Vec<AnyElement>,
+        changes: Option<std::sync::Arc<trek_core::changes::TurnChanges>>,
+        cx: &App,
+    ) -> AnyElement {
         // An answer's row draws its document, not the item's text: that isn't copied each frame
         // (a long answer's is megabytes, and each of its parts on screen would copy all of it).
         // A thought's row draws its document too, and a group's row only its summary, so neither
@@ -3083,61 +3325,22 @@ impl ThreadView {
                     ..
                 },
                 _,
-            ) => {
-                let muted = theme.muted_foreground;
-                column(
-                    v_flex()
-                        .py(px(3.))
-                        .child(
-                            h_flex()
-                                .id(("tool-group", ix))
-                                .test_support()
-                                .gap_2()
-                                .py_1()
-                                .text_size(to_rems(text::LABEL))
-                                .text_color(muted)
-                                .cursor_pointer()
-                                .hover(|s| s.text_color(theme.foreground))
-                                .child(crate::activity::group_icon(kind).small())
-                                .child(
-                                    div()
-                                        .when(running, |el| {
-                                            el.text_color(theme.foreground.opacity(0.85))
-                                        })
-                                        .child(summary),
-                                )
-                                // A closed group still says when a call in it went wrong.
-                                .children(trouble.map(|t| {
-                                    div()
-                                        .id(("tool-group-trouble", ix))
-                                        .test_support()
-                                        .text_color(palette::red(cx))
-                                        .child(format!("· {t}"))
-                                }))
-                                .child(
-                                    Icon::new(if open {
-                                        IconName::ChevronDown
-                                    } else {
-                                        IconName::ChevronRight
-                                    })
-                                    .xsmall()
-                                    .opacity(CHEVRON),
-                                )
-                                .on_click(toggle(key.clone())),
-                        )
-                        .when(open, |el| {
-                            el.child(
-                                v_flex()
-                                    .ml(px(7.))
-                                    .pl_4()
-                                    .border_l_1()
-                                    .border_color(theme.border)
-                                    .children(children),
-                            )
-                        }),
-                )
-                .into_any_element()
-            }
+            ) => column(Self::closed_group(
+                ClosedGroup {
+                    ix,
+                    key,
+                    summary,
+                    trouble,
+                    kind,
+                    running,
+                    open,
+                },
+                children,
+                view,
+                row_ix,
+                cx,
+            ))
+            .into_any_element(),
             (
                 Row::Tool {
                     ix,
@@ -3153,143 +3356,26 @@ impl ThreadView {
                     status,
                 },
             ) => {
-                let kind = tool_kind(&title);
-                let icon = kind_icon(kind);
-                // Files read or changed get their type's badge; changes, the lines they touched.
-                let file = matches!(kind, ToolKind::Read | ToolKind::Edit)
-                    .then(|| detail.split(", ").next().unwrap_or_default().to_string())
-                    .filter(|f| !f.is_empty());
                 let lines = live
                     .and_then(|l| l.lines.get(&tool_id))
                     .copied()
                     .filter(|_| !matches!(status, ToolStatus::Failed | ToolStatus::Denied));
-                let status_el = match status {
-                    ToolStatus::Running => Icon::new(crate::assets::Lucide::LoaderCircle)
-                        .xsmall()
-                        .text_color(theme.muted_foreground)
-                        .into_any_element(),
-                    ToolStatus::Done => Icon::new(IconName::Check)
-                        .xsmall()
-                        .text_color(theme.muted_foreground)
-                        .into_any_element(),
-                    ToolStatus::Failed | ToolStatus::Denied => Icon::new(IconName::CircleX)
-                        .xsmall()
-                        .text_color(palette::red(cx))
-                        .into_any_element(),
-                };
-                let has_output = !output.is_empty();
-                // A finished `watch_video` row has the video and its frames under it.
-                let watched = (trek_core::media::is_watch_call(&title)
-                    && status == ToolStatus::Done)
-                    .then(|| crate::video::WatchedVideo {
-                        output: output.clone(),
+                let (row, watched) = Self::tool_row(
+                    ToolRow {
                         ix,
-                    });
-                let subagent = title == "Subagent";
-                // Trek's own orchestration tools read as what they did; their arguments are noise.
-                let ours = orch::tool_label(&title).or_else(|| orch::spawn_failed_label(&title));
-                let label = SharedString::from(match ours {
-                    Some(l) => l.to_string(),
-                    None if subagent => detail.clone(),
-                    None => title,
-                });
-                let code = activity.is_none();
-                let detail = match activity {
-                    Some(a) => a,
-                    None if subagent || ours.is_some() => SharedString::default(),
-                    None => detail.into(),
-                };
-                let row = v_flex()
-                    .py(px(1.))
-                    .child(
-                        h_flex()
-                            .id(("tool", ix))
-                            .test_support()
-                            .gap_2()
-                            .px_2()
-                            .py_1()
-                            .rounded(px(fluent::control(theme.radius.as_f32())))
-                            .text_size(to_rems(text::LABEL))
-                            .when(has_output, |el| {
-                                el.cursor_pointer()
-                                    .hover(|s| s.bg(theme.list_hover))
-                                    .on_click(toggle(key.clone()))
-                            })
-                            .child(icon.small().text_color(theme.muted_foreground))
-                            .child(
-                                div()
-                                    .font_medium()
-                                    .flex_none()
-                                    .max_w(relative(0.5))
-                                    .truncate()
-                                    .child(label),
-                            )
-                            // A file read or changed sits in a chip of its type's colour.
-                            .map(|el| match file {
-                                Some(f) => el.child(
-                                    div().flex_1().min_w_0().flex().child(
-                                        crate::file_icon::chip(
-                                            ("tool-file", ix),
-                                            &f,
-                                            detail.clone(),
-                                            px(11.5),
-                                            cx,
-                                        )
-                                        .when(fluent::WINDOWS, |el| {
-                                            el.rounded(px(fluent::CONTROL_RADIUS))
-                                        }),
-                                    ),
-                                ),
-                                None => el.child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .when(code, |el| {
-                                            el.font_family(theme.mono_font_family.clone())
-                                        })
-                                        .text_size(to_rems(text::META))
-                                        .text_color(theme.muted_foreground)
-                                        .child(detail),
-                                ),
-                            })
-                            .when_some(lines, |el, (a, r)| {
-                                el.child(crate::working_bar::lines_chip(a, r, cx))
-                            })
-                            // A row with output opens: its chevron says so, as a group's does.
-                            .when(has_output, |el| {
-                                el.child(
-                                    div().id(("tool-chevron", ix)).test_support().child(
-                                        Icon::new(if open {
-                                            IconName::ChevronDown
-                                        } else {
-                                            IconName::ChevronRight
-                                        })
-                                        .xsmall()
-                                        .opacity(CHEVRON),
-                                    ),
-                                )
-                            })
-                            .child(status_el),
-                    )
-                    .when(open && has_output, |el| {
-                        el.child(
-                            div()
-                                .id(("tool-out", ix))
-                                .test_support()
-                                .mt_1()
-                                .ml_8()
-                                .max_h(px(260.))
-                                .overflow_y_scroll()
-                                .p_3()
-                                .rounded(px(fluent::surface(theme.radius.as_f32())))
-                                .bg(theme.muted)
-                                .font_family(theme.mono_font_family.clone())
-                                .text_size(to_rems(text::META))
-                                .whitespace_normal()
-                                .child(output),
-                        )
-                    });
+                        key,
+                        open,
+                        activity,
+                        title,
+                        detail,
+                        output,
+                        status,
+                        lines,
+                    },
+                    view,
+                    row_ix,
+                    cx,
+                );
                 match watched {
                     Some(video) => column(row.child(video)).into_any_element(),
                     None => row.into_any_element(),
@@ -5081,6 +5167,30 @@ impl ThreadView {
 
 /// What a click on an opening row does: opens or closes `key`, and measures its row (`row_ix` in
 /// the list) again.
+/// What `ThreadView::closed_group` draws a group's summary line from.
+struct ClosedGroup {
+    ix: usize,
+    key: SharedString,
+    summary: SharedString,
+    trouble: Option<SharedString>,
+    kind: ToolKind,
+    running: bool,
+    open: bool,
+}
+
+/// What `ThreadView::tool_row` draws a tool call's row from.
+struct ToolRow {
+    ix: usize,
+    key: SharedString,
+    open: bool,
+    activity: Option<SharedString>,
+    title: String,
+    detail: String,
+    output: String,
+    status: ToolStatus,
+    lines: Option<(u32, u32)>,
+}
+
 fn toggle_row(
     view: WeakEntity<ThreadView>,
     key: SharedString,
