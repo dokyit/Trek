@@ -99,9 +99,9 @@ struct Ink {
     text: Hsla,
     /// Labels (#606060).
     muted: Hsla,
-    /// A disabled button's label (#969696).
+    /// A disabled button's label (#969696): never text that has to be read (under 3:1 on Paper).
     faint: Hsla,
-    /// The tooltip's middle dot (#999999).
+    /// The tooltip's middle dot (#999999), a separator, not text.
     dot: Hsla,
     surface: Hsla,
     /// The card's edge (#DEDEDE).
@@ -138,7 +138,7 @@ struct Ink {
     action_text: Hsla,
     /// The check by "Freed …" (#2C893C).
     done: Hsla,
-    /// The flyout's note: faint on the Mac, muted on Windows, where faint is under 3:1 on Paper.
+    /// The flyout's note: muted, which reads on Paper (faint is under 3:1 there).
     note: Hsla,
 }
 
@@ -197,11 +197,7 @@ fn ink(cx: &App) -> Ink {
         },
         action_text: pick(cx, (0xA8C4FA, 0x2D468F)),
         done: pick(cx, (0x4CC86A, 0x2C893C)),
-        note: if fluent::WINDOWS {
-            theme.muted_foreground
-        } else {
-            faint
-        },
+        note: theme.muted_foreground,
     }
 }
 
