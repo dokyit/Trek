@@ -1992,7 +1992,8 @@ impl Sidebar {
                     .ghost(true)
                     .small(true)
                     .selected(usage_open)
-                    .tooltip(tip)
+                    // Not over the card it opened, whose last row it would cover.
+                    .when(!usage_open, |p| p.tooltip(tip))
                     .map(|p| match peak {
                         Some(peak) => p
                             .children(focus.as_ref().map(|(agent, _)| {
