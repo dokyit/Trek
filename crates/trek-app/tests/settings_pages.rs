@@ -170,6 +170,52 @@ fn a_pairing_code_goes_from_settings_when_it_expires() {
     });
 }
 
+/// Scroll Settings' page down by `by` points, as a wheel would.
+fn scroll_settings(trek: &Trek, cx: &mut TestAppContext, by: f32) {
+    let page = trek.bounds(cx, "settings-content").expect("the page");
+    let wheel = gpui_kit::ScrollWheelEvent {
+        position: page.center(),
+        delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(-by))),
+        ..Default::default()
+    };
+    trek.window(cx, |window, cx| {
+        _ = window.dispatch_event(gpui_kit::InputEvent::to_platform_input(wheel), cx)
+    });
+    trek.render(cx);
+}
+
+#[test]
+fn the_pairing_codes_fingerprint_stays_inside_its_card() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.update(cx, |ws, cx| {
+            ws.start_test_remote();
+            ws.offer_pairing(cx);
+            // As a server with its certificate has it (the test one has none): a link that long
+            // makes the QR code as large as a real one.
+            let offer = ws.remote.as_mut().unwrap().offer.as_mut().unwrap();
+            offer.code = "GBFV-23F4".into();
+            offer.fingerprint = Some("6586-47C9-BF84-93CD".into());
+            offer.url = format!(
+                "trek://pair?host=127.0.0.1:7431&code=GBFV-23F4&name=Test%E2%80%99s%20MacBook%20Air&hid={}&fp={}",
+                "0".repeat(36),
+                "0".repeat(64)
+            );
+            ws.navigate(Route::Settings(SettingsPage::Mobile), cx)
+        });
+        trek.render(cx);
+        scroll_settings(&trek, cx, 500.);
+        let card = trek.bounds(cx, "mobile-pairing").expect("the pairing card");
+        let fingerprint = trek
+            .bounds(cx, "pair-fingerprint")
+            .expect("the fingerprint");
+        assert!(
+            fingerprint.right() <= card.right() && fingerprint.bottom() <= card.bottom(),
+            "{fingerprint:?} in {card:?}"
+        );
+    });
+}
+
 #[test]
 fn an_isolated_run_shows_no_iphone_install_of_the_users() {
     use trek_app::remote::phone_update;

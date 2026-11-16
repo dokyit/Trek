@@ -669,9 +669,12 @@ impl SettingsView {
                 .min_w_0()
                 .child(div().text_size(px(text::TITLE)).font_semibold().child("Scan this with Trek on your iPhone"))
                 .child(div().text_size(px(text::BODY)).text_color(theme.muted_foreground).child("No camera? Choose “Enter address and code” on the phone and type these:"))
+                // The fingerprint goes under the code where the card is too narrow for both.
                 .child(
                     h_flex()
-                        .gap(px(20.))
+                        .flex_wrap()
+                        .gap_x(px(20.))
+                        .gap_y(px(12.))
                         .child(
                             v_flex()
                                 .gap(px(2.))
@@ -681,6 +684,8 @@ impl SettingsView {
                         .when_some(offer.fingerprint.clone(), |el, fp| {
                             el.child(
                                 v_flex()
+                                    .id("pair-fingerprint")
+                                    .test_support()
                                     .gap(px(2.))
                                     .child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child(words.computer_fingerprint))
                                     .child(div().text_size(px(text::DISPLAY_S)).font_semibold().font_family(theme.mono_font_family.clone()).child(fp)),
