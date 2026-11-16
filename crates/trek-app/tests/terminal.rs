@@ -567,7 +567,17 @@ fn focused(trek: &Trek, cx: &mut TestAppContext, term: &Entity<TerminalPanel>) -
     })
 }
 
-/// A shell in the tools panel with the keys goes off screen (⌘J, or its tab closed with ×):
+/// Hide the tools panel (or Editor mode's bottom panel) as ⌘J does on a Mac, whatever has the
+/// keys: the action itself, since on Windows a shell with the keys takes Ctrl+J as a line feed,
+/// as every Windows terminal does, and the panel is hidden from its title bar button instead.
+fn toggle_panel(trek: &Trek, cx: &mut TestAppContext) {
+    trek.window(cx, |window, cx| {
+        window.dispatch_action(Box::new(trek_app::ToggleRightPanel), cx)
+    });
+    cx.run_until_parked();
+}
+
+/// A shell in the tools panel with the keys goes off screen (hidden, or its tab closed with ×):
 /// the keys go back to the composer, and what's typed lands there, not nowhere.
 #[test]
 fn hiding_or_closing_the_tools_panels_shell_gives_the_keys_back() {
@@ -585,7 +595,7 @@ fn hiding_or_closing_the_tools_panels_shell_gives_the_keys_back() {
         };
         let tab = open_terminal(cx);
         assert!(focused(&trek, cx, &tab), "a new shell takes the keys");
-        trek.press(cx, "secondary-j");
+        toggle_panel(&trek, cx);
         trek.render(cx);
         assert!(!panel.read_with(cx, |p, _| p.open));
         assert!(composer_focused(&trek, cx), "hidden: back to the composer");
@@ -607,7 +617,7 @@ fn hiding_or_closing_the_tools_panels_shell_gives_the_keys_back() {
     });
 }
 
-/// Editor mode's bottom panel hidden with its shell in focus (⌘J): the keys go back to the file.
+/// Editor mode's bottom panel hidden with its shell in focus: the keys go back to the file.
 #[test]
 fn hiding_the_editors_bottom_panel_gives_the_keys_back_to_the_file() {
     use gpui_kit::Focusable as _;
@@ -642,7 +652,7 @@ fn hiding_the_editors_bottom_panel_gives_the_keys_back_to_the_file() {
             })
         };
         assert!(!editor_focused(&trek, cx), "the shell has the keys");
-        trek.press(cx, "secondary-j");
+        toggle_panel(&trek, cx);
         trek.render(cx);
         assert!(editor_focused(&trek, cx), "hidden: back to the file");
     });
