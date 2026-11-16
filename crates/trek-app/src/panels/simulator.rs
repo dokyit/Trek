@@ -2394,7 +2394,8 @@ impl SimulatorPanel {
                             .child(if brew {
                                 "Taps, swipes, typing and hardware buttons"
                             } else {
-                                "It installs with Homebrew, which isn't on this Mac yet"
+                                // The iOS Simulator only runs on a Mac.
+                                "It installs with Homebrew, which isn't on this Mac yet" // words: ok
                             }),
                     ),
             )

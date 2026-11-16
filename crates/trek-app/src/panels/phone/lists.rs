@@ -447,9 +447,12 @@ impl PhonePanel {
                 .label("Add a file…")
                 .disabled(busy || !can_add)
                 .tooltip(if can_add {
-                    "Copy a file from this Mac into this folder"
+                    SharedString::from(format!(
+                        "Copy a file from {} into this folder",
+                        crate::words::words().this_computer
+                    ))
                 } else {
-                    "Open a folder to copy into first (Downloads, say; not the Camera Roll)"
+                    "Open a folder to copy into first (Downloads, say; not the Camera Roll)".into()
                 })
                 .on_click(cx.listener(|this, _, _, cx| this.add_file(cx)))
                 .into_any_element(),
@@ -761,7 +764,7 @@ impl PhonePanel {
             crate::ui::icon_button(
                 SharedString::from(format!("phone-file-save-{}", e.name)),
                 Lucide::Download,
-                "Save to this Mac…",
+                format!("Save to {}…", crate::words::words().this_computer),
             )
             .xsmall()
             .disabled(busy)

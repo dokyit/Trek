@@ -544,7 +544,10 @@ impl Composer {
             && let Some(machine) = self.workspace.read(cx).machine_named_for_send(&self.scope)
         {
             self.toast(
-                format!("Files can't go to {machine} yet. Take them off, or start the thread on this Mac."),
+                format!(
+                    "Files can't go to {machine} yet. Take them off, or start the thread on {}.",
+                    crate::words::words().this_computer
+                ),
                 cx,
             );
             return;
