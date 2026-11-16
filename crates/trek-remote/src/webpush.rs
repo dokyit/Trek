@@ -145,6 +145,13 @@ struct KeyFile {
     pkcs8: String,
 }
 
+/// Whether `key` (base64url) is a P-256 public key as a page subscribes with it: 65 bytes,
+/// uncompressed.
+pub fn is_public_key(key: &str) -> bool {
+    B64.decode(key.trim())
+        .is_ok_and(|bytes| bytes.len() == 65 && bytes[0] == 4)
+}
+
 impl VapidKey {
     /// A new key pair, and its PKCS#8 bytes to keep.
     pub fn generate() -> io::Result<(Self, Vec<u8>)> {
@@ -357,6 +364,16 @@ pub fn headers(authorization: String, urgent: bool) -> Vec<(&'static str, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_public_key_is_told_from_what_isnt_one() {
+        let (key, _) = VapidKey::generate().unwrap();
+        assert!(is_public_key(&key.public_key()));
+        assert!(!is_public_key("not a key"));
+        assert!(!is_public_key(""));
+        // 65 bytes, but not an uncompressed point.
+        assert!(!is_public_key(&B64.encode([0u8; 65])));
+    }
     use ring::signature::{ECDSA_P256_SHA256_FIXED, UnparsedPublicKey};
 
     fn b64(s: &str) -> Vec<u8> {

@@ -67,6 +67,18 @@ async fn start() -> RemoteHandle {
     RemoteServer::start(config, Arc::new(Host)).await.unwrap()
 }
 
+/// Where the web remote listens, or why it doesn't.
+fn listening(handle: &RemoteHandle) -> std::net::SocketAddr {
+    *handle.web_listening().first().unwrap_or_else(|| {
+        panic!(
+            "the web remote listens: {}",
+            handle
+                .web_trouble()
+                .unwrap_or_else(|| "nothing said".into())
+        )
+    })
+}
+
 /// What the pairing link carries after `#p=`.
 fn link_payload(url: &str) -> Value {
     let (base, fragment) = url.split_once('#').unwrap();
@@ -88,7 +100,7 @@ async fn open(
     origin: Option<&str>,
     path: &str,
 ) -> Result<(wtransport::Connection, Page), String> {
-    let port = handle.web_listening()[0].port();
+    let port = listening(handle).port();
     let config = wtransport::ClientConfig::builder()
         .with_bind_default()
         .with_server_certificate_hashes(hashes.iter().map(|h| digest(h)))
@@ -134,7 +146,7 @@ async fn hear(ws: &mut Page) -> Value {
 #[tokio::test]
 async fn a_page_pairs_and_says_hello_over_webtransport_with_the_certificate_pinned() {
     let handle = start().await;
-    assert!(!handle.web_listening().is_empty(), "the web remote listens");
+    listening(&handle);
     let offer = handle.pairing_offer_with_code("K7Q2-9XMV");
     let link = link_payload(offer.web_url.as_deref().expect("a web link"));
     assert_eq!(link["code"], "K7Q2-9XMV");
@@ -335,5 +347,48 @@ async fn a_page_hands_over_its_push_subscription() {
     assert_eq!(hear(&mut page).await["subscribed"], true);
     assert!(handle.revoke("web-1"));
     assert!(handle.push_targets().is_empty(), "unpairing lets it go");
+    handle.shutdown();
+}
+
+/// Notifications are the web remote's extra: a push key that isn't one leaves the web remote
+/// listening and pairing, only without `web_push`.
+#[tokio::test]
+async fn a_push_key_that_isnt_one_leaves_the_web_remote_listening_without_notifications() {
+    let mut config = ServerConfig::new(host_info());
+    config.bind = "127.0.0.1:0".parse().unwrap();
+    config.web = Some(
+        WebConfig::new(None)
+            .serving_from(PAGE)
+            .with_push_key("not a key".into()),
+    );
+    let handle = RemoteServer::start(config, Arc::new(Host)).await.unwrap();
+    listening(&handle);
+    let offer = handle.pairing_offer_with_code("K7Q2-9XMV");
+    let link = link_payload(offer.web_url.as_deref().unwrap());
+    assert!(
+        link.get("push").is_none(),
+        "no notifications offered: {link}"
+    );
+    let pinned: Vec<String> = link["certs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap().to_string())
+        .collect();
+    let (_conn, mut page) = open(&handle, &pinned, Some(ORIGIN), "/trek").await.unwrap();
+    say(
+        &mut page,
+        json!({"type":"pair","id":"1","protocol":1,"code":"K7Q2-9XMV","device_id":"web-1","device_name":"Pixel 9","platform":"web"}),
+    )
+    .await;
+    let paired = hear(&mut page).await;
+    assert_eq!(paired["type"], "paired", "{paired}");
+    // The test host serves no features, so none at all are listed; web_push isn't among them.
+    assert!(
+        !paired["features"]
+            .as_array()
+            .is_some_and(|f| f.iter().any(|f| f == "web_push")),
+        "{paired}"
+    );
     handle.shutdown();
 }

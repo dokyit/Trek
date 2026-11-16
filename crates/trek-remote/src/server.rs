@@ -238,6 +238,26 @@ fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
     socket.listen(1024)
 }
 
+/// The phone server's listener at `addr`. With the web remote on and no port asked for (`:0`),
+/// one UDP can have too, since the web remote listens at the same number over UDP: a port the
+/// system hands out for TCP can be one it keeps from UDP (Windows reserves whole ranges of them,
+/// as `netsh int ipv4 show excludedportrange protocol=udp` lists).
+fn bind_phone(addr: SocketAddr, web: bool) -> io::Result<TcpListener> {
+    if web && addr.port() == 0 {
+        for _ in 0..16 {
+            let Ok(udp) = std::net::UdpSocket::bind(SocketAddr::new(addr.ip(), 0)) else {
+                break;
+            };
+            let port = udp.local_addr()?.port();
+            drop(udp);
+            if let Ok(listener) = bind(SocketAddr::new(addr.ip(), port)) {
+                return Ok(listener);
+            }
+        }
+    }
+    bind(addr)
+}
+
 /// Starts servers.
 pub struct RemoteServer;
 
@@ -248,6 +268,20 @@ impl RemoteServer {
         config: ServerConfig,
         host: Arc<H>,
     ) -> io::Result<RemoteHandle> {
+        let mut config = config;
+        // Notifications are the web remote's extra: a key that isn't one turns them off, never
+        // the web remote.
+        if let Some(web) = config.web.as_mut()
+            && web
+                .push_key
+                .as_deref()
+                .is_some_and(|k| !crate::webpush::is_public_key(k))
+        {
+            tracing::warn!(
+                "the push key isn't a P-256 public key; the web remote runs without notifications"
+            );
+            web.push_key = None;
+        }
         let registry = match &config.devices_path {
             Some(path) => DeviceRegistry::load(path.clone())?,
             None => DeviceRegistry::in_memory(),
@@ -265,6 +299,7 @@ impl RemoteServer {
                     config,
                     certs: Mutex::new(certs),
                     bound: Mutex::new(Vec::new()),
+                    trouble: Mutex::new(None),
                 }),
                 Err(err) => {
                     tracing::warn!(%err, "the web remote's certificates couldn't be made; serving phones without it");
@@ -272,7 +307,7 @@ impl RemoteServer {
                 }
             }
         });
-        let listener = bind(config.bind)?;
+        let listener = bind_phone(config.bind, web.is_some())?;
         let local_addr = listener.local_addr()?;
         let mut more = Vec::new();
         for &addr in &config.also_bind {
@@ -427,6 +462,15 @@ impl RemoteHandle {
             .as_ref()
             .map(|w| w.bound.lock().unwrap_or_else(|e| e.into_inner()).clone())
             .unwrap_or_default()
+    }
+
+    /// Why the web remote doesn't listen somewhere it was meant to, the last time it couldn't
+    /// (no certificate valid now, or an address it couldn't bind).
+    pub fn web_trouble(&self) -> Option<String> {
+        self.inner
+            .web
+            .as_ref()
+            .and_then(|w| w.trouble.lock().unwrap_or_else(|e| e.into_inner()).clone())
     }
 
     /// The web remote's certificates: each one's hash, and when it's valid.
@@ -796,6 +840,8 @@ struct WebState {
     certs: Mutex<WebCerts>,
     /// The addresses it listens on (UDP).
     bound: Mutex<Vec<SocketAddr>>,
+    /// Why it doesn't listen somewhere, the last time it couldn't.
+    trouble: Mutex<Option<String>>,
 }
 
 impl WebState {
@@ -815,8 +861,10 @@ fn start_web<H: RemoteHost>(inner: &Arc<Inner>, host: &Arc<H>) {
     let Some(web) = &inner.web else {
         return;
     };
+    let say = |why: String| *web.trouble.lock().unwrap_or_else(|e| e.into_inner()) = Some(why);
     let Some(cert) = web.certs().current(now_ms()).cloned() else {
         tracing::warn!("the web remote has no certificate valid now; not serving it");
+        say("no certificate valid now".into());
         return;
     };
     let mut endpoints = Vec::new();
@@ -838,7 +886,10 @@ fn start_web<H: RemoteHost>(inner: &Arc<Inner>, host: &Arc<H>) {
                 ));
                 endpoints.push((endpoint, addr));
             }
-            Err(err) => tracing::warn!(%addr, %err, "the web remote couldn't listen there"),
+            Err(err) => {
+                tracing::warn!(%addr, %err, "the web remote couldn't listen there");
+                say(format!("couldn't listen at {addr}: {err}"));
+            }
         }
     }
     if !endpoints.is_empty() {
