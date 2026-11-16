@@ -66,6 +66,9 @@ pub struct Basecamp {
     summaries: [Option<Arc<Summary>>; 3],
     key: Option<Key>,
     computing: bool,
+    /// Why the last pass couldn't read the history, if it couldn't: drawn instead of an empty
+    /// page, which would read as a fresh install.
+    load_error: Option<String>,
     /// Passes over the store run so far (switching range runs none).
     pub passes: usize,
     /// On screen (the main window's route).
@@ -98,6 +101,7 @@ impl Basecamp {
             summaries: Default::default(),
             key: None,
             computing: false,
+            load_error: None,
             passes: 0,
             open: false,
             hovered: None,
@@ -217,7 +221,7 @@ impl Basecamp {
             && self.summaries.iter().all(Option::is_none)
             && !cache.warm())
         .then_some(self.range);
-        let (tx, rx) = async_channel::unbounded::<(bool, Vec<(Range, Summary)>)>();
+        let (tx, rx) = async_channel::unbounded::<(bool, Vec<(Range, Summary)>, Option<String>)>();
         let pass = self.passes;
         cx.background_executor()
             .spawn(async move {
@@ -230,13 +234,18 @@ impl Basecamp {
                             _ = tx.send_blocking((
                                 false,
                                 vec![(range, Summary::compute(range, &now, window, &g.threads))],
+                                None,
                             ))
                         }
-                        Err(e) => tracing::warn!("basecamp: {e:#}"),
+                        Err(e) => {
+                            tracing::warn!("basecamp: {e:#}");
+                            _ = tx.send_blocking((false, vec![], Some(format!("{e:#}"))));
+                        }
                     }
                 }
                 let first_ms = began.elapsed();
                 let mut counted = (0, 0);
+                let mut failed: Option<String> = None;
                 let all = cache
                     .with(&store, |g| {
                         counted = (g.threads.len(), g.read);
@@ -244,6 +253,7 @@ impl Basecamp {
                     })
                     .unwrap_or_else(|e| {
                         tracing::warn!("basecamp: {e:#}");
+                        failed = Some(format!("{e:#}"));
                         RANGES
                             .map(|r| (r, Summary::compute(r, &now, r.window(&now), &[])))
                             .to_vec()
@@ -256,12 +266,15 @@ impl Basecamp {
                         crate::perf::ms(began.elapsed())
                     );
                 }
-                let _ = tx.send_blocking((true, all));
+                let _ = tx.send_blocking((true, all, failed));
             })
             .detach();
         self._compute = Some(cx.spawn(async move |this, cx| {
-            while let Ok((done, found)) = rx.recv().await {
+            while let Ok((done, found, error)) = rx.recv().await {
                 let _ = this.update(cx, |this, cx| {
+                    if error.is_some() || done {
+                        this.load_error = error;
+                    }
                     for (range, summary) in found {
                         this.summaries[range as usize] = Some(Arc::new(summary));
                     }
@@ -735,6 +748,45 @@ impl Basecamp {
     }
 
     /// Nothing done in this range yet.
+    /// The history couldn't be read: say so, and offer another try, rather than an empty page.
+    fn load_failed(&self, why: &str, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let short: String = why
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(160)
+            .collect();
+        h_flex()
+            .id("basecamp-load-failed")
+            .test_support()
+            .gap(px(16.))
+            .py(px(14.))
+            .border_t_1()
+            .border_b_1()
+            .border_color(theme.foreground.opacity(0.07))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(text::BODY))
+                    .text_color(palette::amber(cx))
+                    .child(format!("Couldn't read your history: {short}")),
+            )
+            .child(
+                Button::new("basecamp-try-again")
+                    .outline()
+                    .small()
+                    .label("Try again")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.key = None;
+                        this.refresh(cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
     fn empty(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let text = match self.range {
@@ -792,7 +844,10 @@ impl Render for Basecamp {
                 self.table("basecamp-project", "Projects", "Project", &s.projects, cx),
                 self.table("basecamp-model", "Models", "Model", &s.models, cx),
             ],
-            Some(_) => vec![self.empty(cx)],
+            Some(_) => vec![match self.load_error.clone() {
+                Some(why) => self.load_failed(&why, cx),
+                None => self.empty(cx),
+            }],
             None => vec![
                 div()
                     .text_size(px(text::BODY))
