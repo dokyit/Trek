@@ -363,3 +363,48 @@ fn a_plugin_too_big_to_seal_says_so_and_waits() {
         });
     });
 }
+
+#[test]
+fn a_plugin_key_that_is_trek_s_own_stays_trek_s() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    run(async |cx| {
+        let trek = start(cx);
+        let dir = trek_core::plugins::dir().join("keys");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.toml"),
+            "name = \"Keys\"\n\
+             [[command]]\nid = \"mine\"\ntitle = \"Mine\"\nkey = \"cmd-alt-j\"\naction = \"set:hits=1\"\n\
+             [[command]]\nid = \"theirs\"\ntitle = \"Theirs\"\nkey = \"cmd-n\"\naction = \"set:hits=2\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            trek_core::plugins::dir().join(trek_core::plugins::STATE_FILE),
+            "[plugins.keys]\non = true\n",
+        )
+        .unwrap();
+        cx.update(|cx| trek_app::plugins::reread(&trek.ws, cx));
+        cx.update(|cx| {
+            assert!(trek_app::plugins::running("keys", cx));
+            // cmd-n is Trek's new thread: the plugin's command keeps its palette row, keyless.
+            let keys: Vec<(String, Option<String>)> = trek_app::plugins::palette_entries(cx)
+                .into_iter()
+                .filter_map(|e| match e {
+                    trek_app::plugins::PaletteEntry::Command { command, key, .. } => {
+                        Some((command, key))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                keys,
+                [
+                    ("mine".to_string(), Some("cmd-alt-j".to_string())),
+                    ("theirs".to_string(), None)
+                ]
+            );
+            assert!(trek_app::plugins::free_key("cmd-n", cx).is_none());
+            assert!(trek_app::plugins::free_key("cmd-alt-j", cx).is_some());
+        });
+    });
+}

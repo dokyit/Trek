@@ -447,9 +447,22 @@ fn keystroke(key: &str) -> Option<Keystroke> {
     Keystroke::parse(&key).ok()
 }
 
+/// Whether Trek's own keymap already has `key` (on its own, in any context): a plugin's command
+/// on it would run as well as Trek's, so it keeps only its palette entry.
+fn trek_has(key: &Keystroke, cx: &App) -> bool {
+    cx.key_bindings().borrow().bindings().any(
+        |b| matches!(b.keystrokes(), [k] if k.key() == key.key && *k.modifiers() == key.modifiers),
+    )
+}
+
+/// A plugin command's key, when it's one Trek can give it: well formed, and not one of Trek's.
+pub fn free_key(key: &str, cx: &App) -> Option<Keystroke> {
+    keystroke(key).filter(|k| !trek_has(k, cx))
+}
+
 /// Hear the keys the running plugins' commands name: nothing is heard while none has a key.
 fn bind_keys(cx: &mut App) {
-    let table: Vec<(Keystroke, String, String)> = cx
+    let wanted: Vec<(Keystroke, String, String)> = cx
         .try_global::<Plugins>()
         .map(|p| {
             p.plugins
@@ -467,6 +480,15 @@ fn bind_keys(cx: &mut App) {
                 .collect()
         })
         .unwrap_or_default();
+    // A key Trek has already stays Trek's: the command is still in the palette.
+    let (taken, table): (Vec<_>, Vec<_>) =
+        wanted.into_iter().partition(|(k, _, _)| trek_has(k, cx));
+    for (key, plugin, command) in taken {
+        core::log(
+            &plugin,
+            &format!("{command}'s key {key} is one of Trek's own: it's in the palette without it"),
+        );
+    }
     if table.is_empty() {
         if cx.has_global::<Keys>() {
             cx.remove_global::<Keys>();
@@ -543,7 +565,7 @@ pub fn palette_entries(cx: &App) -> Vec<PaletteEntry> {
                     plugin: m.id.clone(),
                     command: c.id.clone(),
                     title: c.title.clone(),
-                    key: c.key.clone(),
+                    key: c.key.clone().filter(|k| free_key(k, cx).is_some()),
                 });
             }
             for page in &m.pages {

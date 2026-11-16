@@ -179,7 +179,8 @@ fails (its tree can't be read, its logic stops) falls back to Trek's at once, wi
 
 **Commands and hooks.** `[[command]]` puts an entry in the palette (`run` names a function of the
 logic, or `action` is one of the element actions) and, with `key`, a keybinding (it needs cmd,
-ctrl or alt; `cmd` is Ctrl on Windows). The palette also opens each plugin's pages and panels and
+ctrl or alt; `cmd` is Ctrl on Windows; a key Trek already has stays Trek's, and the plugin's log
+says so). The palette also opens each plugin's pages and panels and
 turns plugins on and off. `hooks = ["turn.end", …]` are the events its logic hears: `turn.start`,
 `turn.end`, `thread.needs-you`, `file.changed` (a turn changed files), `theme.changed`,
 `app.start`. Trek watches for them only while some running plugin names one, by looking over

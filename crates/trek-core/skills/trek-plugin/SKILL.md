@@ -65,7 +65,7 @@ ui = "ui/meter.json"                   # an element tree: a JSON file, or a tabl
 [[command]]                            # an entry in the palette, and a key
 id = "reset"
 title = "Burn: reset the meter"
-key = "cmd-alt-b"                      # needs cmd, ctrl or alt; cmd is Ctrl on Windows
+key = "cmd-alt-b"                      # needs cmd, ctrl or alt; cmd is Ctrl on Windows; not one of Trek's
 run = "reset"                          # a function of main.js; or action = "page:burn"
 
 [[page]]                               # a page in the sidebar's Pages group (your HTML)
