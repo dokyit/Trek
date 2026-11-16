@@ -1509,4 +1509,74 @@ mod tests {
         assert_eq!(ease(1.), 1.);
         assert_eq!(ease(0.5), 0.5);
     }
+
+    /// WCAG contrast of `fg` over `bg` (0xRRGGBBAA; a translucent `fg` laid on `bg` first).
+    fn contrast(fg: u32, bg: u32) -> f64 {
+        let lum = |c: u32| {
+            let ch = |s: u32| {
+                let v = ((c >> s) & 0xFF) as f64 / 255.0;
+                if v <= 0.03928 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * ch(24) + 0.7152 * ch(16) + 0.0722 * ch(8)
+        };
+        let fg = mix(bg | 0xFF, fg | 0xFF, (fg & 0xFF) as f32 / 255.0);
+        let (a, b) = (lum(fg), lum(bg | 0xFF));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// Every look Trek offers, in dark and light: its built-in themes and the example plugins'.
+    fn every_look() -> Vec<Theme> {
+        let mut out = core::built_in();
+        for (name, files) in trek_core::plugins::examples::ALL {
+            let manifest = files.iter().find(|(p, _)| *p == "plugin.toml").unwrap().1;
+            for (path, text) in files.iter().filter(|(p, _)| {
+                p.ends_with(".toml") && *p != "plugin.toml" && manifest.contains(p)
+            }) {
+                out.push(
+                    core::parse(name, text, core::Origin::BuiltIn)
+                        .unwrap_or_else(|e| panic!("{name}/{path}: {e}")),
+                );
+            }
+        }
+        out
+    }
+
+    /// The text every theme sets on its fills and surfaces reads as small text (4.5:1): a
+    /// button's label at rest and under the pointer, body text on the window and in menus, a
+    /// red button's label, a link. Buttons' labels are 12-13 px.
+    #[test]
+    fn every_theme_s_buttons_and_text_read_as_small_text() {
+        let (mut checked, mut under) = (0, Vec::new());
+        for t in every_look() {
+            for dark in [true, false] {
+                let c = super::theme_colours(&t, dark);
+                let get = |k: &str| c.get(k).and_then(rgba).unwrap_or_else(|| panic!("{k}"));
+                let mode = if dark { "dark" } else { "light" };
+                for (fg, bg) in [
+                    ("primary.foreground", "primary.background"),
+                    ("primary.foreground", "primary.hover.background"),
+                    ("primary.foreground", "primary.active.background"),
+                    ("sidebar.primary.foreground", "sidebar.primary.background"),
+                    ("danger.foreground", "danger.background"),
+                    ("danger.foreground", "danger.hover.background"),
+                    ("foreground", "background"),
+                    ("popover.foreground", "popover.background"),
+                    ("muted.foreground", "background"),
+                    ("link", "background"),
+                ] {
+                    let ratio = contrast(get(fg), get(bg));
+                    if ratio < 4.5 {
+                        under.push(format!("{} {mode}: {fg} on {bg} is {ratio:.2}:1", t.id));
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert!(under.is_empty(), "{}", under.join("\n"));
+        assert!(checked >= 10 * 2 * 5, "{checked}");
+    }
 }
