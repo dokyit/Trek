@@ -36,7 +36,12 @@ pub struct Attempt {
     pub line: String,
 }
 
+/// The updater's folder. An isolated run (tests, the capture driver) has one in its data folder
+/// instead: the LaunchAgent's record is of the user's own iPhone, which such a run never shows.
 fn state_dir() -> PathBuf {
+    if trek_core::paths::isolated() {
+        return trek_core::paths::data_dir().join("phone-update");
+    }
     trek_core::paths::home().join(STATE)
 }
 
@@ -303,6 +308,10 @@ impl Workspace {
                 "Trek on {} can't build the iPhone app: that takes Xcode",
                 words.this_computer
             ));
+        }
+        // The script builds for and installs on whichever iPhone this Mac reaches: the user's.
+        if trek_core::paths::isolated() {
+            return Err("An isolated Trek doesn't install on a real iPhone".into());
         }
         if self.phone_update.running {
             return Ok(());

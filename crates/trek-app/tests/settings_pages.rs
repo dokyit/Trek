@@ -171,6 +171,45 @@ fn a_pairing_code_goes_from_settings_when_it_expires() {
 }
 
 #[test]
+fn an_isolated_run_shows_no_iphone_install_of_the_users() {
+    use trek_app::remote::phone_update;
+    run(async |cx| {
+        let trek = open(cx);
+        trek.update(cx, |ws, cx| {
+            ws.navigate(Route::Settings(SettingsPage::Mobile), cx)
+        });
+        trek.render(cx);
+        // Whatever the phone updater of this Mac recorded of the user's iPhone stays out.
+        assert_eq!(phone_update::last_attempt(), None);
+        assert!(
+            !trek.visible(cx, "mobile-update-phone"),
+            "no iPhone to speak of"
+        );
+        // The run's own record, in its data folder, is the one read.
+        let dir = trek_core::paths::data_dir().join("phone-update");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("last"),
+            "at=1793390000\nresult=ok\nline=Installed Trek 0.4.27 on the iPhone (Test iPhone)\n",
+        )
+        .unwrap();
+        assert_eq!(
+            phone_update::last_attempt().map(|a| a.line),
+            Some("Installed Trek 0.4.27 on the iPhone (Test iPhone)".into())
+        );
+        trek.render(cx);
+        // Only where the iPhone app builds (Xcode).
+        assert_eq!(
+            trek.visible(cx, "mobile-update-phone"),
+            cfg!(target_os = "macos")
+        );
+        // And it never builds for or installs on the iPhone this Mac reaches.
+        assert!(trek.update(cx, |ws, cx| ws.update_phone(None, cx)).is_err());
+        assert!(!trek.read(cx, |ws, _| ws.phone_update.running));
+    });
+}
+
+#[test]
 fn the_settings_scroll_container_can_be_found_by_the_driver() {
     run(async |cx| {
         let trek = open(cx);
