@@ -76,56 +76,13 @@ pub struct Facts {
     pub stalled: bool,
 }
 
-/// Installing Trek Driver from the iPhone tool: what this Mac lacks first, then the phone
-/// updater's steps as it builds Trek's iPhone app with the driver inside and installs it.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum Setup {
-    #[default]
-    Idle,
-    /// Looking at what this Mac has to build the app with.
-    Checking,
-    /// The one thing this Mac lacks to build the app.
-    Missing(Missing),
-    Building,
-    Installing,
-    /// Installed: the driver is read again.
-    Installed,
-    /// In the updater's words.
-    Failed(String),
-}
-
-impl Setup {
-    /// Under way: the install button waits.
-    pub fn busy(&self) -> bool {
-        matches!(self, Setup::Checking | Setup::Building | Setup::Installing)
-    }
-}
-
-/// What a Mac needs to build Trek's iPhone app, in the order it's looked for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Missing {
-    Xcode,
-    AppleId,
-    Source,
-}
+pub use crate::setup::{Missing, Setup};
 
 impl Missing {
-    pub fn line(self) -> &'static str {
-        match self {
-            Missing::Xcode => {
-                "Building Trek's iPhone app with its driver takes Xcode, which isn't on this Mac."
-            }
-            Missing::AppleId => {
-                "Xcode needs your Apple ID to sign Trek's iPhone app: add it in Xcode › Settings › Accounts."
-            }
-            Missing::Source => {
-                "Trek builds its iPhone app from its source code, which isn't on this Mac yet."
-            }
-        }
-    }
-
+    /// The button for what's missing (a Mac's: a PC's tool never shows this strip).
     pub fn fix(self) -> Fix {
         match self {
+            Missing::Mac => Fix::CheckAgain,
             Missing::Xcode => Fix::GetXcode,
             Missing::AppleId => Fix::OpenXcode,
             Missing::Source => Fix::GetSource,

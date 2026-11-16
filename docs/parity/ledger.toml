@@ -854,8 +854,9 @@ what = "Get the iPhone app, and update it from the computer"
 macos = "yes"
 windows = "no"
 live_skip = "The iPhone app is built with Xcode on a Mac."
-note = "Built and installed with Xcode, which is Mac-only, so a Windows-only user can't get it. TestFlight or App Store distribution would."
-code = ["crates/trek-app/src/remote.rs", "crates/trek-app/src/remote/phone_update.rs"]
+note = "Built and installed with Xcode, which is Mac-only, so a Windows-only user can't get it. TestFlight or App Store distribution would. On a PC, a phone's ask to update and the driver's install say so in one line (`trek_phone::setup::Missing::Mac`: the driver is installed from a Mac; the PC's iPhone tool shows the apps and files, and the screen once its developer disk image is mounted)."
+code = ["crates/trek-app/src/remote.rs", "crates/trek-app/src/remote/phone_update.rs", "crates/trek-phone/src/setup.rs"]
+tests = ["crates/trek-phone/src/setup.rs", "crates/trek-app/src/remote/phone_update.rs"]
 
 [[feature]]
 id = "phone-uploads-space"

@@ -205,7 +205,11 @@ pub fn get_source_command() -> String {
 /// Trek's source, as the phone updater would find out a few minutes in. Blocking (a couple of
 /// quick processes). Nothing that could ask to install anything is run: `xcrun` without the
 /// command line tools would.
-pub fn missing() -> Option<trek_phone::route::Missing> {
+pub fn missing() -> Option<trek_phone::setup::Missing> {
+    // Trek Driver is built with Xcode, which only a Mac runs.
+    if !cfg!(target_os = "macos") {
+        return Some(trek_phone::setup::Missing::Mac);
+    }
     let developer = std::process::Command::new("/usr/bin/xcode-select")
         .arg("-p")
         .output()
@@ -227,26 +231,13 @@ pub fn missing() -> Option<trek_phone::route::Missing> {
         .output()
         .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("teamID = "));
     let source = source_dir().join(".git").exists();
-    first_missing(xcode, team, source)
-}
-
-fn first_missing(xcode: bool, team: bool, source: bool) -> Option<trek_phone::route::Missing> {
-    use trek_phone::route::Missing;
-    if !xcode {
-        Some(Missing::Xcode)
-    } else if !team {
-        Some(Missing::AppleId)
-    } else if !source {
-        Some(Missing::Source)
-    } else {
-        None
-    }
+    trek_phone::setup::first_missing(true, xcode, team, source)
 }
 
 /// Where an install the iPhone tool follows stands, from the run's steps (`running`, and the
 /// step it last said).
-pub fn setup_of(running: bool, now: Option<&tr::PhoneUpdate>) -> trek_phone::route::Setup {
-    use trek_phone::route::Setup;
+pub fn setup_of(running: bool, now: Option<&tr::PhoneUpdate>) -> trek_phone::setup::Setup {
+    use trek_phone::setup::Setup;
     match now {
         Some(step) => match step.state {
             tr::PhoneUpdateState::Building => Setup::Building,
@@ -303,11 +294,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         if !cfg!(target_os = "macos") {
-            let words = crate::words::words();
-            return Err(format!(
-                "Trek on {} can't build the iPhone app: that takes Xcode",
-                words.this_computer
-            ));
+            return Err(trek_phone::setup::Missing::Mac.line().into());
         }
         // The script builds for and installs on whichever iPhone this Mac reaches: the user's.
         if trek_core::paths::isolated() {
@@ -454,18 +441,14 @@ mod tests {
     }
 
     #[test]
-    fn the_first_thing_this_mac_lacks_is_named() {
-        use trek_phone::route::Missing;
-        assert_eq!(first_missing(false, false, false), Some(Missing::Xcode));
-        assert_eq!(first_missing(true, false, false), Some(Missing::AppleId));
-        assert_eq!(first_missing(true, true, false), Some(Missing::Source));
-        assert_eq!(first_missing(true, true, true), None);
+    fn the_source_is_fetched_where_the_updater_looks() {
+        // What's missing, in its order, is `trek_phone::setup::first_missing`'s, tested there.
         assert!(get_source_command().starts_with("git clone https://github.com/dokyit/Trek.git '"));
     }
 
     #[test]
     fn an_install_from_the_tool_follows_the_runs_steps() {
-        use trek_phone::route::Setup;
+        use trek_phone::setup::Setup;
         let step = |state, message: Option<&str>| tr::PhoneUpdate {
             state,
             version: None,

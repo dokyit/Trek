@@ -31,6 +31,7 @@
 pub mod files;
 pub mod hid;
 pub mod lease;
+pub mod setup;
 
 #[cfg(all(feature = "coredevice", any(target_os = "macos", windows)))]
 pub mod ax;
