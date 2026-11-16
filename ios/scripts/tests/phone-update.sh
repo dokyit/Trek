@@ -105,6 +105,52 @@ line=Your Mac couldn't reach the iPhone: plug it in or join the same Wi-Fi"
 check "the log has it its own way" "$(tail -1 "$WORK/home/Library/Logs/trek-phone-update.log" | cut -c21-)" \
   "asked, but no iPhone in reach (not plugged in, and not on this Wi-Fi or asleep too long)"
 
+# A run that holds the lock: busy while it's young, stuck past $STUCK (one install waited three
+# hours on an iPhone that had left the Wi-Fi, and held every later update off).
+LOCK="$WORK/home/Library/Application Support/dev.trek.phone-update/lock"
+hold() {  # how long ago it began, in seconds
+  sleep 300 &
+  held=$!
+  mkdir -p "$LOCK"
+  print $held > "$LOCK/pid"
+  print $(( $(date +%s) - $1 )) > "$LOCK/at"
+}
+hold 60
+out=$(TREK_MAC_UPDATE=0 run)
+check "a run that began a minute ago is busy" "$out" "already running ($held)"
+kill -0 $held 2>/dev/null; check "and is left running" "$?" "0"
+kill $held 2>/dev/null; rm -rf "$LOCK"
+
+hold 3600
+out=$(TREK_MAC_UPDATE=0 run --status)
+check "asked what it would do, a stuck run is named and left" "$out" \
+  "the update that began 60 min ago ($held) is stuck: the next update stops it and starts again"
+kill -0 $held 2>/dev/null; check "and is still there" "$?" "0"
+out=$(TREK_MAC_UPDATE=0 run)
+check "a run that began an hour ago is stuck: stopped, and this one goes on" "$out" \
+  "the update that began 60 min ago ($held) is stuck: stopping it and starting again
+no iPhone in reach (not plugged in, and not on this Wi-Fi or asleep too long)"
+kill -0 $held 2>/dev/null; check "the stuck run is gone" "$?" "1"
+[[ -e "$LOCK" ]]; check "and the lock is free again" "$?" "1"
+
+hold 3600
+out=$(TREK_MAC_UPDATE=0 TREK_PHONE_UPDATE_STUCK=7200 run)
+check "how long counts as stuck can be set" "$out" "already running ($held)"
+kill $held 2>/dev/null; rm -rf "$LOCK"
+
+# The install's time limit, by itself (nothing is installed here): the script's own `within`.
+eval "$(sed -n '/^stop_tree() {/,/^}/p; /^within() {/,/^}/p' "$SCRIPT")"
+began=$(date +%s)
+within 1 sleep 30; code=$?
+check "an install that doesn't finish is ended, and says 124" "$code" "124"
+(( $(date +%s) - began < 10 )); check "within seconds of its limit" "$?" "0"
+# What it started goes with it (xcrun starts devicectl; a build runs in a subshell).
+within 1 sh -c 'sleep 41 & wait'; code=$?
+check "an install that started something else is ended too" "$code" "124"
+/usr/bin/pgrep -f "sleep 41" >/dev/null; check "and what it started is gone" "$?" "1"
+within 5 sh -c 'exit 3'; check "one that fails in time keeps its own answer" "$?" "3"
+within 5 true; check "one that finishes in time passed" "$?" "0"
+
 if (( fails )); then
   print "$fails failed"
   exit 1

@@ -45,6 +45,8 @@ PROFILES="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
 LOG="$HOME/Library/Logs/trek-phone-update.log"
 RENEW=$((2 * 86400))    # renew the signing with this much (or less) left
 URGENT=$((12 * 3600))   # this close to lapsing, don't wait for builds or an open app
+STUCK="${TREK_PHONE_UPDATE_STUCK:-2700}"       # a run older than this (45 min) is stuck: see the lock
+INSTALL_LIMIT="${TREK_PHONE_INSTALL_LIMIT:-900}"  # an install that takes longer than this is ended
 MODE="${1:-}"
 ASKED=0
 [[ "$MODE" == --asked ]] && ASKED=1 MODE=--force
@@ -80,20 +82,49 @@ if [[ -e "$STATE/off" && "$MODE" != --force ]]; then
   exit 0
 fi
 
-# One at a time.
+# End a process and all it started (a build runs in a subshell, xcrun starts devicectl), the
+# deepest first.
+stop_tree() {  # signal, pid
+  local kid
+  for kid in $(pgrep -P "$2" 2>/dev/null); do stop_tree "$1" "$kid"; done
+  kill "$1" "$2" 2>/dev/null
+}
+
+# One at a time. A run that has gone on past $STUCK is stuck, not busy (an install once waited
+# three hours on an iPhone that had left the Wi-Fi, and every update asked for in that time was
+# told "already updating"): it's stopped, with what it started, and this run takes its place.
 if ! mkdir "$STATE/lock" 2>/dev/null; then
   other=$(cat "$STATE/lock/pid" 2>/dev/null)
   if [[ -n "$other" ]] && kill -0 "$other" 2>/dev/null; then
-    log "already running ($other)"
-    (( ASKED )) && event "failed Your Mac is already updating the iPhone; it's done in a few minutes"
-    exit 0
+    since=$(cat "$STATE/lock/at" 2>/dev/null)
+    [[ "$since" == <-> ]] || since=$(stat -f %m "$STATE/lock" 2>/dev/null || date +%s)
+    age=$(( $(date +%s) - since ))
+    if (( age <= STUCK )); then
+      log "already running ($other)"
+      (( ASKED )) && event "failed Your Mac is already updating the iPhone; it's done in a few minutes"
+      exit 0
+    fi
+    if [[ "$MODE" == --status ]]; then
+      log "the update that began $(( age / 60 )) min ago ($other) is stuck: the next update stops it and starts again"
+      exit 0
+    fi
+    log "the update that began $(( age / 60 )) min ago ($other) is stuck: stopping it and starting again"
+    stop_tree -TERM "$other"
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      kill -0 "$other" 2>/dev/null || break
+      sleep 0.5
+    done
+    stop_tree -KILL "$other"
   fi
   rm -rf "$STATE/lock"
   mkdir "$STATE/lock" || exit 0
 fi
 print $$ > "$STATE/lock/pid"
+date +%s > "$STATE/lock/at"
 TMP=$(mktemp -d)
-trap 'rm -rf "$STATE/lock" "$TMP"' EXIT
+# The lock goes only while it's still this run's: a run that was stopped for being stuck must not
+# take the lock of the one that replaced it.
+trap '[[ "$(cat "$STATE/lock/pid" 2>/dev/null)" == $$ ]] && rm -rf "$STATE/lock"; rm -rf "$TMP"' EXIT
 
 # 1. This Mac's Trek, while it's closed (see the top). Not when someone asked from Trek, which is
 # open then. A Trek before `mac-update` (0.4.28) exits 2 with its usage: it updates while open.
@@ -355,15 +386,49 @@ fi
 # the same installd, but that wasn't tried on one. So the app is opened again below if it was open,
 # and the iPhone that asked was told ("Installing… Trek will close and open again").
 event "installing $VERSION"
+# A command, ended when it takes longer than $1 seconds (124 then, as timeout(1) answers). An
+# iPhone that leaves the Wi-Fi mid-copy closes nothing, and an install would wait on it for good.
+within() {  # seconds, command...
+  local limit=$1 waited=0 pid
+  shift
+  "$@" &
+  pid=$!
+  while kill -0 $pid 2>/dev/null; do
+    if (( waited >= limit )); then
+      stop_tree -TERM $pid
+      sleep 1
+      stop_tree -KILL $pid
+      wait $pid 2>/dev/null
+      return 124
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait $pid
+}
+gave_up=0
 install_app() {
-  if (( VIA_MUX )) && "$TREK_MCP" phone-device install "$APP" --udid "$UDID" > "$TMP/install.log" 2>&1; then
-    log "installed over usbmuxd (no Xcode)"
-  else
-    xcrun devicectl device install app --device "$UDID" "$APP" > "$TMP/install.log" 2>&1
+  local code
+  if (( VIA_MUX )); then
+    within "$INSTALL_LIMIT" "$TREK_MCP" phone-device install "$APP" --udid "$UDID" > "$TMP/install.log" 2>&1
+    code=$?
+    if (( code == 0 )); then
+      log "installed over usbmuxd (no Xcode)"
+      return 0
+    fi
+    (( code == 124 )) && log "the install over usbmuxd didn't finish in $INSTALL_LIMIT s: trying Xcode's devicectl"
   fi
+  within "$INSTALL_LIMIT" xcrun devicectl device install app --device "$UDID" "$APP" > "$TMP/install.log" 2>&1
+  code=$?
+  (( code == 124 )) && gave_up=1
+  return $code
 }
 if ! install_app; then
   installed=0
+  if (( gave_up )); then
+    fail "The iPhone stopped answering during the install: unlock it, keep it plugged in or on the same Wi-Fi, and update again" \
+      "install gave up: nothing from the iPhone in $INSTALL_LIMIT s"
+  fi
   if [[ -d "$APP/PlugIns/TrekActivity.appex" ]]; then
     # A free team's three apps may have no room for the extension: Trek itself comes first.
     log "the iPhone refused the install: trying without the Live Activity"
