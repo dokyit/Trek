@@ -74,13 +74,16 @@ pub fn surface(
         .into_any_element()
 }
 
-/// The user's threads as plugin `plugin` may know them (it has `threads:read`: a thread list's
-/// replacement must), newest first, without the archived.
-fn threads_value(plugin: &str, ws: &Entity<Workspace>, cx: &App) -> Value {
-    let usage = cx
-        .try_global::<Plugins>()
-        .and_then(|p| p.find(plugin))
-        .is_some_and(|p| p.manifest.wants(&Permission::UsageRead));
+/// The user's threads as plugin `plugin` may know them, newest first, without the archived: a
+/// thread list's replacement must ask for `threads:read` (`trek_core::plugins::parse`), and only
+/// what it was given is in them.
+pub fn threads_value(plugin: &str, ws: &Entity<Workspace>, cx: &App) -> Value {
+    let wants = |perm: Permission| {
+        cx.try_global::<Plugins>()
+            .and_then(|p| p.find(plugin))
+            .is_some_and(|p| p.manifest.wants(&perm))
+    };
+    let (read, usage) = (wants(Permission::ThreadsRead), wants(Permission::UsageRead));
     let ws = ws.read(cx);
     let mut threads: Vec<&trek_core::store::Thread> = ws
         .threads
@@ -92,7 +95,7 @@ fn threads_value(plugin: &str, ws: &Entity<Workspace>, cx: &App) -> Value {
         threads
             .into_iter()
             .take(500)
-            .map(|t| thread_value(t, ws, true, usage))
+            .map(|t| thread_value(t, ws, read, usage))
             .collect(),
     )
 }

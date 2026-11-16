@@ -68,18 +68,20 @@ pub fn now(name: &str, manifest: &Manifest, ws: &Entity<Workspace>, cx: &App) ->
             }))
         }
         "usage" => {
+            // Tokens and cost are usage:read's; a thread's title is threads:read's.
+            let titles = manifest.wants(&Permission::ThreadsRead);
             let rows: Vec<Value> = ws
                 .threads
                 .iter()
                 .filter_map(|t| {
                     let spend = ws.live.get(&t.id)?.spend.as_ref()?;
-                    Some(json!({
-                        "id": t.id,
-                        "title": t.title,
-                        "tokens": spend.tokens(),
-                        "cost": spend.usd(),
-                        "updated": t.updated_at,
-                    }))
+                    Some(usage_row(
+                        &t.id,
+                        &t.title,
+                        t.updated_at,
+                        (spend.tokens(), spend.usd()),
+                        titles,
+                    ))
                 })
                 .take(MAX_THREADS)
                 .collect();
@@ -136,5 +138,41 @@ pub fn now(name: &str, manifest: &Manifest, ws: &Entity<Workspace>, cx: &App) ->
             ))
         })),
         _ => Answer::Unknown,
+    }
+}
+
+/// One thread's row in `usage`: its id, time, tokens and cost, and its title only for a plugin
+/// that may read threads (`titles`).
+fn usage_row(
+    id: &str,
+    title: &str,
+    updated: i64,
+    (tokens, cost): (u64, f64),
+    titles: bool,
+) -> Value {
+    let mut row = json!({
+        "id": id,
+        "tokens": tokens,
+        "cost": cost,
+        "updated": updated,
+    });
+    if titles {
+        row["title"] = json!(title);
+    }
+    row
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: the gpui glob import brings its own `test` attribute.
+    use super::usage_row;
+
+    #[test]
+    fn usage_names_a_thread_only_for_a_plugin_that_may_read_threads() {
+        let row = usage_row("t1", "Fix the login bug", 5, (1200, 0.04), false);
+        assert_eq!(row["tokens"], 1200);
+        assert!(row.get("title").is_none(), "usage:read alone: {row}");
+        let row = usage_row("t1", "Fix the login bug", 5, (1200, 0.04), true);
+        assert_eq!(row["title"], "Fix the login bug");
     }
 }

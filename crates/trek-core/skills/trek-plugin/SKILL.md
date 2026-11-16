@@ -151,7 +151,8 @@ colours and fonts. JSON in a file, or the same as a TOML table.
   `title`, `state` (`working`, `needs-you`, `idle`, `done`, `failed`), `agent`, `model`,
   `project`, `branch`, `started`, `updated`, `added`, `removed`; with `usage:read` also
   `tokens`, `cost`, `context.used`, `context.size`, `context.share`.
-- `threads`: in a `thread-list` replacement, the list of threads (the same fields), newest first.
+- `threads`: in a `thread-list` replacement (which needs `threads:read`), the list of threads
+  (the same fields), newest first.
 - `project.name`; `theme.dark`, `theme.id`; `state.<key>`: the plugin's own state (below).
 - Filters: `k` (12.3k), `int` (10,281), `usd`, `pct`, `ago` (a time as 3m, 2h), `upper`,
   `lower`, `plural:commit` (3 commits), `or:text` (when empty). A path that isn't there is empty.
@@ -197,7 +198,8 @@ Trek's own places are slots.
     between launches. Use it, not `localStorage`.
   - `trek.data(name)`: `"threads"` (a list, as above) and `"finished"` (`{days, start, total,
     today, working, waiting}`: threads settled per day for twelve weeks) with `threads:read`;
-    `"usage"` with `usage:read`; `"commits"` (`{weeks, total, start, mine}`: the project's year)
+    `"usage"` (`{tokens, cost, threads}`, each thread's `title` only with `threads:read`) with
+    `usage:read`; `"commits"` (`{weeks, total, start, mine}`: the project's year)
     and `"project"` with `git:read`; `"notes"` with `notes:read`.
   - `trek.open(threadId)`, `trek.newThread()` (`threads:open`); `trek.send(threadId, text)`
     (`threads:send`); `trek.toast(text)`.

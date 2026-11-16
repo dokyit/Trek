@@ -708,6 +708,12 @@ pub fn parse(text: &str, dir: &Path, folder_id: &str) -> Result<Manifest, String
         if replacements.iter().any(|o| o.surface == surface) {
             return Err(format!("[[replace]] {} is there twice", surface.name()));
         }
+        if surface == Surface::ThreadList && !permissions.contains(&Permission::ThreadsRead) {
+            return Err(
+                "[[replace]] thread-list shows your threads: it needs the threads:read permission"
+                    .into(),
+            );
+        }
         replacements.push(Replacement {
             surface,
             title: r.title.clone().unwrap_or_else(|| name.clone()),
@@ -1365,7 +1371,7 @@ mod tests {
 name = "Burn"
 version = "1.2.0"
 trek = ">=0.4.0"
-permissions = ["usage:read", "threads:open", "network:api.example.com"]
+permissions = ["threads:read", "usage:read", "threads:open", "network:api.example.com"]
 main = "main.js"
 hooks = ["turn.end"]
 
@@ -1460,6 +1466,11 @@ run = "reset"
             "name = \"X\"\n[[slot]]\nat = \"thread.header\"\nui = { type = \"button\", text = \"Go\", on = \"new-thread\" }\n",
         );
         assert!(e.contains("threads:open"), "{e}");
+        // A thread list of its own lists the user's threads: that's threads:read.
+        let e = bad(
+            "name = \"X\"\n[[replace]]\nsurface = \"thread-list\"\nui = { type = \"trek:thread-list\" }\n",
+        );
+        assert!(e.contains("threads:read"), "{e}");
         let e = bad(
             "name = \"X\"\n[[slot]]\nat = \"composer.border\"\nui = { type = \"text\", text = \"x\" }\n",
         );
