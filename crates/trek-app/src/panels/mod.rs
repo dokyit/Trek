@@ -529,6 +529,16 @@ impl RightPanel {
             Some(View::Phone(p)) => p.update(cx, |p, cx| p.release(window, cx)),
             _ => {}
         }
+        // The keys were in the tab going (its shell), or nothing took them from it: once its view
+        // goes they'd be with nothing, so they go back to the composer unless the tab in front
+        // after it takes them.
+        let before = window.focused(cx);
+        let had_keys = self.open
+            && self.active == Some(id)
+            && match self.tabs.iter().find(|t| t.id == id).map(|t| &t.view) {
+                Some(View::Terminal(t)) => t.read(cx).focus_handle().is_focused(window),
+                _ => before.is_some(),
+            };
         let ix = self.tabs.iter().position(|t| t.id == id);
         self.tabs.retain(|t| t.id != id);
         if self.active == Some(id) {
@@ -537,6 +547,11 @@ impl RightPanel {
                 .map(|t| t.id);
         }
         self.after_activate(window, cx);
+        if had_keys && window.focused(cx) == before {
+            self.workspace.update(cx, |_, cx| {
+                cx.emit(crate::workspace::WorkspaceEvent::FocusComposer)
+            });
+        }
     }
 
     /// Native web views draw above GPUI, so only the visible Browser tab may show.

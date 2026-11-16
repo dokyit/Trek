@@ -487,10 +487,18 @@ impl TrekWindow {
                     | WorkspaceEvent::CardChanged { .. } => {}
                 },
             ),
-            // What had the keys left the screen (a tool panel hidden or its tab closed, the dock
-            // hidden, a field that went with its card): they go where the screen takes them, not
-            // nowhere.
-            cx.on_focus_lost(window, |this, window, cx| this.focus_screen(window, cx)),
+            // What had the keys is still there but off the screen (a tool panel hidden, the dock
+            // or the editor's bottom panel hidden): they go where the screen takes them, not
+            // nowhere. Let go of on purpose (`window.blur`), or gone with its view (a closed tab
+            // says so itself, `RightPanel::close`), they rest on the anchor, inside the window's
+            // shortcuts: a composer given them then would blink on every frame.
+            cx.on_focus_lost(window, |this, window, cx| {
+                if window.focused(cx).is_some() {
+                    this.focus_screen(window, cx)
+                } else {
+                    this.focus.focus(window, cx)
+                }
+            }),
             // A split coming or going.
             cx.observe_in(&workspace, window, |this, _, window, cx| {
                 this.sync_split(window, cx)
