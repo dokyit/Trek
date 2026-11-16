@@ -11,7 +11,8 @@
 
 use super::Plugins;
 use crate::workspace::{Route, Workspace, WorkspaceEvent};
-use gpui_kit::component::{ActiveTheme as _, Icon, h_flex, v_flex};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -404,7 +405,10 @@ impl PageHost {
             }
             Request::Open(thread) => {
                 let there = self.ws.read(cx).thread(&thread).is_some();
+                // Answered first: a panel's page stays while the main pane moves on, and its
+                // promise settles.
                 if there {
+                    self.reply(id, Ok(Value::Null), cx);
                     self.ws
                         .update(cx, |ws, cx| ws.navigate(Route::Thread(thread), cx));
                 } else {
@@ -412,6 +416,7 @@ impl PageHost {
                 }
             }
             Request::NewThread => {
+                self.reply(id, Ok(Value::Null), cx);
                 self.ws
                     .update(cx, |ws, cx| ws.navigate(Route::Draft { project: None }, cx));
             }
@@ -491,6 +496,35 @@ pub fn page_of(plugin: &str, page: &str, cx: &App) -> Option<(Manifest, PathBuf,
     Some((pl.manifest.clone(), pl.dir.clone(), entry))
 }
 
+/// Why plugin `plugin`'s page isn't showing, in words: it couldn't be loaded (and what's wrong),
+/// Trek stopped it (and why), it waits to be allowed, it's off, or it's gone.
+pub fn why_closed(plugin: &str, cx: &App) -> String {
+    let Some(p) = cx.try_global::<Plugins>() else {
+        return "This page's plugin isn't running.".into();
+    };
+    if let Some(problem) = p.problems.iter().find(|pr| pr.id == plugin) {
+        return format!(
+            "This page's plugin couldn't be loaded: {}",
+            problem.message.lines().next().unwrap_or_default()
+        );
+    }
+    let Some(pl) = p.find(plugin) else {
+        return "This page's plugin isn't installed any more.".into();
+    };
+    let name = &pl.manifest.name;
+    let choice = p.state.choice(plugin);
+    if let Some(why) = &choice.stopped {
+        format!(
+            "{name} was stopped: {}",
+            why.lines().next().unwrap_or_default()
+        )
+    } else if choice.on || choice.waiting {
+        format!("{name} is waiting for you to allow what it asks for.")
+    } else {
+        format!("{name} is off.")
+    }
+}
+
 impl Render for PageHost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
@@ -530,7 +564,45 @@ impl Render for PageHost {
             })
             .into_any_element(),
             (Web::None, true) => div().size_full().into_any_element(),
-            (Web::None, false) => note("This page's plugin isn't running.").into_any_element(),
+            (Web::None, false) => {
+                let plugin = match (&self.fixed, &self.ws.read(cx).route) {
+                    (Some((plugin, _)), _) | (None, Route::Page { plugin, .. }) => plugin.clone(),
+                    _ => String::new(),
+                };
+                let ws = self.ws.clone();
+                v_flex()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(10.))
+                    .px(px(32.))
+                    .text_size(px(crate::scale::text::BODY))
+                    .text_color(theme.muted_foreground)
+                    .child(Icon::empty().path(super::icon_path("puzzle")).size(px(20.)))
+                    .child(
+                        div()
+                            .id("plugin-page-closed")
+                            .test_support()
+                            .max_w(px(440.))
+                            .text_center()
+                            .child(why_closed(&plugin, cx)),
+                    )
+                    .child(
+                        Button::new("plugin-page-settings")
+                            .small()
+                            .outline()
+                            .label("Open Settings › Plugins")
+                            .on_click(move |_, _, cx| {
+                                ws.update(cx, |ws, cx| {
+                                    ws.navigate(
+                                        Route::Settings(crate::workspace::SettingsPage::Plugins),
+                                        cx,
+                                    )
+                                })
+                            }),
+                    )
+                    .into_any_element()
+            }
         };
         v_flex()
             .id("plugin-page")
