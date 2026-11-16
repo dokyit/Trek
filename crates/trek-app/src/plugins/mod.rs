@@ -612,13 +612,10 @@ pub fn set_on(id: &str, on: bool, ws: &Entity<Workspace>, cx: &mut App) {
         }
     });
     if !allowed {
-        let name = plugin.manifest.name.clone();
+        let message = cant_allow(&plugin);
         ws.update(cx, |_, cx| {
             cx.emit(WorkspaceEvent::Toast {
-                message: format!(
-                    "{name} can't be allowed: Trek couldn't read its key in {}",
-                    crate::words::words().your_credential_store
-                ),
+                message,
                 undo: None,
             })
         });
@@ -632,6 +629,80 @@ pub fn set_on(id: &str, on: bool, ws: &Entity<Workspace>, cx: &mut App) {
             "turned off in Settings"
         },
     );
+}
+
+/// Why plugin `plugin`, which asks for permissions, couldn't be allowed: what the grant is
+/// sealed over is the hash of its files, which a plugin past the file limit (or with a file
+/// Trek can't read) doesn't have; otherwise the key couldn't be read.
+pub fn cant_allow(plugin: &Plugin) -> String {
+    let name = &plugin.manifest.name;
+    if plugin.hash.is_none() {
+        format!(
+            "{name} can't be allowed: it has more than {} files, or one Trek can't read",
+            core::MAX_FILES
+        )
+    } else {
+        format!(
+            "{name} can't be allowed: Trek couldn't read its key in {}",
+            crate::words::words().your_credential_store
+        )
+    }
+}
+
+/// The user flipped plugin `id`'s switch. Off is at once, and so is on for a plugin that asks
+/// for nothing it hasn't been given; one that does turns on only once the user allows what it
+/// asks, read out in words in a dialog.
+pub fn switch(id: &str, on: bool, ws: &Entity<Workspace>, window: &mut Window, cx: &mut App) {
+    use gpui_kit::component::{WindowExt as _, v_flex};
+    let Some((name, asks)) = cx.try_global::<Plugins>().and_then(|p| {
+        p.find(id)
+            .map(|pl| (pl.manifest.name.clone(), p.state.missing(&pl.manifest)))
+    }) else {
+        return;
+    };
+    if !on || asks.is_empty() {
+        set_on(id, on, ws, cx);
+        return;
+    }
+    let (id, ws) = (id.to_string(), ws.clone());
+    window.open_alert_dialog(cx, move |alert, _, cx| {
+        let (id, ws) = (id.clone(), ws.clone());
+        alert
+            .title(format!("Turn on “{name}”?"))
+            .description(
+                v_flex()
+                    .gap(px(6.))
+                    .child(div().child("It may then:"))
+                    .children(asks.iter().map(|p| permission_line(p, cx))),
+            )
+            .confirm()
+            .ok_text("Allow and turn on")
+            .on_ok(move |_, _, cx| {
+                set_on(&id, true, &ws, cx);
+                true
+            })
+    });
+}
+
+/// What permission `p` allows, in words, with a mark for reading or acting.
+pub fn permission_line(p: &core::Permission, cx: &App) -> AnyElement {
+    use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex};
+    let theme = cx.theme();
+    h_flex()
+        .gap(px(7.))
+        .text_size(px(crate::scale::text::LABEL))
+        .text_color(theme.muted_foreground)
+        .child(
+            Icon::new(if p.acts() {
+                IconName::CircleUser
+            } else {
+                IconName::Eye
+            })
+            .xsmall()
+            .text_color(theme.muted_foreground.opacity(0.8)),
+        )
+        .child(p.words())
+        .into_any_element()
 }
 
 /// Stop plugin `id` for `why` (its logic failed, a frame of its couldn't be drawn): it's off
@@ -699,6 +770,32 @@ pub fn install(src: String, ws: &Entity<Workspace>, cx: &mut App) {
                 });
             }
             reread(&ws, cx);
+        });
+    })
+    .detach();
+}
+
+/// Settings' "Install from folder…": the user picks a plugin's folder, and it's copied in as
+/// `trek plugin install <folder>` would.
+pub fn install_from_folder(ws: &Entity<Workspace>, cx: &mut App) {
+    let rx = cx.prompt_for_paths(PathPromptOptions {
+        files: false,
+        directories: true,
+        multiple: false,
+        prompt: Some("Install".into()),
+    });
+    let ws = ws.downgrade();
+    cx.spawn(async move |cx| {
+        let Ok(Ok(Some(paths))) = rx.await else {
+            return;
+        };
+        let Some(folder) = paths.into_iter().next() else {
+            return;
+        };
+        cx.update(|cx| {
+            if let Some(ws) = ws.upgrade() {
+                install(folder.to_string_lossy().into_owned(), &ws, cx);
+            }
         });
     })
     .detach();
@@ -820,7 +917,7 @@ pub fn send_to_thread(
 /// The sidebar's Pages group: each running plugin's pages, a row apiece (none, and nothing drawn,
 /// without them).
 pub fn sidebar_pages(ws: &Entity<Workspace>, cx: &App) -> Vec<AnyElement> {
-    use gpui_kit::component::{ActiveTheme as _, Icon};
+    use gpui_kit::component::Icon;
     let Some(p) = cx.try_global::<Plugins>() else {
         return Vec::new();
     };
@@ -839,17 +936,8 @@ pub fn sidebar_pages(ws: &Entity<Workspace>, cx: &App) -> Vec<AnyElement> {
         return Vec::new();
     }
     let open = open_page_of(ws, cx);
-    let theme = cx.theme();
-    let mut out = vec![
-        div()
-            .pt(px(10.))
-            .pb(px(2.))
-            .px(px(10.))
-            .text_size(crate::scale::to_rems(crate::scale::text::META))
-            .text_color(theme.muted_foreground)
-            .child("Pages")
-            .into_any_element(),
-    ];
+    // Labelled as the sidebar labels its other groups.
+    let mut out = vec![crate::sidebar::look::section_label("Pages", None, cx).into_any_element()];
     for (plugin, page) in pages {
         let selected = open.as_ref() == Some(&(plugin.clone(), page.id.clone()));
         let ws = ws.clone();

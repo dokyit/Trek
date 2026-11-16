@@ -10,7 +10,7 @@
 //! right-hand column (`look`), so state, badges and glyphs line up at the left and counts and
 //! times at the right.
 
-mod look;
+pub(crate) mod look;
 
 use crate::fluent::{self, PillExt as _};
 use crate::palette;

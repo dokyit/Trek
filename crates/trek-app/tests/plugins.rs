@@ -7,6 +7,7 @@ mod common;
 
 use common::{open, run};
 use gpui_kit::TestAppContext;
+use gpui_kit::component::WindowExt as _;
 use trek_app::workspace::Route;
 use trek_core::plugins::{Slot, Surface};
 
@@ -271,5 +272,94 @@ fn a_page_s_view_lives_while_its_open_and_gives_the_keys_back_before_it_goes() {
         cx.update(|cx| trek_app::plugins::set_on("summit-log", false, &trek.ws, cx));
         trek.render(cx);
         assert!(!has_view(cx));
+        // The page says why it's gone, with the way to Settings.
+        let why = cx.update(|cx| trek_app::plugins::page::why_closed("summit-log", cx));
+        assert_eq!(why, "Summit log is off.");
+        assert!(trek.visible(cx, "plugin-page-settings"));
+        // Stopped by Trek, it says why.
+        cx.update(|cx| trek_app::plugins::set_on("summit-log", true, &trek.ws, cx));
+        trek.render(cx);
+        assert!(has_view(cx));
+        cx.update(|cx| {
+            trek_app::plugins::stop("summit-log", "TypeError: x is undefined", &trek.ws, cx)
+        });
+        trek.render(cx);
+        let why = cx.update(|cx| trek_app::plugins::page::why_closed("summit-log", cx));
+        assert_eq!(why, "Summit log was stopped: TypeError: x is undefined");
+        trek.click(cx, "plugin-page-settings");
+        assert!(trek.read(cx, |ws, _| matches!(
+            ws.route,
+            Route::Settings(trek_app::workspace::SettingsPage::Plugins)
+        )));
+    });
+}
+
+#[test]
+fn the_switch_asks_before_it_allows_what_a_plugin_asks_for() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    run(async |cx| {
+        let trek = start(cx);
+        install("trail-board", &trek, cx);
+        install("focus-timer", &trek, cx);
+        let running =
+            |id: &str, cx: &mut TestAppContext| cx.update(|cx| trek_app::plugins::running(id, cx));
+        let ws = trek.ws.clone();
+
+        // The board asks to read and open threads: its switch opens a dialog and turns
+        // nothing on.
+        trek.window(cx, |window, cx| {
+            trek_app::plugins::switch("trail-board", true, &ws, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(!running("trail-board", cx), "nothing allowed yet");
+        assert!(trek.window(cx, |window, cx| window.has_active_dialog(cx)));
+        trek.window(cx, |window, cx| window.close_all_dialogs(cx));
+
+        // The timer asks for nothing: its switch is at once, off and on.
+        trek.window(cx, |window, cx| {
+            trek_app::plugins::switch("focus-timer", false, &ws, window, cx)
+        });
+        assert!(!running("focus-timer", cx));
+        trek.window(cx, |window, cx| {
+            trek_app::plugins::switch("focus-timer", true, &ws, window, cx)
+        });
+        assert!(running("focus-timer", cx));
+        assert!(!trek.window(cx, |window, cx| window.has_active_dialog(cx)));
+
+        // Allowed once, the board's switch is at once too.
+        cx.update(|cx| trek_app::plugins::set_on("trail-board", true, &ws, cx));
+        trek.window(cx, |window, cx| {
+            trek_app::plugins::switch("trail-board", false, &ws, window, cx)
+        });
+        assert!(!running("trail-board", cx));
+    });
+}
+
+#[test]
+fn a_plugin_too_big_to_seal_says_so_and_waits() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    run(async |cx| {
+        let trek = start(cx);
+        let dir = trek_core::plugins::dir().join("big");
+        std::fs::create_dir_all(dir.join("ui")).unwrap();
+        std::fs::write(
+            dir.join("plugin.toml"),
+            "name = \"Big\"\npermissions = [\"threads:read\"]\n",
+        )
+        .unwrap();
+        for i in 0..=trek_core::plugins::MAX_FILES {
+            std::fs::write(dir.join(format!("ui/{i}.json")), "{}").unwrap();
+        }
+        cx.update(|cx| trek_app::plugins::reread(&trek.ws, cx));
+        cx.update(|cx| trek_app::plugins::set_on("big", true, &trek.ws, cx));
+        cx.update(|cx| {
+            assert!(!trek_app::plugins::running("big", cx));
+            let p = cx.global::<trek_app::plugins::Plugins>();
+            let plugin = p.find("big").expect("read");
+            assert!(p.state.choice("big").waiting);
+            let said = trek_app::plugins::cant_allow(plugin);
+            assert!(said.contains("more than 500 files"), "{said}");
+            assert!(!said.contains("key"), "{said}");
+        });
     });
 }

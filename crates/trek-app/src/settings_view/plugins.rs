@@ -61,6 +61,47 @@ impl SettingsView {
             let rows = problems
                 .iter()
                 .map(|pr| {
+                    // Its folder, or the link that names a folder that isn't there.
+                    let folder = dir.join(&pr.id);
+                    let at = if folder.is_dir() {
+                        folder
+                    } else {
+                        dir.join(format!("{}.{}", pr.id, core::LINK_EXT))
+                    };
+                    let reveal =
+                        Button::new(SharedString::from(format!("plugin-problem-show-{}", pr.id)))
+                            .small()
+                            .ghost()
+                            .label(crate::words::words().show_in_file_manager)
+                            .on_click(move |_, _, cx| cx.reveal_path(&at));
+                    // Remove takes a plugin's id; a folder named otherwise is the user's to move.
+                    let remove = core::id_ok(&pr.id).then(|| {
+                        let (id, ws) = (pr.id.clone(), self.workspace.clone());
+                        Button::new(SharedString::from(format!("plugin-problem-remove-{id}")))
+                            .small()
+                            .ghost()
+                            .label("Remove…")
+                            .on_click(move |_, window, cx| {
+                                let (id, ws) = (id.clone(), ws.clone());
+                                window.open_alert_dialog(cx, move |alert, _, _| {
+                                    let (id2, ws2) = (id.clone(), ws.clone());
+                                    alert
+                                        .title(format!("Remove “{id}”?"))
+                                        .description("Its folder and what it kept are deleted.")
+                                        .confirm()
+                                        .ok_text("Remove")
+                                        .ok_variant(
+                                            gpui_kit::component::button::ButtonVariant::Danger,
+                                        )
+                                        .on_ok(move |_, window, cx| {
+                                            if let Err(e) = plugins::remove(&id2, &ws2, cx) {
+                                                crate::toast::push(window, e, cx);
+                                            }
+                                            true
+                                        })
+                                });
+                            })
+                    });
                     h_flex()
                         .id(SharedString::from(format!("plugin-problem-{}", pr.id)))
                         .test_support()
@@ -88,6 +129,7 @@ impl SettingsView {
                                         .child(pr.message.clone()),
                                 ),
                         )
+                        .child(h_flex().gap(px(4.)).child(reveal).children(remove))
                         .into_any_element()
                 })
                 .collect();
@@ -165,9 +207,23 @@ impl SettingsView {
         }
 
         let open_dir = dir.clone();
+        let ws = self.workspace.clone();
+        out.push(
+            div()
+                .pt(px(20.))
+                .child(
+                    Button::new("plugin-install-folder")
+                        .small()
+                        .outline()
+                        .icon(IconName::FolderOpen)
+                        .label("Install from folder…")
+                        .on_click(move |_, _, cx| plugins::install_from_folder(&ws, cx)),
+                )
+                .into_any_element(),
+        );
         out.push(
             h_flex()
-                .pt(px(24.))
+                .pt(px(12.))
                 .gap(px(6.))
                 .flex_wrap()
                 .text_size(px(text::LABEL))
@@ -190,9 +246,7 @@ impl SettingsView {
                             cx.open_with_system(&open_dir);
                         }),
                 )
-                .child(
-                    "· Trek's program installs them too: trek plugin install <folder or git URL>",
-                )
+                .child("· an agent can install one from a folder or a git URL")
                 .into_any_element(),
         );
         out
@@ -361,6 +415,12 @@ impl SettingsView {
             );
         }
         let folder = pl.dir.clone();
+        // A linked plugin (`trek plugin dev`) is someone's own folder: only the link goes.
+        let gone = if pl.origin == Origin::Linked {
+            "Trek stops reading it and forgets what it kept. Its folder stays where it is."
+        } else {
+            "Its folder and what it kept are deleted, and everything it added goes from Trek."
+        };
         let log_open = log.is_some_and(|(lid, _)| *lid == m.id);
         let more = Button::new(SharedString::from(format!("plugin-more-{id}")))
             .ghost()
@@ -384,41 +444,47 @@ impl SettingsView {
                                     plugins::show_log((!log_open).then_some(id2.as_str()), cx)
                                 }),
                         )
-                        .item(PopupMenuItem::new("Reload").on_click(move |_, _, cx| {
-                            plugins::reread(&ws2, cx)
-                        }))
+                        .item(
+                            PopupMenuItem::new("Reload")
+                                .on_click(move |_, _, cx| plugins::reread(&ws2, cx)),
+                        )
                         .item(
                             PopupMenuItem::new(crate::words::words().show_in_file_manager)
                                 .on_click(move |_, _, cx| cx.reveal_path(&folder)),
                         )
                         .separator()
-                        .item(PopupMenuItem::new("Remove…").icon(IconName::Delete).on_click(
-                            move |_, window, cx| {
-                                let (id4, ws4, name) = (id3.clone(), ws3.clone(), name.clone());
-                                window.open_alert_dialog(cx, move |alert, _, _| {
-                                    let (id5, ws5) = (id4.clone(), ws4.clone());
-                                    alert
-                                        .title(format!("Remove “{name}”?"))
-                                        .description("Its folder and what it kept are deleted, and everything it added goes from Trek.")
-                                        .confirm()
-                                        .ok_text("Remove")
-                                        .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
-                                        .on_ok(move |_, window, cx| {
-                                            if let Err(e) = plugins::remove(&id5, &ws5, cx) {
-                                                crate::toast::push(window, e, cx);
-                                            }
-                                            true
-                                        })
-                                });
-                            },
-                        ))
+                        .item(
+                            PopupMenuItem::new("Remove…")
+                                .icon(IconName::Delete)
+                                .on_click(move |_, window, cx| {
+                                    let (id4, ws4, name) = (id3.clone(), ws3.clone(), name.clone());
+                                    window.open_alert_dialog(cx, move |alert, _, _| {
+                                        let (id5, ws5) = (id4.clone(), ws4.clone());
+                                        alert
+                                            .title(format!("Remove “{name}”?"))
+                                            .description(gone)
+                                            .confirm()
+                                            .ok_text("Remove")
+                                            .ok_variant(
+                                                gpui_kit::component::button::ButtonVariant::Danger,
+                                            )
+                                            .on_ok(move |_, window, cx| {
+                                                if let Err(e) = plugins::remove(&id5, &ws5, cx) {
+                                                    crate::toast::push(window, e, cx);
+                                                }
+                                                true
+                                            })
+                                    });
+                                }),
+                        )
                 }
             });
+        // On asks first when it brings permissions the user hasn't given it.
         let switch = Switch::new(SharedString::from(format!("plugin-on-{id}")))
             .checked(running)
             .on_click({
                 let (id, ws) = (id.clone(), ws.clone());
-                move |v: &bool, _, cx| plugins::set_on(&id, *v, &ws, cx)
+                move |v: &bool, window, cx| plugins::switch(&id, *v, &ws, window, cx)
             });
         h_flex()
             .id(SharedString::from(format!("plugin-row-{id}")))
@@ -496,24 +562,7 @@ impl SettingsView {
     }
 }
 
-fn permission_line(p: &Permission, cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    h_flex()
-        .gap(px(7.))
-        .text_size(px(text::LABEL))
-        .text_color(theme.muted_foreground)
-        .child(
-            Icon::new(if p.acts() {
-                IconName::CircleUser
-            } else {
-                IconName::Eye
-            })
-            .xsmall()
-            .text_color(theme.muted_foreground.opacity(0.8)),
-        )
-        .child(p.words())
-        .into_any_element()
-}
+use plugins::permission_line;
 
 fn badge(text: &'static str, cx: &App) -> AnyElement {
     let theme = cx.theme();
