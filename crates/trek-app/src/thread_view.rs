@@ -1838,6 +1838,25 @@ impl ThreadView {
                                             )
                                             .when_some(lines, |el, (a, r)| {
                                                 el.child(crate::working_bar::lines_chip(a, r, cx))
+                                            })
+                                            // A step with output opens: its chevron says so, as
+                                            // a thought's does here and a tool row's on a Mac.
+                                            .when(has_output, |el| {
+                                                el.child(
+                                                    div()
+                                                        .id(("tool-chevron", *ix))
+                                                        .test_support()
+                                                        .flex_none()
+                                                        .child(
+                                                            Icon::new(if *open {
+                                                                IconName::ChevronDown
+                                                            } else {
+                                                                IconName::ChevronRight
+                                                            })
+                                                            .xsmall()
+                                                            .opacity(CHEVRON),
+                                                        ),
+                                                )
                                             }),
                                     )
                                     .children(timeline::source_chips(
