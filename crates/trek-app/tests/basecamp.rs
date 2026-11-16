@@ -661,7 +661,13 @@ fn all_time_reaches_back_to_the_first_thing_done() {
         // Work today (even a minute after midnight), and a thread from six weeks ago in another
         // project.
         let now = now_ms().max(Range::Today.window(&chrono::Local::now()).start + 61_000);
-        let long_ago = now - 42 * 24 * 3_600_000;
+        // Noon 42 calendar days back, so a clock change between then and now (an hour less or
+        // more than 42 x 24 h) can't move it onto the next or the last day.
+        let long_ago = (chrono::Local::now().date_naive() - chrono::Days::new(42))
+            .and_hms_opt(12, 0, 0)
+            .and_then(|t| t.and_local_timezone(chrono::Local).earliest())
+            .expect("noon is a time on every day")
+            .timestamp_millis();
         let website = new_project("website");
         trek.update(cx, |ws, cx| {
             for (at, model, project) in [
