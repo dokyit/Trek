@@ -3259,18 +3259,15 @@ impl ThreadView {
                             // A row with output opens: its chevron says so, as a group's does.
                             .when(has_output, |el| {
                                 el.child(
-                                    div()
-                                        .id(("tool-chevron", ix))
-                                        .test_support()
-                                        .child(
-                                            Icon::new(if open {
-                                                IconName::ChevronDown
-                                            } else {
-                                                IconName::ChevronRight
-                                            })
-                                            .xsmall()
-                                            .opacity(CHEVRON),
-                                        ),
+                                    div().id(("tool-chevron", ix)).test_support().child(
+                                        Icon::new(if open {
+                                            IconName::ChevronDown
+                                        } else {
+                                            IconName::ChevronRight
+                                        })
+                                        .xsmall()
+                                        .opacity(CHEVRON),
+                                    ),
                                 )
                             })
                             .child(status_el),
