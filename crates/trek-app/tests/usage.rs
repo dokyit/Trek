@@ -232,7 +232,8 @@ fn each_agent_is_read_on_its_own_off_the_main_thread_and_again_after_a_turn() {
             trek.read(cx, |ws, _| ws.agent_status[&AgentId::ClaudeCode.key()]
                 .error
                 .clone()),
-            Some("claude timed out".into())
+            // The card says it in a sentence; the error itself goes to the log.
+            Some("Couldn't read its plan usage just now. Trek will try again shortly.".into())
         );
         // Asked again within 30 seconds: nothing is read.
         let before = asked.borrow().len();

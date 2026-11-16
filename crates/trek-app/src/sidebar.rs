@@ -2316,7 +2316,7 @@ impl Sidebar {
             )
             .children(picker)
             .when(!picking && rows.is_empty() && !loading, |el| {
-                el.child(div().text_size(to_rems(text::LABEL)).text_color(theme.muted_foreground).child(if ws.usage_picked() { "No providers picked. Choose some with …" } else { "No plan usage reported by your agents." }))
+                el.child(div().text_size(to_rems(text::LABEL)).text_color(theme.muted_foreground).child(if ws.usage_picked() { "No providers picked. Choose some with the … button above." } else { "No plan limits to show yet. Sign in to Claude Code or Codex and they appear here." }))
             })
             .when(!picking, |el| el.children(rows.into_iter().zip(labels).map(|(u, label)| {
                 let agent = u.agent.clone();

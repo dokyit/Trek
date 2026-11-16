@@ -40,6 +40,47 @@ fn read_every(agent: &AgentId) -> i64 {
     }
 }
 
+/// What the Usage card says when reading an agent's usage failed: a sentence, with the error
+/// itself in the log. A sign-in problem says so; anything else says it will be tried again.
+pub fn usage_failure(raw: &str) -> String {
+    let lower = raw.to_lowercase();
+    if [
+        "signed in",
+        "log in",
+        "login",
+        "sign in",
+        "unauthorized",
+        "auth",
+    ]
+    .iter()
+    .any(|w| lower.contains(w))
+    {
+        "Not signed in, so its plan usage can't be read. Sign in to the agent and Trek will pick it up."
+            .to_string()
+    } else {
+        "Couldn't read its plan usage just now. Trek will try again shortly.".to_string()
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::usage_failure;
+
+    #[test]
+    fn a_failed_read_is_a_sentence_not_the_error_chain() {
+        let raw = "failed to spawn claude: No such file or directory (os error 2)";
+        let said = usage_failure(raw);
+        assert!(
+            !said.contains("os error") && said.starts_with("Couldn't read"),
+            "{said}"
+        );
+        assert!(
+            usage_failure("Claude Code isn't signed in. Run claude login")
+                .starts_with("Not signed in")
+        );
+    }
+}
+
 /// Claude Code's or Codex's own report, with its usage or without, read on Trek's tokio runtime.
 pub fn read_agent(
     agent: &AgentId,
@@ -579,8 +620,9 @@ impl Workspace {
                 }
             }
             Err(e) => {
+                tracing::warn!("usage of {key}: {e}");
                 let st = self.agent_status.entry(key.clone()).or_default();
-                st.error = Some(e);
+                st.error = Some(usage_failure(&e));
             }
         }
         if !with_usage {
