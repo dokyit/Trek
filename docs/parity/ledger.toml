@@ -250,6 +250,17 @@ how = { macos = "Through dictation.", windows = "Through dictation." }
 code = ["crates/trek-app/src/study.rs"]
 
 [[feature]]
+id = "study-card-dictation"
+area = "Composer"
+what = "Dictate into a Study question card's thinking box"
+macos = "yes"
+windows = "yes"
+live_skip = "The mic is inside the card's web page, which Trek's element checks can't count, and the isolated app has no microphone; the page's take is driven through the fake dictation and the card's own script in node."
+how = { macos = "The card's mic asks Trek (`trek.dictate`) for the composer's dictation; what's heard goes back to the page as it's revised.", windows = "The same, over WebView2's message channel." }
+code = ["crates/trek-app/src/artifact/mod.rs", "crates/trek-core/src/artifact.rs", "crates/trek-core/src/study_card.html"]
+tests = ["crates/trek-app/tests/study.rs", "crates/trek-core/src/study_card_test.js", "crates/trek-core/src/artifact.rs"]
+
+[[feature]]
 id = "shortcuts"
 area = "Composer"
 what = "Keyboard shortcuts"

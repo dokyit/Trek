@@ -71,6 +71,10 @@ pub struct Doc {
     pub hosts: Vec<String>,
     /// The block as written, fences and all (shown as code when artifacts are off).
     pub source: Arc<str>,
+    /// What's inside the fences as written, by which the answer holding it is found: `html`,
+    /// except for a tutor's question (`trek-study`) Trek drew as a card here, whose answer
+    /// holds only the question.
+    pub written: Arc<str>,
     /// A video file this plays (`html` is the player's page, `core::VIDEO_HTML`): a note's, one
     /// an answer links, one a message attached, one `watch_video` watched.
     pub media: Option<std::path::PathBuf>,
@@ -98,6 +102,7 @@ impl Doc {
             title: Some(title),
             hosts: Vec::new(),
             source: source.into(),
+            written: core::VIDEO_HTML.into(),
             media: Some(path),
             remote: None,
         }
@@ -109,6 +114,7 @@ impl Doc {
         let hosts = core::hosts(&html, 1);
         Self {
             hash: core::content_hash(&html),
+            written: html.as_str().into(),
             html: html.into(),
             title: Some(title),
             hosts,
@@ -135,6 +141,10 @@ enum Block {
     /// Closed, but too big to run.
     TooBig {
         bytes: usize,
+        source: Arc<str>,
+    },
+    /// A tutor's question (`trek-study`) that isn't one Trek can draw.
+    Unreadable {
         source: Arc<str>,
     },
 }
@@ -166,13 +176,28 @@ impl MarkdownPlugin for ArtifactPlugin {
         let markdown_ast::Node::Code(code) = node else {
             return None;
         };
-        if code.lang.as_deref() != Some(core::FENCE) {
+        // A tutor's question (`trek-study`) is drawn as the question card: Trek does that as the
+        // answer comes in (`study::expand_cards`), so one still here came from elsewhere (another
+        // Mac's thread) or is being written.
+        let question = code.lang.as_deref() == Some(trek_core::study::FENCE);
+        if code.lang.as_deref() != Some(core::FENCE) && !question {
             return None;
         }
         let source = cx.node_source(node)?;
-        let html = code.value.as_str();
-        let title = core::title(html);
-        let block = if !core::fence_closed(source) {
+        let card = question
+            .then(|| trek_core::study::card(&code.value))
+            .flatten();
+        let html = card.as_deref().unwrap_or(code.value.as_str());
+        let title = if question {
+            Some("Study".to_string())
+        } else {
+            core::title(html)
+        };
+        let block = if question && card.is_none() && core::fence_closed(source) {
+            Block::Unreadable {
+                source: source.into(),
+            }
+        } else if !core::fence_closed(source) {
             Block::Building {
                 title: title.clone(),
                 bytes: html.len(),
@@ -190,6 +215,7 @@ impl MarkdownPlugin for ArtifactPlugin {
                 title: title.clone(),
                 hosts: core::hosts(html, 3),
                 source: source.into(),
+                written: code.value.as_str().into(),
                 media: None,
                 remote: None,
             }))
@@ -229,6 +255,13 @@ impl MarkdownPlugin for ArtifactPlugin {
                     bytes / 1024,
                     core::MAX_BYTES / 1024
                 ),
+                source,
+                key,
+                self.size,
+                cx,
+            ),
+            Some(Block::Unreadable { source }) => note(
+                "the question isn't JSON with a prompt",
                 source,
                 key,
                 self.size,
@@ -892,6 +925,11 @@ pub struct ArtifactState {
     height_changes: u32,
     /// A video's page goes here (seconds) once it has loaded: a frame clicked before it had.
     pending_seek: Option<f64>,
+    /// Dictation the page asked for (`trek.dictate`): the composer's voice mode without its row,
+    /// what's heard going to the page instead (`core::dictation_event`).
+    voice: crate::composer::voice::Voice,
+    dictation: Option<crate::dictate::Dictation>,
+    voice_tasks: Vec<Task<()>>,
     _events: Option<Task<()>>,
     /// The view being made, outside any update (see `make`).
     making: Option<Task<()>>,
@@ -937,6 +975,9 @@ impl ArtifactState {
             sends: core::SendGate::default(),
             height_changes: 0,
             pending_seek: None,
+            voice: Default::default(),
+            dictation: None,
+            voice_tasks: Vec::new(),
             _events: None,
             making: None,
             _release,
@@ -1037,12 +1078,25 @@ impl ArtifactState {
     /// Make the view (the card is near the screen and the window is in front).
     fn make(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (tx, rx) = async_channel::unbounded();
+        // A page in a thread is handed what was sent after it, and Trek's dictation where there
+        // is some (a video plays; it has no use for either).
+        let extras = if self.doc.is_video() {
+            core::Extras::default()
+        } else {
+            core::Extras {
+                replies: cx
+                    .try_global::<crate::workspace::GlobalWorkspace>()
+                    .map(|ws| ws.0.read(cx).card_replies(&self.doc.written))
+                    .unwrap_or_default(),
+                can_dictate: crate::dictate::available(),
+            }
+        };
         let spec = native::Spec {
             origin: core::origin(self.doc.hash, cfg!(windows)),
             document: self.served.clone(),
             csp: self.doc.csp(),
             media: self.doc.media.clone(),
-            bootstrap: core::bootstrap(&self.nonce),
+            bootstrap: core::bootstrap_with(&self.nonce, &extras),
             background: self.background,
             events: tx,
         };
@@ -1103,6 +1157,10 @@ impl ArtifactState {
 
     /// Let go of the view (far off screen, or past `MAX_LIVE`); its snapshot stays.
     fn drop_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A take the page started has nowhere to go: the mic is let go.
+        if self.voice.phase != crate::composer::voice::Phase::Idle {
+            self.voice_step(crate::composer::voice::Event::Cancel, window, cx);
+        }
         // The keys back first, while there's a view to take them from: the view goes next, and
         // one that goes with them leaves them with the window (see `let_go_of_keys`).
         if self.surface.is_some() {
@@ -1150,6 +1208,7 @@ impl ArtifactState {
                 }
                 Some(core::Message::Open(url)) => self.open_link(&url, cx),
                 Some(core::Message::Wheel(dx, dy)) => self.scroll_around(dx, dy, window, cx),
+                Some(core::Message::Dictate(on)) => self.dictate(on, window, cx),
                 None => match core::parse_action(&body, &self.nonce) {
                     Some(core::Action::Send(text)) => self.send(text, window, cx),
                     Some(core::Action::Copy(text)) => {
@@ -1159,6 +1218,173 @@ impl ArtifactState {
                     None => tracing::debug!("artifact: message ignored"),
                 },
             },
+        }
+    }
+
+    /// `trek.dictate(on)`: start a take (the composer's dictation: permission, then the mic and
+    /// the recognizer), or end the one that's open, its words kept. A page where Trek can't
+    /// dictate hears why.
+    fn dictate(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::composer::voice::{Event, Phase};
+        if !crate::dictate::available() {
+            self.tell_page(&core::dictation_event(
+                "idle",
+                "",
+                Some("Trek can't take dictation here."),
+            ));
+            return;
+        }
+        let event = match (on, self.voice.phase) {
+            (true, Phase::Idle) => Event::Mic,
+            (false, Phase::Listening) => Event::Confirm,
+            (false, Phase::Asking | Phase::Preparing) => Event::Cancel,
+            _ => return,
+        };
+        self.voice_step(event, window, cx);
+    }
+
+    /// Move the take on (`voice::Voice::step`), do what that calls for, and tell the page.
+    fn voice_step(
+        &mut self,
+        event: crate::composer::voice::Event,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::composer::voice::{Event, GRACE, Phase};
+        let effect = self.voice.step(event);
+        if effect.ask {
+            self.ask_to_dictate(window, cx);
+        }
+        if effect.abandon {
+            crate::dictate::abandon();
+        }
+        if effect.finish {
+            if let Some(d) = self.dictation.as_mut() {
+                d.finish();
+            }
+            // As in the composer: a live take's words are on the page already, and go in as
+            // shown if the recognizer is slow to settle them.
+            if self.voice.live {
+                let grace = self.dictation.as_ref().map_or(GRACE, |d| d.grace());
+                self.voice_tasks
+                    .push(cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(grace).await;
+                        let _ = this.update_in(cx, |s, window, cx| {
+                            s.voice_step(Event::GraceOver, window, cx)
+                        });
+                    }));
+            }
+        }
+        let script = if effect.end {
+            self.dictation = None;
+            // Not dropped here: this can run inside one of them.
+            let tasks = std::mem::take(&mut self.voice_tasks);
+            cx.spawn(async move |_, _| drop(tasks)).detach();
+            match &effect.commit {
+                Some(text) => core::dictation_event("done", text, None),
+                None => core::dictation_event("idle", "", effect.toast.as_deref()),
+            }
+        } else {
+            match self.voice.phase {
+                Phase::Asking | Phase::Preparing => core::dictation_event("asking", "", None),
+                Phase::Listening => core::dictation_event("listening", &self.voice.interim, None),
+                Phase::Finishing => core::dictation_event("finishing", &self.voice.interim, None),
+                Phase::Idle => String::new(),
+            }
+        };
+        if !script.is_empty() {
+            self.tell_page(&script);
+        }
+        // Why the mic or Speech is off, with the way to turn it on, as the composer says it.
+        if let Some(message) = effect.toast {
+            let pane = match message.as_str() {
+                crate::dictate::MIC_REFUSED => Some(crate::permissions::Permission::Microphone),
+                crate::dictate::SPEECH_REFUSED => {
+                    Some(crate::permissions::Permission::SpeechRecognition)
+                }
+                _ => None,
+            };
+            if let Some(ws) = cx.try_global::<crate::workspace::GlobalWorkspace>() {
+                ws.0.clone().update(cx, |_, cx| {
+                    cx.emit(crate::workspace::WorkspaceEvent::Toast {
+                        message,
+                        undo: pane.map(crate::workspace::UndoAction::OpenPrivacy),
+                    })
+                });
+            }
+        }
+    }
+
+    /// Ask for the mic and speech recognition; once allowed, open the take (as the composer's
+    /// `ask_to_dictate`). A take given up meanwhile is abandoned, so the mic is let go.
+    fn ask_to_dictate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::composer::voice::{Event, Phase};
+        let take = self.voice.take;
+        let (tx, rx) = async_channel::bounded(1);
+        crate::dictate::ensure_permission(tx);
+        cx.spawn_in(window, async move |this, cx| {
+            let allowed = rx
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err("Dictation ended.".into()));
+            let opened = allowed.is_ok();
+            let started = this.update_in(cx, |s, window, cx| {
+                if s.voice.take != take
+                    || !matches!(s.voice.phase, Phase::Asking | Phase::Preparing)
+                {
+                    return false;
+                }
+                let (heard, results) = async_channel::unbounded();
+                match allowed.and_then(|()| crate::dictate::start(heard)) {
+                    Ok(d) => {
+                        let live = d.live();
+                        s.dictation = Some(d);
+                        s.voice_step(
+                            Event::Started {
+                                live,
+                                value: String::new(),
+                                cursor: 0,
+                            },
+                            window,
+                            cx,
+                        );
+                        s.voice_tasks
+                            .push(cx.spawn_in(window, async move |this, cx| {
+                                while let Ok(heard) = results.recv().await {
+                                    let event = match heard {
+                                        crate::dictate::Heard::Partial(t) => Event::Partial(t),
+                                        crate::dictate::Heard::Final(t) => Event::Final(t),
+                                        crate::dictate::Heard::Failed(e) => Event::Failed(e),
+                                    };
+                                    if this
+                                        .update_in(cx, |s, window, cx| {
+                                            s.voice_step(event, window, cx)
+                                        })
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                            }));
+                        true
+                    }
+                    Err(e) => {
+                        s.voice_step(Event::Failed(e), window, cx);
+                        false
+                    }
+                }
+            });
+            if opened && !started.unwrap_or(false) {
+                crate::dictate::abandon();
+            }
+        })
+        .detach();
+    }
+
+    /// Run `script` in the page, if it has one.
+    fn tell_page(&self, script: &str) {
+        if let Some(surface) = &self.surface {
+            surface.eval(script);
         }
     }
 
@@ -1175,8 +1401,7 @@ impl ArtifactState {
             .clone()
             .unwrap_or_else(|| "Interactive page".to_string());
         let ws = crate::workspace::workspace_global(cx);
-        let html = self.doc.html.clone();
-        let thread = ws.read(cx).card_thread(&html);
+        let thread = ws.read(cx).card_thread(&self.doc.written);
         match thread {
             // The user's own words, so what's typed in the page may be the secret a card is up for.
             Some((id, false)) if ws.read(cx).asks_for_secret(&id) => crate::toast::push(

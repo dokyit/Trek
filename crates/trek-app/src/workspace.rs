@@ -2844,6 +2844,13 @@ impl Workspace {
     /// The thread whose transcript has an answer holding the `trek-html` page `html` (the latest
     /// one when several do), and whether that thread is archived: where a card's `trek.send` goes.
     pub fn card_thread(&self, html: &str) -> Option<(String, bool)> {
+        let (id, _) = self.card_at(html)?;
+        let archived = self.thread(id).is_some_and(|t| t.archived_at.is_some());
+        Some((id.clone(), archived))
+    }
+
+    /// The thread and item of the latest answer holding the card written as `html`.
+    fn card_at(&self, html: &str) -> Option<(&String, usize)> {
         let mut best: Option<(&String, usize)> = None;
         for (id, live) in &self.live {
             let at = live
@@ -2857,9 +2864,29 @@ impl Workspace {
                 }
             }
         }
-        let (id, _) = best?;
-        let archived = self.thread(id).is_some_and(|t| t.archived_at.is_some());
-        Some((id.clone(), archived))
+        best
+    }
+
+    /// What the user sent after the answer holding the card written as `html`, up to the next
+    /// answer with a card of its own, oldest first: what the card's page is handed
+    /// (`trek.replies`), so a question card drawn again shows the answer it already got.
+    pub fn card_replies(&self, html: &str) -> Vec<String> {
+        let Some((id, at)) = self.card_at(html) else {
+            return Vec::new();
+        };
+        let fence = format!("```{}", trek_core::artifact::FENCE);
+        let mut out = Vec::new();
+        for item in self.live[id].items.iter().skip(at + 1) {
+            match item {
+                Item::User { text, .. } => out.push(text.clone()),
+                Item::Assistant { text } if text.contains(&fence) => break,
+                _ => {}
+            }
+            if out.len() == trek_core::artifact::MAX_REPLIES {
+                break;
+            }
+        }
+        out
     }
 
     pub fn thread(&self, id: &str) -> Option<&Thread> {
@@ -6390,6 +6417,10 @@ impl Workspace {
                                 text.push_str(&t);
                                 // One value can come in two pieces.
                                 trek_core::session_secrets::scrub_string(text, &secrets);
+                                // A tutor's question, once written, is the card it asks for.
+                                if let Some(drawn) = trek_core::study::expand_cards(text) {
+                                    *text = drawn;
+                                }
                             }
                         }
                         if !t.trim().is_empty() {
@@ -6397,6 +6428,7 @@ impl Workspace {
                         }
                     }
                     AgentEvent::TextDone(t) => {
+                        let t = trek_core::study::expand_cards(&t).unwrap_or(t);
                         match live.streaming.take() {
                             Some(ix) => {
                                 if let Some(Item::Assistant { text }) = live.items.get_mut(ix) {

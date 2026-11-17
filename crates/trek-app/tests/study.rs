@@ -371,3 +371,166 @@ fn a_session_takes_maps_notes_folders_and_pages_and_shows_what_was_asked() {
         }
     });
 }
+
+/// A thread on screen whose tutor asked `question` (a `trek-study` block, as the guide says),
+/// and the card Trek draws for it.
+fn asked(
+    trek: &common::Trek,
+    cx: &mut gpui_kit::TestAppContext,
+    question: &str,
+) -> (String, String) {
+    let id = trek.quiet_thread(cx);
+    let said = format!("First, a quick check:\n\n```trek-study\n{question}\n```");
+    trek.update(cx, |ws, cx| {
+        ws.apply_events(
+            &id,
+            vec![
+                trek_agents::AgentEvent::TextDelta(said.clone()),
+                trek_agents::AgentEvent::TextDone(said),
+                trek_agents::AgentEvent::TurnComplete { error: None },
+            ],
+            cx,
+        )
+    });
+    settle(trek, cx);
+    (id, study::card(question).expect("a card"))
+}
+
+/// A few frames: the first lays a card out, the next reads what covers it.
+fn settle(trek: &common::Trek, cx: &mut gpui_kit::TestAppContext) {
+    trek.window(cx, |window, _| window.activate_window());
+    for _ in 0..3 {
+        trek.render(cx);
+    }
+}
+
+/// The card's page says `body` (`{nonce}`: its secret), as its bootstrap would.
+fn post(trek: &common::Trek, cx: &mut gpui_kit::TestAppContext, body: &str) {
+    trek.window(cx, |window, cx| trek_app::artifact::post(window, body, cx));
+    settle(trek, cx);
+}
+
+const QUESTION: &str = r#"{"kind": "question", "step": "", "prompt": "What sets long-run growth?", "options": ["Research share", "Researcher productivity", "Population growth $\\bar n$, scaled by $\\gamma$", "The saving rate"], "targets": []}"#;
+
+/// The tutor writes only the question; Trek draws the card from it, and the card's answer comes
+/// back as the learner's message, shown as a card's answer. Drawn again later (a new view), the
+/// card is handed what was sent after it, so it shows the answer rather than a blank card.
+#[test]
+fn a_tutors_question_is_drawn_as_the_card_and_keeps_the_answer_it_got() {
+    run(async |cx| {
+        let log = trek_app::artifact::fake_web(true).unwrap();
+        let trek = open(cx);
+        let (id, html) = asked(&trek, cx, QUESTION);
+        // The answer holds the card, not the question: the phone and every reader see the card.
+        let answer = trek
+            .items(cx, &id)
+            .into_iter()
+            .find_map(|i| match i {
+                Item::Assistant { text } => Some(text),
+                _ => None,
+            })
+            .unwrap();
+        assert!(answer.contains(&format!("```trek-html\n{html}\n```")));
+        assert!(!answer.contains("```trek-study"));
+        assert_eq!(log.borrow().made, 1, "the card runs");
+        assert!(log.borrow().bootstraps[0].contains("const replies = Object.freeze([]);"));
+
+        let sent = "Question\nAnswer: C. Population growth $\\bar n$, scaled by $\\gamma$\nConfidence: Unsure (45%)\nWorking: I *think* so";
+        let body = serde_json::json!({"n": "{nonce}", "t": "send", "text": sent}).to_string();
+        post(&trek, cx, &body);
+        let row = trek.rows(cx).iter().position(|r| r == "user").unwrap();
+        trek.thread_view(cx)
+            .update(cx, |v, cx| v.scroll_to_row(row, cx));
+        settle(&trek, cx);
+        // The learner's message reads as the card's answer, typeset.
+        let shown = trek.window(cx, |window, _| {
+            gpui_kit::base::test_support::snapshots(window)
+                .into_iter()
+                .filter(|s| s.visible())
+                .any(|s| {
+                    matches!(s.path().last(), Some(gpui_kit::ElementId::NamedInteger(n, _)) if n == "study-sent")
+                })
+        });
+        assert!(
+            shown,
+            "{:?} {:?}",
+            trek.rows(cx),
+            trek.window(cx, |window, _| {
+                gpui_kit::base::test_support::registered_paths(window)
+            })
+            .lines()
+            .filter(|l| l.contains("user"))
+            .collect::<Vec<_>>()
+        );
+        trek.update(cx, |ws, _| {
+            assert_eq!(ws.card_replies(&html), vec![sent.to_string()]);
+        });
+
+        // Drawn again (another page and back): the page is handed the answer it got.
+        let before = log.borrow().made;
+        trek.update(cx, |ws, cx| ws.navigate(Route::Study, cx));
+        settle(&trek, cx);
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
+        trek.thread_view(cx).update(cx, |v, cx| v.scroll_to_top(cx));
+        settle(&trek, cx);
+        let replies = serde_json::to_string(&[sent]).unwrap();
+        let handed = format!("const replies = Object.freeze({replies});");
+        let log = log.borrow();
+        assert!(log.made > before, "new views");
+        assert!(
+            log.bootstraps[before..].iter().any(|b| b.contains(&handed)),
+            "the card made again is handed its answer"
+        );
+    });
+}
+
+/// The thinking box's mic is Trek's own dictation: the page asks for a take (only after the
+/// learner's click), what's heard so far goes to the page as it's revised, and the mic again
+/// ends the take with its words kept.
+#[test]
+fn a_question_cards_mic_takes_trek_dictation_into_the_card() {
+    use trek_app::dictate::{Heard, fake};
+    run(async |cx| {
+        let dictation = fake::install();
+        let log = trek_app::artifact::fake_web(true).unwrap();
+        let trek = open(cx);
+        asked(&trek, cx, QUESTION);
+        assert!(log.borrow().bootstraps[0].contains("canDictate: true"));
+        let heard = |log: &std::rc::Rc<std::cell::RefCell<trek_app::artifact::FakeLog>>| {
+            log.borrow()
+                .scripts
+                .iter()
+                .filter(|s| s.contains("'trekdictation'"))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        post(&trek, cx, r#"{"n":"{nonce}","t":"dictate","on":true}"#);
+        cx.run_until_parked();
+        assert!(dictation.listening(), "a take is open");
+        dictation.hear(Heard::Partial("population".into()));
+        cx.run_until_parked();
+        dictation.hear(Heard::Partial("population growth".into()));
+        cx.run_until_parked();
+        let so_far = heard(&log);
+        assert!(
+            so_far
+                .iter()
+                .any(|s| s.contains(r#""state":"listening","text":"population growth""#)),
+            "{so_far:?}"
+        );
+        // The mic again: the take settles, and its words go to the page to keep.
+        post(&trek, cx, r#"{"n":"{nonce}","t":"dictate","on":false}"#);
+        cx.run_until_parked();
+        assert!(dictation.finished());
+        dictation.hear(Heard::Final("population growth times gamma".into()));
+        cx.run_until_parked();
+        let last = heard(&log).last().cloned().unwrap();
+        assert!(
+            last.contains(r#""state":"done","text":"population growth times gamma""#),
+            "{last}"
+        );
+        assert!(!dictation.mic_open(), "the mic is let go");
+        // The words were the card's, not the composer's.
+        assert_eq!(trek.composer_text(cx), "");
+    });
+}
