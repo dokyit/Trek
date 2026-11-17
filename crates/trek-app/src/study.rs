@@ -1117,6 +1117,59 @@ pub fn intro_bubble(intro: &Intro, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
+/// What a question card sent, in the learner's bubble: the card's label over its fields, each
+/// value typeset as the answers are (Markdown and `$…$` maths: an option is the tutor's words,
+/// maths and all). `ix` keys the fields' text views.
+pub fn submission_bubble(
+    sent: &study::Submission,
+    ix: usize,
+    size: Pixels,
+    cx: &App,
+) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    let fields = sent
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(_, (k, v))| !(k == "Working" && v.trim() == "(none)"));
+    v_flex()
+        .id(("study-sent", ix))
+        .test_support()
+        .gap(px(4.))
+        .child(
+            div()
+                .text_size(px(text::LABEL))
+                .text_color(muted)
+                .child(sent.head.clone()),
+        )
+        .children(fields.map(|(i, (k, v))| {
+            h_flex()
+                .items_start()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(84.))
+                        .pt(px(2.))
+                        .text_size(px(text::LABEL))
+                        .text_color(muted)
+                        .child(k.clone()),
+                )
+                .child(div().flex_1().min_w_0().child(crate::md::keyed(
+                    SharedString::from(format!("study-sent-{ix}-{i}")),
+                    v.clone(),
+                    None,
+                    None,
+                    size,
+                    false,
+                    false,
+                    None,
+                    cx,
+                )))
+        }))
+        .into_any_element()
+}
+
 /// A map's name from its file: "gradient-descent.md" → "Gradient descent" (the heading would
 /// need a read on every frame; the name is enough for a chip).
 fn map_title(path: &Path) -> String {

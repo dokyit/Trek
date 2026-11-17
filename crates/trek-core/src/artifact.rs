@@ -388,9 +388,61 @@ pub fn document_with(html: &str, theme_css: &str, csp: &str) -> String {
 /// had no use for (`w`, so the answer scrolls on past it). It also gives the page `trek.send` and
 /// `trek.copy` (`ACTIONS_JS`), heard only within `GESTURE_WINDOW` of the user's own click or key.
 pub fn bootstrap(nonce: &str) -> String {
+    bootstrap_with(nonce, &Extras::default())
+}
+
+/// What a page in a thread gets besides `trek.send` and `trek.copy` (the Mac's; the phone's
+/// page has neither).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Extras {
+    /// `trek.replies`: what the user sent in the thread after the answer holding the page, up to
+    /// the next answer with a page of its own, oldest first (at most `MAX_REPLIES`, each at most
+    /// `MAX_ACTION_BYTES`), so a page drawn again (scrolled back to, the app opened again) can
+    /// show what was already answered in it.
+    pub replies: Vec<String>,
+    /// `trek.canDictate`: Trek can take dictation here, so `trek.dictate(on)` (Trek's own, the
+    /// composer's) is worth offering. What's heard comes back as `trekdictation` events
+    /// (`dictation_event`).
+    pub can_dictate: bool,
+}
+
+/// The most replies a page is handed (`Extras::replies`).
+pub const MAX_REPLIES: usize = 20;
+
+/// `bootstrap`, with `extras` for the page to read.
+pub fn bootstrap_with(nonce: &str, extras: &Extras) -> String {
+    let replies: Vec<&str> = extras
+        .replies
+        .iter()
+        .filter(|r| r.len() <= MAX_ACTION_BYTES)
+        .take(MAX_REPLIES)
+        .map(String::as_str)
+        .collect();
+    let replies = serde_json::to_string(&replies)
+        .unwrap_or_else(|_| "[]".into())
+        // In a script (the bootstrap is one), nothing may end it.
+        .replace("</", "<\\/");
     BOOTSTRAP
         .replace("__ACTIONS__", ACTIONS_JS)
+        .replace("__REPLIES__", &replies)
+        .replace(
+            "__DICTATE__",
+            if extras.can_dictate { "true" } else { "false" },
+        )
         .replace("__NONCE__", nonce)
+}
+
+/// What a dictation the page started (`trek.dictate`) is doing, for the page: a `trekdictation`
+/// event on its window whose `detail` is `{state, text, error}`. `state`: `"asking"` (the
+/// system is asked for the mic), `"listening"` (`text`: heard so far, revised as it goes),
+/// `"finishing"` (the mic is off, the last words settling), `"done"` (`text`: what was said, to
+/// keep) or `"idle"` (it ended with nothing to keep; `error` says why, if it failed).
+pub fn dictation_event(state: &str, text: &str, error: Option<&str>) -> String {
+    let detail = serde_json::json!({ "state": state, "text": text, "error": error });
+    format!(
+        "window.dispatchEvent(new CustomEvent('trekdictation',{{detail:{}}}));",
+        detail.to_string().replace("</", "<\\/")
+    )
 }
 
 /// The page's `trek.send(text)` and `trek.copy(text)`, as a function of `post` (how a message
@@ -402,7 +454,7 @@ pub fn bootstrap(nonce: &str) -> String {
 /// checks the text and the rate again (`parse_action`, `SendGate`). The click rule holds because
 /// the helper reads a clock it took before the page's scripts ran and `post` carries a secret
 /// those scripts can't read (`the_page_cannot_act_without_a_click`).
-pub const ACTIONS_JS: &str = r#"((post, live) => {
+pub const ACTIONS_JS: &str = r#"((post, live, more) => {
   const MAX = 4096;
   // The clock and the encoder are taken now, before the page's own scripts run: a page that
   // replaces `Date.now` or `TextEncoder` later changes nothing here.
@@ -417,7 +469,7 @@ pub const ACTIONS_JS: &str = r#"((post, live) => {
     post({ t, text });
     return true;
   };
-  const api = Object.freeze({ send: act('send'), copy: act('copy') });
+  const api = Object.freeze(Object.assign({}, more, { send: act('send'), copy: act('copy') }));
   try { Object.defineProperty(window, 'trek', { value: api, enumerable: true }); } catch (_) {}
 })"#;
 
@@ -448,7 +500,12 @@ const BOOTSTRAP: &str = r#"(() => {
   const touch = (e) => { if (e.isTrusted) touched = now(); };
   window.addEventListener('pointerup', touch, true);
   window.addEventListener('keydown', touch, true);
-  (__ACTIONS__)(post, () => now() - touched < 5000);
+  const live = () => now() - touched < 5000;
+  // What the page reads besides (`Extras`): what was sent after it, and Trek's dictation, which
+  // starts (or stops) only just after the user's own click, as a send does.
+  const replies = Object.freeze(__REPLIES__);
+  const dictate = (on) => { if (!live()) return false; post({ t: 'dictate', on: !!on }); return true; };
+  (__ACTIONS__)(post, live, { replies, canDictate: __DICTATE__, dictate });
   let last = -1, queued = false;
   const measure = () => {
     queued = false;
@@ -517,6 +574,9 @@ pub enum Message {
     Open(String),
     /// A wheel the page didn't use, in CSS px (positive: right, down), for the answer around it.
     Wheel(f32, f32),
+    /// `trek.dictate(on)`: start Trek's dictation into the page (`true`), or end the take
+    /// (`false`). What's heard goes back to the page (`dictation_event`).
+    Dictate(bool),
 }
 
 /// `body`, a message from the page, if it's one Trek's bootstrap sent with `nonce` and says
@@ -544,6 +604,7 @@ pub fn parse_message(body: &str, nonce: &str) -> Option<Message> {
             (x.is_finite() && y.is_finite() && x.abs() <= 10_000. && y.abs() <= 10_000.)
                 .then_some(Message::Wheel(x as f32, y as f32))
         }
+        "dictate" => Some(Message::Dictate(object.get("on")?.as_bool()?)),
         _ => None,
     }
 }
@@ -818,6 +879,22 @@ mod tests {
             "no wheel that big"
         );
         assert_eq!(parse_message(r#"{"n":"3f9a","t":"w","y":5}"#, n), None);
+        assert_eq!(
+            parse_message(r#"{"n":"3f9a","t":"dictate","on":true}"#, n),
+            Some(Message::Dictate(true))
+        );
+        assert_eq!(
+            parse_message(r#"{"n":"3f9a","t":"dictate","on":false}"#, n),
+            Some(Message::Dictate(false))
+        );
+        assert_eq!(
+            parse_message(r#"{"n":"3f9a","t":"dictate","on":1}"#, n),
+            None
+        );
+        assert_eq!(
+            parse_message(r#"{"n":"x","t":"dictate","on":true}"#, n),
+            None
+        );
         // Without the secret, or with another, nothing is heard: the page's own scripts can't
         // speak for the bootstrap.
         assert_eq!(parse_message(r#"{"t":"h","v":412}"#, n), None);
@@ -954,9 +1031,10 @@ mod tests {
             "{js}"
         );
         assert!(js.contains(&format!(
-            "(post, () => now() - touched < {})",
+            "const live = () => now() - touched < {};",
             GESTURE_WINDOW.as_millis()
         )));
+        assert!(js.contains("(post, live, { replies, canDictate: false, dictate })"));
         // The clock is the one taken before the page ran, and a message has no prototype.
         assert!(
             !ACTIONS_JS.contains("Date.now()"),
@@ -993,6 +1071,15 @@ mod tests {
     /// listens for). Returns what reached the native channel, as JSON text, and the JSON `after`
     /// printed. `None` without node.
     fn run_in_node(page: &str, after: &str) -> Option<(Vec<String>, serde_json::Value)> {
+        run_in_node_with(&bootstrap("c0ffee"), page, after)
+    }
+
+    /// `run_in_node` with the bootstrap `boot`.
+    fn run_in_node_with(
+        boot: &str,
+        page: &str,
+        after: &str,
+    ) -> Option<(Vec<String>, serde_json::Value)> {
         use std::io::Write as _;
         let driver = r#"
 const vm = require('vm');
@@ -1022,7 +1109,7 @@ process.stdout.write(JSON.stringify({ sent, out: out === undefined ? null : out 
             .stderr(std::process::Stdio::piped())
             .spawn()
             .ok()?;
-        let input = serde_json::json!([bootstrap("c0ffee"), page, after]).to_string();
+        let input = serde_json::json!([boot, page, after]).to_string();
         child.stdin.take()?.write_all(input.as_bytes()).ok()?;
         let output = child.wait_with_output().ok()?;
         assert!(
@@ -1059,6 +1146,52 @@ process.stdout.write(JSON.stringify({ sent, out: out === undefined ? null : out 
         .unwrap();
         assert_eq!(out, serde_json::json!([false, false]));
         assert!(sent.is_empty(), "{sent:?}");
+    }
+
+    #[test]
+    fn a_page_reads_what_was_sent_after_it_and_dictates_only_after_a_click() {
+        let extras = Extras {
+            replies: vec![
+                "Question\nAnswer: C. $\\bar n$ </script>\nWorking: (none)".into(),
+                "x".repeat(MAX_ACTION_BYTES + 1),
+            ],
+            can_dictate: true,
+        };
+        let boot = bootstrap_with("c0ffee", &extras);
+        assert!(!boot.contains("__REPLIES__") && !boot.contains("__DICTATE__"));
+        assert!(!boot.contains("</script>"), "nothing in it ends a script");
+        // A page can't change what it was handed, nor make Trek dictate without a click.
+        let page =
+            "window.__r = [trek.dictate(true)]; try { trek.replies.push('forged'); } catch (_) {}";
+        let after = "const r = window.__r; \
+            r.push(trek.replies, trek.canDictate, typeof trek.send); \
+            fire('pointerup', true); r.push(trek.dictate(true), trek.dictate(false)); r";
+        let Some((sent, out)) = run_in_node_with(&boot, page, after) else {
+            return;
+        };
+        assert_eq!(
+            out,
+            serde_json::json!([
+                false,
+                ["Question\nAnswer: C. $\\bar n$ </script>\nWorking: (none)"],
+                true,
+                "function",
+                true,
+                true
+            ])
+        );
+        let messages: Vec<_> = sent
+            .iter()
+            .map(|m| parse_message(m, "c0ffee").expect(m))
+            .collect();
+        assert_eq!(messages, [Message::Dictate(true), Message::Dictate(false)]);
+        // Elsewhere (no thread, no dictation) a page sees none of it.
+        let (_, out) = run_in_node("", "[trek.replies.length, trek.canDictate]").unwrap();
+        assert_eq!(out, serde_json::json!([0, false]));
+        // What's heard reaches the page as an event it listens for, and can't end the script.
+        let js = dictation_event("listening", "two </script> keys", None);
+        assert!(js.starts_with("window.dispatchEvent(new CustomEvent('trekdictation',"));
+        assert!(js.contains(r#""state":"listening""#) && !js.contains("</script>"));
     }
 
     #[test]

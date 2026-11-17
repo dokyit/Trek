@@ -2559,7 +2559,15 @@ impl ThreadView {
                 // A study session's first message shows what the learner asked for and what came
                 // with it, not the instructions Trek wrote the tutor.
                 let intro = trek_core::study::intro(said);
-                let long = intro.is_none() && (text.len() > 700 || text.lines().count() > 10);
+                // What a question card sent reads as the card's answer, typeset (its options
+                // carry the tutor's maths).
+                let card_sent = intro
+                    .is_none()
+                    .then(|| trek_core::study::submission(&words))
+                    .flatten();
+                let long = intro.is_none()
+                    && card_sent.is_none()
+                    && (text.len() > 700 || text.lines().count() > 10);
                 let has_text = !text.trim().is_empty() || intro.is_some();
                 // Copy takes the message as sent, files and all.
                 let copy_text = SharedString::from(said.to_string());
@@ -2762,11 +2770,16 @@ impl ThreadView {
                                         .when_some(crate::themes::conversation_font(cx), |el, f| {
                                             el.font_family(f)
                                         })
-                                        .map(|el| match &intro {
-                                            Some(intro) => {
+                                        .map(|el| match (&intro, &card_sent) {
+                                            (Some(intro), _) => {
                                                 el.child(crate::study::intro_bubble(intro, cx))
                                             }
-                                            None => el.child(
+                                            (None, Some(sent)) => {
+                                                el.child(crate::study::submission_bubble(
+                                                    sent, ix, text_size, cx,
+                                                ))
+                                            }
+                                            (None, None) => el.child(
                                                 h_flex()
                                                     .items_start()
                                                     .gap(px(8.))
