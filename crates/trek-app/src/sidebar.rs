@@ -2620,9 +2620,8 @@ impl Sidebar {
             .child(
                 h_flex()
                     .gap_2()
-                    // Lifted 2 pt, as in the title bar: the mountain, under its flag, level
-                    // with the words.
-                    .child(div().mt(px(-4.)).child(crate::brand::logo_mark(px(16.))))
+                    // Centred on the words, as in the title bar.
+                    .child(crate::brand::logo_mark(px(16.)))
                     .child(
                         div()
                             .text_size(to_rems(text::LABEL))

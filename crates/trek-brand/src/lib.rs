@@ -1,138 +1,52 @@
-//! Brand elements: the mountain mark, and the mark drawing itself on the welcome screens.
+//! Brand elements: the signpost mark, and the signpost putting itself up on the welcome screens.
 //!
-//! The mark is one mountain with a lit face and a shaded face, a dotted trail up the lit face
-//! and a small flag planted behind the summit. The numbers here are those of
-//! `assets/brand/trek_icon.py`, which writes the app icons and the mark's SVGs from them;
-//! `small_icon_tests` reads its SVGs and holds the two together.
+//! The mark is a trail signpost: a thick post with a chamfered cap and two ember boards, the
+//! upper pointing right with a trail blaze cut through it, the lower shorter, ending in a
+//! swallowtail. Its numbers (`signpost.rs`) are written by `assets/brand/trek_icon.py`, which
+//! writes the app icons and the mark's SVGs from the same drawing; `small_icon_tests` reads its
+//! SVGs and holds the two together.
 
 use gpui_kit::*;
 use std::time::Duration;
 
-/// A point of a drawing, in its own units.
+mod signpost;
+use signpost::{BOARDS, BOX, POST, RADIUS, SMALL_1X, SMALL_2X};
+
+/// A point of the drawing, on its 96-unit square.
 type P = (f32, f32);
 
-/// A drawing of the mountain: the mark on its 96-unit square, or one fitted to a few pixels.
-struct Art {
-    /// The outline, clockwise from the lit face's foot: the summit is its last corner but one,
-    /// the shaded face's foot its last.
+/// A board of the signpost, as it stands.
+struct Board {
+    /// The outline, clockwise from its top left. It's grown by [`RADIUS`] with round joins (the
+    /// SVG fills it and strokes it twice that wide), which is what rounds its corners.
     outline: &'static [P],
-    /// The outline is grown by half of this with round joins (the SVG fills it and strokes it
-    /// this wide), which is what rounds the summit and the feet.
-    edge: f32,
-    /// The ridge, summit to base. The shaded face is the silhouette right of it, so the two
-    /// faces share one shape and meet exactly at the summit.
-    ridge: &'static [P],
-    /// The trail up the lit face, from its foot: centre x, y, radius. Cut through the mountain,
-    /// so they're the colour of whatever it stands on.
-    dots: &'static [(f32, f32, f32)],
-    /// The flag's pole, behind the mountain: centre x, foot, top, width.
-    pole: (f32, f32, f32, f32),
-    /// The flag's cloth: where it starts, then lines (one point) and curves (two control points
-    /// and the end).
-    cloth: &'static [&'static [P]],
-    /// Drawn for a few pixels: the flag is two plain rectangles on whole device pixels (the
-    /// cloth's first and third points are its corners). The mark's own has a round-ended pole
-    /// and a waving cloth.
-    fitted: bool,
+    /// The trail blaze cut through it (the ground shows), or nothing.
+    blaze: &'static [P],
+    /// Where it's fixed to the post, which it swings about on the welcome screens.
+    pivot: P,
+    /// How far it's turned from level, clockwise in degrees (negative raises its right end).
+    /// The outline is already turned; the tests undo it to check the drawing is as written.
+    #[allow(dead_code)]
+    angle: f32,
 }
 
-/// The mark, on its 96-unit square.
-const MARK: Art = Art {
-    outline: &[
-        (9.5, 78.5),
-        (32.8, 46.6),
-        (43., 43.4),
-        (56., 21.),
-        (86.5, 78.5),
-    ],
-    edge: 4.5,
-    ridge: &[
-        (56., 21.),
-        (60.6, 39.6),
-        (55., 51.6),
-        (62.6, 64.8),
-        (58.8, 78.5),
-    ],
-    dots: &[
-        (29., 74.2, 2.4),
-        (36., 69.2, 2.4),
-        (43., 66., 2.4),
-        (47.2, 60., 2.4),
-        (44., 53.2, 2.4),
-        (48., 47., 2.4),
-        (51.6, 40.4, 2.4),
-        (53.6, 34., 2.4),
-        (54.6, 28.2, 2.),
-    ],
-    pole: (56., 24., 8.6, 2.),
-    cloth: &[
-        &[(56.4, 8.6)],
-        &[(59.3, 7.2), (61.5, 10.2), (65.7, 8.8)],
-        &[(65.7, 15.2)],
-        &[(61.5, 16.6), (59.3, 13.6), (56.4, 15.)],
-    ],
-    fitted: false,
-};
-
-/// The mark's own box on that square: left, top, width, height (`trek-mark.svg`'s view box).
-const BOX: (f32, f32, f32, f32) = (7., 7., 82., 74.);
 /// The mark's width over its height.
 const ASPECT: f32 = BOX.2 / BOX.3;
-/// How many dots the trail has.
-const DOTS: usize = MARK.dots.len();
 
-/// The mark's colours on a theme: the lit face, the shaded face, the flag. Night's are the
-/// app icon's; Paper's are a step deeper, as the Paper icon's are, and its flag is dark where
-/// Night's is light.
-const NIGHT: [u32; 3] = [0xFF7A3D, 0xC9551F, 0xFFC7A0];
-const PAPER: [u32; 3] = [0xE85D1F, 0xB8461A, 0xB8461A];
+/// The mark's colours on a theme: the boards, the post. Night's are the Night icon's (a cream
+/// post for a dark ground); Paper's the Paper icon's (a near-black post, the boards a step
+/// deeper).
+const NIGHT: [u32; 2] = [0xFF7A3D, 0xF6F1EA];
+const PAPER: [u32; 2] = [0xEE5A24, 0x1F1714];
 
 /// The largest the small mark is drawn.
 const SMALL: f32 = 24.;
-
-/// The small mark in its 16 pt box, a device pixel a point: no trail (its dots would be a third
-/// of a pixel across), a straight ridge on a pixel's edge, the base on the box's bottom edge
-/// and the flag on whole points, larger than its share so it's still a flag.
-const SMALL_1X: Art = Art {
-    outline: &[(0., 16.), (5., 9.6), (7., 9.), (9.5, 4.), (16., 16.)],
-    edge: 0.,
-    ridge: &[(9.5, 4.), (10., 5.), (10., 16.)],
-    dots: &[],
-    pole: (9.5, 5., 1., 1.),
-    cloth: &[&[(10., 1.)], &[(12., 1.)], &[(12., 3.)], &[(10., 3.)]],
-    fitted: true,
-};
-
-/// The small mark where a point is two device pixels or more: on half points, with the ridge's
-/// turns, round joins a pixel across and a shorter trail of larger dots, each centred on a
-/// pixel.
-const SMALL_2X: Art = Art {
-    outline: &[(0.5, 15.5), (5., 9.3), (7., 8.7), (9.5, 4.5), (15.5, 15.5)],
-    edge: 1.,
-    ridge: &[
-        (9.5, 4.5),
-        (10.5, 8.),
-        (9.5, 10.25),
-        (11., 12.75),
-        (10.25, 15.5),
-    ],
-    dots: &[
-        (4.75, 14.25, 0.575),
-        (6.75, 13.25, 0.575),
-        (7.75, 11.25, 0.575),
-        (8.25, 9.25, 0.575),
-        (8.75, 7.25, 0.575),
-    ],
-    pole: (9.5, 5., 1., 1.),
-    cloth: &[&[(10., 1.)], &[(12., 1.)], &[(12., 2.5)], &[(10., 2.5)]],
-    fitted: true,
-};
 
 /// A step along a grown outline.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Step {
     Line(P),
-    /// A clockwise arc of the edge's radius to here: a round join.
+    /// A clockwise arc of the joins' radius to here: a round join.
     Arc(P),
 }
 
@@ -140,6 +54,13 @@ impl Step {
     fn point(self) -> P {
         match self {
             Step::Line(p) | Step::Arc(p) => p,
+        }
+    }
+
+    fn map(self, f: impl Fn(P) -> P) -> Self {
+        match self {
+            Step::Line(p) => Step::Line(f(p)),
+            Step::Arc(p) => Step::Arc(f(p)),
         }
     }
 }
@@ -151,113 +72,95 @@ fn unit(a: P, b: P) -> P {
     (dx / length, dy / length)
 }
 
-impl Art {
-    fn radius(&self) -> f32 {
-        self.edge / 2.
-    }
-
-    fn summit(&self) -> P {
-        self.outline[self.outline.len() - 2]
-    }
-
-    /// The whole silhouette: the outline grown by the edge's radius, with round joins.
-    fn silhouette(&self) -> Vec<Step> {
-        let (corners, r) = (self.outline, self.radius());
-        let mut steps = Vec::with_capacity(corners.len() * 2);
-        for (i, &corner) in corners.iter().enumerate() {
-            let before = corners[(i + corners.len() - 1) % corners.len()];
-            let after = corners[(i + 1) % corners.len()];
-            let (d0, d1) = (unit(before, corner), unit(corner, after));
-            // Where the grown edges before and after this corner end and start.
-            let a = (corner.0 + r * d0.1, corner.1 - r * d0.0);
-            let b = (corner.0 + r * d1.1, corner.1 - r * d1.0);
-            let turn = d0.0 * d1.1 - d0.1 * d1.0;
-            if turn > 0. {
-                // A corner that points out: the round join.
-                steps.push(Step::Line(a));
-                steps.push(Step::Arc(b));
-            } else {
-                // The shoulder's inside corner: the two grown edges meet.
-                let t = ((b.0 - a.0) * d1.1 - (b.1 - a.1) * d1.0) / turn;
-                steps.push(Step::Line((a.0 + t * d0.0, a.1 + t * d0.1)));
-            }
+/// A clockwise outline grown by `r`, with round joins where it turns out and the grown edges
+/// meeting where it turns in (the swallowtail's notch).
+fn grown(corners: &[P], r: f32) -> Vec<Step> {
+    let mut steps = Vec::with_capacity(corners.len() * 2);
+    for (i, &corner) in corners.iter().enumerate() {
+        let before = corners[(i + corners.len() - 1) % corners.len()];
+        let after = corners[(i + 1) % corners.len()];
+        let (d0, d1) = (unit(before, corner), unit(corner, after));
+        // Where the grown edges before and after this corner end and start.
+        let a = (corner.0 + r * d0.1, corner.1 - r * d0.0);
+        let b = (corner.0 + r * d1.1, corner.1 - r * d1.0);
+        let turn = d0.0 * d1.1 - d0.1 * d1.0;
+        if turn > 0. {
+            steps.push(Step::Line(a));
+            steps.push(Step::Arc(b));
+        } else {
+            let t = ((b.0 - a.0) * d1.1 - (b.1 - a.1) * d1.0) / turn;
+            steps.push(Step::Line((a.0 + t * d0.0, a.1 + t * d0.1)));
         }
-        steps
     }
-
-    /// The silhouette right of the ridge: from the top of the summit's round join, round the
-    /// shaded face's foot, along the base to under the ridge's end, and back up the ridge.
-    fn shade(&self) -> Vec<Step> {
-        let (summit, foot, first) = (
-            self.summit(),
-            self.outline[self.outline.len() - 1],
-            self.outline[0],
-        );
-        let r = self.radius();
-        let (down, base) = (unit(summit, foot), unit(foot, first));
-        let end = self.ridge[self.ridge.len() - 1];
-        let mut steps = vec![
-            Step::Line((summit.0, summit.1 - r)),
-            Step::Arc((summit.0 + r * down.1, summit.1 - r * down.0)),
-            Step::Line((foot.0 + r * down.1, foot.1 - r * down.0)),
-            Step::Arc((foot.0 + r * base.1, foot.1 - r * base.0)),
-            Step::Line((end.0, end.1 + r)),
-        ];
-        steps.extend(self.ridge.iter().rev().map(|&p| Step::Line(p)));
-        steps
-    }
+    steps
 }
 
-/// How far the mark has drawn itself. Finished, for everything but the welcome screens.
+/// `p` turned `degrees` about `pivot`, clockwise on screen.
+fn turned(p: P, pivot: P, degrees: f32) -> P {
+    let (sin, cos) = degrees.to_radians().sin_cos();
+    let (x, y) = (p.0 - pivot.0, p.1 - pivot.1);
+    (pivot.0 + x * cos - y * sin, pivot.1 + x * sin + y * cos)
+}
+
+/// How far the signpost has put itself up. Finished, for everything but the welcome screens.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Drawn {
-    /// Each dot of the trail, from the foot: 0 not there, 1 its full size.
-    dots: [f32; DOTS],
-    /// The flag: 0 behind the summit, 1 risen.
-    flag: f32,
+    /// The post: 0 in the ground, 1 standing.
+    post: f32,
+    /// Each board's swing, upper then lower: 0 not hung yet, 1 at rest.
+    boards: [f32; 2],
 }
 
-/// The welcome screens' drawing, as shares of its length: when the first dot starts, how long
-/// after one the next starts, how long a dot takes to grow, and when the flag starts to rise
-/// (it's up at the end). The last dot is nearly out when the flag starts.
-const FIRST_DOT: f32 = 0.06;
-const NEXT_DOT: f32 = 0.07;
-const DOT_GROWS: f32 = 0.14;
-const FLAG_RISES: f32 = 0.7;
+/// The welcome screens' drawing, as shares of its length: the post rises over the first part,
+/// then each board swings on, the upper first; the lower is at rest at the end.
+const POST_RISES: f32 = 0.38;
+const BOARD_SWINGS: [(f32, f32); 2] = [(0.28, 0.78), (0.46, 1.0)];
+/// Where each board swings in from, in degrees from where it rests: the upper one tipped down
+/// at its tip, the lower one at its tail end, so they swing up into place.
+const SWING_FROM: [f32; 2] = [32., -28.];
 
 impl Drawn {
     const DONE: Self = Self {
-        dots: [1.; DOTS],
-        flag: 1.,
+        post: 1.,
+        boards: [1.; 2],
     };
 
-    /// `t` of the way through the welcome screens' drawing, 0 to 1. The mountain is there from
-    /// the start; the trail's dots appear one at a time from its foot, then the flag rises.
+    /// `t` of the way through the welcome screens' drawing, 0 to 1.
     fn at(t: f32) -> Self {
+        let span = |(from, to): (f32, f32)| ((t - from) / (to - from)).clamp(0., 1.);
         Self {
-            dots: std::array::from_fn(|i| {
-                settle((t - FIRST_DOT - i as f32 * NEXT_DOT) / DOT_GROWS)
-            }),
-            flag: settle((t - FLAG_RISES) / (1. - FLAG_RISES)),
+            post: settle(span((0., POST_RISES))),
+            boards: BOARD_SWINGS.map(span),
         }
     }
 }
 
-/// An ease for something arriving: quick, then slowing to rest at 1, never past it (a dot
-/// doesn't swell and shrink back, a flag doesn't overshoot its pole).
+/// An ease for something arriving: quick, then slowing to rest at 1, never past it (the post
+/// doesn't bounce out of the ground).
 fn settle(t: f32) -> f32 {
     1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
 }
 
-/// Follow `steps` as one closed shape. `r` is the round joins' radius, `to` where a point of
-/// the drawing is in the window.
+/// What's left of a board's swing `t` of the way through it, as a share of where it swung from:
+/// 1 at the start, then past its place a little (a fifth at most) and back, 0 at the end.
+fn swing(t: f32) -> f32 {
+    let t = t.clamp(0., 1.);
+    (1. - t).powi(2) * (1.5 * std::f32::consts::PI * t).cos()
+}
+
+/// How opaque a board is `t` of the way through its swing: it's there by a third of the way.
+fn shown(t: f32) -> f32 {
+    settle(t * 3.)
+}
+
+/// Follow `steps` as one closed shape. `r` is the joins' radius, `to` where a point of the
+/// drawing is in the window.
 fn trace(path: &mut PathBuilder, steps: &[Step], r: Pixels, to: &impl Fn(P) -> Point<Pixels>) {
     for (i, step) in steps.iter().enumerate() {
         let at = to(step.point());
         match step {
             _ if i == 0 => path.move_to(at),
             Step::Arc(_) if r > px(0.) => path.arc_to(point(r, r), px(0.), false, true, at),
-            // No radius, no join: the line before it ended here.
             Step::Arc(_) => {}
             Step::Line(_) => path.line_to(at),
         }
@@ -265,89 +168,59 @@ fn trace(path: &mut PathBuilder, steps: &[Step], r: Pixels, to: &impl Fn(P) -> P
     path.close();
 }
 
-/// Paint `art`: `to` places a point of it in the window, `k` is window pixels per unit of it
-/// and `scale` device pixels per window pixel. Back to front: the flag, the mountain in the
-/// lit face's colour with the trail cut through it, the shaded face over its right. (As the SVG
-/// has it. Two faces painted side by side leave a seam of the ground's colour down the ridge,
-/// each path being antialiased on its own; one over the other doesn't. It needs the colours
-/// opaque: see [`logo_mark_muted`].)
+/// Paint the signpost: `to` places a point of it in the window and `k` is window pixels per
+/// unit. Back to front, as the SVG has it: the post, then the boards over it, each with its
+/// blaze cut through (the fill is even-odd).
 fn paint(
-    art: &Art,
     to: impl Fn(P) -> Point<Pixels>,
     k: f32,
-    scale: f32,
-    [lit, shade, flag]: [Hsla; 3],
+    [board, post]: [Hsla; 2],
     drawn: Drawn,
     window: &mut Window,
 ) {
-    let (x, foot, top, wide) = art.pole;
-    if art.fitted {
-        let snap = |p: Point<Pixels>| {
-            point(
-                px((p.x.as_f32() * scale).round() / scale),
-                px((p.y.as_f32() * scale).round() / scale),
-            )
-        };
-        let rect = |a: P, b: P| Bounds::from_corners(snap(to(a)), snap(to(b)));
-        window.paint_quad(fill(
-            rect((x - wide / 2., top), (x + wide / 2., foot)),
-            flag,
-        ));
-        window.paint_quad(fill(rect(art.cloth[0][0], art.cloth[2][0]), flag));
-    } else if drawn.flag > 0. {
-        // Rising, the flag starts with its top at the summit, behind the mountain, and its
-        // cloth unfurls from the pole on the way up.
-        let sunk = (1. - drawn.flag) * (art.summit().1 - top);
-        let flag = flag.opacity(drawn.flag);
-        let (a, b) = (to((x - wide / 2., top + sunk)), to((x + wide / 2., foot)));
-        if b.y > a.y {
-            window
-                .paint_quad(fill(Bounds::from_corners(a, b), flag).corner_radii(px(wide * k / 2.)));
-        }
-        let place = |p: P| to((x + (p.0 - x) * drawn.flag, p.1 + sunk));
-        let mut cloth = PathBuilder::fill();
-        cloth.move_to(place(art.cloth[0][0]));
-        for part in &art.cloth[1..] {
-            match **part {
-                [end] => cloth.line_to(place(end)),
-                [a, b, end] => cloth.cubic_bezier_to(place(end), place(a), place(b)),
-                _ => {}
-            }
-        }
-        cloth.close();
-        if let Ok(cloth) = cloth.build() {
-            window.paint_path(cloth, flag);
+    let r = px(RADIUS * k);
+    if drawn.post > 0. {
+        // Rising, the post comes up out of the ground: drawn lower by what's still to come,
+        // and cut off at its foot.
+        let foot = POST.iter().map(|p| p.1).fold(f32::MIN, f32::max) + RADIUS;
+        let top = POST.iter().map(|p| p.1).fold(f32::MAX, f32::min) - RADIUS;
+        let sunk = (1. - drawn.post) * (foot - top);
+        let mut path = PathBuilder::fill();
+        trace(&mut path, &grown(POST, RADIUS), r, &|p| {
+            to((p.0, p.1 + sunk))
+        });
+        if let Ok(path) = path.build() {
+            let (a, b) = (to((0., 0.)), to((96., foot)));
+            let ground = Bounds::from_corners(a, b);
+            window.with_content_mask(Some(ContentMask { bounds: ground }), |window| {
+                window.paint_path(path, post)
+            });
         }
     }
-
-    let r = px(art.radius() * k);
-    let mut body = PathBuilder::fill();
-    trace(&mut body, &art.silhouette(), r, &to);
-    // The trail: holes (the fill is even-odd), so the ground shows through them.
-    for (&(x, y, dot), grown) in art.dots.iter().zip(drawn.dots) {
-        let dot = dot * grown;
-        if dot <= 0. {
+    for ((b, swung), from) in BOARDS.iter().zip(drawn.boards).zip(SWING_FROM) {
+        if swung <= 0. {
             continue;
         }
-        let (left, right) = (to((x - dot, y)), to((x + dot, y)));
-        let radii = point(px(dot * k), px(dot * k));
-        body.move_to(left);
-        body.arc_to(radii, px(0.), true, false, right);
-        body.arc_to(radii, px(0.), true, false, left);
-        body.close();
-    }
-    if let Ok(body) = body.build() {
-        window.paint_path(body, lit);
-    }
-    let mut face = PathBuilder::fill();
-    trace(&mut face, &art.shade(), r, &to);
-    if let Ok(face) = face.build() {
-        window.paint_path(face, shade);
+        let extra = from * swing(swung);
+        let turn = |p: P| turned(p, b.pivot, extra);
+        let mut path = PathBuilder::fill();
+        let steps: Vec<Step> = grown(b.outline, RADIUS)
+            .into_iter()
+            .map(|s| s.map(turn))
+            .collect();
+        trace(&mut path, &steps, r, &to);
+        if !b.blaze.is_empty() {
+            let blaze: Vec<Step> = b.blaze.iter().map(|&p| Step::Line(turn(p))).collect();
+            trace(&mut path, &blaze, px(0.), &to);
+        }
+        if let Ok(path) = path.build() {
+            window.paint_path(path, board.opacity(shown(swung)));
+        }
     }
 }
 
-/// The mark's colours on the theme in use.
-fn colours(cx: &App) -> [Hsla; 3] {
+/// The mark's colours on the theme in use: the boards, the post.
+fn colours(cx: &App) -> [Hsla; 2] {
     use gpui_kit::component::ActiveTheme as _;
     let colours = if cx.theme().mode.is_dark() {
         NIGHT
@@ -358,7 +231,7 @@ fn colours(cx: &App) -> [Hsla; 3] {
 }
 
 /// `colours`, `strength` of the way from the theme's background to themselves, and opaque.
-fn muted(colours: [Hsla; 3], strength: f32, cx: &App) -> [Hsla; 3] {
+fn muted(colours: [Hsla; 2], strength: f32, cx: &App) -> [Hsla; 2] {
     use gpui_kit::component::ActiveTheme as _;
     if strength >= 1. {
         return colours;
@@ -377,16 +250,14 @@ fn muted(colours: [Hsla; 3], strength: f32, cx: &App) -> [Hsla; 3] {
 }
 
 /// Paint the mark into `bounds`, in its own proportions, centred.
-fn paint_mark(bounds: Bounds<Pixels>, colours: [Hsla; 3], drawn: Drawn, window: &mut Window) {
+fn paint_mark(bounds: Bounds<Pixels>, colours: [Hsla; 2], drawn: Drawn, window: &mut Window) {
     let w = bounds.size.width.min(bounds.size.height * ASPECT);
     let k = w.as_f32() / BOX.2;
     let ox = bounds.origin.x.as_f32() + (bounds.size.width - w).as_f32() / 2. - BOX.0 * k;
     let oy = bounds.origin.y.as_f32() + (bounds.size.height - w / ASPECT).as_f32() / 2. - BOX.1 * k;
     paint(
-        &MARK,
         |p| point(px(ox + p.0 * k), px(oy + p.1 * k)),
         k,
-        window.scale_factor(),
         colours,
         drawn,
         window,
@@ -394,15 +265,14 @@ fn paint_mark(bounds: Bounds<Pixels>, colours: [Hsla; 3], drawn: Drawn, window: 
 }
 
 /// The mark, `size` wide, in the theme's colours. Up to [`SMALL`] points it's the small mark
-/// ([`small_mark`]), drawn for its size; above that the mark itself, trail and all.
+/// ([`small_mark`]), drawn pixel by pixel; above that the signpost itself.
 pub fn logo_mark(size: Pixels) -> AnyElement {
     mark(size, 1.)
 }
 
 /// The mark at half strength, for an empty state that shouldn't call for attention: its colours
 /// half way to the theme's background. Use this rather than making the mark see-through
-/// (`.opacity(0.5)` round [`logo_mark`]): the shaded face is painted over the lit one, which
-/// would show through it, brighter than the lit face itself on a dark theme.
+/// (`.opacity(0.5)` round [`logo_mark`]): the post would show through the boards.
 pub fn logo_mark_muted(size: Pixels) -> AnyElement {
     mark(size, 0.5)
 }
@@ -429,10 +299,9 @@ fn mark(size: Pixels, strength: f32) -> AnyElement {
     }
 }
 
-/// The mountain drawn for small sizes (the title bar's 16 pt), where the mark itself, scaled
-/// down, loses its trail and its flag to blur: its box is put on whole device pixels, the base
-/// on the box's bottom edge and the flag on whole points. A point a pixel it has no trail; from
-/// two pixels a point, a short one.
+/// The signpost drawn for small sizes (the title bar's 16 pt), where the full drawing, scaled
+/// down, blurs: pixel by pixel, from a grid of 16 a side a point a pixel and of 32 from two
+/// pixels a point. Its box is put on whole device pixels.
 pub fn small_mark(side: Pixels) -> impl IntoElement {
     small(side, 1.)
 }
@@ -446,37 +315,57 @@ fn small(side: Pixels, strength: f32) -> impl IntoElement {
                 let snap = |v: f32| (v * scale).round() / scale;
                 let side = snap(b.size.width.as_f32().min(b.size.height.as_f32()));
                 let (ox, oy) = (snap(b.origin.x.as_f32()), snap(b.origin.y.as_f32()));
-                let k = side / 16.;
-                let art = small_art(side * scale);
-                paint(
-                    art,
-                    |p| point(px(ox + p.0 * k), px(oy + p.1 * k)),
-                    k,
-                    scale,
-                    muted(colours(cx), strength, cx),
-                    Drawn::DONE,
-                    window,
-                );
+                let grid = small_grid(side * scale);
+                let k = side / grid.len() as f32;
+                let [board, post] = muted(colours(cx), strength, cx);
+                for (ch, colour) in [('#', post), ('o', board)] {
+                    for (x, y, w) in runs(grid, ch) {
+                        let at = |x: usize, y: usize| {
+                            point(px(snap(ox + x as f32 * k)), px(snap(oy + y as f32 * k)))
+                        };
+                        let cell = Bounds::from_corners(at(x, y), at(x + w, y + 1));
+                        window.paint_quad(fill(cell, colour));
+                    }
+                }
             },
         )
         .size_full(),
     )
 }
 
-/// The small mark's drawing for a box `pixels` device pixels across.
-fn small_art(pixels: f32) -> &'static Art {
+/// The small mark's grid for a box `pixels` device pixels across.
+fn small_grid(pixels: f32) -> &'static [&'static str] {
     if pixels >= 28. { &SMALL_2X } else { &SMALL_1X }
 }
 
-/// The welcome screens' signature: the mark draws itself. The mountain comes up, the trail's
-/// dots appear one at a time from its foot, then the flag rises behind the summit. With reduce
-/// motion it's simply there, finished.
-pub fn mountain_draw(
+/// The cells of `ch` in `grid`, as runs along each row: column, row, length.
+fn runs(grid: &[&str], ch: char) -> Vec<(usize, usize, usize)> {
+    let mut out = vec![];
+    for (y, row) in grid.iter().enumerate() {
+        let mut start = None;
+        for (x, c) in row.chars().chain(['.']).enumerate() {
+            match (c == ch, start) {
+                (true, None) => start = Some(x),
+                (false, Some(s)) => {
+                    out.push((s, y, x - s));
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// The welcome screens' signature: the signpost puts itself up. The post rises out of the
+/// ground, then the boards swing on, the upper first, and settle. With reduce motion it's
+/// simply there, finished.
+pub fn signpost_draw(
     id: impl Into<ElementId>,
     size_px: Pixels,
     reduce_motion: bool,
 ) -> impl IntoElement {
-    let total = Duration::from_millis(900);
+    let total = Duration::from_millis(1100);
     div()
         .w(size_px)
         .h(size_px / ASPECT)
@@ -499,12 +388,12 @@ pub fn mountain_draw(
 #[cfg(test)]
 mod tests {
     use super::{
-        DOT_GROWS, Drawn, FIRST_DOT, FLAG_RISES, MARK, NEXT_DOT, SMALL_1X, SMALL_2X, Step, settle,
-        small_art,
+        BOARDS, Drawn, POST, POST_RISES, SMALL_1X, SMALL_2X, SWING_FROM, runs, settle, shown,
+        small_grid, swing, turned,
     };
 
     #[test]
-    fn nothing_arrives_past_its_place() {
+    fn the_post_never_bounces_and_the_boards_settle_where_they_rest() {
         let mut last = 0.0;
         for i in 0..=100 {
             let k = settle(i as f32 / 100.0);
@@ -512,122 +401,94 @@ mod tests {
             last = k;
         }
         assert_eq!(settle(1.0), 1.0);
+        // A swing starts from where it swung in from and ends at rest, going past its place a
+        // little on the way, never far.
+        assert_eq!(swing(0.), 1.);
+        assert!(swing(1.).abs() < 1e-6);
+        let least = (0..=100)
+            .map(|i| swing(i as f32 / 100.))
+            .fold(f32::MAX, f32::min);
+        assert!(least < 0. && least > -1. / 5., "{least}");
+        assert_eq!(shown(0.34), 1.);
     }
 
     #[test]
-    fn the_trail_appears_from_the_foot_and_then_the_flag_rises() {
-        // It starts as the bare mountain and ends as the mark.
+    fn the_post_rises_first_then_the_boards_swing_on_upper_first() {
         assert_eq!(Drawn::at(1.0), Drawn::DONE);
         let start = Drawn::at(0.0);
-        assert_eq!((start.dots, start.flag), ([0.; 9], 0.));
+        assert_eq!((start.post, start.boards), (0., [0., 0.]));
         let mut last = start;
         for i in 1..=200 {
             let now = Drawn::at(i as f32 / 200.);
-            // Nothing goes back.
-            assert!(now.flag >= last.flag);
-            for (a, b) in now.dots.iter().zip(last.dots) {
-                assert!(*a >= b);
-            }
-            // One at a time from the foot: a dot is never further out than the one below it.
-            for pair in now.dots.windows(2) {
-                assert!(pair[0] >= pair[1], "{i}: {:?}", now.dots);
-            }
-            // The flag waits until the last dot is nearly out.
-            if now.flag > 0. {
-                assert!(now.dots[8] > 0.8, "{i}: {now:?}");
+            assert!(now.post >= last.post);
+            assert!(now.boards[0] >= last.boards[0] && now.boards[1] >= last.boards[1]);
+            // The upper board is always further on than the lower.
+            assert!(now.boards[0] >= now.boards[1], "{i}: {now:?}");
+            // No board is hung before the post is mostly up.
+            if now.boards[0] > 0. {
+                assert!(now.post > 0.9, "{i}: {now:?}");
             }
             last = now;
         }
-        // The dots come one after another, not together: when the fifth starts the first is
-        // out and the last hasn't begun.
-        let mid = Drawn::at(FIRST_DOT + 4. * NEXT_DOT + 0.01);
-        assert!(mid.dots[0] == 1. && mid.dots[4] > 0. && mid.dots[8] == 0.);
-        // And the whole trail is out before the end, with the flag still rising.
-        let late = Drawn::at(FIRST_DOT + 8. * NEXT_DOT + DOT_GROWS);
-        assert!(late.dots == [1.; 9] && late.flag > 0. && late.flag < 1.);
-        assert!(FLAG_RISES < 1.);
+        assert_eq!(Drawn::at(POST_RISES).post, 1.);
+        // They swing in from opposite sides: the upper tipped down at its tip, the lower at its
+        // tail end.
+        assert!(SWING_FROM[0] > 0. && SWING_FROM[1] < 0.);
     }
 
     #[test]
-    fn both_faces_share_the_silhouette_and_meet_at_the_summit() {
-        let (whole, shade) = (MARK.silhouette(), MARK.shade());
-        let summit = MARK.summit();
-        // The shaded face starts at the top of the summit's round join, straight above it.
-        assert_eq!(shade[0], Step::Line((summit.0, summit.1 - MARK.radius())));
-        // Its outer edge is the silhouette's own: the same join's end, then the far foot's.
-        for step in &shade[1..4] {
-            assert!(whole.contains(step), "{step:?} isn't on the silhouette");
+    fn the_boards_hang_on_the_post_and_the_mirror_is_broken() {
+        let (left, right) = (POST[0].0, POST[2].0);
+        let [upper, lower] = &BOARDS;
+        for b in [upper, lower] {
+            // Fixed to the post, crossing it.
+            assert!(b.pivot.0 > left && b.pivot.0 < right);
+            let xs = b.outline.iter().map(|p| p.0);
+            assert!(xs.clone().fold(f32::MAX, f32::min) < left);
+            assert!(xs.fold(f32::MIN, f32::max) > right);
+            // Turned as the drawing says: undo the turn and its top edge is level.
+            let level: Vec<_> = b
+                .outline
+                .iter()
+                .map(|&p| turned(p, b.pivot, -b.angle))
+                .collect();
+            assert!((level[0].1 - level[1].1).abs() < 0.02, "{level:?}");
         }
-        // And it comes back up the ridge to the summit itself.
-        assert_eq!(shade.last(), Some(&Step::Line(summit)));
-        // The trail is on the lit face: left of the ridge at its height.
-        for &(x, y, r) in MARK.dots {
-            let ridge = MARK
-                .ridge
-                .windows(2)
-                .find(|w| w[0].1 <= y && y <= w[1].1)
-                .map(|w| w[0].0 + (w[1].0 - w[0].0) * (y - w[0].1) / (w[1].1 - w[0].1))
-                .unwrap();
-            assert!(
-                x + r < ridge,
-                "the dot at {x} {y} crosses the ridge at {ridge}"
-            );
-        }
-    }
-
-    /// Whether `v` is on a `1/per`-point grid: whole points for 1, half points for 2.
-    fn on_grid(v: f32, per: f32) -> bool {
-        (v * per).fract() == 0.0
-    }
-
-    #[test]
-    fn the_small_mark_is_on_whole_pixels() {
-        assert!(std::ptr::eq(small_art(16.), &SMALL_1X));
-        assert!(std::ptr::eq(small_art(24.), &SMALL_1X));
-        assert!(std::ptr::eq(small_art(32.), &SMALL_2X));
-        for (art, per) in [(&SMALL_1X, 1.), (&SMALL_2X, 2.)] {
-            let r = art.radius();
-            // The base is the box's bottom edge, the feet its bottom corners.
-            let (first, foot) = (art.outline[0], art.outline[art.outline.len() - 1]);
-            assert_eq!((first.1 + r, foot.1 + r), (16., 16.));
-            assert_eq!((first.0 - r, foot.0 + r), (0., 16.));
-            // The pole is a column of pixels, the summit in the middle of it, and the cloth
-            // a rectangle of them beside it.
-            let (x, pole_foot, top, wide) = art.pole;
-            assert!(on_grid(x - wide / 2., 1.) && wide == 1. && on_grid(top, per));
-            assert_eq!(art.summit().0, x);
-            assert!(
-                pole_foot > art.summit().1 - r,
-                "the pole stands behind the summit"
-            );
-            let (a, b) = (art.cloth[0][0], art.cloth[2][0]);
-            assert_eq!(
-                a,
-                (x + wide / 2., top),
-                "the cloth hangs from the pole's top"
-            );
-            assert!(on_grid(b.0, 1.) && on_grid(b.1, per) && b.0 <= 16. && b.1 < art.summit().1);
-            assert!(
-                top >= 0. && art.summit().1 - r >= b.1,
-                "the flag is above the summit"
-            );
-            // Each dot is centred on a pixel.
-            for &(x, y, _) in art.dots {
-                assert!(
-                    on_grid(x * per - 0.5, 1.) && on_grid(y * per - 0.5, 1.),
-                    "{x} {y}"
-                );
-            }
-        }
-        // A pixel a point, the shaded face starts on a pixel's edge under the summit's pixel.
-        assert!(SMALL_1X.ridge[1..].iter().all(|p| p.0 == 10.));
-        // No trail a pixel a point; a shorter one of larger dots from two.
-        assert!(SMALL_1X.dots.is_empty());
-        assert!(!SMALL_2X.dots.is_empty() && SMALL_2X.dots.len() < MARK.dots.len());
-        let share = |art: &super::Art| {
-            art.dots[0].2 / (art.outline[art.outline.len() - 1].0 - art.outline[0].0)
+        // The upper board points right and carries the blaze; the lower is shorter, reaching
+        // further left, and ends in a notch (an inside corner) rather than a second point.
+        let width = |b: &super::Board| {
+            let xs = b.outline.iter().map(|p| p.0);
+            xs.clone().fold(f32::MIN, f32::max) - xs.fold(f32::MAX, f32::min)
         };
-        assert!(share(&SMALL_2X) > share(&MARK));
+        assert!(width(lower) < width(upper));
+        assert!(!upper.blaze.is_empty() && lower.blaze.is_empty());
+        assert_eq!(lower.outline.len(), 5, "the swallowtail's notch");
+        // The post stands above the upper board and below the lower: a signpost, its cap one
+        // chamfer (the left corner lower).
+        assert!(POST[0].1 > POST[1].1);
+        let top = upper.outline.iter().map(|p| p.1).fold(f32::MAX, f32::min);
+        let bottom = lower.outline.iter().map(|p| p.1).fold(f32::MIN, f32::max);
+        assert!(POST[1].1 < top && POST[2].1 > bottom);
+    }
+
+    #[test]
+    fn the_small_mark_is_drawn_on_whole_pixels() {
+        assert!(std::ptr::eq(small_grid(16.), &SMALL_1X[..]));
+        assert!(std::ptr::eq(small_grid(24.), &SMALL_1X[..]));
+        assert!(std::ptr::eq(small_grid(32.), &SMALL_2X[..]));
+        for grid in [&SMALL_1X[..], &SMALL_2X[..]] {
+            let n = grid.len();
+            assert!(grid.iter().all(|row| row.len() == n));
+            // One post, a column at least two pixels wide all the way down from its cap, and
+            // two boards: the post shows between them.
+            let post = runs(grid, '#');
+            let rows: Vec<usize> = post.iter().map(|r| r.1).collect();
+            assert!(rows.windows(2).all(|w| w[1] >= w[0]));
+            assert!(post.iter().filter(|r| r.2 >= 2).count() >= n / 3);
+            let board_rows: Vec<usize> = runs(grid, 'o').iter().map(|r| r.1).collect();
+            let gaps = board_rows.windows(2).filter(|w| w[1] > w[0] + 1).count();
+            assert_eq!(gaps, 1, "two boards, apart");
+        }
     }
 }
 

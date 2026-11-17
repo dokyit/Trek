@@ -59,7 +59,8 @@ fn glyph_asset(name: &str, windows: bool, light: bool, px: u32) -> String {
     }
 }
 
-/// While agents work the summit beacon blinks between lit (the idle glyph) and ring (working).
+/// While agents work the signpost blinks between its filled boards (the idle glyph) and their
+/// outlines (working).
 fn blink_name(lit: bool) -> &'static str {
     if lit {
         Glyph::Idle.name()
@@ -141,7 +142,7 @@ pub struct Tray {
     /// The glyph on screen: the state's, or the other beat of the blink.
     shown: &'static str,
     surface: Surface,
-    /// While agents work the summit beacon blinks between lit and ring.
+    /// While agents work the signpost blinks between filled and outlined boards.
     blink: Option<Task<()>>,
     _subscription: Subscription,
     _behind: Subscription,

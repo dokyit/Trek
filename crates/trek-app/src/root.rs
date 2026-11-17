@@ -784,12 +784,9 @@ impl WindowTitle {
             .when(shown >= 1., |el| el.w(px(width)))
             .flex_none()
             .children(toggle.map(|toggle| crate::chrome::no_drag("toggle-sidebar", toggle)))
-            // The small mark at 16 pt. Its box is the flag's 4 pt over the mountain's 12, and it's
-            // the mountain that belongs on the row's centre line, beside the toggle and the
-            // wordmark: centred as a box it would hang 3 pt under the wordmark's baseline. Five
-            // points off its top margin lift it 2.5, the mountain onto the line and its base a
-            // point under the baseline (and the box onto whole pixels at 1x).
-            .child(div().mt(px(-5.)).child(crate::brand::logo_mark(px(16.))))
+            // The small mark at 16 pt: the signpost fills its box top to bottom, so centred
+            // on the row it stands beside the toggle and the wordmark as a capital would.
+            .child(crate::brand::logo_mark(px(16.)))
             .when(wordmark, |el| {
                 el.child(
                     div()
