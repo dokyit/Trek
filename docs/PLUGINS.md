@@ -1,9 +1,12 @@
 # Trek plugins
 
-A Trek plugin changes how Trek looks and works: a whole new look, a meter in every thread's
-header, a board in place of the thread list, a timer round the composer, a Music page in the
-sidebar. Users rarely write one by hand: they ask an agent, which follows Trek's built-in skill
-`trek-plugin`, writes the folder, installs it and reloads it while they watch.
+A Trek plugin makes Trek the user's own: a whole new look, a pet in the sidebar, sounds of their
+choosing, a new-thread screen that greets them, what their agents are doing in the title bar, a
+timer round the composer. People rarely write one by hand: they **ask an agent, in one sentence**
+("put a little marmot at the bottom of my sidebar that whistles when an agent needs me"), and the
+agent follows Trek's built-in skill `trek-plugin`, writes the folder, installs it and reloads it
+while they watch. Settings › Plugins opens with that invitation and three sentences to start
+from, each opening a new thread with it in the composer.
 
 This is the design, and the reasons for it. The skill (`crates/trek-core/skills/trek-plugin`) is
 the reference an agent works from; the code is `trek_core::plugins` (the format, the folder,
@@ -15,22 +18,23 @@ A folder with a `plugin.toml`:
 
 ```toml
 id = "focus-timer"                  # lower case and dashes; the folder's name if left out
-name = "Focus timer"
-version = "1.0.0"
-description = "The hiker walks round the composer while you focus."
+name = "Focus walk"
+version = "2.0.0"
+description = "A focus timer on the composer: the hiker walks its edge while you work."
 author = "Trek"
-trek = ">=0.4.54"                   # the Trek versions it runs on (semver requirement)
+trek = ">=0.4.55"                   # the Trek versions it runs on (semver requirement)
 permissions = []                    # what it may read or do (below)
 main = "main.js"                    # optional: its logic (below)
 
 [[slot]]                            # something drawn in one of Trek's places
 at = "composer.border"
-ui = { type = "trek:focus-timer", minutes = 25 }
+ui = { type = "trek:focus-timer", minutes = 25, break = 5 }
 
 [[command]]                         # an entry in the palette, and a key
-id = "start"
-title = "Start a focus timer"
+id = "toggle"
+title = "Focus walk: start, pause or carry on"
 key = "cmd-alt-f"
+action = "trek:focus-timer.toggle"
 ```
 
 Besides `[[slot]]` and `[[command]]` it may have `[[theme]]` (a look), `[[page]]` (a sidebar
@@ -46,6 +50,28 @@ of seconds. What's wrong with a plugin is shown in Settings › Plugins and writ
 
 `<data>/plugins/state.toml` is what the user chose: which plugins are on, the permissions each
 was granted, and which surface each replacement slot shows. Settings writes it; so does the CLI.
+
+## The examples
+
+Trek ships six (`plugins/examples/`, installed from Settings › Plugins or `trek plugin install
+example:<name>`). Each is something an agent could make from one sentence, which is the first
+line of its README ("Ask an agent: …") and is shown under it in Settings, and each makes Trek
+the user's own rather than adding something Trek already has. Together they use every way a
+plugin changes Trek:
+
+| Example | What it is | What it shows |
+|---|---|---|
+| `campfire` | A whole look: ember and woodsmoke at night, parchment by day, answers in a serif, a tent for a prompt, the hiker's pack in ember | `[[theme]]`, `[[effect]]` |
+| `trailhead` | The new-thread screen: a landscape and greeting for the time of day, quick prompts the user writes | `[[replace]]` of `new-thread` embedding `trek:composer`, `{now.…}`, a `[[page]]` that sets state, `app.start`, `composer.plus` |
+| `marmot` | Pip, a marmot at the foot of the sidebar: naps, keeps watch while agents work, whistles when one needs you | a `sidebar.foot` slot with its own pictures, hooks and logic, a `[[command]]` with a key; no permissions |
+| `soft-sounds` | A soft chime when an agent finishes, a knock when one needs you, chosen in its panel | hooks, `trek.sound`, a `[[panel]]`, commands with a key |
+| `now-playing` | What the agents are working on, in the title bar, as a player shows its track | a `status` slot, `threads:read` and `threads:open` (asked for when it's turned on), `trek.threads()`, `open:` |
+| `focus-timer` | Focus walk: the hiker walks the composer's edge during a focus session, then offers a break | `composer.border` with `trek:focus-timer`, commands with a key |
+
+Left out on purpose, as copies of what Trek has built in: a page of finished threads (Basecamp
+counts them), a board of threads by state (the sidebar's inbox lists what needs the user and
+what's running), a monospace look (Console) and a meter of tokens (the context ring and
+Basecamp). A plugin can still do any of them; they just don't show what a plugin is for.
 
 ## The CLI
 
@@ -95,7 +121,9 @@ literal values; `accent/20` is the accent at 20%.
 
 Text holds bindings, `{path|filter}`, read from what the slot is drawn for: `thread` (its title,
 state, agent, model, tokens, cost, context), `project`, `threads` (a replacement's list),
-`state` (what the plugin's logic set) and `theme`. A path that isn't there is empty, never an
+`state` (what the plugin's logic or its page set), `theme` and `now` (the time of day: `part`
+is morning, afternoon, evening or night; `hour`, `weekday`, `date`, `weekend`; read as the tree
+is drawn). A path that isn't there is empty, never an
 error, so a frame can't fail. A button's `on` is an action: `command:<id>` (the plugin's logic),
 `open:<thread id>`, `page:<id>`, `new-thread`.
 
@@ -118,8 +146,10 @@ system's web view (WKWebView, WebView2) with the interactive-artifact sandbox
 - Trek's theme as CSS variables (`--trek-bg`, `--trek-fg`, `--trek-accent`, `--trek-font`…,
   with Trek's fonts served to it), changed in place when the theme changes;
 - one channel to Trek, `window.trek`, whose messages carry a per-view secret only Trek's own
-  bootstrap holds: `trek.storage` (the plugin's own, kept by Trek), `trek.data(name)` (what the
-  plugin's permissions allow), `trek.on('theme', …)`, `trek.open(...)`.
+  bootstrap holds: `trek.storage` (the plugin's own, kept by Trek), `trek.state` (what its slots
+  and replacements draw from, so a page can change them: Trailhead's prompts page does),
+  `trek.data(name)` (what the plugin's permissions allow), `trek.on('theme', …)`,
+  `trek.open(...)`.
 
 A web view is a native view laid over the window: GPUI can't draw over it, so menus and the
 palette hide it while they're open. That's why web views are only for full panes, never slots.
@@ -142,8 +172,10 @@ trek.command("start", () => trek.state.set({ running: true }));
 
 The logic never runs on the UI thread and is never asked anything while a frame draws: it sets
 `state`, which the element trees read from memory. What it may read and do is its permissions'
-(`trek.threads()`, `trek.send()`, `trek.open()`, `trek.toast()`, `trek.storage`): what it asks
-for comes back as data, and Trek does it or refuses it. Simple state needs no logic at all: an
+(`trek.threads()`, `trek.send()`, `trek.open()`, `trek.toast()`, `trek.storage`), and it may
+play a sound of its own (`trek.sound("sounds/chime.wav")`: a `.wav` in its folder, the one kind
+both systems play; anything else is refused in its log; the isolated test app plays nothing
+aloud): what it asks for comes back as data, and Trek does it or refuses it. Simple state needs no logic at all: an
 element's `set:key=value` action sets it.
 
 ## What a plugin can contribute
@@ -256,7 +288,7 @@ Trek is first on ADEMark's speed and weight tests, and plugins must not change t
   thread, no QuickJS, no web view, no key or event listener. Each slot's check is an empty list.
 - **Off screen, no cost.** A slot draws only when its place is on screen. A page's web view
   exists only while the page is open. Trek's animated components (the focus timer) tick only
-  while visible, at the hiker's 16 fps clock or slower, stop while the window is covered, and
+  while visible and a walk is under way, at the hiker's 16 fps clock or slower, stop while the window is covered, and
   stand still with Reduce motion.
 - **Frames never wait.** A render never reads the disk, runs JavaScript or walks a thread's
   items. Data a slot shows (git history, counts) is worked out off the UI thread when it changes
@@ -267,7 +299,9 @@ from when plugins landed (below).
 
 ## Not built yet
 
-- Logic on a timer, and `fetch` from logic (pages have `network:<host>`).
+- Logic on a timer, and `fetch` from logic (pages have `network:<host>`). A plugin's state
+  lasts until Trek quits; what must outlast that goes in `trek.storage`, and logic that hears
+  `app.start` puts it back (Trailhead does).
 - A composer replacement can wrap Trek's composer (`trek:composer`) but can't supply an input
   of its own; a declarative tree has no text field.
 - Web content inside a slot: web views are for pages and panels.

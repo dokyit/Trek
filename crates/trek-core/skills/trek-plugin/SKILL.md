@@ -1,9 +1,23 @@
 ---
 name: trek-plugin
-description: Make a Trek plugin - a folder that changes how Trek itself looks and works (a whole look, buttons and chips in the composer, a meter in each thread's header, rows in the sidebar, a page or a panel of your own HTML, a board in place of the thread list, palette commands with keys, logic that hears Trek's events), checked by Trek and loaded live. Use when the user asks you to restyle, mod, extend or add something to Trek ("make Trek look like a terminal", "add a focus timer round the composer", "show token burn in the thread header", "add a Music page", "replace the thread list with a board").
+description: Make a Trek plugin - a folder that makes Trek the user's own (a whole look, a pet or sticker in the sidebar, sounds when agents finish, their own new-thread screen, a status in the title bar, buttons and chips in the composer, a page or a panel of their own HTML, palette commands with keys, logic that hears Trek's events), checked by Trek and loaded live. Use when the user asks you to restyle, personalise, mod, extend or add something to Trek ("make Trek feel like a campfire", "put a marmot in my sidebar that whistles when an agent needs me", "play a chime when an agent finishes", "greet me on the new-thread screen", "add a focus timer round the composer", "show token burn in the thread header").
 ---
 
 # Trek plugin
+
+People ask for a plugin in one sentence, and you make it whole. What they ask for is usually
+about making Trek theirs:
+
+- "Make Trek feel like a campfire: warm ember colours, answers in a serif, soft round corners,
+  a little tent as my prompt, and give the hiker an orange pack."
+- "Put a little marmot at the bottom of my sidebar that naps when nothing's running, keeps
+  watch while agents work, and whistles when one needs me."
+- "Play a soft chime when an agent finishes and a gentle knock when one needs me, and let me
+  pick other sounds."
+
+Build all of what the sentence asks, make it look right in both the light and the dark (use the
+theme's colour names, not your own, except in pictures), and don't rebuild what Trek has (a
+page of finished threads is Basecamp; a list of what needs the user is the sidebar's inbox).
 
 A plugin is a folder with a `plugin.toml`. Trek reads every folder in `<data>/plugins/`, reads it
 again within two seconds of any change, and lists it in Settings › Plugins. You make one by
@@ -40,8 +54,10 @@ letters, digits and dashes.
 Trek's own program does the same from a terminal, if it's on the PATH: `trek plugin install
 <folder | git URL | example:<name>>`, `list`, `enable <id>`, `disable <id>`, `reload`, `remove
 <id>`, `dev <folder> --once` (reads a folder in place while you work on it), `new <id>`,
-`examples`. Trek ships examples to read and copy: `trek plugin install example:focus-timer`,
-`commit-graph`, `summit-log`, `trail-board`, `terminal-look`.
+`examples`. Trek ships examples to read and copy, each made from the sentence at the top of its
+README: `trek plugin install example:campfire` (a whole look), `trailhead` (a new-thread screen
+with a page), `marmot` (a pet in the sidebar, with hooks), `soft-sounds` (sounds, with a panel),
+`now-playing` (the title bar, with permissions), `focus-timer` (the composer's edge).
 
 While you work, the plugin's log is `<data>/plugin-data/<id>/log.txt`: what its logic printed,
 files a page asked for that aren't there, anything refused, and why Trek stopped it if it did.
@@ -127,10 +143,10 @@ colours and fonts. JSON in a file, or the same as a TOML table.
   file in the plugin), `spacer`, `divider`.
 - `each`: one `item` per entry of the list at `of`, those matching `where` (a table of field =
   value; `a|b` is either), at most `limit`; `as` names the entry (default `item`); `empty` is
-  shown when there are none.
+  shown when there are none. A column, or with `wrap: true` a row that wraps (chips).
 - `when`: `then` while the value at `value` is set (or equals `equals`), `else` otherwise.
-- Trek's own components: `trek:focus-timer` (`minutes`; in `composer.border` it walks the hiker
-  round the composer), `trek:commit-trail` (`style`: `ridge` or `dots`, `mine`: true or false;
+- Trek's own components: `trek:focus-timer` (`minutes`, `break`; in `composer.border` a chip,
+  and the hiker walking round the composer during a walk), `trek:commit-trail` (`style`: `ridge` or `dots`, `mine`: true or false;
   needs `git:read`), `trek:hiker`, and in a replacement `trek:thread-list` or `trek:composer`:
   Trek's own surface, embedded in yours.
 
@@ -154,13 +170,16 @@ colours and fonts. JSON in a file, or the same as a TOML table.
 - `threads`: in a `thread-list` replacement (which needs `threads:read`), the list of threads
   (the same fields), newest first.
 - `project.name`; `theme.dark`, `theme.id`; `state.<key>`: the plugin's own state (below).
+- `now`: the time of day, `now.part` (`morning`, `afternoon`, `evening`, `night`), `now.hour`,
+  `now.weekday` (Tuesday), `now.date` (17 November), `now.weekend`. A greeting or picture that
+  follows the day is a `when` on `now.part`.
 - Filters: `k` (12.3k), `int` (10,281), `usd`, `pct`, `ago` (a time as 3m, 2h), `upper`,
   `lower`, `plural:commit` (3 commits), `or:text` (when empty). A path that isn't there is empty.
 
 **Actions** (`on`): `command:<id>` (one of the plugin's commands), `page:<id>`, `panel:<id>`,
 `insert:<text>` (into the composer), `set:<key>=<value>` (the plugin's state, with no logic),
-`open:<thread id>` and `new-thread` (need `threads:open`), `trek:focus-timer.start` (`.pause`,
-`.stop`).
+`open:<thread id>` and `new-thread` (need `threads:open`), `trek:focus-timer.toggle` (`.start`,
+`.pause`, `.stop`, `.break`, `.length`).
 
 **Slots** (`at`):
 
@@ -196,6 +215,9 @@ Trek's own places are slots.
 - **`window.trek`**, each returning a promise:
   - `trek.storage.get()`, `trek.storage.set(object)`: the plugin's own storage (1 MB), kept
     between launches. Use it, not `localStorage`.
+  - `trek.state.get()`, `trek.state.set(patch)`: the state the plugin's slots and replacements
+    draw from (`{state.…}`). A page that edits what a slot shows sets both: storage to keep it,
+    state to show it now (and logic hearing `app.start` copies storage back into state).
   - `trek.data(name)`: `"threads"` (a list, as above) and `"finished"` (`{days, start, total,
     today, working, waiting}`: threads settled per day for twelve weeks) with `threads:read`;
     `"usage"` (`{tokens, cost, threads}`, each thread's `title` only with `threads:read`) with
@@ -228,7 +250,10 @@ function reset() {                     // [[command]] run = "reset"
 - `trek.state.get()`, `trek.state.set(patch)`: what element trees read as `{state.…}`.
 - `trek.storage.get()`, `trek.storage.set(object)`; `trek.threads()` (`threads:read`);
   `trek.theme()`; `trek.toast(text)`, `trek.open(id)`, `trek.newThread()`, `trek.send(id,
-  text)`, `trek.page(id)`; `console.log` goes to the plugin's log.
+  text)`, `trek.page(id)`; `trek.sound("sounds/chime.wav")` plays a `.wav` file of the plugin's
+  own (no permission; WAV is what both systems play; one at a time); `console.log` goes to the
+  plugin's log.
+- State lasts until Trek quits. Keep what must outlast it in `trek.storage`.
 - An exception, a call that runs past its time, or too much memory **stops the plugin** (it's
   turned off, with the reason in its log and in Settings). Catch what can fail.
 
@@ -253,7 +278,8 @@ There is no file, shell or other network access, and no way round the list.
 Say so if the user asks for these: change Trek's own layout beyond the slots and the three
 replaceable surfaces; draw web content inside a slot (web views are for pages and panels); type
 into or read the composer's draft (it can insert text and mark words); read transcripts; run
-logic on a timer; reach the phone apps.
+logic on a timer (a pet can't wander about by itself); replace Trek's own alert sound; reach the
+phone apps.
 
 ## Example: "show how many turns finished today in the title bar"
 
