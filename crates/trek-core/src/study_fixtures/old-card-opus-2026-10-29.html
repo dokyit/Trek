@@ -1,0 +1,93 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Study question</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<style>
+body{margin:0;background:transparent;color:var(--trek-fg);font:14px/1.5 var(--trek-font,system-ui)}
+.card{border:1px solid var(--trek-border);border-radius:var(--trek-radius,10px);background:var(--trek-surface);padding:16px;display:flex;flex-direction:column;gap:12px}
+.tag{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--trek-muted)}
+.q{font-size:15px;font-weight:600}
+.opts{display:flex;flex-direction:column;gap:6px}
+.opt{display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border:1px solid var(--trek-border);border-radius:8px;cursor:pointer}
+.opt:hover{border-color:var(--trek-accent)}
+.opt.on{border-color:var(--trek-accent);box-shadow:inset 0 0 0 1px var(--trek-accent)}
+.key{flex:none;width:20px;height:20px;border-radius:50%;border:1px solid var(--trek-border);display:grid;place-items:center;font-size:11px;color:var(--trek-muted)}
+.opt.on .key{background:var(--trek-accent);border-color:var(--trek-accent);color:var(--trek-bg)}
+.h{font-size:12px;color:var(--trek-muted)}
+textarea{width:100%;box-sizing:border-box;min-height:76px;resize:vertical;padding:8px 10px;border:1px solid var(--trek-border);border-radius:8px;background:transparent;color:inherit;font:inherit}
+textarea:focus{outline:none;border-color:var(--trek-accent)}
+.conf{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--trek-muted)}
+.conf input{flex:1;accent-color:var(--trek-accent)}
+.conf b{width:36px;text-align:right;font-weight:500;color:var(--trek-fg)}
+.row{display:flex;gap:8px;justify-content:flex-end;align-items:center;flex-wrap:wrap}
+.row .note{margin-right:auto;font-size:12px;color:var(--trek-muted)}
+button{font:inherit;font-size:13px;padding:6px 14px;border-radius:8px;border:1px solid var(--trek-border);background:transparent;color:inherit;cursor:pointer}
+button.go{background:var(--trek-accent);border-color:var(--trek-accent);color:var(--trek-bg)}
+button:disabled{opacity:.45;cursor:default}
+</style></head><body>
+<div class="card" id="card"></div>
+<script>
+const DATA = {
+  kind: "question",
+  step: "",
+  prompt: "Using the code above: what value is bound to r?",
+  options: ["2", "3", "4", "7"],
+  targets: []
+};
+const LABEL = {question: "Question", predict: "Predict", check: "Check", problem: "Problem"}[DATA.kind] || "Question";
+const problem = DATA.kind === "problem";
+const choice = !problem && DATA.options.length > 0;
+const el = (t, c, s) => { const e = document.createElement(t); if (c) e.className = c; if (s != null) e.textContent = s; return e; };
+const card = document.getElementById("card");
+card.append(el("div", "tag", [DATA.step, LABEL].filter(Boolean).join(" · ")), el("div", "q", DATA.prompt));
+let pick = null, closed = false;
+const rows = [];
+if (choice) {
+  const box = el("div", "opts");
+  DATA.options.forEach((o, i) => {
+    const r = el("div", "opt");
+    r.append(el("span", "key", String.fromCharCode(65 + i)), el("span", null, o));
+    r.onclick = () => { if (closed) return; pick = i; rows.forEach((x, j) => x.classList.toggle("on", j === i)); sync(); };
+    rows.push(r); box.append(r);
+  });
+  card.append(box);
+}
+const work = el("textarea");
+work.placeholder = problem ? "Everything you try, as you go: what you notice, what you'd try next, where you're stuck…"
+  : DATA.kind === "predict" ? "What do you expect the next move is, and why?"
+  : "Think out loud: what comes to mind, what you're unsure of. Messy is fine.";
+card.append(el("div", "h", problem ? "Your working — send it in chunks" : "Your working"), work);
+let conf = null;
+if (!problem) {
+  const c = el("div", "conf"), v = el("b", null, "50%");
+  conf = el("input"); conf.type = "range"; conf.min = 0; conf.max = 100; conf.step = 5; conf.value = 50;
+  conf.oninput = () => v.textContent = conf.value + "%";
+  c.append(el("span", null, "Confidence"), conf, v); card.append(c);
+}
+const bar = el("div", "row"), note = el("span", "note");
+bar.append(note); card.append(bar);
+const button = (text, go, fn) => { const b = el("button", go ? "go" : null, text); b.onclick = fn; bar.append(b); return b; };
+let main;
+function send(lines, close) {
+  const tag = DATA.targets.length ? " [" + DATA.targets.join(", ") + "]" : "";
+  const text = ["**" + LABEL + (DATA.step ? " · " + DATA.step : "") + "**" + tag, ...lines,
+    "Working: " + (work.value.trim() || "(none)")].join("\n");
+  if (!window.trek || !window.trek.send(text)) { note.textContent = "Couldn't send: copy your working into the composer."; return; }
+  if (close) { closed = true; bar.querySelectorAll("button").forEach(b => b.disabled = true); work.readOnly = true; if (conf) conf.disabled = true; note.textContent = "Sent"; }
+  else { work.value = ""; note.textContent = "Sent — keep going"; }
+}
+const sure = () => "Confidence: " + conf.value + "%";
+if (problem) {
+  button("Hint", false, () => send(["Asking for: a hint"], false));
+  button("Send working", false, () => send(["Status: still working"], false));
+  main = button("Solved", true, () => send(["Status: I think I've solved it"], true));
+} else {
+  button("I don't know", false, () => send(["Answer: I don't know"], true));
+  main = button(choice ? "Answer" : "Send", true, () => send([
+    choice ? "Answer: " + String.fromCharCode(65 + pick) + ". " + DATA.options[pick] : "Answer: (in my working)", sure()], true));
+}
+function sync() { if (!closed) main.disabled = choice ? pick === null : (!problem && !work.value.trim()); }
+work.oninput = sync; sync();
+window.addEventListener("load", () => window.renderMathInElement && renderMathInElement(card, {
+  delimiters: [{left: "$$", right: "$$", display: true}, {left: "$", right: "$", display: false}], throwOnError: false}));
+</script></body></html>

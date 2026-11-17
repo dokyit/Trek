@@ -180,7 +180,10 @@ impl MarkdownPlugin for ArtifactPlugin {
         // A tutor's question (`trek-study`) is drawn as the question card: Trek does that as the
         // answer comes in (`study::expand_cards`), so one still here came from elsewhere (another
         // Mac's thread) or is being written.
-        let question = code.lang.as_deref() == Some(trek_core::study::FENCE);
+        let question = code
+            .lang
+            .as_deref()
+            .is_some_and(trek_core::study::is_question_fence);
         if code.lang.as_deref() != Some(core::FENCE) && !question {
             return None;
         }

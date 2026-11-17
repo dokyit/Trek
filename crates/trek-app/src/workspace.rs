@@ -6479,7 +6479,7 @@ impl Workspace {
                         }
                     }
                     AgentEvent::TextDone(t) => {
-                        let t = trek_core::study::expand_cards(&t).unwrap_or(t);
+                        let t = trek_core::study::expand_cards_done(&t).unwrap_or(t);
                         match live.streaming.take() {
                             Some(ix) => {
                                 if let Some(Item::Assistant { text }) = live.items.get_mut(ix) {
