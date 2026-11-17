@@ -405,6 +405,8 @@ fn contributions_changed(ws: &Entity<Workspace>, cx: &mut App) {
     {
         trail::init(cx);
     }
+    // The focus timer's walk from before a restart, the first time a plugin places it.
+    focus::restore(ws, cx);
     let themes: Vec<(String, PathBuf)> = cx
         .try_global::<Plugins>()
         .map(|p| {
@@ -883,6 +885,35 @@ pub fn run_command(
             );
         }
         None => {}
+    }
+}
+
+/// Play plugin `plugin`'s sound `file` (`trek.sound`): a `.wav` inside its folder, as both
+/// systems play one. Anything else is refused, in its log.
+pub fn play_sound(plugin: &str, file: &str, cx: &App) {
+    let Some(dir) = cx
+        .try_global::<Plugins>()
+        .and_then(|p| p.find(plugin))
+        .map(|p| p.dir.clone())
+    else {
+        return;
+    };
+    let wav = std::path::Path::new(file)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("wav"));
+    match core::page::resolve(&dir, file) {
+        Some(path) if wav => {
+            core::log(plugin, &format!("played {file}"));
+            crate::system::play_sound_file(path);
+        }
+        Some(_) => core::log(
+            plugin,
+            &format!("refused trek.sound(\"{file}\"): a sound is a .wav file"),
+        ),
+        None => core::log(
+            plugin,
+            &format!("refused trek.sound(\"{file}\"): there's no such file in the plugin"),
+        ),
     }
 }
 

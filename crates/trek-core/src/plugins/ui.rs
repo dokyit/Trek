@@ -116,7 +116,7 @@ impl Component {
     /// What it can be told to do (`Action::Trek`).
     pub fn verbs(self) -> &'static [&'static str] {
         match self {
-            Component::FocusTimer => &["start", "pause", "stop"],
+            Component::FocusTimer => &["start", "pause", "stop", "toggle", "break", "length"],
             _ => &[],
         }
     }
@@ -124,7 +124,10 @@ impl Component {
     /// The settings it takes, each with what it must be.
     fn props(self) -> &'static [(&'static str, PropKind)] {
         match self {
-            Component::FocusTimer => &[("minutes", PropKind::Number(1., 180.))],
+            Component::FocusTimer => &[
+                ("minutes", PropKind::Number(1., 180.)),
+                ("break", PropKind::Number(1., 60.)),
+            ],
             Component::CommitTrail => &[
                 ("style", PropKind::OneOf(&["ridge", "dots"])),
                 ("mine", PropKind::Bool),

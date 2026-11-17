@@ -1,7 +1,10 @@
-//! `trek:focus-timer`: a focus session as a walk round the composer. The hiker sets off from the
-//! chip on the composer's top edge and walks its border clockwise, feet on the edge, turning at
-//! each corner; the trail it has walked is drawn in the theme's accent, the trail ahead in dots.
-//! Back at the chip, time's up.
+//! `trek:focus-timer`: a focus session as a walk round the composer. Before a walk, a chip on
+//! the composer's top edge offers one (its time steps through 15, 25, 45 and 60 minutes); once
+//! it starts, the hiker sets off from the chip and walks the card's border clockwise, feet on the
+//! edge, turning at each corner, the trail it has walked drawn in the theme's accent and the
+//! trail ahead in dots. Back at the chip, time's up: a toast and the alert sound say so, and the
+//! chip offers a break (a shorter walk, in green) or another walk. A session is kept in the
+//! placing plugin's data folder by the wall clock, so it outlasts a restart.
 //!
 //! Only time places it: where the hiker is, and which of its four steps it's on (a new one every
 //! four art pixels, as the working bar's walk), come from the session's time on the hiker's 16 fps
@@ -21,18 +24,25 @@ use std::time::{Duration, Instant};
 
 /// A session's length when the plugin names none.
 pub const DEFAULT_MINUTES: f32 = 25.;
+/// A break's length when the plugin names none.
+pub const DEFAULT_BREAK: f32 = 5.;
+/// The lengths the chip's time steps through before a session starts (the plugin's own is
+/// added among them).
+const LENGTHS: [f32; 4] = [15., 25., 45., 60.];
 /// The hiker's clock: what a moment of the session is rounded to.
 const FRAME: Duration = Duration::from_millis(1000 / trek_mascot::FPS);
 /// Room the composer leaves above and below its card while the ring is on: the hiker stands
 /// outside the edge it walks.
 pub const CLEARANCE: f32 = 20.;
 /// The chip's height; it sits on the top edge, half above it.
-const CHIP_H: f32 = 22.;
+const CHIP_H: f32 = 24.;
 /// Where the chip starts along the top edge, from the corner's end.
 const CHIP_IN: f32 = 10.;
 /// Dots of the trail ahead, apart; and of the trail walked (closer: it reads as a line).
 const AHEAD_EVERY: f32 = 7.;
 const WALKED_EVERY: f32 = 2.5;
+/// The file in the placing plugin's data folder a session is kept in.
+const KEPT: &str = "focus.json";
 
 /// Where a session is.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -47,13 +57,24 @@ pub enum Session {
     Paused {
         walked: Duration,
     },
-    /// Back at the start.
+    /// A focus walk back at the start: the chip offers a break or another walk.
     Done,
+}
+
+/// What the walk is for: focus, or the break after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Focus,
+    Break,
 }
 
 /// The focus timer: one for the app, made when a plugin first places it.
 pub struct Focus {
+    /// A focus walk's length: the plugin's, or what the chip was stepped to.
     pub minutes: f32,
+    /// A break's length.
+    pub break_minutes: f32,
+    pub mode: Mode,
     pub session: Session,
     ring: Option<Entity<Ring>>,
     /// Says time's up even when nothing draws the ring.
@@ -63,8 +84,27 @@ pub struct Focus {
 impl Global for Focus {}
 
 impl Focus {
+    /// A timer with no walk under way.
+    pub fn new(minutes: f32, break_minutes: f32) -> Focus {
+        Focus {
+            minutes,
+            break_minutes,
+            mode: Mode::Focus,
+            session: Session::Ready,
+            ring: None,
+            _done: None,
+        }
+    }
+
+    fn length(&self) -> f32 {
+        match self.mode {
+            Mode::Focus => self.minutes,
+            Mode::Break => self.break_minutes,
+        }
+    }
+
     fn total(&self) -> Duration {
-        Duration::from_secs_f32(self.minutes.max(1. / 60.) * 60.)
+        Duration::from_secs_f32(self.length().max(1. / 60.) * 60.)
     }
 
     /// How much of the session has gone, at `now`.
@@ -90,46 +130,152 @@ impl Focus {
         let left = self.total().saturating_sub(self.walked(now));
         left.as_secs() + u64::from(left.subsec_nanos() > 0)
     }
+
+    /// The session as it's kept on disk: by the wall clock (`at_ms`), so a restart picks it up
+    /// where time has got to.
+    pub fn kept(&self, now: Instant, at_ms: i64) -> serde_json::Value {
+        let state = match self.session {
+            Session::Ready => "ready",
+            Session::Running { .. } => "running",
+            Session::Paused { .. } => "paused",
+            Session::Done => "done",
+        };
+        serde_json::json!({
+            "mode": if self.mode == Mode::Break { "break" } else { "focus" },
+            "minutes": self.minutes,
+            "state": state,
+            "walked_ms": self.walked(now).as_millis() as u64,
+            "at_ms": at_ms,
+        })
+    }
+
+    /// Take up `kept` (`Focus::kept`) at `now`, the wall clock reading `at_ms`: a walk that was
+    /// under way carries on as if Trek had stayed open, or is over if its time ran out meanwhile.
+    pub fn take_up(&mut self, kept: &serde_json::Value, now: Instant, at_ms: i64) {
+        if let Some(m) = kept["minutes"].as_f64() {
+            self.minutes = (m as f32).clamp(1., 180.);
+        }
+        self.mode = if kept["mode"] == "break" {
+            Mode::Break
+        } else {
+            Mode::Focus
+        };
+        let walked = Duration::from_millis(kept["walked_ms"].as_u64().unwrap_or(0));
+        let away =
+            Duration::from_millis((at_ms - kept["at_ms"].as_i64().unwrap_or(at_ms)).max(0) as u64);
+        let total = self.total();
+        self.session = match kept["state"].as_str() {
+            Some("running") if walked + away < total => Session::Running {
+                since: now,
+                before: walked + away,
+            },
+            // A focus walk that ended while Trek was closed is done; a break is simply over.
+            Some("running" | "done") if self.mode == Mode::Focus => Session::Done,
+            Some("paused") => Session::Paused { walked },
+            _ => {
+                self.mode = Mode::Focus;
+                Session::Ready
+            }
+        };
+    }
 }
 
-/// The minutes the running plugins' focus timers ask for (the first one's).
-fn minutes(cx: &App) -> f32 {
+/// The placing plugin's timer: (its id, a walk's minutes, a break's minutes).
+fn placed(cx: &App) -> Option<(String, f32, f32)> {
     super::slot(trek_core::plugins::Slot::ComposerBorder, cx)
         .iter()
         .find_map(|p| match &p.tree.kind {
             trek_core::plugins::ui::Kind::Trek(
                 trek_core::plugins::ui::Component::FocusTimer,
                 props,
-            ) => props
-                .get("minutes")
-                .and_then(|m| m.as_f64())
-                .map(|m| m as f32),
+            ) => {
+                let n = |k: &str, or: f32| {
+                    props
+                        .get(k)
+                        .and_then(|m| m.as_f64())
+                        .map_or(or, |m| m as f32)
+                };
+                Some((
+                    p.plugin.to_string(),
+                    n("minutes", DEFAULT_MINUTES),
+                    n("break", DEFAULT_BREAK),
+                ))
+            }
             _ => None,
         })
-        .unwrap_or(DEFAULT_MINUTES)
+}
+
+/// The minutes the running plugins' focus timers ask for (the first one's).
+fn minutes(cx: &App) -> f32 {
+    placed(cx).map_or(DEFAULT_MINUTES, |p| p.1)
 }
 
 fn ensure(cx: &mut App) {
     if !cx.has_global::<Focus>() {
-        let minutes = minutes(cx);
-        cx.set_global(Focus {
-            minutes,
-            session: Session::Ready,
-            ring: None,
-            _done: None,
-        });
+        let (minutes, break_minutes) =
+            placed(cx).map_or((DEFAULT_MINUTES, DEFAULT_BREAK), |p| (p.1, p.2));
+        cx.set_global(Focus::new(minutes, break_minutes));
     }
 }
 
-/// Start, pause (a running session) or resume (a paused one), or stop the session.
+/// A plugin places the timer: the session kept from before (Trek quit mid-walk) is read off the
+/// UI thread and taken up where time has got to. Once per launch.
+pub fn restore(ws: &Entity<Workspace>, cx: &mut App) {
+    let Some((plugin, _, _)) = placed(cx) else {
+        return;
+    };
+    if cx.has_global::<Focus>() {
+        return;
+    }
+    ensure(cx);
+    let ws = ws.clone();
+    cx.spawn(async move |cx| {
+        let file = trek_core::plugins::data_dir(&plugin).join(KEPT);
+        let kept: Option<serde_json::Value> = cx
+            .background_spawn(async move {
+                std::fs::read_to_string(file)
+                    .ok()
+                    .and_then(|t| serde_json::from_str(&t).ok())
+            })
+            .await;
+        let Some(kept) = kept else { return };
+        cx.update(|cx| {
+            let now = crate::motion::now(cx);
+            let f = cx.global_mut::<Focus>();
+            // Started meanwhile: what the user did now wins.
+            if f.session != Session::Ready {
+                return;
+            }
+            f.take_up(&kept, now, trek_core::store::now_ms());
+            arm(&ws, cx);
+        });
+    })
+    .detach();
+}
+
+/// Start, pause (a running walk) or carry on (a paused one), or stop it. `toggle` starts,
+/// pauses or carries on, whichever fits (the plugin's key); `break` walks the break; `length`
+/// steps a walk's length before it starts.
 pub fn control(verb: &str, ws: &Entity<Workspace>, cx: &mut App) {
     ensure(cx);
     let now = crate::motion::now(cx);
-    let minutes = minutes(cx);
+    let plugin_minutes = minutes(cx);
     let f = cx.global_mut::<Focus>();
+    let verb = match (verb, f.session) {
+        ("toggle", Session::Running { .. }) => "pause",
+        ("toggle", _) => "start",
+        (v, _) => v,
+    };
     match (verb, f.session) {
         ("start", Session::Ready | Session::Done) => {
-            f.minutes = minutes;
+            f.mode = Mode::Focus;
+            f.session = Session::Running {
+                since: now,
+                before: Duration::ZERO,
+            };
+        }
+        ("break", _) => {
+            f.mode = Mode::Break;
             f.session = Session::Running {
                 since: now,
                 before: Duration::ZERO,
@@ -146,10 +292,53 @@ pub fn control(verb: &str, ws: &Entity<Workspace>, cx: &mut App) {
                 walked: f.walked(now),
             }
         }
-        ("stop", _) => f.session = Session::Ready,
+        ("length", Session::Ready | Session::Done) => {
+            let mut lengths: Vec<f32> = LENGTHS.to_vec();
+            if !lengths.contains(&plugin_minutes) {
+                lengths.push(plugin_minutes);
+                lengths.sort_by(f32::total_cmp);
+            }
+            let current = f.minutes;
+            f.minutes = lengths
+                .iter()
+                .copied()
+                .find(|m| *m > current + 0.01)
+                .unwrap_or(lengths[0]);
+            f.mode = Mode::Focus;
+            f.session = Session::Ready;
+        }
+        ("stop", _) => {
+            f.mode = Mode::Focus;
+            f.session = Session::Ready;
+        }
         _ => return,
     }
-    // Time's up is said even if the ring isn't drawn then: one timer, to the end.
+    keep(cx);
+    arm(ws, cx);
+}
+
+/// Keep the session on disk (off the UI thread), for the next launch.
+fn keep(cx: &mut App) {
+    let Some((plugin, _, _)) = placed(cx) else {
+        return;
+    };
+    let now = crate::motion::now(cx);
+    let text = cx
+        .global::<Focus>()
+        .kept(now, trek_core::store::now_ms())
+        .to_string();
+    cx.background_spawn(async move {
+        let dir = trek_core::plugins::data_dir(&plugin);
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join(KEPT), text);
+    })
+    .detach();
+}
+
+/// Arm the timer that says time's up (even if the ring isn't drawn then), and redraw.
+fn arm(ws: &Entity<Workspace>, cx: &mut App) {
+    let now = crate::motion::now(cx);
+    let f = cx.global::<Focus>();
     let left = match f.session {
         Session::Running { .. } => Some(f.total().saturating_sub(f.walked(now))),
         _ => None,
@@ -166,20 +355,34 @@ pub fn control(verb: &str, ws: &Entity<Workspace>, cx: &mut App) {
                 if !matches!(f.session, Session::Running { .. }) {
                     return;
                 }
-                f.session = Session::Done;
                 let minutes = f.minutes;
+                // A walk ends at the trailhead, offering a break; a break ends ready for the next.
+                let message = match f.mode {
+                    Mode::Focus => {
+                        f.session = Session::Done;
+                        format!(
+                            "Back at the trailhead: {} focused. Take a break?",
+                            minutes_words(minutes)
+                        )
+                    }
+                    Mode::Break => {
+                        f.mode = Mode::Focus;
+                        f.session = Session::Ready;
+                        "Break's over: ready for the next walk".to_string()
+                    }
+                };
                 if let Some(ring) = f.ring.clone() {
                     ring.update(cx, |_, cx| cx.notify());
                 }
+                keep(cx);
+                crate::system::play_alert_sound();
                 if let Some(ws) = ws_weak.upgrade() {
                     ws.update(cx, |_, cx| {
                         cx.emit(WorkspaceEvent::Toast {
-                            message: format!(
-                                "Back at the trailhead: {} focused",
-                                minutes_words(minutes)
-                            ),
+                            message,
                             undo: None,
-                        })
+                        });
+                        cx.notify();
                     });
                 }
             });
@@ -202,9 +405,7 @@ pub fn jump(secs: f32, ws: &Entity<Workspace>, cx: &mut App) {
         since: now,
         before: Duration::from_secs_f32(secs.max(0.)),
     };
-    if let Some(ring) = f.ring.clone() {
-        ring.update(cx, |_, cx| cx.notify());
-    }
+    arm(ws, cx);
 }
 
 fn minutes_words(m: f32) -> String {
@@ -254,69 +455,110 @@ pub fn ring(ws: &Entity<Workspace>, cx: &mut App) -> Option<AnyElement> {
 
 /// The chip alone, for a plugin that places the timer somewhere else.
 pub fn chip(ws: &Entity<Workspace>, cx: &App) -> AnyElement {
-    let (session, left, minutes) = match cx.try_global::<Focus>() {
+    let (session, mode, left, minutes) = match cx.try_global::<Focus>() {
         Some(f) => {
             let now = crate::motion::now(cx);
-            (f.session, f.left(now), f.minutes)
+            (f.session, f.mode, f.left(now), f.minutes)
         }
-        None => (Session::Ready, (minutes(cx) * 60.) as u64, minutes(cx)),
+        None => (
+            Session::Ready,
+            Mode::Focus,
+            (minutes(cx) * 60.) as u64,
+            minutes(cx),
+        ),
     };
-    chip_element(session, left, minutes, ws, cx)
+    chip_element(session, mode, left, minutes, ws, cx)
 }
 
 fn chip_element(
     session: Session,
+    mode: Mode,
     left: u64,
     minutes: f32,
     ws: &Entity<Workspace>,
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
-    let accent = theme.primary;
+    let tone = match mode {
+        Mode::Focus => theme.primary,
+        Mode::Break => crate::palette::emerald(cx),
+    };
     let button = |id: &'static str, icon: Icon, tip: &'static str, verb: &'static str| {
         let ws = ws.clone();
         Button::new(id)
             .ghost()
             .xsmall()
-            .icon(icon.size(px(11.)).text_color(theme.muted_foreground))
+            .icon(
+                icon.size(px(13.))
+                    .text_color(theme.foreground.opacity(0.75)),
+            )
             .tooltip(tip)
             .on_click(move |_, _, cx| control(verb, &ws, cx))
     };
-    let (label, time): (&str, String) = match session {
-        Session::Ready => ("Focus", clock((minutes * 60.) as u64)),
-        Session::Running { .. } => ("Focus", clock(left)),
-        Session::Paused { .. } => ("Paused", clock(left)),
-        Session::Done => ("Summit", minutes_words(minutes)),
+    let label = match (session, mode) {
+        (Session::Done, _) => "Done",
+        (Session::Paused { .. }, _) => "Paused",
+        (_, Mode::Break) => "Break",
+        _ => "Focus",
     };
+    let time = match session {
+        Session::Ready => clock((minutes * 60.) as u64),
+        Session::Running { .. } | Session::Paused { .. } => clock(left),
+        Session::Done => minutes_words(minutes),
+    };
+    // Before a walk the time is a control: each click steps the length (15, 25, 45, 60).
+    let time_el = div()
+        .id("focus-length")
+        .test_support()
+        .px(px(3.))
+        .rounded(px(4.))
+        .font_family(theme.mono_font_family.clone())
+        .text_color(theme.foreground)
+        .font_weight(FontWeight::MEDIUM)
+        .child(time)
+        .when(session == Session::Ready, |el| {
+            let ws = ws.clone();
+            el.cursor_pointer()
+                .hover(|s| s.bg(theme.foreground.opacity(0.08)))
+                .tooltip(|window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new("Change the length")
+                        .build(window, cx)
+                })
+                .on_click(move |_, _, cx| control("length", &ws, cx))
+        });
     h_flex()
         .id("focus-chip")
         .test_support()
         .h(px(CHIP_H))
-        .pl(px(8.))
+        .pl(px(9.))
         .pr(px(2.))
         .gap(px(5.))
         .rounded_full()
         .bg(look::card_fill(cx))
         .border_1()
-        .border_color(accent.opacity(0.45))
+        .border_color(match session {
+            Session::Ready => theme.border,
+            _ => tone.opacity(0.55),
+        })
         .text_size(px(crate::scale::text::META))
-        .child(div().size(px(6.)).rounded_full().bg(match session {
-            Session::Running { .. } => accent,
-            Session::Done => crate::palette::emerald(cx),
-            _ => theme.muted_foreground.opacity(0.6),
-        }))
+        .child(
+            Icon::new(match mode {
+                Mode::Focus => Lucide::Timer,
+                Mode::Break => Lucide::Coffee,
+            })
+            .size(px(12.))
+            .text_color(match session {
+                Session::Running { .. } => tone,
+                Session::Done => crate::palette::emerald(cx),
+                _ => theme.muted_foreground,
+            }),
+        )
         .child(
             div()
                 .text_color(theme.muted_foreground)
                 .child(label.to_string()),
         )
-        .child(
-            div()
-                .font_family(theme.mono_font_family.clone())
-                .text_color(theme.foreground)
-                .font_weight(FontWeight::MEDIUM)
-                .child(time),
-        )
+        .child(time_el)
         .map(|el| match session {
             Session::Ready => el.child(button(
                 "focus-start",
@@ -333,8 +575,8 @@ fn chip_element(
                 ))
                 .child(button(
                     "focus-stop",
-                    Icon::new(Lucide::Square),
-                    "Stop",
+                    Icon::new(Lucide::X),
+                    "Stop and reset",
                     "stop",
                 )),
             Session::Paused { .. } => el
@@ -346,15 +588,21 @@ fn chip_element(
                 ))
                 .child(button(
                     "focus-stop",
-                    Icon::new(Lucide::Square),
-                    "Stop",
+                    Icon::new(Lucide::X),
+                    "Stop and reset",
                     "stop",
                 )),
             Session::Done => el
                 .child(button(
+                    "focus-break",
+                    Icon::new(Lucide::Coffee),
+                    "Take a break",
+                    "break",
+                ))
+                .child(button(
                     "focus-again",
                     Icon::new(Lucide::RefreshCw),
-                    "Walk it again",
+                    "Walk again",
                     "start",
                 ))
                 .child(button("focus-clear", Icon::new(Lucide::X), "Done", "stop")),
@@ -449,7 +697,11 @@ impl Render for Ring {
         let walking = matches!(session, Session::Running { .. });
         let still = !self.ws.read(cx).motion(cx);
         let dark = cx.theme().mode.is_dark();
-        let accent = cx.theme().primary;
+        let accent = match f.mode {
+            Mode::Focus => cx.theme().primary,
+            Mode::Break => crate::palette::emerald(cx),
+        };
+        let mode = f.mode;
         let ahead = cx.theme().foreground.opacity(0.22);
         let radius = look::RADIUS * corner_scale();
         let chip_w = self.drawn.clone();
@@ -493,6 +745,10 @@ impl Render for Ring {
                             h: b.size.height.as_f32(),
                             r: radius.min(b.size.height.as_f32() / 2.),
                         };
+                        // Before a walk only the chip shows: the composer keeps its own edge.
+                        if !started {
+                            return;
+                        }
                         // The journey: from the chip's right end round to its left end.
                         let chip_start = CHIP_IN;
                         let chip_end = chip_start + chip_w.get() + 6.;
@@ -566,7 +822,7 @@ impl Render for Ring {
                     .child({
                         let chip_w = self.drawn.clone();
                         div()
-                            .child(chip_element(session, left, minutes, &self.ws, cx))
+                            .child(chip_element(session, mode, left, minutes, &self.ws, cx))
                             .child(
                                 canvas(
                                     move |b, _, _| chip_w.set(b.size.width.as_f32()),
