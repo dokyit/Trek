@@ -49,10 +49,9 @@ pub use agent_updates::Hold;
 pub use limits::Clock;
 pub use lineage::{LineageRow, ThreadState};
 pub use mcp::{McpCheck, mcp_server_of};
-pub use node_setup::NodeSetup;
+pub use media_setup::MediaSetup;
 pub use node_setup::NodeSetup;
 pub use sign_in::SignedIn;
-pub use media_setup::MediaSetup;
 pub use orchestrate::{TaskState, waiting_label};
 pub use turn_changes::{TurnRange, TurnSpans};
 pub use verification::ago;
@@ -2031,6 +2030,7 @@ pub struct Workspace {
     pub setup_ended: HashMap<String, std::time::Instant>,
     /// Agents (`install_hint` keys) whose install ended in a terminal, to say how it went once
     /// they've been looked for again.
+    installs_awaited: Vec<&'static str>,
     /// Agents (`AgentId::key`) whose sign-in terminal is open and who weren't signed in: asked
     /// every `login_recheck` until they are (`sign_in`).
     login_watch: HashMap<String, sign_in::LoginWatch>,
@@ -2038,7 +2038,6 @@ pub struct Workspace {
     /// Agents Trek saw sign in after opening their login terminal, for Settings and the terminal
     /// to say so.
     signed_in: HashMap<String, SignedIn>,
-    installs_awaited: Vec<&'static str>,
     /// A scan was asked for while one ran: another follows, so what it finds is current.
     detect_again: bool,
     /// What asking each provider about the key just saved found: `None` while it is asked
@@ -2160,6 +2159,10 @@ pub struct Workspace {
     pub added_agents: AddedAgents,
     /// Node.js being set up for an agent install that runs npm, or found missing by one.
     pub node_setup: Option<NodeSetup>,
+    /// ffmpeg or yt-dlp being downloaded for the video watcher (Settings › Tools › Video), or
+    /// failed to download; `media_revision` counts the downloads that finished.
+    pub media_setup: Option<MediaSetup>,
+    pub media_revision: u32,
     /// Slash commands an agent offered in its last session in a folder: (`AgentId::key()`, cwd).
     agent_commands: HashMap<(String, PathBuf), Vec<SlashCommand>>,
     pub usage_loading: bool,
@@ -2169,10 +2172,6 @@ pub struct Workspace {
     pub settings_project: Option<String>,
     /// An agent session started while the user was still typing a new thread's first message.
     pub warm: Option<(WarmKey, trek_agents::SessionHandle, Instant)>,
-    /// ffmpeg or yt-dlp being downloaded for the video watcher (Settings › Tools › Video), or
-    /// failed to download; `media_revision` counts the downloads that finished.
-    pub media_setup: Option<MediaSetup>,
-    pub media_revision: u32,
     /// A `settle_merged` pass is running.
     checking_merges: bool,
     /// When `tidy_inbox` last ran: snoozes that ended since then bring their threads back.
@@ -2609,10 +2608,10 @@ impl Workspace {
             direct_models: trek_agents::load_all_cached_direct_models(),
             direct_inflight: HashSet::new(),
             setup_ended: HashMap::new(),
+            installs_awaited: Vec::new(),
             login_watch: HashMap::new(),
             login_recheck: sign_in::RECHECK,
             signed_in: HashMap::new(),
-            installs_awaited: Vec::new(),
             detect_again: false,
             key_checks: HashMap::new(),
             mcp_checks: HashMap::new(),
@@ -2687,6 +2686,8 @@ impl Workspace {
             authenticating_agents: HashSet::new(),
             added_agents: AddedAgents::default(),
             node_setup: None,
+            media_setup: None,
+            media_revision: 0,
             usage_loading: false,
             reset_credits_in_flight: HashSet::new(),
             settings_project: None,
@@ -2699,8 +2700,6 @@ impl Workspace {
             overlay_open: false,
             main_window: None,
             mode: Mode::Agents,
-            media_setup: None,
-            media_revision: 0,
             ide_root: None,
             diagnostics: HashMap::new(),
             reviews: HashMap::new(),
@@ -5087,7 +5086,12 @@ impl Workspace {
             .filter(|a| a.availability == Availability::Ready)
             .filter(|a| match &a.agent {
                 AgentId::ClaudeCode | AgentId::Codex => true,
-                AgentId::Direct(_) => !a.models.is_empty(),
+                // A server that had no models when it was looked for, and has some now (the model
+                // menu asked it again), is pickable too.
+                AgentId::Direct(p) => {
+                    !a.models.is_empty()
+                        || self.direct_models.get(p).is_some_and(|m| !m.is_empty())
+                }
                 // ACP agents are pickable once probed and signed in.
                 other => self
                     .acp_info
@@ -5117,6 +5121,33 @@ impl Workspace {
             out.push(AgentId::ClaudeCode);
         }
         out
+    }
+
+    /// What the model menu's rail lists: the agents the user can pick (`ready_agents`), and a
+    /// local model server that's running with no models yet (Ollama before its first `pull`).
+    /// That one has nothing to pick, but leaving it off the rail left a user who'd just installed
+    /// Ollama with no sign that Trek had seen it; its panel says how to get a model.
+    pub fn picker_agents(&self) -> Vec<AgentId> {
+        let mut out = self.ready_agents();
+        for a in &self.agents {
+            if matches!(&a.agent, AgentId::Direct(p) if catalog::is_local_provider(p))
+                && a.availability == Availability::Ready
+                && !out.contains(&a.agent)
+                && !self.settings.disabled_agents.contains(&a.agent.key())
+            {
+                out.push(a.agent.clone());
+            }
+        }
+        out
+    }
+
+    /// Whether the local model server `provider` (`ollama`, `lmstudio`, `llamacpp`) answered when
+    /// agents were last looked for.
+    pub fn local_server_running(&self, provider: &str) -> bool {
+        self.agents.iter().any(|a| {
+            a.agent == AgentId::Direct(provider.to_string())
+                && a.availability == Availability::Ready
+        })
     }
 
     /// Why `agent` can't be put in plan mode, when what it reported says it has none: said in the
@@ -12105,6 +12136,15 @@ mod tests {
                     std::path::Path::new(&env[0].1).ends_with("videos"),
                     "{env:?}"
                 );
+                // Where ffmpeg and yt-dlp are downloaded: the watcher reads and writes the folder
+                // Trek's Settings and its own PATH use.
+                assert!(
+                    env.contains(&(
+                        "TREK_TOOLS_DIR".to_string(),
+                        trek_core::media_tools::dir().display().to_string()
+                    )),
+                    "{env:?}"
+                );
                 // Dictation's speech model, where it has one (Windows): transcripts without
                 // whisper are made with it. Nothing on a Mac, whose Speech framework has its own.
                 let models = env
@@ -12149,15 +12189,6 @@ mod tests {
             "Trek restarts to update in 10 seconds."
         );
         assert_eq!(
-                // Where ffmpeg and yt-dlp are downloaded: the watcher reads and writes the folder
-                // Trek's Settings and its own PATH use.
-                assert!(
-                    env.contains(&(
-                        "TREK_TOOLS_DIR".to_string(),
-                        trek_core::media_tools::dir().display().to_string()
-                    )),
-                    "{env:?}"
-                );
             restart_message(10, true, &["npm run dev\n# more"]),
             "Trek restarts to update in 10 seconds, stopping npm run dev."
         );

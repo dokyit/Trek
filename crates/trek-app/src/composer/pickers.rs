@@ -67,6 +67,19 @@ pub struct Pickers {
     model_fetches: HashSet<String>,
 }
 
+/// What the model panel says for a local model server with nothing to list: one that's running
+/// and has no model yet says how to get one; one that isn't running, to start it.
+fn no_local_models(provider: &str, name: &str, running: bool) -> String {
+    if !running {
+        return format!("No models came back from {name}. Is it running?");
+    }
+    match provider {
+        "ollama" => "No models yet. In a terminal: ollama pull qwen3-coder".into(),
+        "lmstudio" => format!("No models yet. In {name}, download one and keep its server on."),
+        _ => format!("No models yet. Start {name} with a model file."),
+    }
+}
+
 /// Whether the model menu should start fetching `provider`'s models now: it has none, no fetch
 /// is out, and this menu hasn't asked yet. Records the ask.
 fn should_fetch_models(
@@ -722,8 +735,14 @@ fn model_panel<H: PickerHost>(
                 ws.direct_inflight.contains(p),
             )
         };
-        let should_fetch =
-            should_fetch_models(&mut host.pickers().model_fetches, p, empty, inflight);
+        // A local server is asked each time the menu opens, though it listed some: a model pulled
+        // since shows without restarting Trek.
+        let should_fetch = should_fetch_models(
+            &mut host.pickers().model_fetches,
+            p,
+            empty || trek_core::catalog::is_local_provider(p),
+            inflight,
+        );
         if should_fetch {
             let pid = p.clone();
             host.workspace().update(cx, |ws, cx| {
@@ -740,7 +759,7 @@ fn model_panel<H: PickerHost>(
     };
 
     let ws = host.workspace().read(cx);
-    let agents = ws.ready_agents();
+    let agents = ws.picker_agents();
     let unready = ws.unready_agents();
     let favorites = ws.settings.general.favorite_models.clone();
     let searching = !host
@@ -952,9 +971,10 @@ fn model_panel<H: PickerHost>(
                 Rail::Agent(_) if searching => ("No models match.".into(), None),
                 Rail::Agent(AgentId::Direct(provider)) => {
                     let name = AgentId::Direct(provider.clone()).display_name();
-                    if matches!(provider.as_str(), "ollama" | "lmstudio" | "llamacpp") {
+                    if trek_core::catalog::is_local_provider(provider) {
+                        let running = host.workspace().read(cx).local_server_running(provider);
                         (
-                            format!("No models came back from {name}. Is it running?"),
+                            no_local_models(provider, &name, running),
                             Some(SettingsPage::LocalModels),
                         )
                     } else {
@@ -1760,8 +1780,23 @@ pub fn picker<H: PickerHost>(host: &H, cx: &mut Context<H>) -> Option<AnyElement
 #[cfg(test)]
 mod tests {
     // Not `super::*`: that brings gpui's `test` attribute in over the built-in one.
-    use super::should_fetch_models;
+    use super::{no_local_models, should_fetch_models};
     use std::collections::HashSet;
+
+    #[test]
+    fn a_running_local_server_with_no_models_says_how_to_get_one() {
+        assert_eq!(
+            no_local_models("ollama", "Ollama", true),
+            "No models yet. In a terminal: ollama pull qwen3-coder"
+        );
+        assert!(no_local_models("lmstudio", "LM Studio", true).starts_with("No models yet."));
+        assert!(no_local_models("llamacpp", "llama.cpp", true).starts_with("No models yet."));
+        // Not running: it's the server to start, not a model to get.
+        assert_eq!(
+            no_local_models("ollama", "Ollama", false),
+            "No models came back from Ollama. Is it running?"
+        );
+    }
 
     #[test]
     fn a_menu_asks_for_a_providers_models_once() {

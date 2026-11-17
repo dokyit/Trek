@@ -1715,6 +1715,85 @@ fn a_provider_with_no_models_does_not_say_no_models_match() {
     });
 }
 
+/// Ollama running with no model yet is on the model menu's rail all the same: its panel says how
+/// to get one and links to Local Models, and a model pulled afterwards shows (and is pickable)
+/// without restarting Trek.
+#[test]
+fn a_running_ollama_with_no_models_is_on_the_rail_and_a_pulled_model_shows() {
+    use trek_core::AgentId;
+    use trek_core::catalog::ModelInfo;
+    use trek_core::detect::{Availability, DetectedAgent};
+    run(async |cx| {
+        let trek = open(cx);
+        let ollama = AgentId::Direct("ollama".into());
+        trek.update(cx, |ws, cx| {
+            ws.agents.push(DetectedAgent {
+                agent: ollama.clone(),
+                name: "Ollama".into(),
+                path: None,
+                version: None,
+                availability: Availability::Ready,
+                models: vec![],
+                install_hint: None,
+            });
+            cx.notify();
+        });
+        // Nothing to pick yet, so it isn't one of the agents a session can use; the rail has it.
+        trek.read(cx, |ws, _| {
+            assert!(!ws.ready_agents().contains(&ollama));
+            assert!(ws.picker_agents().contains(&ollama));
+            assert!(ws.local_server_running("ollama"));
+        });
+        open_model_list(&trek, cx);
+        assert!(
+            trek.visible(cx, "rail-direct:ollama"),
+            "Ollama is on the rail"
+        );
+        trek.click(cx, "rail-direct:ollama");
+        trek.render(cx);
+        assert!(
+            trek.visible(cx, "model-empty"),
+            "the empty state says what to do"
+        );
+        assert!(trek.visible(cx, "model-fix"), "and links to Local Models");
+        // A model pulled meanwhile (the menu asked Ollama again when it opened): listed, and Ollama
+        // is an agent a session can use.
+        trek.update(cx, |ws, cx| {
+            ws.direct_models.insert(
+                "ollama".into(),
+                vec![ModelInfo {
+                    id: "qwen3-coder".into(),
+                    name: "qwen3-coder".into(),
+                    efforts: vec![],
+                    tier: 0,
+                    fast: None,
+                    context: None,
+                    caps: None,
+                }],
+            );
+            cx.notify();
+        });
+        trek.render(cx);
+        assert!(trek.visible(cx, "m-direct:ollama-qwen3-coder"));
+        assert!(!trek.visible(cx, "model-empty"));
+        assert!(trek.read(cx, |ws, _| ws.ready_agents().contains(&ollama)));
+        // A server that isn't running is still where it was: dimmed, with its reason.
+        trek.update(cx, |ws, cx| {
+            ws.direct_models.clear();
+            for a in &mut ws.agents {
+                if a.agent == ollama {
+                    a.availability = Availability::Offline;
+                }
+            }
+            cx.notify();
+        });
+        trek.read(cx, |ws, _| {
+            assert!(!ws.picker_agents().contains(&ollama));
+            assert!(ws.unready_agents().iter().any(|(a, ..)| *a == ollama));
+        });
+    });
+}
+
 /// A model on this computer takes no effort: its menu has no Effort row and its pill no signal
 /// bars, where a model with levels keeps both.
 #[test]
