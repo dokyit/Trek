@@ -67,7 +67,7 @@ crop $ATLAS/composer--env-place--night.png worktree-night.webp 500 259 1136 600
 # Undo any turn: the end of a turn with its buttons (copy, undo, retry, retry with, fork).
 ffmpeg -v error -y -ss 30 -i $FOOT/story.mp4 -frames:v 1 -vf "crop=820:220:690:910" $T/u.png
 cwebp -quiet -q 90 -m 6 $T/u.png -o $O/undo-paper.webp
-crop $R3/raw/T_night.png undo-night.webp 820 180 590 1118
+crop $R3/raw/T_night.png undo-night.webp 820 170 590 1145
 
 # Study: a question it set, with its answers and how sure you are.
 crop $R3/raw/S_study_question.png study.webp 1580 1100 600 240
