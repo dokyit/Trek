@@ -121,6 +121,7 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
 .hero-window { position: relative; z-index: 1; width: min(1086px, 100%); margin: clamp(40px, 5vw, 56px) auto 0; perspective: 2200px; perspective-origin: 50% 0%; }
 .hero-window picture { display: block; transform-origin: 50% 100%; transform: rotateX(var(--tilt, 0deg)) translate3d(0, var(--lift, 0px), 0) scale(var(--zoom, 1)); will-change: transform; }
 .hero-window img { width: 100%; }
+.hero-window figcaption { position: relative; margin-top: 26px; font-size: 13px; color: var(--mute); }
 /* The window's own shadow is in the capture; this is where it meets the ground. */
 .hero-window::before { content: ""; position: absolute; inset: auto 6% -18px; height: 60px; border-radius: 50%; background: radial-gradient(closest-side, rgb(var(--shade) / 0.32), transparent); filter: blur(10px); transform: translateY(8px); }
 
@@ -136,6 +137,11 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
   .hero .cta { animation-delay: 0.3s; }
   .hero .fine { animation-delay: 0.38s; }
   .hero-window { animation: rise-far 1.3s var(--out) 0.35s both; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .mark-hero .board { transition: rotate 0.6s var(--out); }
+  .hero-copy:has(.btn-ember:hover, .btn-ember:focus-visible) .board-b { rotate: 5deg; }
+  .hero-copy:has(.btn-quiet:hover, .btn-quiet:focus-visible) .board-a { rotate: -5deg; }
 }
 @keyframes post { from { transform: scaleY(0.4); opacity: 0; } to { transform: none; opacity: 1; } }
 @keyframes board { 0% { transform: scaleX(0.08) rotate(-14deg); opacity: 0; } 22% { opacity: 1; } 58% { transform: scaleX(1.04) rotate(3deg); } 78% { transform: scaleX(0.99) rotate(-1deg); } 100% { transform: none; } }
@@ -173,12 +179,15 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
   background: linear-gradient(170deg, var(--panel-2), var(--panel) 70%); box-shadow: 0 0 0 1px var(--line) inset; }
 .panel-tall { min-height: clamp(420px, 44vw, 560px); }
 .panel-wide { padding-block: clamp(32px, 5vw, 72px); }
+.panel-bleed { padding-bottom: 0; place-items: end center; }
+.panel-bleed .shot { border-radius: 12px 12px 0 0; }
 .panel-mid { min-height: clamp(280px, 30vw, 380px); }
 .shot { border-radius: 12px; background: var(--raised); box-shadow: 0 0 0 1px rgb(0 0 0 / 0.07), 0 2px 4px rgb(var(--shade) / 0.06), 0 24px 48px -20px rgb(var(--shade) / 0.42);
   transform: translate3d(0, var(--drift, 0px), 0); will-change: transform; }
 .feat-inbox .shot { width: 380px; }
+.shot-worktree { width: 330px; }
 .panel-wide .shot { width: min(900px, 100%); }
-.feat-themes .panel-wide .shot { width: min(1000px, 100%); border-radius: 14px; }
+.feat-themes .panel-wide .shot { width: min(1000px, 100%); border-radius: 14px 14px 0 0; }
 .shot-undo { width: min(560px, 100%); }
 .panel-crop { height: clamp(360px, 40vw, 500px); place-items: start center; padding-bottom: 0; }
 .panel-crop .shot { width: 100%; max-width: 520px; border-radius: 12px 12px 0 0; -webkit-mask-image: linear-gradient(180deg, #000 72%, transparent); mask-image: linear-gradient(180deg, #000 72%, transparent); }
@@ -188,19 +197,16 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
 .strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: clamp(24px, 3vw, 44px); margin-top: clamp(96px, 12vw, 150px); }
 .feat-mini { margin-top: 0; padding-top: 22px; border-top: 1px solid var(--line); }
 .feat-mini .mini-media { height: 168px; display: flex; align-items: center; margin-bottom: 26px; }
-.feat-mini .shot { width: 100%; }
+.feat-mini .mini-media { overflow: hidden; padding: 4px 0 30px; margin-bottom: -4px; }
+.feat-mini .shot { max-width: none; flex: none; -webkit-mask-image: linear-gradient(90deg, #000 78%, transparent); mask-image: linear-gradient(90deg, #000 78%, transparent); }
 .feat-mini h3 { font-size: 1.4rem; }
 .feat-mini p { margin-top: 8px; color: var(--ink-2); font-size: 16px; max-width: 36ch; }
 
-/* The menu bar's three states, drawn with the app's own icons. */
-.menubar { display: grid; gap: 12px; width: 100%; }
-.menubar li { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 14px; font-size: 15px; font-weight: 500; color: var(--ink-2); }
-.mb-strip { order: 0; display: flex; align-items: center; justify-content: flex-end; gap: 14px; width: 168px; height: 30px; padding: 0 12px; border-radius: 9px;
-  background: color-mix(in srgb, var(--raised) 70%, transparent); box-shadow: 0 0 0 1px var(--line) inset, 0 8px 20px -14px rgb(var(--shade) / 0.5); }
-.mb-strip::before { content: ""; width: 56px; height: 6px; border-radius: 3px; margin-right: auto; background: color-mix(in srgb, var(--ink) 14%, transparent); }
-.mb-strip::after { content: "9:41"; order: 2; font: 600 12px/1 var(--text); color: var(--ink-2); font-variant-numeric: tabular-nums; }
-.mb-strip img { width: 16px; height: 16px; }
-@media (prefers-color-scheme: dark) { .mb-strip img { opacity: 0.92; } }
+/* The menu bar's three states: the app's own icons, large, each with its name. */
+.menubar { display: flex; gap: clamp(20px, 3vw, 36px); }
+.menubar li { display: grid; justify-items: center; gap: 12px; font-size: 14px; font-weight: 500; color: var(--ink-2); }
+.menubar img { width: 44px; height: 44px; padding: 14px; box-sizing: content-box; border-radius: 16px; background: var(--raised); box-shadow: 0 0 0 1px var(--line) inset, 0 10px 24px -16px rgb(var(--shade) / 0.5); }
+@media (prefers-color-scheme: dark) { .menubar img { filter: invert(1); background: #E6E0EE; } }
 
 /* ---------- iPhone ---------- */
 .phone-band { margin-top: clamp(96px, 12vw, 160px); background: linear-gradient(180deg, var(--ground), var(--sky-2) 22%, var(--sky)); overflow: clip; }
@@ -223,10 +229,11 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
 .get-in { max-width: calc(var(--wide) + 2 * var(--gutter)); margin: 0 auto; padding: clamp(80px, 10vw, 128px) var(--gutter); }
 .get-head p { margin-top: 16px; font-size: 19px; color: var(--ink-2); }
 .builds { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0 clamp(20px, 3vw, 40px); margin-top: 52px; }
-.build { display: flex; flex-direction: column; padding-top: 22px; border-top: 2px solid var(--ink); }
+.build { display: flex; flex-direction: column; padding-top: 22px; border-top: 1px solid color-mix(in srgb, var(--ink) 22%, transparent); }
 .build h3 { font-size: 1.35rem; }
 .build p { margin-top: 10px; font-size: 15px; color: var(--ink-2); flex: 1; }
-.build .links { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+.build .links { display: flex; flex-wrap: nowrap; gap: 8px; margin-top: 18px; }
+.build .links .btn { padding: 0 13px; }
 
 /* ---------- Footer ---------- */
 .foot { border-top: 1px solid var(--line); }

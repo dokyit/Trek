@@ -240,19 +240,38 @@
     }, { rootMargin: "0px 0px -12% 0px" });
     all(".reveal").forEach((el) => seen.observe(el));
 
-    // The recordings play while they are on screen, and not at all with Reduce Motion on, where
-    // each shows its first frame and the player's own controls.
-    const loops = all("video[data-loop]");
-    const sync = (video, on) => {
-      if (still.matches) { video.pause(); video.controls = true; return; }
-      video.controls = false;
-      if (on) { video.preload = "auto"; const p = video.play(); if (p) p.catch(() => {}); } else video.pause();
-    };
+    // Each recording is a still picture in the page (its poster). As one comes near, and only when
+    // motion is welcome, the picture becomes the recording, which plays while it is on screen.
+    // With Reduce Motion on, or without this script, the still stays.
+    const narrow = matchMedia("(max-width: 600px)");
     const play = new IntersectionObserver((entries) => {
-      for (const entry of entries) sync(entry.target, entry.isIntersecting);
+      for (const entry of entries) {
+        const video = entry.target;
+        if (entry.isIntersecting && !still.matches) { const p = video.play(); if (p) p.catch(() => {}); } else video.pause();
+      }
     }, { threshold: 0.25 });
-    loops.forEach((v) => play.observe(v));
-    still.addEventListener("change", () => loops.forEach((v) => sync(v, false)));
+    function upgrade(img) {
+      const video = document.createElement("video");
+      video.className = img.className;
+      video.width = img.width; video.height = img.height;
+      video.muted = true; video.loop = true; video.playsInline = true;
+      video.setAttribute("muted", ""); video.setAttribute("playsinline", "");
+      video.poster = img.currentSrc || img.src;
+      video.src = (narrow.matches && img.dataset.loopNarrow) || img.dataset.loop;
+      video.setAttribute("aria-label", img.alt);
+      (img.parentElement.matches("picture") ? img.parentElement : img).replaceWith(video);
+      play.observe(video);
+    }
+    const posters = all("img[data-loop]");
+    const coming = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting || still.matches) continue;
+        coming.unobserve(entry.target);
+        upgrade(entry.target);
+      }
+    }, { rootMargin: "50% 0px" });
+    posters.forEach((img) => coming.observe(img));
+    still.addEventListener("change", () => { if (still.matches) all("video").forEach((v) => v.pause()); });
   } else {
     all(".reveal").forEach((el) => el.classList.add("is-in"));
   }

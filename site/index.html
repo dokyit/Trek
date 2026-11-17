@@ -30,8 +30,8 @@
 <link rel="manifest" href="/site.webmanifest?v=4e204174">
 <link rel="preload" href="/assets/fonts/BricolageGrotesque.woff2?v=a79fdb52" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/assets/fonts/HankenGrotesk.woff2?v=e9201edd" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="/assets/site.css?v=a96464b7">
-<script src="/assets/site.js?v=a92d8fa0" defer></script>
+<link rel="stylesheet" href="/assets/site.css?v=aebdba6a">
+<script src="/assets/site.js?v=356c607b" defer></script>
 
 <script type="application/ld+json">
 {
@@ -92,6 +92,7 @@
       <source media="(prefers-color-scheme: dark)" srcset="/assets/img/window-night.webp?v=381ee848">
       <img src="/assets/img/window-paper.webp?v=6eda071e" width="1086" height="746" fetchpriority="high" decoding="async" alt="Trek on a Mac. The Inbox lists three threads that are waiting, each with its reason, and one that has finished. The open thread shows Claude Code's plan with the buttons Keep planning and Approve and start.">
     </picture>
+    <figcaption>The real app, with staged threads.</figcaption>
   </figure>
 </section>
 
@@ -107,9 +108,7 @@
       <p>Running and waiting threads on top. One stops to ask, goes to the top, and gets back to work once you answer.</p>
     </div>
     <div class="panel panel-tall reveal" data-drift>
-      <video class="shot" data-loop muted loop playsinline preload="none" width="274" height="350" poster="/assets/img/features/inbox-poster.webp?v=66041204" aria-label="Trek's sidebar: a thread stops to ask for ./migrate and moves to the top of the Inbox, is allowed, and goes back to work while another finishes.">
-        <source src="/assets/img/features/inbox.mp4?v=3323afc4" type="video/mp4">
-      </video>
+      <img class="shot" data-loop="/assets/img/features/inbox.mp4?v=f4103dd4" src="/assets/img/features/inbox-poster.webp?v=740d08fe" width="274" height="330" loading="lazy" decoding="async" alt="Trek's sidebar: a thread stops to ask for ./migrate and moves to the top of the Inbox, is allowed, and goes back to work while another finishes.">
     </div>
   </article>
 
@@ -118,10 +117,8 @@
       <h3>Agents consult agents</h3>
       <p>Codex reviews Claude's plan, and back. Here one agent sends two sub-agents ahead and waits for both.</p>
     </div>
-    <div class="panel panel-wide reveal" data-drift>
-      <video class="shot" data-loop muted loop playsinline preload="none" width="900" height="345" poster="/assets/img/features/agents-poster.webp?v=56796fa1" aria-label="A thread in Trek: the agent sends two sub-agents, Map the HTTP routes and Audit error handling, and waits on both while they run.">
-        <source src="/assets/img/features/agents.mp4?v=e3e9c071" type="video/mp4">
-      </video>
+    <div class="panel panel-wide panel-bleed reveal">
+      <picture><source media="(max-width: 600px)" srcset="/assets/img/features/agents-narrow-poster.webp?v=5d7354d9"><img class="shot" data-loop="/assets/img/features/agents.mp4?v=e3e9c071" data-loop-narrow="/assets/img/features/agents-narrow.mp4?v=3848400f" src="/assets/img/features/agents-poster.webp?v=56796fa1" width="900" height="345" loading="lazy" decoding="async" alt="A thread in Trek: the agent sends two sub-agents, Map the HTTP routes and Audit error handling, and waits on both while they run."></picture>
     </div>
   </article>
 
@@ -141,8 +138,8 @@
     <article class="feat feat-card feat-5">
       <div class="panel panel-mid reveal" data-drift>
         <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/worktree-night.webp?v=3e8a2dd9">
-          <img class="shot" src="/assets/img/features/worktree-paper.webp?v=5c304004" width="262" height="119" loading="lazy" decoding="async" alt="The menu for where a new thread runs: Local, the project folder, or New worktree, a branch of its own.">
+          <source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/worktree-night.webp?v=877a0b73">
+          <img class="shot shot-worktree" src="/assets/img/features/worktree-paper.webp?v=dd0750d2" width="250" height="130" loading="lazy" decoding="async" alt="The menu for where a new thread runs: Local, the project folder, or New worktree, a branch of its own.">
         </picture>
       </div>
       <div class="feat-text reveal">
@@ -163,14 +160,11 @@
     <div class="phones reveal">
       <figure class="phone phone-back" data-drift="-1">
         <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/iphone-threads-night.webp?v=2ad550b2">
           <img src="/assets/img/features/iphone-threads-paper.webp?v=ccba25fb" width="288" height="605" loading="lazy" decoding="async" alt="Trek for iPhone: Threads, with the ones that need you on top.">
         </picture>
       </figure>
       <figure class="phone phone-front">
-        <video class="phone-screen" data-loop muted loop playsinline preload="none" width="295" height="638" poster="/assets/img/features/iphone-poster.webp?v=8d5e3001" aria-label="Trek for iPhone: Claude Code wants to run ./migrate, and Allow is pressed.">
-          <source src="/assets/img/features/iphone.mp4?v=ca859399" type="video/mp4">
-        </video>
+        <img class="phone-screen" data-loop="/assets/img/features/iphone.mp4?v=ca859399" src="/assets/img/features/iphone-poster.webp?v=8d5e3001" width="295" height="638" loading="lazy" decoding="async" alt="Trek for iPhone: Claude Code wants to run ./migrate, and Allow is pressed.">
       </figure>
     </div>
   </div>
@@ -181,9 +175,9 @@
     <article class="feat feat-mini reveal">
       <div class="mini-media">
         <ul class="menubar" aria-label="Trek's menu bar icon in its three states">
-          <li><span class="mb-strip"><picture><source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/menubar-idle-dark.png?v=09657545"><img src="/assets/img/features/menubar-idle-light.png?v=875b1975" width="16" height="16" alt=""></picture></span>Idle</li>
-          <li><span class="mb-strip"><picture><source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/menubar-working-dark.png?v=66a1c642"><img src="/assets/img/features/menubar-working-light.png?v=dfb61155" width="16" height="16" alt=""></picture></span>Working</li>
-          <li><span class="mb-strip"><picture><source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/menubar-attention-dark.png?v=b5c93fa6"><img src="/assets/img/features/menubar-attention-light.png?v=2595625a" width="16" height="16" alt=""></picture></span>Needs you</li>
+          <li><img src="/assets/img/features/menubar-idle.svg?v=f74252aa" width="44" height="44" alt="">Idle</li>
+          <li><img src="/assets/img/features/menubar-working.svg?v=074a9874" width="44" height="44" alt="">Working</li>
+          <li><img src="/assets/img/features/menubar-attention.svg?v=5604e05d" width="44" height="44" alt="">Needs you</li>
         </ul>
       </div>
       <h3>Menu bar and tray</h3>
@@ -191,7 +185,7 @@
     </article>
     <article class="feat feat-mini reveal">
       <div class="mini-media">
-        <img class="shot" src="/assets/img/features/undo-paper.webp?v=b1f8cc08" width="620" height="150" loading="lazy" decoding="async" alt="The end of an agent's turn, with its buttons: copy, undo, retry, retry with another model, and fork.">
+        <img class="shot" src="/assets/img/features/undo-paper.webp?v=9fcdf9b5" width="410" height="110" loading="lazy" decoding="async" alt="The end of an agent's turn, with its buttons: copy, undo, retry, retry with another model, and fork.">
       </div>
       <h3>Undo any turn</h3>
       <p>Edit, retry or fork. Files roll back too.</p>
@@ -199,8 +193,8 @@
     <article class="feat feat-mini reveal">
       <div class="mini-media">
         <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/study-night.webp?v=4b7ad592">
-          <img class="shot" src="/assets/img/features/study-paper.webp?v=34123edd" width="780" height="154" loading="lazy" decoding="async" alt="Study in Trek: Learn or Practice, and the question What do you want to learn? It starts from what you already know.">
+          <source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/study-night.webp?v=76bfc112">
+          <img class="shot" src="/assets/img/features/study-paper.webp?v=a8acbae5" width="466" height="154" loading="lazy" decoding="async" alt="Study in Trek: Learn or Practice, and the question What do you want to learn? It starts from what you already know.">
         </picture>
       </div>
       <h3>Study</h3>
@@ -226,10 +220,8 @@
       <h3>Themes and backgrounds</h3>
       <p>Four themes, Paper or Night, glass. Painted and ASCII art.</p>
     </div>
-    <div class="panel panel-wide reveal" data-drift>
-      <video class="shot" data-loop muted loop playsinline preload="none" width="1000" height="636" poster="/assets/img/features/themes-poster.webp?v=f35cceea" aria-label="One Trek window changing through its four themes, then taking a painted background.">
-        <source src="/assets/img/features/themes.mp4?v=8cee7a3b" type="video/mp4">
-      </video>
+    <div class="panel panel-wide panel-bleed reveal">
+      <img class="shot" data-loop="/assets/img/features/themes.mp4?v=8cee7a3b" src="/assets/img/features/themes-poster.webp?v=f35cceea" width="1000" height="636" loading="lazy" decoding="async" alt="One Trek window changing through its four themes, then taking a painted background.">
     </div>
   </article>
   <p class="staged reveal">The real app, with staged threads.</p>
