@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="212 236 600 600">
+<!-- Trek's mark, the signpost: one post and two boards. This file is the only copy of its shape.
+     Pages draw it with <use href="/assets/img/mark.svg#post"> and #board-a / #board-b, so the
+     page's CSS colours it (the post takes `fill`, the boards take `fill` and `stroke`) and can
+     move each board. script/site/make_icons.py reads the same three paths for the favicon, the
+     touch icon, the manifest's icons and the share picture. To change the mark, change it here
+     and run that script. -->
+<defs>
+  <path id="post" d="M512 236A32 32 0 0 1 544 268V804A32 32 0 0 1 512 836A32 32 0 0 1 480 804V268A32 32 0 0 1 512 236Z"/>
+  <path id="board-a" stroke-width="36" stroke-linejoin="round" transform="rotate(-4 512 352)" d="M262 290H676L770 352L676 414H262Z"/>
+  <path id="board-b" stroke-width="36" stroke-linejoin="round" transform="rotate(3 512 540)" d="M762 478H348L254 540L348 602H762Z"/>
+</defs>
+</svg>
