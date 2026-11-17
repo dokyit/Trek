@@ -42,7 +42,10 @@ pub fn login_path() -> &'static str {
     static PATH: OnceLock<String> = OnceLock::new();
     PATH.get_or_init(|| {
         let path = compose_path(base_path().as_deref(), &crate::paths::home());
-        with_last(&path, &crate::node::bin_dir())
+        with_last(
+            &with_last(&path, &crate::node::bin_dir()),
+            &crate::media_tools::dir(),
+        )
     })
 }
 

@@ -157,7 +157,7 @@ const MACOS: Words = Words {
 
     build_name: "Mac",
 
-    video_watcher_note: "Agents can watch a video file or link: they get its frames and a transcript of its audio, and you get a player with the frames they saw. YouTube and X links need yt-dlp; transcripts use whisper when it's installed, else the Mac's speech recognition. Applies to new sessions.",
+    video_watcher_note: "Agents can watch a video file or link: they get its frames and a transcript of its audio, and you get a player with the frames they saw. YouTube and X links use yt-dlp; Trek downloads ffmpeg and yt-dlp the first time they are needed if they are not installed. Transcripts use whisper when it's installed, else the Mac's speech recognition. Applies to new sessions.",
 
     local_servers: "Ollama, LM Studio, and llama.cpp or MLX",
 
@@ -225,7 +225,7 @@ const WINDOWS: Words = Words {
 
     build_name: "Windows",
 
-    video_watcher_note: "Agents can watch a video file or link: they get its frames and a transcript of its audio, and you get a player with the frames they saw. YouTube and X links need yt-dlp; transcripts use whisper when it's installed, else Trek's own speech model, which the composer's mic downloads the first time it's clicked. Applies to new sessions.",
+    video_watcher_note: "Agents can watch a video file or link: they get its frames and a transcript of its audio, and you get a player with the frames they saw. YouTube and X links use yt-dlp; Trek downloads ffmpeg and yt-dlp the first time they are needed if they are not installed. Transcripts use whisper when it's installed, else Trek's own speech model, which the composer's mic downloads the first time it's clicked. Applies to new sessions.",
 
     local_servers: "Ollama, LM Studio, and llama.cpp",
 

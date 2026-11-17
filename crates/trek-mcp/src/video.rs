@@ -47,7 +47,8 @@ pub const ENV_VIDEO_DIR: &str = "TREK_VIDEO_DIR";
 /// Where Trek keeps dictation's speech model (Windows): a transcript without whisper uses it.
 pub const ENV_DICTATION_DIR: &str = "TREK_DICTATION_DIR";
 
-// No restart: the user's and the machine's Path are read again as they are now (util.rs).
+// No restart: the user's and the machine's Path are read again as they are now (util.rs), and the
+// folder Trek downloads ffmpeg into is looked in too.
 #[cfg(windows)]
 pub const FFMPEG_MISSING: &str = "watch_video needs ffmpeg and ffprobe, and they aren't installed. Ask the user to \
 install them with `winget install ffmpeg`, and try again.";
@@ -61,6 +62,9 @@ install them with `brew install ffmpeg`, and try again.";
 pub struct Video {
     scratch: PathBuf,
     speech: Option<PathBuf>,
+    /// Whether a missing ffmpeg or yt-dlp is downloaded (Trek's own copy, `trek_core::media_tools`)
+    /// rather than asked for. Off in the tests: nothing is downloaded there.
+    fetch: bool,
 }
 
 impl Default for Video {
@@ -74,6 +78,7 @@ impl Default for Video {
             scratch: absolute(ENV_VIDEO_DIR)
                 .unwrap_or_else(|| std::env::temp_dir().join("trek-videos")),
             speech: absolute(ENV_DICTATION_DIR),
+            fetch: true,
         }
     }
 }
@@ -458,8 +463,39 @@ fn size_text(bytes: u64) -> String {
 
 const BREW_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin"];
 
+/// `name` on PATH, in the package managers' folders, or in the folder Trek downloads tools into.
 fn find(name: &str) -> Option<PathBuf> {
-    util::find_executable(name, BREW_DIRS)
+    find_with_own(name, &trek_core::media_tools::dir_from_env())
+}
+
+/// `find`, with `own` as the folder of Trek's downloads.
+fn find_with_own(name: &str, own: &Path) -> Option<PathBuf> {
+    let own = own.to_string_lossy();
+    let dirs: Vec<&str> = BREW_DIRS.iter().copied().chain([own.as_ref()]).collect();
+    util::find_executable(name, &dirs)
+}
+
+/// `find`, and when `name` isn't here and `fetch`: `tool` downloaded into Trek's folder first
+/// (checked, and started once to see it runs), then found there. `Err` says why not, in words for
+/// the user.
+fn find_or_download(
+    tool: trek_core::media_tools::Tool,
+    name: &str,
+    fetch: bool,
+) -> Result<PathBuf, String> {
+    if let Some(found) = find(name) {
+        return Ok(found);
+    }
+    if !fetch {
+        return Err("it isn't installed".into());
+    }
+    let plan = trek_core::media_tools::plan(tool)
+        .ok_or_else(|| "Trek has no download of it for this computer".to_string())?;
+    let dir = trek_core::media_tools::dir_from_env();
+    trek_core::runtime()
+        .block_on(trek_core::media_tools::install_into(&dir, &plan, &|_| {}))
+        .map_err(|e| format!("{e:#}"))?;
+    find(name).ok_or_else(|| "it wasn't there after the download".into())
 }
 
 fn path_str(p: &Path) -> Result<&str, String> {
@@ -514,6 +550,7 @@ impl Video {
         Self {
             scratch,
             speech: None,
+            fetch: false,
         }
     }
 
@@ -557,14 +594,33 @@ impl Video {
 
     fn watch(&self, args: &Value) -> ToolResult {
         let ask = read_args(args)?;
-        let (Some(ffmpeg), Some(ffprobe)) = (find("ffmpeg"), find("ffprobe")) else {
-            return Err(FFMPEG_MISSING.into());
+        let (ffmpeg, ffprobe) = match (find("ffmpeg"), find("ffprobe")) {
+            (Some(ffmpeg), Some(ffprobe)) => (ffmpeg, ffprobe),
+            // Not installed: Trek downloads its own the first time (about a minute), unless that
+            // can't be (no internet, no build for this computer).
+            _ => {
+                use trek_core::media_tools::Tool;
+                let both = find_or_download(Tool::Ffmpeg, "ffmpeg", self.fetch).and_then(|a| {
+                    Ok((a, find_or_download(Tool::Ffmpeg, "ffprobe", self.fetch)?))
+                });
+                match both {
+                    Ok(both) => both,
+                    Err(why) if self.fetch => {
+                        return Err(format!(
+                            "{FFMPEG_MISSING} (Trek tried to download them and couldn't: {why})"
+                        ));
+                    }
+                    Err(_) => return Err(FFMPEG_MISSING.into()),
+                }
+            }
         };
         let dir = self.scratch_dir()?;
         let (file, source_text) = match &ask.source {
             Source::Local(p) => (p.clone(), p.display().to_string()),
             Source::Url(url) => (download(url, &dir)?, url.clone()),
-            Source::Site { url, site } => (fetch_with_ytdlp(url, site, &dir)?, url.clone()),
+            Source::Site { url, site } => {
+                (fetch_with_ytdlp(url, site, &dir, self.fetch)?, url.clone())
+            }
         };
         let ffmpeg = path_str(&ffmpeg)?.to_string();
         let input = input_arg(&file)?;
@@ -1113,37 +1169,52 @@ fn download(url: &str, dir: &Path) -> Result<PathBuf, String> {
     Ok(out)
 }
 
-fn fetch_with_ytdlp(url: &str, site: &str, dir: &Path) -> Result<PathBuf, String> {
-    let Some(ytdlp) = find("yt-dlp") else {
-        let install = if cfg!(windows) {
-            "winget install yt-dlp"
-        } else {
-            "brew install yt-dlp"
-        };
-        return Err(format!(
-            "{site} links need yt-dlp to get the video out of the page, and it isn't installed. Ask the user to install it (`{install}`), or pass a direct link to the media file."
-        ));
+fn fetch_with_ytdlp(url: &str, site: &str, dir: &Path, fetch: bool) -> Result<PathBuf, String> {
+    let downloaded = find_or_download(trek_core::media_tools::Tool::YtDlp, "yt-dlp", fetch);
+    let ytdlp = match downloaded {
+        Ok(ytdlp) => ytdlp,
+        Err(why) => {
+            let install = if cfg!(windows) {
+                "winget install yt-dlp"
+            } else {
+                "brew install yt-dlp"
+            };
+            let tried = if fetch {
+                format!(" Trek tried to download it and couldn't: {why}.")
+            } else {
+                String::new()
+            };
+            return Err(format!(
+                "{site} links need yt-dlp to get the video out of the page, and it isn't installed.{tried} Ask the user to install it (`{install}`), or pass a direct link to the media file."
+            ));
+        }
     };
     let template = dir.join("video.%(ext)s");
     let max = format!("{}M", MAX_DOWNLOAD / 1024 / 1024);
+    // yt-dlp joins the picture and the sound with ffmpeg, which it finds on PATH: not the copy
+    // Trek downloaded, so it's told where it is.
+    let ffmpeg = find("ffmpeg");
+    let mut args = vec![
+        "--no-playlist",
+        "--no-progress",
+        "--max-filesize",
+        &max,
+        "-S",
+        "res:720,ext:mp4:m4a",
+        "--merge-output-format",
+        "mp4",
+        "-o",
+        path_str(&template)?,
+        "--print",
+        "after_move:filepath",
+    ];
+    if let Some(ffmpeg) = &ffmpeg {
+        args.extend(["--ffmpeg-location", path_str(ffmpeg)?]);
+    }
+    args.extend(["--", url]);
     let out = util::run_ok(
         path_str(&ytdlp)?,
-        &[
-            "--no-playlist",
-            "--no-progress",
-            "--max-filesize",
-            &max,
-            "-S",
-            "res:720,ext:mp4:m4a",
-            "--merge-output-format",
-            "mp4",
-            "-o",
-            path_str(&template)?,
-            "--print",
-            "after_move:filepath",
-            "--",
-            url,
-        ],
+        &args,
         None,
         Duration::from_secs(1200),
     )
@@ -1716,6 +1787,27 @@ mod tests {
         );
         assert_eq!(out.len(), 1 + 10);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// What Trek downloaded is found where it keeps it, though it's on no PATH; and with nothing
+    /// downloaded (and downloads off, as in tests) the missing tool is said, not fetched.
+    #[test]
+    fn a_tool_trek_downloaded_is_found_in_its_folder() {
+        let dir = std::env::temp_dir().join(format!("trek-video-own-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = "trek-no-such-ffmpeg";
+        assert_eq!(find_with_own(name, &dir), None);
+        let file = dir.join(if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.to_string()
+        });
+        std::fs::copy(trek_test_fixtures::bin("fixture"), &file).unwrap();
+        assert_eq!(find_with_own(name, &dir), Some(file));
+        let _ = std::fs::remove_dir_all(&dir);
+        let missing = find_or_download(trek_core::media_tools::Tool::YtDlp, name, false);
+        assert_eq!(missing, Err("it isn't installed".to_string()));
     }
 
     #[test]

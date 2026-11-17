@@ -69,11 +69,30 @@ pub fn ffmpeg_installed() -> bool {
         && trek_core::detect::which_now("ffprobe").is_some()
 }
 
+/// What a computer's package manager installs ffmpeg with: where Trek has no download of its own
+/// for the computer (`trek_core::media_tools`), or when that download can't be made.
 pub const FFMPEG_INSTALL: &str = if cfg!(windows) {
     "winget install ffmpeg"
 } else {
     "brew install ffmpeg"
 };
+
+pub const YTDLP_INSTALL: &str = if cfg!(windows) {
+    "winget install yt-dlp"
+} else {
+    "brew install yt-dlp"
+};
+
+/// yt-dlp, which gets the video out of a YouTube or X link, installed (on PATH or downloaded by
+/// Trek).
+pub fn ytdlp_installed() -> bool {
+    trek_core::detect::which_now("yt-dlp").is_some()
+}
+
+/// Whether this computer has the package manager `FFMPEG_INSTALL` uses (Homebrew, winget).
+pub fn package_manager_installed() -> bool {
+    trek_core::detect::which_now(if cfg!(windows) { "winget" } else { "brew" }).is_some()
+}
 
 /// MCP servers each agent already loads from its own config: `(agent, server names)`.
 pub fn agent_mcp_servers() -> Vec<(&'static str, Vec<String>)> {

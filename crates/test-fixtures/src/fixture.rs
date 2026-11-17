@@ -13,6 +13,7 @@
 //!                          the args one per line into `dir/args` and stdin into `dir/stdin`, then
 //!                          `reply` on stdout (on stderr when `code` isn't 0), and exit with `code`:
 //!                          a CLI that notes what it was asked (a stand-in `gh gist`)
+//!   -version, --version    a version line on stdout (a stand-in ffmpeg or yt-dlp that starts)
 //!   fake-acp               run the stand-in ACP agent
 //!   fake-mcp [<mode>]      run the stand-in MCP server
 //!   serve <dir> [<port>]   the files in `dir` over HTTP on 127.0.0.1 (see `serve`)
@@ -95,6 +96,10 @@ pub fn run() -> i32 {
                 eprintln!("{line}");
             }
             code
+        }
+        Some("-version" | "--version") => {
+            println!("fixture version 1");
+            0
         }
         Some("exit") => args.next().and_then(|c| c.parse().ok()).unwrap_or(0),
         Some("record") => {

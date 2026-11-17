@@ -24,6 +24,7 @@ pub mod limit;
 pub mod lineage;
 pub mod mcp;
 pub mod media;
+pub mod media_tools;
 pub mod node;
 pub mod notes;
 pub mod open_in;
