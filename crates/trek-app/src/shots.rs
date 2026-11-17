@@ -3206,6 +3206,35 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         crate::system::apply_reduce_motion(ws, cx);
         return Ok(());
     }
+    // `media-demo install ffmpeg|yt-dlp` has Trek download its own copy for real, as Settings ›
+    // Tools › Video's Install button does (into the run's data folder), showing its progress;
+    // `media-demo failed ffmpeg|yt-dlp` shows the row of a download that couldn't be made.
+    if verb == "media-demo" {
+        use crate::workspace::MediaSetup;
+        use trek_core::media_tools::Tool;
+        let (sub, name) = arg.split_once(' ').unwrap_or((arg, ""));
+        let tool = match name.trim() {
+            "ffmpeg" => Tool::Ffmpeg,
+            "yt-dlp" => Tool::YtDlp,
+            _ => anyhow::bail!("media-demo install|failed ffmpeg|yt-dlp"),
+        };
+        ws.update(cx, |ws, cx| match sub {
+            "install" => {
+                ws.install_media_tool_in(tool, Some(trek_core::media_tools::dir()), cx);
+                Ok(())
+            }
+            "failed" => {
+                ws.media_setup = Some(MediaSetup::Failed {
+                    tool,
+                    error: "Couldn't reach the download. Check your internet connection or proxy, then try again.".into(),
+                });
+                cx.notify();
+                Ok(())
+            }
+            _ => anyhow::bail!("media-demo install|failed ffmpeg|yt-dlp"),
+        })?;
+        return Ok(());
+    }
     // `sign-in-demo start|done`: Droid (a login that's its own TUI, and never ends) installed and
     // signed out, its sign-in opened in the terminal dock as Settings' Sign in opens it (the capture
     // run starts no program); then, as the probe Trek's recheck starts would find it, signed in. The

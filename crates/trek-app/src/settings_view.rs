@@ -54,8 +54,8 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _,
-    h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _,
+    WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -2074,9 +2074,12 @@ impl SettingsView {
             .media_setup
             .clone()
             .filter(|m| m.tool() == tool);
-        let busy = self.workspace.read(cx).media_setup.as_ref().is_some_and(
-            |m| matches!(m, crate::workspace::MediaSetup::Downloading { .. }),
-        );
+        let busy = self
+            .workspace
+            .read(cx)
+            .media_setup
+            .as_ref()
+            .is_some_and(|m| matches!(m, crate::workspace::MediaSetup::Downloading { .. }));
         let (what, when) = match tool {
             Tool::Ffmpeg => (
                 "Reads the video, takes its frames and its audio.",
@@ -2139,7 +2142,10 @@ impl SettingsView {
         };
         let (extra, control) = match (&setup, probe) {
             (Some(crate::workspace::MediaSetup::Downloading { .. }), _) => (
-                setup.as_ref().and_then(|s| s.label()).map(|l| line(l, false)),
+                setup
+                    .as_ref()
+                    .and_then(|s| s.label())
+                    .map(|l| line(l, false)),
                 Spinner::new().small().into_any_element(),
             ),
             (Some(crate::workspace::MediaSetup::Failed { error, .. }), probe) => {
@@ -2166,7 +2172,10 @@ impl SettingsView {
                     );
                 }
                 (
-                    Some(line(format!("Trek couldn't download {name}: {error}"), true)),
+                    Some(line(
+                        format!("Trek couldn't download {name}: {error}"),
+                        true,
+                    )),
                     controls.into_any_element(),
                 )
             }
@@ -2180,17 +2189,17 @@ impl SettingsView {
                     .child("Checking…")
                     .into_any_element(),
             ),
-            (None, Some((true, _))) => (
+            (None, Some((true, _))) => (None, Self::status_dot(palette::emerald(cx), "Installed")),
+            (None, Some((false, _))) => (
                 None,
-                Self::status_dot(palette::emerald(cx), "Installed"),
+                download(
+                    match tool {
+                        Tool::Ffmpeg => "Install ffmpeg",
+                        Tool::YtDlp => "Install yt-dlp",
+                    },
+                    cx,
+                ),
             ),
-            (None, Some((false, _))) => (None, download(
-                match tool {
-                    Tool::Ffmpeg => "Install ffmpeg",
-                    Tool::YtDlp => "Install yt-dlp",
-                },
-                cx,
-            )),
         };
         Self::row_with(name, description, extra, control, cx)
     }

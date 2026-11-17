@@ -600,9 +600,8 @@ impl Video {
             // can't be (no internet, no build for this computer).
             _ => {
                 use trek_core::media_tools::Tool;
-                let both = find_or_download(Tool::Ffmpeg, "ffmpeg", self.fetch).and_then(|a| {
-                    Ok((a, find_or_download(Tool::Ffmpeg, "ffprobe", self.fetch)?))
-                });
+                let both = find_or_download(Tool::Ffmpeg, "ffmpeg", self.fetch)
+                    .and_then(|a| Ok((a, find_or_download(Tool::Ffmpeg, "ffprobe", self.fetch)?)));
                 match both {
                     Ok(both) => both,
                     Err(why) if self.fetch => {
@@ -1212,13 +1211,8 @@ fn fetch_with_ytdlp(url: &str, site: &str, dir: &Path, fetch: bool) -> Result<Pa
         args.extend(["--ffmpeg-location", path_str(ffmpeg)?]);
     }
     args.extend(["--", url]);
-    let out = util::run_ok(
-        path_str(&ytdlp)?,
-        &args,
-        None,
-        Duration::from_secs(1200),
-    )
-    .map_err(|e| format!("yt-dlp couldn't get the video from {url}: {e}"))?;
+    let out = util::run_ok(path_str(&ytdlp)?, &args, None, Duration::from_secs(1200))
+        .map_err(|e| format!("yt-dlp couldn't get the video from {url}: {e}"))?;
     let printed = out
         .lines()
         .map(str::trim)

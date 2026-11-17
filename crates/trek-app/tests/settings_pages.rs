@@ -314,7 +314,10 @@ fn the_video_tools_say_what_trek_downloads_and_how_far_it_has_got() {
             ))),
             "{said:?}"
         );
-        assert!(said.iter().any(|t| t.contains("Trek downloads yt-dlp (about")));
+        assert!(
+            said.iter()
+                .any(|t| t.contains("Trek downloads yt-dlp (about"))
+        );
         // Downloading: how far, in words.
         trek.update(cx, |ws, cx| {
             ws.media_setup = Some(MediaSetup::Downloading {

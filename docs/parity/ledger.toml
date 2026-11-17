@@ -395,9 +395,85 @@ macos = "yes"
 windows = "yes"
 live = ["route project:{project}", "pace 0", "send mock:video", "wait idle 60000", "wait 800", "count trek-artifact-* 1+"]
 how = { macos = "whisper when it's installed, else the Speech framework.", windows = "whisper when it's installed, else Whisper in Trek itself: trek-mcp transcribes on the PC with dictation's engine (trek-dictate) and the speech model the mic downloaded, whose folder Trek names in TREK_DICTATION_DIR. It never downloads the model for a video: without it, the agent is told the composer's mic gets it (141 MB) or to install whisper." }
-note = "Checked on a Windows 11 PC (i7-13700H): a generated clip with a sentence spoken a second in, watched from 0:01, comes back word for word as [0:01.0–0:06.0] on the video's clock, in 2.7 s for the whole call (trek-mcp's video tests, where the model is present; they pass as skipped where it isn't, as on CI). A first-time Windows user gets transcripts once dictation has been used once, where a Mac asks for Speech Recognition the first time. Settings' \"Install ffmpeg\" runs `winget install ffmpeg`, which without Developer Mode puts the package's own folder on the user's Path rather than in its Links: Settings (detect::which_now) and watch_video (trek-mcp's find_executable) read the registry's Path as it is now, so it's found without restarting Trek."
+note = "Checked on a Windows 11 PC (i7-13700H): a generated clip with a sentence spoken a second in, watched from 0:01, comes back word for word as [0:01.0–0:06.0] on the video's clock, in 2.7 s for the whole call (trek-mcp's video tests, where the model is present; they pass as skipped where it isn't, as on CI). A first-time Windows user gets transcripts once dictation has been used once, where a Mac asks for Speech Recognition the first time. A winget install of ffmpeg (what Settings' \"Use winget\" runs where Trek's own download failed) without Developer Mode puts the package's own folder on the user's Path rather than in its Links: Settings (detect::which_now) and watch_video (trek-mcp's find_executable) read the registry's Path as it is now, so it's found without restarting Trek."
 code = ["crates/trek-mcp/src/video.rs", "crates/trek-dictate/src/lib.rs", "crates/trek-dictate/src/windows/local.rs", "crates/trek-app/src/workspace.rs", "crates/trek-mcp/src/util.rs", "crates/trek-core/src/detect.rs", "crates/trek-integrations/src/lib.rs"]
 tests = ["crates/trek-mcp/src/video.rs", "crates/trek-dictate/src/windows/local.rs", "crates/trek-app/src/workspace.rs", "crates/trek-mcp/src/util.rs", "crates/trek-core/src/detect.rs"]
+
+[[feature]]
+id = "video-tools-download"
+area = "Agent tools"
+what = "ffmpeg and yt-dlp for the video watcher come from Trek itself where Homebrew or winget isn't there to install them"
+macos = "yes"
+windows = "yes"
+live = ["route settings:tools", "wait 300", "media-demo failed yt-dlp", "wait 300", "reveal yt-dlp-media-status", "count yt-dlp-media-status 1", "count install-yt-dlp 1"]
+how = { macos = "Martin Riedl's static ffmpeg and ffprobe 9.0.2 (ffmpeg.martin-riedl.de: one zip each for Apple silicon and for Intel, signed with his Developer ID, a .sha256 beside each), pinned by URL and SHA-256 in trek_core::media_tools; yt-dlp's own `yt-dlp_macos` from its latest GitHub release, checked against that release's SHA2-256SUMS.", windows = "Gyan Doshi's \"essentials\" ffmpeg 8.1.2 for x86-64 (GitHub GyanD/codexffmpeg, the same file and SHA-256 gyan.dev publishes), whose ffmpeg.exe and ffprobe.exe are taken out of the zip; yt-dlp's own `yt-dlp.exe`, checked against its release's SHA2-256SUMS. There is no ARM64 build: a Windows on ARM falls back to winget's line." }
+note = "The first `watch_video` (and Settings › Tools › Video's Install ffmpeg / Install yt-dlp, with progress) downloads what's missing into the folder `media_tools::dir` names (local app data on Windows, the data folder on a Mac), checks it against its SHA-256, starts it once with -version, and only then puts it in place; PATH and the package managers' folders come first, so an ffmpeg that's already there is used. Where a download can't be made Settings says why and offers Homebrew or winget when it's here. A file Trek downloads itself isn't quarantined, so Gatekeeper never asks about it (and the Mac builds are signed and notarized anyway). Checked on a Mac: with Homebrew's ffmpeg hidden from trek-mcp (a sandbox profile), the first watch_video of a generated clip downloaded both programs in 3 s and watched it, a second call used them at once, and with the network blocked it said why and left nothing behind; and the isolated app downloaded ffmpeg for real into its data folder from Settings' row (capture build: media-demo), with its progress shown. The Windows download isn't run on a PC here: its URL, size and SHA-256 are the ones the two sources publish, and the unpacking is tested with a made-up zip laid out as theirs is."
+code = ["crates/trek-core/src/media_tools.rs", "crates/trek-core/src/detect.rs", "crates/trek-mcp/src/video.rs", "crates/trek-integrations/src/lib.rs", "crates/trek-app/src/workspace/media_setup.rs", "crates/trek-app/src/settings_view.rs"]
+tests = ["crates/trek-core/src/media_tools.rs", "crates/trek-mcp/src/video.rs", "crates/trek-app/tests/settings_pages.rs", "crates/trek-app/src/workspace.rs"]
+
+[[feature.promise]]
+what = "A tool Trek downloads is checked against its SHA-256 before it's unpacked, started once before it's kept, and a failed download leaves nothing (and an older copy as it was)"
+macos = "crates/trek-core/src/media_tools.rs::a_download_that_doesn_t_match_its_checksum_is_refused_and_nothing_is_left"
+windows = "crates/trek-core/src/media_tools.rs::a_download_that_doesn_t_match_its_checksum_is_refused_and_nothing_is_left"
+
+[[feature.promise]]
+what = "Every platform Trek ships for has a pinned ffmpeg and ffprobe, each with a SHA-256 written in the code"
+macos = "crates/trek-core/src/media_tools.rs::every_platform_trek_ships_for_has_a_plan_with_a_hash_written_in_the_code"
+windows = "crates/trek-core/src/media_tools.rs::every_platform_trek_ships_for_has_a_plan_with_a_hash_written_in_the_code"
+
+[[feature.promise]]
+what = "What Trek downloaded is found where it keeps it, though it's on no PATH"
+macos = "crates/trek-mcp/src/video.rs::a_tool_trek_downloaded_is_found_in_its_folder"
+windows = "crates/trek-mcp/src/video.rs::a_tool_trek_downloaded_is_found_in_its_folder"
+
+[[feature.promise]]
+what = "Settings says what Trek downloads, how far it's got, and why one failed, with a way to try again"
+macos = "crates/trek-app/tests/settings_pages.rs::the_video_tools_say_what_trek_downloads_and_how_far_it_has_got"
+windows = "crates/trek-app/tests/settings_pages.rs::the_video_tools_say_what_trek_downloads_and_how_far_it_has_got"
+
+[[feature]]
+id = "sign-in-shown"
+area = "Agents"
+what = "An agent's sign-in shows in Settings as soon as it's true, whether or not its terminal ends, and says the terminal can be closed"
+macos = "yes"
+windows = "yes"
+live = ["sign-in-demo start", "wait 600", "sign-in-demo done", "wait 2500", "count terminal-login-note 1"]
+how = { macos = "The same on both: while a login terminal is open for an agent that wasn't signed in, Trek asks that agent every few seconds; when its terminal ends, what Trek knows of the agent is read again at once.", windows = "The same on both." }
+note = "A login that's the agent's whole TUI (droid, qwen, pi) never exits, and the one that does (claude auth login, codex login) was read again only when the usual spacing allowed (30 s, Claude Code's 120 s, or once a run for the others), so a user saw \"Not signed in\" until a restart. Now a toast, the terminal's tab, a strip beside it in the dock and the agent's row in Settings say \"Signed in to Droid. You can close the terminal.\""
+code = ["crates/trek-app/src/workspace/sign_in.rs", "crates/trek-app/src/workspace/usage.rs", "crates/trek-app/src/workspace/node_setup.rs", "crates/trek-app/src/terminal_dock.rs", "crates/trek-app/src/ide/panel.rs", "crates/trek-app/src/panels/terminal.rs", "crates/trek-app/src/settings_view.rs", "crates/trek-core/src/catalog.rs"]
+tests = ["crates/trek-app/tests/sign_in.rs", "crates/trek-core/src/catalog.rs"]
+
+[[feature.promise]]
+what = "A login whose terminal never ends is noticed while it's open, and said once, in plain words"
+macos = "crates/trek-app/tests/sign_in.rs::a_login_that_never_exits_is_noticed_while_its_terminal_is_open"
+windows = "crates/trek-app/tests/sign_in.rs::a_login_that_never_exits_is_noticed_while_its_terminal_is_open"
+
+[[feature.promise]]
+what = "A login that ends has its agent read again at once, whatever was read a moment ago"
+macos = "crates/trek-app/tests/sign_in.rs::a_login_that_ends_has_its_agent_read_again_at_once"
+windows = "crates/trek-app/tests/sign_in.rs::a_login_that_ends_has_its_agent_read_again_at_once"
+
+[[feature.promise]]
+what = "Switching account while signed in isn't announced as a sign-in"
+macos = "crates/trek-app/tests/sign_in.rs::switching_account_while_signed_in_is_not_announced"
+windows = "crates/trek-app/tests/sign_in.rs::switching_account_while_signed_in_is_not_announced"
+
+[[feature]]
+id = "local-models-in-picker"
+area = "Agents"
+what = "A local model server that's running with no models yet is in the model menu, and says how to get one"
+macos = "yes"
+windows = "yes"
+live = ["click model-pill", "wait 300", "click mm-model", "wait 300", "count model-menu-body 1"]
+how = { macos = "The same on both: Ollama, LM Studio or llama.cpp answering with no models is on the rail; its panel says \"No models yet. In a terminal: ollama pull qwen3-coder\" and links to Settings › Local Models. The menu asks the server again each time it opens, so a model pulled since shows without restarting Trek.", windows = "The same on both." }
+note = "The list dropped a running server with no models (`ready_agents` wants a model to pick), so the menu's own empty state could never show, and a user who had just installed Ollama saw no sign that Trek had seen it. The rail now lists it (`picker_agents`); the agents a session can use (`ready_agents`) are as they were until it has a model."
+code = ["crates/trek-app/src/composer/pickers.rs", "crates/trek-app/src/workspace.rs"]
+tests = ["crates/trek-app/tests/composer.rs", "crates/trek-app/src/composer/pickers.rs"]
+
+[[feature.promise]]
+what = "A running Ollama with no models is on the model menu's rail with a way to get one, and a model pulled afterwards is listed"
+macos = "crates/trek-app/tests/composer.rs::a_running_ollama_with_no_models_is_on_the_rail_and_a_pulled_model_shows"
+windows = "crates/trek-app/tests/composer.rs::a_running_ollama_with_no_models_is_on_the_rail_and_a_pulled_model_shows"
 
 # ---------- Notifications ----------
 

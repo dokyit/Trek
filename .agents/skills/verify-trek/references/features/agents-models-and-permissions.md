@@ -25,6 +25,7 @@ Open **Settings → Agents & Subscriptions**, **API Keys**, **Local Models**, **
 ./.agents/skills/verify-trek/scripts/trek-dev send "permission"   # the mock asks to run a command: card, "Always allow…", and a typed reply
 ./.agents/skills/verify-trek/scripts/trek-dev control secret-demo   # a secret's request card on the thread on screen
 ./.agents/skills/verify-trek/scripts/trek-dev control accounts-demo   # usage-demo, with a second account per agent
+./.agents/skills/verify-trek/scripts/trek-dev control media-demo install ffmpeg   # a real download into the run's data folder, with progress in Settings › Tools › Video (media-demo failed yt-dlp: the failed row)
 ./.agents/skills/verify-trek/scripts/trek-dev control sign-in-demo start   # Droid signed out; its login opened in the terminal dock (no program runs)
 ./.agents/skills/verify-trek/scripts/trek-dev control sign-in-demo done    # what Trek's next look at Droid would find: signed in. Within seconds: a toast, the dock strip, Settings' row
 ```

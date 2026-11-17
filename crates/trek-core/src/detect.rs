@@ -36,15 +36,17 @@ const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(4);
 /// The PATH child processes get, as a string in the platform's own format (`:`-separated on Unix,
 /// `;` on Windows). Apps launched from Finder or the Start menu get a minimal PATH, so this is
 /// what the user's terminal would have (see `base_path`) plus the folders agent CLIs install into
-/// (see `extra_dirs`), and last the folder of the Node.js Trek installs for npm-only agents
-/// (`node::bin_dir`, where their commands land too), worked out once.
+/// (see `extra_dirs`), the folder Trek downloads ffmpeg and yt-dlp into (`media_tools::dir`), and
+/// last the folder of the Node.js Trek installs for npm-only agents (`node::bin_dir`, where their
+/// commands land too), worked out once.
 pub fn login_path() -> &'static str {
     static PATH: OnceLock<String> = OnceLock::new();
     PATH.get_or_init(|| {
         let path = compose_path(base_path().as_deref(), &crate::paths::home());
+        // The tools Trek downloaded (ffmpeg, yt-dlp), then its own Node.js, which stays last.
         with_last(
-            &with_last(&path, &crate::node::bin_dir()),
-            &crate::media_tools::dir(),
+            &with_last(&path, &crate::media_tools::dir()),
+            &crate::node::bin_dir(),
         )
     })
 }
@@ -929,6 +931,9 @@ mod tests_paths {
         assert_eq!(entries(&path), [a.clone(), node.clone()]);
         assert_eq!(with_last(&path, &node), path);
         assert!(entries(login_path()).last() == Some(&crate::node::bin_dir()));
+        // The folder Trek downloads ffmpeg and yt-dlp into is on it too, before Node's.
+        let on = entries(login_path());
+        assert!(on.contains(&crate::media_tools::dir()), "{on:?}");
     }
 
     #[test]

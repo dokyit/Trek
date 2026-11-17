@@ -533,9 +533,9 @@ impl Render for TerminalDock {
                                 IconName::Close,
                                 "Close this terminal",
                             )
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.kill_terminal(window, cx)
-                            })),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.kill_terminal(window, cx)),
+                            ),
                         )
                 }))
                 .child(

@@ -106,7 +106,9 @@ fn switching_account_while_signed_in_is_not_announced() {
         cx.executor().advance_clock(Duration::from_secs(30));
         cx.run_until_parked();
         assert!(said.borrow().is_empty());
-        assert!(trek.read(cx, |ws, _| ws.signed_in_now(&AgentId::Droid.key()).is_none()));
+        assert!(trek.read(cx, |ws, _| {
+            ws.signed_in_now(&AgentId::Droid.key()).is_none()
+        }));
     });
 }
 

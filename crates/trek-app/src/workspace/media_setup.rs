@@ -46,6 +46,18 @@ impl Workspace {
     /// Download `tool` into Trek's folder (`media_tools::install`), showing how far it's got.
     /// One at a time.
     pub fn install_media_tool(&mut self, tool: Tool, cx: &mut gpui_kit::Context<Self>) {
+        self.install_media_tool_in(tool, None, cx);
+    }
+
+    /// `install_media_tool`, into `dir` when there is one even in an isolated process (the capture
+    /// build's `media-demo`, whose data folder is a throwaway one); an isolated process downloads
+    /// nothing otherwise.
+    pub fn install_media_tool_in(
+        &mut self,
+        tool: Tool,
+        dir: Option<std::path::PathBuf>,
+        cx: &mut gpui_kit::Context<Self>,
+    ) {
         if matches!(self.media_setup, Some(MediaSetup::Downloading { .. })) {
             return;
         }
@@ -57,10 +69,13 @@ impl Workspace {
         let (tx, rx) = async_channel::unbounded();
         trek_core::runtime().spawn(async move {
             let progress = tx.clone();
-            let done = media_tools::install(tool, &move |p| {
+            let report = move |p| {
                 let _ = progress.try_send(Step::Progress(p));
-            })
-            .await
+            };
+            let done = match (dir, media_tools::plan(tool)) {
+                (Some(dir), Some(plan)) => media_tools::install_into(&dir, &plan, &report).await,
+                _ => media_tools::install(tool, &report).await,
+            }
             .map_err(|e| {
                 tracing::warn!("downloading {}: {e:#}", tool.name());
                 format!("{e:#}")

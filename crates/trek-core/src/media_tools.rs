@@ -245,7 +245,10 @@ fn latest_yt_dlp(file: &str, size: u64) -> Part {
 /// How far a download has got.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Progress {
-    Downloading { done: u64, total: u64 },
+    Downloading {
+        done: u64,
+        total: u64,
+    },
     /// Checking and unpacking, and making sure the programs start.
     Finishing,
 }
@@ -434,9 +437,10 @@ fn unpack(archive: &Path, pack: &Pack, dir: &Path, id: u32) -> Result<Vec<(PathB
                     let Ok(name) = entry.name().map(|n| n.replace('\\', "/")) else {
                         continue;
                     };
-                    let Some((_, program)) = wanted.iter().find(|(end, _)| {
-                        name == *end || name.ends_with(&format!("/{end}"))
-                    }) else {
+                    let Some((_, program)) = wanted
+                        .iter()
+                        .find(|(end, _)| name == *end || name.ends_with(&format!("/{end}")))
+                    else {
                         continue;
                     };
                     let to = staged_path(dir, id, program);
@@ -551,7 +555,11 @@ mod tests {
             assert!(plan.bytes() > 50_000_000, "{os} {arch}");
         }
         // yt-dlp's hash comes from its release's own sums, never from this file.
-        for (os, arch) in [("macos", "aarch64"), ("macos", "x86_64"), ("windows", "x86_64")] {
+        for (os, arch) in [
+            ("macos", "aarch64"),
+            ("macos", "x86_64"),
+            ("windows", "x86_64"),
+        ] {
             let plan = plan_for(Tool::YtDlp, os, arch).unwrap();
             assert!(matches!(plan.parts[0].hash, Hash::Sums { .. }));
         }
@@ -731,7 +739,8 @@ mod tests {
         std::fs::create_dir_all(&tools).unwrap();
         std::fs::write(tools.join(file_name("ffmpeg")), "older").unwrap();
         // The release's "ffmpeg" is text, which no system starts.
-        let mut zip = zip::ZipWriter::new(std::fs::File::create(served.dir.join("release.zip")).unwrap());
+        let mut zip =
+            zip::ZipWriter::new(std::fs::File::create(served.dir.join("release.zip")).unwrap());
         {
             use std::io::Write as _;
             let options = zip::write::SimpleFileOptions::default();
@@ -803,18 +812,27 @@ mod tests {
             let tools = dir.join("tools");
             let seen = std::sync::Mutex::new(Vec::new());
             crate::runtime()
-                .block_on(install_into(&tools, &plan, &|p| seen.lock().unwrap().push(p)))
+                .block_on(install_into(&tools, &plan, &|p| {
+                    seen.lock().unwrap().push(p)
+                }))
                 .unwrap_or_else(|e| panic!("{e:#}"));
             assert!(installed_in(&tools, tool));
             for program in tool.programs() {
-                let flag = if *program == "yt-dlp" { "--version" } else { "-version" };
+                let flag = if *program == "yt-dlp" {
+                    "--version"
+                } else {
+                    "-version"
+                };
                 let out = std::process::Command::new(find_in(&tools, program).unwrap())
                     .arg(flag)
                     .output()
                     .unwrap();
                 eprintln!(
                     "{program}: {}",
-                    String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or("")
+                    String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
                 );
                 assert!(out.status.success());
             }

@@ -13,11 +13,11 @@ mod lineage;
 mod mcp;
 mod media_setup;
 mod node_setup;
-mod sign_in;
 mod orchestrate;
 pub mod permission_requests;
 pub mod phone_use;
 pub mod pr_checks;
+mod sign_in;
 mod tabs;
 mod transcript_log;
 #[cfg(any(test, feature = "test-support"))]
@@ -51,8 +51,8 @@ pub use lineage::{LineageRow, ThreadState};
 pub use mcp::{McpCheck, mcp_server_of};
 pub use media_setup::MediaSetup;
 pub use node_setup::NodeSetup;
-pub use sign_in::SignedIn;
 pub use orchestrate::{TaskState, waiting_label};
+pub use sign_in::SignedIn;
 pub use turn_changes::{TurnRange, TurnSpans};
 pub use verification::ago;
 
@@ -5089,8 +5089,7 @@ impl Workspace {
                 // A server that had no models when it was looked for, and has some now (the model
                 // menu asked it again), is pickable too.
                 AgentId::Direct(p) => {
-                    !a.models.is_empty()
-                        || self.direct_models.get(p).is_some_and(|m| !m.is_empty())
+                    !a.models.is_empty() || self.direct_models.get(p).is_some_and(|m| !m.is_empty())
                 }
                 // ACP agents are pickable once probed and signed in.
                 other => self

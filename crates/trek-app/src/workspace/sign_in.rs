@@ -187,7 +187,9 @@ impl Workspace {
     /// What Settings says under an agent's row, and the dock beside its terminal, once Trek has
     /// seen it sign in: for a few minutes.
     pub fn signed_in_now(&self, key: &str) -> Option<&SignedIn> {
-        self.signed_in.get(key).filter(|s| s.at.elapsed() < SAID_FOR)
+        self.signed_in
+            .get(key)
+            .filter(|s| s.at.elapsed() < SAID_FOR)
     }
 
     /// What to say beside the terminal running `command`, if it signed an agent in.
