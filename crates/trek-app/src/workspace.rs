@@ -6480,13 +6480,34 @@ impl Workspace {
                     }
                     AgentEvent::TextDone(t) => {
                         let t = trek_core::study::expand_cards_done(&t).unwrap_or(t);
+                        // The same message again in one turn (GPT models in Codex can say their
+                        // final answer twice, once as commentary): shown once, so a question card
+                        // isn't asked twice.
+                        let turn_start = live
+                            .items
+                            .iter()
+                            .rposition(|i| matches!(i, Item::User { .. }))
+                            .map_or(0, |ix| ix + 1);
+                        let said_before = |items: &[Item], before: usize| {
+                            !t.trim().is_empty()
+                                && items[turn_start.min(before)..before].iter().any(
+                                    |i| matches!(i, Item::Assistant { text } if text.trim() == t.trim()),
+                                )
+                        };
                         match live.streaming.take() {
+                            Some(ix)
+                                if ix + 1 == live.items.len() && said_before(&live.items, ix) =>
+                            {
+                                live.items.truncate(ix);
+                            }
                             Some(ix) => {
                                 if let Some(Item::Assistant { text }) = live.items.get_mut(ix) {
                                     *text = t;
                                 }
                             }
-                            None if !t.trim().is_empty() => {
+                            None if !t.trim().is_empty()
+                                && !said_before(&live.items, live.items.len()) =>
+                            {
                                 live.items.push(Item::Assistant { text: t });
                             }
                             None => {}
