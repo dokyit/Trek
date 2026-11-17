@@ -1,0 +1,69 @@
+name = "Campfire"
+description = "Ember on woodsmoke at night, parchment by day: answers in a serif, soft round corners, a tent for a prompt."
+mode = "any"
+
+# The interface in Inter, the conversation in Spectral, as a book read by the fire.
+[fonts]
+ui = "sans"
+conversation = "serif"
+conversation_size = 15
+
+[shape]
+corners = 1.5
+density = "roomy"
+
+[lines]
+pills = "round"
+borders = 1
+shadows = 0.5
+
+[motion]
+style = "calm"
+
+# The user's words as a line after a small tent, as notes in a trail journal.
+[messages]
+user = "line"
+user_mark = "△"
+
+[composer]
+prompt = "△"
+
+# The hiker keeps walking, with an ember-orange pack.
+[hiker]
+show = true
+pack = "#F08A3C"
+
+[marks]
+agents = "logo"
+
+[dark]
+accent = "#F08A3C"
+on_accent = "#1C1009"
+window = "#16100C"
+sidebar = "#1B140F"
+surface = "#271D16"
+raised = "#211811"
+text = "#F2E6D6"
+muted = "#AE9883"
+border = "#3A2C22"
+
+[dark.kit]
+"title_bar.background" = "#1B140F"
+"tab_bar.background" = "#1B140F"
+"selection.background" = "#F08A3C40"
+
+[light]
+accent = "#A84A12"
+on_accent = "#FFFFFF"
+window = "#FBF6EE"
+sidebar = "#F3EADC"
+surface = "#EDE1CF"
+raised = "#FFFDF9"
+text = "#2B1F16"
+muted = "#6F5A49"
+border = "#E0D0BA"
+
+[light.kit]
+"title_bar.background" = "#F3EADC"
+"tab_bar.background" = "#F3EADC"
+"selection.background" = "#A84A1233"

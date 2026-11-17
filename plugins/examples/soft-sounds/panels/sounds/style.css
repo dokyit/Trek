@@ -1,0 +1,24 @@
+main { display: flex; flex-direction: column; gap: 18px; padding: 4px 2px 16px; }
+h2 { font-size: 12px; font-weight: 500; color: var(--trek-muted); margin: 0 0 8px; letter-spacing: 0.01em; }
+
+.switch { display: flex; align-items: center; gap: 10px; cursor: pointer; font-weight: 500; }
+.switch input { appearance: none; width: 30px; height: 18px; margin: 0; border-radius: 9px; background: var(--trek-border); position: relative; cursor: pointer; transition: background-color 0.15s ease; }
+.switch input::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--trek-bg); transition: transform 0.15s ease; }
+.switch input:checked { background: var(--trek-accent); }
+.switch input:checked::after { transform: translateX(12px); }
+
+.choices { display: flex; flex-direction: column; gap: 4px; }
+.choice {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 7px 8px 7px 12px; box-sizing: border-box;
+  border: 1px solid var(--trek-border); border-radius: var(--trek-radius);
+  background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.choice:hover { background: color-mix(in srgb, var(--trek-fg) 5%, transparent); }
+.choice.on { border-color: var(--trek-accent); background: color-mix(in srgb, var(--trek-accent) 10%, transparent); }
+.choice .name { flex: 1; }
+.choice .about { color: var(--trek-muted); font-size: 12px; }
+.play { flex: none; width: 26px; height: 26px; display: grid; place-items: center; border-radius: 50%; border: 0; background: color-mix(in srgb, var(--trek-fg) 8%, transparent); color: var(--trek-fg); cursor: pointer; }
+.play:hover { background: color-mix(in srgb, var(--trek-fg) 14%, transparent); }
+.off .choices { opacity: 0.45; }
+.note { font-size: 12px; line-height: 1.5; color: var(--trek-muted); margin: 0; }

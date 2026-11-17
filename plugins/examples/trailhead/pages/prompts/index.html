@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Quick prompts</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Quick prompts</h1>
+      <p>They sit under the composer on your new-thread screen. A click puts one in the composer, to send or finish.</p>
+    </header>
+    <ol id="list"></ol>
+    <form id="add" autocomplete="off">
+      <input id="text" maxlength="80" placeholder="Something you often ask, like “Review my last commit”">
+      <button type="submit">Add</button>
+    </form>
+    <p id="note" class="note" aria-live="polite"></p>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

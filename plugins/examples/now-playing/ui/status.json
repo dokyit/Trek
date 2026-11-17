@@ -1,0 +1,31 @@
+{
+  "type": "when",
+  "value": "state.playing.id",
+  "then": {
+    "type": "row",
+    "gap": 7,
+    "align": "center",
+    "pad": [3, 4, 3, 10],
+    "radius": "full",
+    "bg": "surface",
+    "border": "border",
+    "children": [
+      { "type": "row", "gap": 7, "align": "center",
+        "on": "open:{state.playing.id}", "tooltip": "{state.playing.agent} is at work on “{state.playing.title}” · open it",
+        "children": [
+          { "type": "icon", "name": "music", "fg": "accent", "size": 13 },
+          { "type": "text", "text": "{state.playing.title}", "size": "label", "weight": "medium", "truncate": true, "width": 150 },
+          { "type": "text", "text": "{state.playing.agent} · {state.playing.since|ago}", "size": "meta", "fg": "muted" }
+        ]
+      },
+      { "type": "when", "value": "state.more",
+        "then": { "type": "row", "gap": 3, "align": "center", "pad": [1, 6], "radius": "full", "bg": "accent/15",
+          "on": "command:next", "tooltip": "Next agent at work",
+          "children": [
+            { "type": "text", "text": "+{state.more}", "size": "meta", "fg": "accent", "weight": "semibold" },
+            { "type": "icon", "name": "play", "fg": "accent", "size": 11 }
+          ] }
+      }
+    ]
+  }
+}

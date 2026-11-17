@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="120" viewBox="0 0 440 120">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0E1530"/>
+      <stop offset="1" stop-color="#25335C"/>
+    </linearGradient>
+    <clipPath id="card"><rect width="440" height="120" rx="16"/></clipPath>
+  </defs>
+  <g clip-path="url(#card)">
+    <rect width="440" height="120" fill="url(#sky)"/>
+    <g fill="#E8ECFA">
+      <circle cx="40" cy="20" r="1.2"/><circle cx="88" cy="40" r="1"/><circle cx="130" cy="14" r="1.4"/>
+      <circle cx="176" cy="32" r="1"/><circle cx="232" cy="18" r="1.2"/><circle cx="268" cy="44" r="0.9"/>
+      <circle cx="304" cy="12" r="1.1"/><circle cx="398" cy="30" r="1.3"/><circle cx="420" cy="12" r="0.9"/>
+      <circle cx="16" cy="48" r="0.9"/><circle cx="200" cy="52" r="0.8"/>
+    </g>
+    <circle cx="352" cy="34" r="14" fill="#F4F0DC"/>
+    <circle cx="358" cy="30" r="12" fill="#1A2546"/>
+    <path d="M0 88 L72 46 L120 72 L186 28 L250 78 L306 54 L370 84 L440 56 L440 120 L0 120 Z" fill="#2D3B66"/>
+    <path d="M186 28 L204 42 L194 44 L186 38 L176 46 L170 40 Z" fill="#AEB8D6"/>
+    <path d="M0 104 L80 84 L160 102 L236 80 L310 100 L390 86 L440 98 L440 120 L0 120 Z" fill="#1E2A4D"/>
+    <path d="M0 114 L120 104 L230 116 L340 104 L440 112 L440 120 L0 120 Z" fill="#141D38"/>
+    <path d="M300 106 l10 -14 l10 14 Z" fill="#F0B35A"/>
+    <path d="M308 106 l2 -5 l2 5 Z" fill="#7A4A20"/>
+  </g>
+</svg>

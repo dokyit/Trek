@@ -1442,10 +1442,13 @@ mod tests {
     fn the_example_plugins_themes_read_and_name_real_kit_colours() {
         let mut seen = 0;
         for (name, files) in trek_core::plugins::examples::ALL {
-            let manifest = files.iter().find(|(p, _)| *p == "plugin.toml").unwrap().1;
+            let manifest =
+                std::str::from_utf8(files.iter().find(|(p, _)| *p == "plugin.toml").unwrap().1)
+                    .unwrap();
             for (path, text) in files.iter().filter(|(p, _)| {
                 p.ends_with(".toml") && *p != "plugin.toml" && manifest.contains(p)
             }) {
+                let text = std::str::from_utf8(text).unwrap();
                 let t = core::parse(name, text, core::Origin::BuiltIn)
                     .unwrap_or_else(|e| panic!("{name}/{path}: {e}"));
                 let checked = super::known_art(core::Scan {
@@ -1532,10 +1535,13 @@ mod tests {
     fn every_look() -> Vec<Theme> {
         let mut out = core::built_in();
         for (name, files) in trek_core::plugins::examples::ALL {
-            let manifest = files.iter().find(|(p, _)| *p == "plugin.toml").unwrap().1;
+            let manifest =
+                std::str::from_utf8(files.iter().find(|(p, _)| *p == "plugin.toml").unwrap().1)
+                    .unwrap();
             for (path, text) in files.iter().filter(|(p, _)| {
                 p.ends_with(".toml") && *p != "plugin.toml" && manifest.contains(p)
             }) {
+                let text = std::str::from_utf8(text).unwrap();
                 out.push(
                     core::parse(name, text, core::Origin::BuiltIn)
                         .unwrap_or_else(|e| panic!("{name}/{path}: {e}")),

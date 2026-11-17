@@ -1,0 +1,27 @@
+id = "soft-sounds"
+name = "Soft sounds"
+version = "1.0.0"
+description = "A soft chime when an agent finishes and a gentle knock when one needs you; pick your own in its panel."
+author = "Trek"
+trek = ">=0.4.55"
+
+# It hears turns end and threads come to need you (by id alone) and plays its own sounds.
+main = "main.js"
+hooks = ["turn.end", "thread.needs-you"]
+
+# Which sound for which, with a play button for each: a tab beside the thread.
+[[panel]]
+id = "sounds"
+title = "Sounds"
+entry = "panels/sounds/index.html"
+
+[[command]]
+id = "mute"
+title = "Soft sounds: mute or unmute"
+key = "cmd-alt-s"
+run = "mute"
+
+[[command]]
+id = "choose"
+title = "Soft sounds: choose sounds"
+action = "panel:sounds"

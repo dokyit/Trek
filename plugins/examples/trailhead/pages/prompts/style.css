@@ -1,0 +1,31 @@
+main { max-width: 560px; margin: 0 auto; padding: 36px 8px; }
+header h1 { font-size: 22px; font-weight: 600; margin: 0 0 6px; }
+header p { margin: 0 0 22px; color: var(--trek-muted); line-height: 1.5; }
+
+ol { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+li {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 8px 8px 14px;
+  border: 1px solid var(--trek-border); border-radius: var(--trek-radius);
+  background: var(--trek-surface);
+}
+li span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+li button { opacity: 0.7; }
+li button:hover { opacity: 1; }
+li.empty { justify-content: center; color: var(--trek-muted); background: transparent; border-style: dashed; }
+
+form { display: flex; gap: 8px; }
+input {
+  flex: 1; min-width: 0; font: inherit; color: var(--trek-fg);
+  padding: 8px 12px; border-radius: var(--trek-radius);
+  border: 1px solid var(--trek-border); background: transparent;
+}
+input:focus { outline: none; border-color: var(--trek-accent); }
+button {
+  font: inherit; font-size: 13px; color: var(--trek-fg); cursor: pointer;
+  padding: 6px 12px; border-radius: var(--trek-radius);
+  border: 1px solid var(--trek-border); background: transparent;
+}
+button[type="submit"] { background: var(--trek-accent); border-color: var(--trek-accent); color: var(--trek-bg); font-weight: 500; }
+button:disabled { opacity: 0.35; cursor: default; }
+.note { min-height: 1.5em; margin-top: 12px; font-size: 12.5px; color: var(--trek-muted); }

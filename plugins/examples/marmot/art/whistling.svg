@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <!-- Pip, up on its hind legs, whistling: an agent needs you. -->
+  <ellipse cx="22" cy="44" rx="10" ry="2.2" fill="#000" opacity="0.12"/>
+  <path d="M29 41 C34 41 37 37 36 32 C39 35 39 42 33 44 C30 45 28 44 28 43 Z" fill="#6E4A2E"/>
+  <path d="M13 42 C11 33 12 23 15 19 C18 15 26 15 29 19 C32 23 33 33 31 42 Z" fill="#9A6B45"/>
+  <path d="M17 41 C16 34 16.5 27 18.5 24 C20 22 24 22 26 24 C28 27 28.5 34 27.5 41 Z" fill="#E2C29B"/>
+  <path d="M14 15 C14 8 18 5 22 5 C26 5 30 8 30 15 C30 19 26 21 22 21 C18 21 14 19 14 15 Z" fill="#B88559"/>
+  <circle cx="15" cy="7.5" r="2.4" fill="#6E4A2E"/>
+  <circle cx="29" cy="7.5" r="2.4" fill="#6E4A2E"/>
+  <circle cx="18.6" cy="12" r="1.6" fill="#2B1E15"/>
+  <circle cx="25.4" cy="12" r="1.6" fill="#2B1E15"/>
+  <circle cx="19" cy="11.5" r="0.5" fill="#FFF"/>
+  <circle cx="25.8" cy="11.5" r="0.5" fill="#FFF"/>
+  <ellipse cx="22" cy="16.4" rx="3.4" ry="2.6" fill="#E2C29B"/>
+  <ellipse cx="22" cy="17.4" rx="1.2" ry="1.4" fill="#2B1E15"/>
+  <path d="M15.5 25 C14 22 14.5 20 16 19.5 M28.5 25 C30 22 29.5 20 28 19.5" fill="none" stroke="#6E4A2E" stroke-width="2.4" stroke-linecap="round"/>
+  <path d="M16 42 h5 M24 42 h5" stroke="#6E4A2E" stroke-width="2.6" stroke-linecap="round"/>
+  <g fill="none" stroke="#E0A030" stroke-width="1.8" stroke-linecap="round">
+    <path d="M34 12 l5 -3"/>
+    <path d="M35 17 h6"/>
+    <path d="M34 22 l5 3"/>
+  </g>
+</svg>

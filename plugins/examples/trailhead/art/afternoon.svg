@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="120" viewBox="0 0 440 120">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7DB4E6"/>
+      <stop offset="1" stop-color="#CFE6F5"/>
+    </linearGradient>
+    <clipPath id="card"><rect width="440" height="120" rx="16"/></clipPath>
+  </defs>
+  <g clip-path="url(#card)">
+    <rect width="440" height="120" fill="url(#sky)"/>
+    <circle cx="96" cy="32" r="16" fill="#FFF3C4"/>
+    <circle cx="96" cy="32" r="26" fill="#FFF3C4" opacity="0.3"/>
+    <path d="M236 30 q10 -12 24 -4 q12 -8 20 4 q12 0 10 10 h-60 q-6 -8 6 -10 Z" fill="#FFFFFF" opacity="0.85"/>
+    <path d="M0 86 L80 40 L128 66 L196 22 L262 74 L318 50 L380 80 L440 52 L440 120 L0 120 Z" fill="#6E9A6A"/>
+    <path d="M196 22 L214 36 L204 38 L196 32 L186 40 L180 34 Z" fill="#F4F7F2"/>
+    <path d="M0 102 L70 82 L150 100 L230 76 L300 98 L380 84 L440 96 L440 120 L0 120 Z" fill="#4F7D52"/>
+    <path d="M0 112 L100 102 L200 114 L300 100 L440 110 L440 120 L0 120 Z" fill="#3B6340"/>
+    <path d="M330 100 l6 -16 l6 16 Z M346 102 l5 -13 l5 13 Z" fill="#2E5034"/>
+  </g>
+</svg>

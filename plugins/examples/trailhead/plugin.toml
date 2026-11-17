@@ -1,0 +1,28 @@
+id = "trailhead"
+name = "Trailhead"
+version = "1.0.0"
+description = "Your own new-thread screen: a greeting and a landscape for the time of day, and quick prompts you write yourself."
+author = "Trek"
+trek = ">=0.4.55"
+
+# It reads nothing of yours: the time of day, and the prompts you keep in it.
+main = "main.js"
+hooks = ["app.start"]
+
+# In place of Trek's new-thread screen (Settings › Plugins › In place of Trek's own puts Trek's
+# back). Trek's composer sits in the middle of it.
+[[replace]]
+surface = "new-thread"
+title = "Trailhead"
+ui = "ui/screen.json"
+
+# Where the quick prompts are written: a page in the sidebar's Pages group.
+[[page]]
+id = "prompts"
+title = "Quick prompts"
+icon = "notebook-pen"
+
+# And from the composer's + menu.
+[[slot]]
+at = "composer.plus"
+ui = { type = "button", text = "Edit quick prompts…", on = "page:prompts" }

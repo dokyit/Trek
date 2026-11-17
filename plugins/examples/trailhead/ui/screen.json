@@ -1,0 +1,45 @@
+{
+  "type": "column",
+  "align": "center",
+  "gap": 16,
+  "width": "full",
+  "children": [
+    { "type": "when", "value": "now.part", "equals": "morning",
+      "then": { "type": "column", "align": "center", "gap": 12, "children": [
+        { "type": "image", "src": "art/morning.svg", "width": 440, "height": 120 },
+        { "type": "text", "text": "Good morning", "size": "heading", "weight": "semibold", "font": "conversation" }
+      ]},
+      "else": { "type": "when", "value": "now.part", "equals": "afternoon",
+        "then": { "type": "column", "align": "center", "gap": 12, "children": [
+          { "type": "image", "src": "art/afternoon.svg", "width": 440, "height": 120 },
+          { "type": "text", "text": "Good afternoon", "size": "heading", "weight": "semibold", "font": "conversation" }
+        ]},
+        "else": { "type": "when", "value": "now.part", "equals": "evening",
+          "then": { "type": "column", "align": "center", "gap": 12, "children": [
+            { "type": "image", "src": "art/evening.svg", "width": 440, "height": 120 },
+            { "type": "text", "text": "Good evening", "size": "heading", "weight": "semibold", "font": "conversation" }
+          ]},
+          "else": { "type": "column", "align": "center", "gap": 12, "children": [
+            { "type": "image", "src": "art/night.svg", "width": 440, "height": 120 },
+            { "type": "text", "text": "Late on the trail", "size": "heading", "weight": "semibold", "font": "conversation" }
+          ]}
+        }
+      }
+    },
+    { "type": "text", "text": "{now.weekday}, {now.date}", "size": "label", "fg": "muted" },
+    { "type": "column", "width": "full", "children": [ { "type": "trek:composer" } ] },
+    { "type": "column", "gap": 8, "align": "center", "width": "full", "pad": [0, 24], "children": [
+      { "type": "each", "of": "state.prompts", "as": "p", "limit": 8, "gap": 6, "wrap": true, "justify": "center", "width": "full",
+        "item": { "type": "row", "gap": 6, "align": "center", "pad": [5, 12], "radius": "full", "bg": "surface", "border": "border",
+          "on": "insert:{p}", "tooltip": "Put it in the composer",
+          "children": [ { "type": "text", "text": "{p}", "size": "label" } ] },
+        "empty": { "type": "text", "text": "No quick prompts yet", "size": "label", "fg": "muted" }
+      },
+      { "type": "row", "gap": 5, "align": "center", "pad": [5, 10], "radius": "full", "on": "page:prompts", "tooltip": "Edit your quick prompts",
+        "children": [
+          { "type": "icon", "name": "notebook-pen", "size": 12, "fg": "muted" },
+          { "type": "text", "text": "Edit", "size": "label", "fg": "muted" }
+        ] }
+    ]}
+  ]
+}

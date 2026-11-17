@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="120" viewBox="0 0 440 120">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#BFD9EE"/>
+      <stop offset="1" stop-color="#F7DCC0"/>
+    </linearGradient>
+    <clipPath id="card"><rect width="440" height="120" rx="16"/></clipPath>
+  </defs>
+  <g clip-path="url(#card)">
+    <rect width="440" height="120" fill="url(#sky)"/>
+    <circle cx="300" cy="78" r="22" fill="#FBE3A6"/>
+    <circle cx="300" cy="78" r="34" fill="#FBE3A6" opacity="0.35"/>
+    <path d="M0 92 L70 48 L112 72 L170 30 L238 82 L290 60 L352 88 L404 56 L440 74 L440 120 L0 120 Z" fill="#9DB5CC"/>
+    <path d="M170 30 L188 42 L178 44 L170 38 L160 46 L154 40 Z" fill="#F4F6F8"/>
+    <path d="M0 104 L60 80 L130 98 L200 70 L270 96 L340 78 L440 100 L440 120 L0 120 Z" fill="#7C98B3"/>
+    <path d="M0 112 L90 98 L180 110 L260 96 L350 108 L440 98 L440 120 L0 120 Z" fill="#5E7D99"/>
+    <path d="M40 18 q6 -5 12 0 q6 -5 12 0" fill="none" stroke="#6A7F93" stroke-width="1.6" stroke-linecap="round"/>
+    <path d="M76 26 q4 -3 8 0 q4 -3 8 0" fill="none" stroke="#6A7F93" stroke-width="1.4" stroke-linecap="round"/>
+  </g>
+</svg>

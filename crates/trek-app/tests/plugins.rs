@@ -2,6 +2,9 @@
 //! place and one that's off doesn't; a replacement stands in for Trek's surface until its plugin
 //! stops, and then Trek's own is back; a page's web view exists only while the page is open, and
 //! gives the keyboard back before it goes; a typed-in draft keeps taking keys after a page closes.
+//! The examples do what they say: the focus walk's lengths, break and restart, the marmot's
+//! moods from agents' turns, the sounds a plugin plays, Trailhead's prompts from its logic and
+//! its page.
 
 mod common;
 
@@ -111,54 +114,65 @@ fn a_plugin_that_asks_waits_and_a_replacement_gives_way_when_its_plugin_stops() 
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     run(async |cx| {
         let trek = start(cx);
-        // The board asks to read threads and open them: installed from the CLI it waits.
-        install("trail-board", &trek, cx);
+        // Now playing asks to read threads and open them: installed from the CLI it waits.
+        install("now-playing", &trek, cx);
         cx.update(|cx| {
-            assert!(!trek_app::plugins::running("trail-board", cx));
-            assert!(trek_app::plugins::replacement(Surface::ThreadList, cx).is_none());
+            assert!(!trek_app::plugins::running("now-playing", cx));
+            assert!(trek_app::plugins::slot(Slot::Status, cx).is_empty());
         });
-        draft(&trek, cx);
-        assert!(!trek.visible(cx, "plugin-surface-thread-list"));
+        // The user turns it on in Settings (allowing what it asks): its pill has its place.
+        cx.update(|cx| trek_app::plugins::set_on("now-playing", true, &trek.ws, cx));
+        cx.update(|cx| {
+            assert!(trek_app::plugins::running("now-playing", cx));
+            assert_eq!(trek_app::plugins::slot(Slot::Status, cx).len(), 1);
+        });
 
-        // The user turns it on in Settings (allowing what it asks): its board is the thread list.
-        cx.update(|cx| trek_app::plugins::set_on("trail-board", true, &trek.ws, cx));
-        draft(&trek, cx);
-        cx.update(|cx| {
-            assert!(trek_app::plugins::running("trail-board", cx));
-            assert!(trek_app::plugins::replacement(Surface::ThreadList, cx).is_some());
-        });
-        assert!(trek.visible(cx, "plugin-surface-thread-list"));
-
-        // Settings puts Trek's own back, and the plugin's again.
-        cx.update(|cx| {
-            trek_app::plugins::choose_replacement(Surface::ThreadList, None, &trek.ws, cx)
-        });
-        draft(&trek, cx);
-        assert!(!trek.visible(cx, "plugin-surface-thread-list"));
+        // Trailhead asks for nothing: it runs at once, and its screen is the new-thread screen
+        // once it's chosen.
+        install("trailhead", &trek, cx);
+        cx.update(|cx| assert!(trek_app::plugins::running("trailhead", cx)));
         cx.update(|cx| {
             trek_app::plugins::choose_replacement(
-                Surface::ThreadList,
-                Some("trail-board"),
+                Surface::NewThread,
+                Some("trailhead"),
                 &trek.ws,
                 cx,
             )
         });
         draft(&trek, cx);
-        assert!(trek.visible(cx, "plugin-surface-thread-list"));
+        assert!(trek.visible(cx, "plugin-surface-new-thread"));
 
-        // It fails: only it stops, the list is Trek's own again, and Settings says why.
-        cx.update(|cx| trek_app::plugins::stop("trail-board", "TypeError: x", &trek.ws, cx));
+        // Settings puts Trek's own back, and the plugin's again.
+        cx.update(|cx| {
+            trek_app::plugins::choose_replacement(Surface::NewThread, None, &trek.ws, cx)
+        });
+        draft(&trek, cx);
+        assert!(!trek.visible(cx, "plugin-surface-new-thread"));
+        cx.update(|cx| {
+            trek_app::plugins::choose_replacement(
+                Surface::NewThread,
+                Some("trailhead"),
+                &trek.ws,
+                cx,
+            )
+        });
+        draft(&trek, cx);
+        assert!(trek.visible(cx, "plugin-surface-new-thread"));
+
+        // It fails: only it stops, the screen is Trek's own again, and Settings says why.
+        cx.update(|cx| trek_app::plugins::stop("trailhead", "TypeError: x", &trek.ws, cx));
         draft(&trek, cx);
         cx.update(|cx| {
-            assert!(!trek_app::plugins::running("trail-board", cx));
-            assert!(trek_app::plugins::replacement(Surface::ThreadList, cx).is_none());
+            assert!(!trek_app::plugins::running("trailhead", cx));
+            assert!(trek_app::plugins::replacement(Surface::NewThread, cx).is_none());
+            assert!(trek_app::plugins::running("now-playing", cx));
             let p = cx.global::<trek_app::plugins::Plugins>();
             assert_eq!(
-                p.state.choice("trail-board").stopped.as_deref(),
+                p.state.choice("trailhead").stopped.as_deref(),
                 Some("TypeError: x")
             );
         });
-        assert!(!trek.visible(cx, "plugin-surface-thread-list"));
+        assert!(!trek.visible(cx, "plugin-surface-new-thread"));
     });
 }
 
@@ -167,34 +181,33 @@ fn a_grant_written_into_the_file_is_ignored_and_an_edited_plugin_asks_again() {
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     run(async |cx| {
         let trek = start(cx);
-        install("trail-board", &trek, cx);
+        install("now-playing", &trek, cx);
         let dir = trek_core::plugins::dir();
         let running =
-            |cx: &mut TestAppContext| cx.update(|cx| trek_app::plugins::running("trail-board", cx));
+            |cx: &mut TestAppContext| cx.update(|cx| trek_app::plugins::running("now-playing", cx));
         let waiting = |cx: &mut TestAppContext| {
             cx.update(|cx| {
                 cx.global::<trek_app::plugins::Plugins>()
                     .state
-                    .choice("trail-board")
+                    .choice("now-playing")
                     .waiting
             })
         };
         // An agent writes the grant into state.toml itself: Trek doesn't take it.
         std::fs::write(
             dir.join(trek_core::plugins::STATE_FILE),
-            "[plugins.trail-board]\non = true\ngranted = [\"threads:read\", \"threads:open\"]\nseal = \"0123abcd\"\n\n[replace]\nthread-list = \"trail-board\"\n",
+            "[plugins.now-playing]\non = true\ngranted = [\"threads:read\", \"threads:open\"]\nseal = \"0123abcd\"\n",
         )
         .unwrap();
         cx.update(|cx| trek_app::plugins::reread(&trek.ws, cx));
         cx.run_until_parked();
         assert!(!running(cx), "a hand-written grant is no grant");
         assert!(waiting(cx), "it waits for the user");
-        draft(&trek, cx);
-        assert!(!trek.visible(cx, "plugin-surface-thread-list"));
+        cx.update(|cx| assert!(trek_app::plugins::slot(Slot::Status, cx).is_empty()));
 
         // The user allows it in Settings: it runs, and the seal Trek wrote is good at the next
         // read of the folder.
-        cx.update(|cx| trek_app::plugins::set_on("trail-board", true, &trek.ws, cx));
+        cx.update(|cx| trek_app::plugins::set_on("now-playing", true, &trek.ws, cx));
         assert!(running(cx));
         let kept = std::fs::read_to_string(dir.join(trek_core::plugins::STATE_FILE)).unwrap();
         assert!(kept.contains("seal = "), "{kept}");
@@ -203,15 +216,14 @@ fn a_grant_written_into_the_file_is_ignored_and_an_edited_plugin_asks_again() {
         assert!(running(cx), "sealed, it stays on");
 
         // Its files change (an update, or another plugin put in its place): it asks again.
-        let board = dir.join("trail-board/ui/board.json");
-        let text = std::fs::read_to_string(&board).unwrap();
-        std::fs::write(&board, text.replace("Needs you", "Needs you now")).unwrap();
+        let pill = dir.join("now-playing/ui/status.json");
+        let text = std::fs::read_to_string(&pill).unwrap();
+        std::fs::write(&pill, text.replace("open it", "open it now")).unwrap();
         cx.update(|cx| trek_app::plugins::reread(&trek.ws, cx));
         cx.run_until_parked();
         assert!(!running(cx), "the grant was for the plugin the user saw");
         assert!(waiting(cx));
-        draft(&trek, cx);
-        assert!(!trek.visible(cx, "plugin-surface-thread-list"));
+        cx.update(|cx| assert!(trek_app::plugins::slot(Slot::Status, cx).is_empty()));
     });
 }
 
@@ -220,8 +232,7 @@ fn a_page_s_view_lives_while_its_open_and_gives_the_keys_back_before_it_goes() {
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     run(async |cx| {
         let trek = start(cx);
-        install("summit-log", &trek, cx);
-        cx.update(|cx| trek_app::plugins::set_on("summit-log", true, &trek.ws, cx));
+        install("trailhead", &trek, cx);
         draft(&trek, cx);
         let has_view = |cx: &mut TestAppContext| {
             trek.root
@@ -231,7 +242,7 @@ fn a_page_s_view_lives_while_its_open_and_gives_the_keys_back_before_it_goes() {
         let _ = trek_app::plugins::page::fake::take();
 
         // The page opens: its view is made and shown.
-        cx.update(|cx| trek_app::plugins::open_page("summit-log", "summit-log", &trek.ws, cx));
+        cx.update(|cx| trek_app::plugins::open_page("trailhead", "prompts", &trek.ws, cx));
         trek.render(cx);
         assert!(trek.read(cx, |ws, _| matches!(ws.route, Route::Page { .. })));
         assert!(has_view(cx));
@@ -266,26 +277,26 @@ fn a_page_s_view_lives_while_its_open_and_gives_the_keys_back_before_it_goes() {
         assert_eq!(typed, "still typing");
 
         // Its plugin turned off while the page is open closes the page's view too.
-        cx.update(|cx| trek_app::plugins::open_page("summit-log", "summit-log", &trek.ws, cx));
+        cx.update(|cx| trek_app::plugins::open_page("trailhead", "prompts", &trek.ws, cx));
         trek.render(cx);
         assert!(has_view(cx));
-        cx.update(|cx| trek_app::plugins::set_on("summit-log", false, &trek.ws, cx));
+        cx.update(|cx| trek_app::plugins::set_on("trailhead", false, &trek.ws, cx));
         trek.render(cx);
         assert!(!has_view(cx));
         // The page says why it's gone, with the way to Settings.
-        let why = cx.update(|cx| trek_app::plugins::page::why_closed("summit-log", cx));
-        assert_eq!(why, "Summit log is off.");
+        let why = cx.update(|cx| trek_app::plugins::page::why_closed("trailhead", cx));
+        assert_eq!(why, "Trailhead is off.");
         assert!(trek.visible(cx, "plugin-page-settings"));
         // Stopped by Trek, it says why.
-        cx.update(|cx| trek_app::plugins::set_on("summit-log", true, &trek.ws, cx));
+        cx.update(|cx| trek_app::plugins::set_on("trailhead", true, &trek.ws, cx));
         trek.render(cx);
         assert!(has_view(cx));
         cx.update(|cx| {
-            trek_app::plugins::stop("summit-log", "TypeError: x is undefined", &trek.ws, cx)
+            trek_app::plugins::stop("trailhead", "TypeError: x is undefined", &trek.ws, cx)
         });
         trek.render(cx);
-        let why = cx.update(|cx| trek_app::plugins::page::why_closed("summit-log", cx));
-        assert_eq!(why, "Summit log was stopped: TypeError: x is undefined");
+        let why = cx.update(|cx| trek_app::plugins::page::why_closed("trailhead", cx));
+        assert_eq!(why, "Trailhead was stopped: TypeError: x is undefined");
         trek.click(cx, "plugin-page-settings");
         assert!(trek.read(cx, |ws, _| matches!(
             ws.route,
@@ -299,19 +310,19 @@ fn the_switch_asks_before_it_allows_what_a_plugin_asks_for() {
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     run(async |cx| {
         let trek = start(cx);
-        install("trail-board", &trek, cx);
+        install("now-playing", &trek, cx);
         install("focus-timer", &trek, cx);
         let running =
             |id: &str, cx: &mut TestAppContext| cx.update(|cx| trek_app::plugins::running(id, cx));
         let ws = trek.ws.clone();
 
-        // The board asks to read and open threads: its switch opens a dialog and turns
+        // Now playing asks to read and open threads: its switch opens a dialog and turns
         // nothing on.
         trek.window(cx, |window, cx| {
-            trek_app::plugins::switch("trail-board", true, &ws, window, cx)
+            trek_app::plugins::switch("now-playing", true, &ws, window, cx)
         });
         cx.run_until_parked();
-        assert!(!running("trail-board", cx), "nothing allowed yet");
+        assert!(!running("now-playing", cx), "nothing allowed yet");
         assert!(trek.window(cx, |window, cx| window.has_active_dialog(cx)));
         trek.window(cx, |window, cx| window.close_all_dialogs(cx));
 
@@ -326,12 +337,12 @@ fn the_switch_asks_before_it_allows_what_a_plugin_asks_for() {
         assert!(running("focus-timer", cx));
         assert!(!trek.window(cx, |window, cx| window.has_active_dialog(cx)));
 
-        // Allowed once, the board's switch is at once too.
-        cx.update(|cx| trek_app::plugins::set_on("trail-board", true, &ws, cx));
+        // Allowed once, its switch is at once too.
+        cx.update(|cx| trek_app::plugins::set_on("now-playing", true, &ws, cx));
         trek.window(cx, |window, cx| {
-            trek_app::plugins::switch("trail-board", false, &ws, window, cx)
+            trek_app::plugins::switch("now-playing", false, &ws, window, cx)
         });
-        assert!(!running("trail-board", cx));
+        assert!(!running("now-playing", cx));
     });
 }
 
@@ -538,6 +549,250 @@ fn a_plugin_s_hiker_walks_while_an_agent_works_and_stands_when_none_does() {
             moved(&stopped),
             0,
             "it stands once the work is done: {stopped:?}"
+        );
+    });
+}
+
+/// A plugin's state, as its trees read it.
+fn state_of(id: &str, cx: &mut TestAppContext) -> serde_json::Value {
+    cx.update(|cx| {
+        cx.global::<trek_app::plugins::Plugins>()
+            .states
+            .get(id)
+            .cloned()
+            .unwrap_or_default()
+    })
+}
+
+/// Wait (on the test's clock, a few tenths of a second at a time) until `until` holds of plugin
+/// `id`'s state: its logic runs after Trek's events settle, off the UI thread.
+async fn until_state(
+    id: &str,
+    what: &str,
+    cx: &mut TestAppContext,
+    until: impl Fn(&serde_json::Value) -> bool,
+) {
+    for _ in 0..200 {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
+        cx.run_until_parked();
+        if until(&state_of(id, cx)) {
+            return;
+        }
+        cx.background_executor
+            .timer(std::time::Duration::from_millis(5))
+            .await;
+    }
+    panic!("{id}: timed out waiting for {what}: {}", state_of(id, cx));
+}
+
+/// The focus walk: its time steps through the lengths before a walk, its key starts, pauses and
+/// carries on, a walk ends offering a break, and a walk under way outlasts a restart by the
+/// wall clock (and one whose time ran out while Trek was closed is done).
+#[test]
+fn the_focus_walk_steps_its_length_pauses_offers_a_break_and_outlasts_a_restart() {
+    use std::time::Duration;
+    use trek_app::plugins::focus::{Focus, Mode, Session, control};
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    run(async |cx| {
+        let trek = start(cx);
+        install("focus-timer", &trek, cx);
+        draft(&trek, cx);
+        assert!(trek.visible(cx, "focus-chip"));
+        assert!(trek.visible(cx, "focus-length"), "the time is a control");
+        let f = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                let f = cx.global::<Focus>();
+                (f.minutes, f.mode, f.session)
+            })
+        };
+        // 25 → 45 → 60 → 15 → 25, before a walk.
+        let mut lengths = vec![];
+        for _ in 0..4 {
+            trek.click(cx, "focus-length");
+            lengths.push(f(cx).0);
+        }
+        assert_eq!(lengths, [45., 60., 15., 25.]);
+
+        // The key's command: start, pause, carry on.
+        cx.update(|cx| control("toggle", &trek.ws, cx));
+        assert!(matches!(f(cx).2, Session::Running { .. }));
+        cx.update(|cx| control("toggle", &trek.ws, cx));
+        assert!(matches!(f(cx).2, Session::Paused { .. }));
+        cx.update(|cx| control("toggle", &trek.ws, cx));
+        assert!(matches!(f(cx).2, Session::Running { .. }));
+
+        // Time's up: done, with a break on offer; the break is a walk of its own, in its mode.
+        cx.update(|cx| trek_app::plugins::focus::jump(25. * 60. - 1., &trek.ws, cx));
+        cx.executor().advance_clock(Duration::from_secs(2));
+        cx.run_until_parked();
+        assert_eq!(f(cx).2, Session::Done);
+        trek.render(cx);
+        assert!(trek.visible(cx, "focus-break"));
+        trek.click(cx, "focus-break");
+        assert!(matches!(f(cx), (_, Mode::Break, Session::Running { .. })));
+        cx.executor().advance_clock(Duration::from_secs(5 * 60 + 1));
+        cx.run_until_parked();
+        assert_eq!(f(cx).1, Mode::Focus);
+        assert_eq!(
+            f(cx).2,
+            Session::Ready,
+            "the break over, ready for the next walk"
+        );
+
+        // Kept by the wall clock: ten minutes in at quit, back two minutes later, twelve in.
+        let now = cx.update(|cx| trek_app::motion::now(cx));
+        let mut walk = Focus::new(25., 5.);
+        walk.take_up(
+            &serde_json::json!({"mode": "focus", "minutes": 25, "state": "running", "walked_ms": 600_000, "at_ms": 1_000_000}),
+            now,
+            1_120_000,
+        );
+        assert_eq!(walk.left(now), 13 * 60);
+        // Paused stays paused, wherever the clock got to.
+        walk.take_up(
+            &serde_json::json!({"mode": "focus", "minutes": 45, "state": "paused", "walked_ms": 60_000, "at_ms": 0}),
+            now,
+            9_000_000,
+        );
+        assert_eq!(
+            walk.session,
+            Session::Paused {
+                walked: Duration::from_secs(60)
+            }
+        );
+        assert_eq!(walk.minutes, 45.);
+        // Its time ran out while Trek was closed: done.
+        walk.take_up(
+            &serde_json::json!({"mode": "focus", "minutes": 25, "state": "running", "walked_ms": 600_000, "at_ms": 0}),
+            now,
+            3_600_000,
+        );
+        assert_eq!(walk.session, Session::Done);
+        // And what's kept reads back the same.
+        let kept = walk.kept(now, 42);
+        walk.take_up(&kept, now, 42);
+        assert_eq!(walk.session, Session::Done);
+    });
+}
+
+/// Pip the marmot hears agents' turns (by thread id alone: it asks for no permissions): it keeps
+/// watch while one works and cheers when the turn is over; Soft sounds plays its own sound for
+/// the same moment.
+#[test]
+fn the_marmot_and_soft_sounds_hear_an_agent_work_and_finish() {
+    use trek_agents::AgentEvent;
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    run(async |cx| {
+        let trek = start(cx);
+        install("marmot", &trek, cx);
+        install("soft-sounds", &trek, cx);
+        cx.update(|cx| {
+            assert!(trek_app::plugins::running("marmot", cx));
+            assert!(trek_app::plugins::running("soft-sounds", cx));
+            assert_eq!(trek_app::plugins::slot(Slot::SidebarFoot, cx).len(), 1);
+        });
+        until_state("marmot", "a nap at launch", cx, |s| s["mood"] == "asleep").await;
+        let sounds = || trek_app::system::SOUNDS.with(|n| n.get());
+        let before = sounds();
+
+        let id = trek.quiet_thread(cx);
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![AgentEvent::ToolStarted {
+                    id: "t1".into(),
+                    title: "Run command".into(),
+                    detail: "cargo build".into(),
+                }],
+                cx,
+            )
+        });
+        until_state("marmot", "keeping watch", cx, |s| s["mood"] == "working").await;
+        assert_eq!(state_of("marmot", cx)["line"], "Keeping watch over 1 agent");
+
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![
+                    AgentEvent::ToolFinished {
+                        id: "t1".into(),
+                        output: String::new(),
+                        ok: true,
+                    },
+                    AgentEvent::TextDone("Done.".into()),
+                    AgentEvent::TurnComplete { error: None },
+                ],
+                cx,
+            )
+        });
+        until_state("marmot", "a cheer", cx, |s| s["mood"] == "cheering").await;
+        let log = trek_core::plugins::log_tail("soft-sounds", 5).join("\n");
+        assert!(log.contains("played sounds/chime.wav"), "{log}");
+        assert!(sounds() > before, "the finish sound");
+
+        // A pat settles it down.
+        trek.window(cx, |window, cx| {
+            trek_app::plugins::run_command("marmot", "pat", &trek.ws, window, cx)
+        });
+        until_state("marmot", "a nap after a pat", cx, |s| s["mood"] == "asleep").await;
+    });
+}
+
+/// Trailhead's prompts: its logic puts the kept ones in its state when Trek starts, and its
+/// page's `trek.state.set` changes what the screen's chips show. Its greeting follows the hour.
+#[test]
+fn trailheads_prompts_come_from_its_logic_and_its_page() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    run(async |cx| {
+        let trek = start(cx);
+        trek_core::plugins::set_storage(
+            "trailhead",
+            serde_json::json!({"prompts": ["Plan my day", "Review my last commit"]})
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
+        install("trailhead", &trek, cx);
+        until_state("trailhead", "the kept prompts", cx, |s| {
+            s["prompts"] == serde_json::json!(["Plan my day", "Review my last commit"])
+        })
+        .await;
+        cx.update(|cx| {
+            trek_app::plugins::choose_replacement(
+                Surface::NewThread,
+                Some("trailhead"),
+                &trek.ws,
+                cx,
+            )
+        });
+        draft(&trek, cx);
+        assert!(trek.visible(cx, "plugin-surface-new-thread"));
+        // As its page sets it (the bridge's state.set merges in the same way).
+        cx.update(|cx| {
+            trek_app::plugins::set_state(
+                "trailhead",
+                serde_json::json!({"prompts": ["Only this one"]}),
+                &trek.ws,
+                cx,
+            )
+        });
+        assert_eq!(
+            state_of("trailhead", cx)["prompts"],
+            serde_json::json!(["Only this one"])
+        );
+        let part = |h: u32| {
+            trek_app::plugins::render::now(
+                chrono::NaiveDate::from_ymd_opt(2026, 11, 17)
+                    .unwrap()
+                    .and_hms_opt(h, 0, 0)
+                    .unwrap(),
+            )["part"]
+                .clone()
+        };
+        assert_eq!(
+            [part(6), part(13), part(19), part(23), part(3)],
+            ["morning", "afternoon", "evening", "night", "night"]
         );
     });
 }

@@ -1,0 +1,21 @@
+id = "marmot"
+name = "Pip the marmot"
+version = "1.0.0"
+description = "A marmot at the foot of the sidebar: it naps, keeps watch while agents work, whistles when one needs you."
+author = "Trek"
+trek = ">=0.4.55"
+
+# It hears when turns start and end and when a thread needs you, by the thread's id alone: it
+# reads no titles or contents, so it asks for no permissions.
+main = "main.js"
+hooks = ["app.start", "turn.start", "turn.end", "thread.needs-you"]
+
+[[slot]]
+at = "sidebar.foot"
+ui = "ui/buddy.json"
+
+[[command]]
+id = "pat"
+title = "Pat Pip"
+key = "cmd-alt-p"
+run = "pat"

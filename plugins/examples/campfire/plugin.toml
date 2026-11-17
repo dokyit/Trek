@@ -1,0 +1,22 @@
+id = "campfire"
+name = "Campfire"
+version = "1.0.0"
+description = "A whole look: ember and woodsmoke at night, parchment by day, answers set in a serif, a tent for a prompt."
+author = "Trek"
+trek = ">=0.4.55"
+
+# A look and two marks in the draft: no permissions, no logic. Turn it on, then pick Campfire in
+# Settings › Appearance or "Use Campfire theme" in the palette.
+[[theme]]
+file = "campfire.toml"
+
+# Notes to self glow like embers while you type them.
+[[effect]]
+match = "TODO"
+color = "accent"
+style = "highlight"
+
+[[effect]]
+match = "FIXME"
+color = "danger"
+style = "underline"

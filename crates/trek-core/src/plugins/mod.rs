@@ -37,6 +37,13 @@ pub const LINK_EXT: &str = "link";
 pub const RELOAD_FILE: &str = "reload";
 /// The built-in skill that tells an agent how to make one.
 pub const SKILL: &str = "trek-plugin";
+/// What Settings › Plugins offers first: sentences to ask an agent for a plugin with (each one
+/// is how an example was made, as its README says).
+pub const ASK_EXAMPLES: [&str; 3] = [
+    "Make Trek feel like a campfire: warm ember colours, answers in a serif, soft round corners, a little tent as my prompt, and give the hiker an orange pack.",
+    "Put a little marmot at the bottom of my sidebar that naps when nothing's running, keeps watch while agents work, and whistles when one needs me.",
+    "Play a soft chime when an agent finishes and a gentle knock when one needs me, and let me pick other sounds.",
+];
 /// What every agent is told, so "make Trek…" finds the skill.
 pub const AGENT_NOTE: &str = "To restyle Trek itself (a Trek theme), follow Trek's built-in skill trek-theme; to add to Trek or change how it works (buttons, pages, panels, a board, commands: a plugin), trek-plugin.";
 /// A plugin's own storage, at most.

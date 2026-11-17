@@ -1,28 +1,29 @@
 id = "focus-timer"
-name = "Focus timer"
-version = "1.0.0"
-description = "The hiker walks round the composer as a focus session passes. Back at the chip, time's up."
+name = "Focus walk"
+version = "2.0.0"
+description = "A focus timer on the composer: the hiker walks its edge while you work, then offers a break."
 author = "Trek"
-trek = ">=0.4.54"
+trek = ">=0.4.55"
 
-# Trek's own component on the composer's edge: the hiker, the trail it has walked, and a chip
-# on the top edge to start, pause and stop. It reads nothing of yours.
+# Trek's own component on the composer's edge. Before a walk it's one chip on the top edge (click
+# its time for 15, 25, 45 or 60 minutes); during one the hiker walks the card's edge, and back at
+# the chip it offers a break. A walk under way outlasts a restart. It reads nothing of yours.
 [[slot]]
 at = "composer.border"
-ui = { type = "trek:focus-timer", minutes = 25 }
+ui = { type = "trek:focus-timer", minutes = 25, break = 5 }
 
 [[command]]
-id = "start"
-title = "Start a focus session"
+id = "toggle"
+title = "Focus walk: start, pause or carry on"
 key = "cmd-alt-f"
-action = "trek:focus-timer.start"
+action = "trek:focus-timer.toggle"
 
 [[command]]
-id = "pause"
-title = "Pause or carry on the focus session"
-action = "trek:focus-timer.pause"
+id = "break"
+title = "Focus walk: take a break"
+action = "trek:focus-timer.break"
 
 [[command]]
 id = "stop"
-title = "Stop the focus session"
+title = "Focus walk: stop and reset"
 action = "trek:focus-timer.stop"

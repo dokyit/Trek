@@ -1,0 +1,22 @@
+id = "now-playing"
+name = "Now playing"
+version = "1.0.0"
+description = "What your agents are working on, in the title bar, as a music player shows its track: click it to open the thread."
+author = "Trek"
+trek = ">=0.4.55"
+
+# It reads your threads' titles, states and agents (never what's in them) to show which is at
+# work, and opens the one you click. Both are asked for when you turn it on.
+permissions = ["threads:read", "threads:open"]
+main = "main.js"
+hooks = ["app.start", "turn.start", "turn.end", "thread.needs-you"]
+
+[[slot]]
+at = "status"
+ui = "ui/status.json"
+
+[[command]]
+id = "next"
+title = "Now playing: next agent at work"
+key = "cmd-alt-n"
+run = "next"

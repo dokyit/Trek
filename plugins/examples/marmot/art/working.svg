@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <!-- Pip, sitting up and keeping watch while agents work. -->
+  <ellipse cx="24" cy="44" rx="11" ry="2.2" fill="#000" opacity="0.12"/>
+  <path d="M32 40 C38 40 41 36 40 31 C43 34 43 41 37 43 C34 44 31 43 31 42 Z" fill="#6E4A2E"/>
+  <path d="M14 42 C12 34 13 24 17 19 C20 15 28 15 31 19 C35 24 36 34 34 42 Z" fill="#9A6B45"/>
+  <path d="M18.5 41 C17.5 34 18 27 20 24 C22 22 26 22 28 24 C30 27 30.5 34 29.5 41 Z" fill="#E2C29B"/>
+  <path d="M16 15 C16 8 20 5 24 5 C28 5 32 8 32 15 C32 19 28 21 24 21 C20 21 16 19 16 15 Z" fill="#B88559"/>
+  <circle cx="17" cy="7.5" r="2.4" fill="#6E4A2E"/>
+  <circle cx="31" cy="7.5" r="2.4" fill="#6E4A2E"/>
+  <circle cx="20.6" cy="12.6" r="1.6" fill="#2B1E15"/>
+  <circle cx="27.4" cy="12.6" r="1.6" fill="#2B1E15"/>
+  <circle cx="21" cy="12.1" r="0.5" fill="#FFF"/>
+  <circle cx="27.8" cy="12.1" r="0.5" fill="#FFF"/>
+  <ellipse cx="24" cy="16.6" rx="3.4" ry="2.4" fill="#E2C29B"/>
+  <path d="M22.9 15.6 h2.2 l-1.1 1.2 Z" fill="#2B1E15"/>
+  <path d="M19 27 C20 25 22 25 23 26.5 M25 26.5 C26 25 28 25 29 27" fill="none" stroke="#6E4A2E" stroke-width="2.2" stroke-linecap="round"/>
+  <path d="M17 42 h5 M26 42 h5" stroke="#6E4A2E" stroke-width="2.6" stroke-linecap="round"/>
+</svg>
