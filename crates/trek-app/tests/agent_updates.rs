@@ -852,3 +852,62 @@ fn a_parent_whose_agent_updated_while_its_sub_agent_reported_still_wakes() {
         );
     });
 }
+
+/// The card's footer and every row keep their buttons inside the card: in Console's monospace
+/// (wider than Inter: the owner's screenshot had "Update all" past the edge), with an agent whose
+/// name and versions run long, and in a window too narrow for the card's full width.
+#[test]
+fn the_cards_buttons_stay_inside_it_in_a_wide_font_and_a_narrow_window() {
+    use gpui_kit::{SharedString, px, size};
+    run(async |cx| {
+        let trek = open(cx);
+        found(&trek, cx);
+        trek.update(cx, |ws, cx| {
+            let mut long = ws.agent_updates.found[1].clone();
+            long.id = "long".into();
+            long.name = "An agent with a name far longer than the card has room for".into();
+            long.installed = Some("2026.11.17-nightly+build.4471.gabcdef0".into());
+            long.latest = Some("2026.11.18-nightly+build.4502.g1234567".into());
+            ws.agent_updates.found.push(long);
+            cx.notify();
+        });
+        for theme in ["console", "trek"] {
+            cx.update(|cx| trek_app::themes::switch_to(theme, &trek.ws, cx));
+            for width in [1280., 560., 380.] {
+                cx.simulate_window_resize(trek.window, size(px(width), px(820.)));
+                trek.render(cx);
+                if !trek.visible(cx, "agent-updates-card") {
+                    trek.click(cx, "agent-updates");
+                    trek.render(cx);
+                }
+                let card = trek
+                    .bounds(cx, "agent-updates-card")
+                    .unwrap_or_else(|| panic!("{theme} at {width}: the card is open"));
+                assert!(
+                    card.size.width <= px(width - 23.),
+                    "{theme} at {width}: the card fits the window ({:?})",
+                    card.size.width
+                );
+                let mut inside = |id: String| {
+                    let b = trek
+                        .bounds(cx, SharedString::from(id.clone()))
+                        .unwrap_or_else(|| panic!("{theme} at {width}: {id} is drawn"));
+                    assert!(
+                        b.left() >= card.left() && b.right() <= card.right() + px(0.5),
+                        "{theme} at {width}: {id} ({:?}..{:?}) inside the card ({:?}..{:?})",
+                        b.left(),
+                        b.right(),
+                        card.left(),
+                        card.right()
+                    );
+                    assert!(b.size.width > px(20.), "{id} keeps its size");
+                };
+                inside("agent-updates-all".into());
+                for row in ["codex", "opencode", "pi", "mock", "long"] {
+                    inside(format!("agent-update-{row}"));
+                    inside(format!("agent-update-row-{row}"));
+                }
+            }
+        }
+    });
+}

@@ -2184,7 +2184,9 @@ impl Sidebar {
                             )
                         }),
                 )
-                .content(move |_, _, cx| crate::agent_updates::card(&ws, cx))
+                .content(move |_, window, cx| {
+                    crate::agent_updates::card(&ws, window.viewport_size().width, cx)
+                })
         });
         let interrupted = self.interrupted_notice(cx);
         let plugin_foot = crate::plugins::render::slot(

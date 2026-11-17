@@ -699,21 +699,41 @@ fn row(
                 .w_full()
                 .gap(px(12.))
                 .child(crate::ui::agent_logo(&agent, px(20.), cx))
+                // A long name or version string gives way (truncated, its whole in the
+                // tooltip) before the control does: that stays inside the card at its size.
                 .child(
                     div()
+                        .id(SharedString::from(format!("agent-update-name-{key}")))
                         .flex_1()
-                        .min_w_0()
+                        .min_w(px(56.))
                         .text_size(px(text::TITLE))
                         .font_weight(FontWeight::MEDIUM)
                         .truncate()
+                        .tooltip({
+                            let name = SharedString::from(v.name.clone());
+                            move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(name.clone())
+                                    .build(window, cx)
+                            }
+                        })
                         .child(v.name.clone()),
                 )
                 .child(
                     div()
-                        .flex_none()
+                        .id(SharedString::from(format!("agent-update-versions-{key}")))
+                        .flex_shrink(1.)
+                        .min_w_0()
+                        .truncate()
                         .font_family(theme.mono_font_family.clone())
                         .text_size(px(text::LABEL))
                         .text_color(muted)
+                        .tooltip({
+                            let versions = SharedString::from(versions.clone());
+                            move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(versions.clone())
+                                    .build(window, cx)
+                            }
+                        })
                         .child(versions),
                 )
                 .child(
@@ -774,8 +794,12 @@ pub fn update_all(ws: &Entity<Workspace>, cx: &App) -> Option<AnyElement> {
     })
 }
 
-/// The sidebar's card: the rows between hairlines, why it matters, and "Update all".
-pub fn card(ws: &Entity<Workspace>, cx: &App) -> AnyElement {
+/// The card's width, when the window has room for it.
+pub const CARD_W: f32 = 420.;
+
+/// The sidebar's card: the rows between hairlines, why it matters, and "Update all". Narrower
+/// than [`CARD_W`] in a window that hasn't room for it (`window` is its width).
+pub fn card(ws: &Entity<Workspace>, window: Pixels, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let u = &ws.read(cx).agent_updates;
     let title = if u.pending() > 0 {
@@ -787,7 +811,8 @@ pub fn card(ws: &Entity<Workspace>, cx: &App) -> AnyElement {
     crate::ui::menu_surface(cx)
         .id("agent-updates-card")
         .test_support()
-        .w(px(420.))
+        .w(px(CARD_W))
+        .max_w((window - px(24.)).max(px(240.)))
         .p(px(0.))
         .child(
             h_flex()
@@ -824,14 +849,18 @@ pub fn card(ws: &Entity<Workspace>, cx: &App) -> AnyElement {
                 .gap(px(12.))
                 .border_t_1()
                 .border_color(line)
+                // The line wraps (or the button would be pushed out past the card's edge in a
+                // wide font, as Console's monospace is); the button keeps its size.
+                .items_center()
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
                         .text_size(px(text::BODY))
                         .text_color(theme.muted_foreground)
                         .child(WHY),
                 )
-                .children(update_all(ws, cx)),
+                .children(update_all(ws, cx).map(|b| div().flex_none().child(b))),
         )
         .into_any_element()
 }
