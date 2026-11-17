@@ -16,7 +16,7 @@ colors:
   board-hover: "#F26A37"
   board-ink: "#1F1714"
   post: "#1F1714"
-  shade: "rgb(44 28 72)"
+  shade: "rgb(31 23 20)"
   sky-night: "#1D1A2C"
   sky-2-night: "#25213A"
   ground-night: "#13111C"
@@ -191,7 +191,7 @@ A cool lavender-and-lilac field with warm ink type and one ember accent.
 - **Second Ink** (ink-2): ledes, paragraphs under headings, nav links at rest, the footer.
 - **Muted Ink** (mute): captions such as the staged-content line, the "Last updated" line and the copyright.
 - **Lilac Hairline** (line): every border and inset ring; the bar's bottom edge once it is stuck.
-- **Shade** (shade): the tint inside every soft shadow, a lilac-dark by day and black by night, always at a stated opacity.
+- **Shade** (shade): the tint inside every soft shadow, the ink by day and black by night, always at a stated opacity.
 - **Cream Post** (post-night): the post of the mark at night.
 
 ### Named Rules
