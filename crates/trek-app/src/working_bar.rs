@@ -638,14 +638,8 @@ impl WorkingBar {
             self.walk.set((walk, None));
             return walk;
         }
-        let dt = last.map_or(0., |l| l.elapsed().as_secs_f32().min(0.2));
-        walk.step(dt, self.travel.get(), pacing);
         // A step too short to move it a frame keeps its start, so the time isn't lost.
-        let last = if dt > 0. && walk == self.walk.get().0 {
-            last
-        } else {
-            Some(Instant::now())
-        };
+        let last = walk.advance(last, Instant::now(), self.travel.get(), pacing);
         self.walk.set((walk, last));
         walk
     }

@@ -7,6 +7,7 @@
 
 pub mod data;
 pub mod focus;
+pub mod hiker;
 pub mod logic;
 pub mod page;
 pub mod render;

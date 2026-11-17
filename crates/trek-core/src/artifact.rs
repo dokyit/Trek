@@ -312,8 +312,12 @@ pub const VIDEO_CSP: &str = "default-src 'none'; media-src 'self'; style-src 'un
 pub const MEDIA_PATH: &str = "/media";
 
 /// The page a note's video plays in: the engine's own player, still until played, as wide as
-/// the card and as tall as the video (`MAX_HEIGHT` at most; it fits inside that).
-pub const VIDEO_HTML: &str = "<style>html,body{margin:0;background:transparent}video{display:block;width:100%;height:auto;max-height:720px;background:#000;object-fit:contain}</style><video src=\"/media#t=0.001\" controls controlslist=\"nodownload\" disablepictureinpicture preload=\"metadata\" playsinline></video>";
+/// the card and as tall as the video (`MAX_HEIGHT` at most; it fits inside that). It never
+/// scrolls and shows no scroll bar: a few pixels' difference between the card and the page (a
+/// height that hasn't caught up) would otherwise put a bar on it as a wheel passes over, and the
+/// picture a card shows while something covers it (`snapshot`) would keep that bar, a white strip
+/// down its edge, until the card was live again.
+pub const VIDEO_HTML: &str = "<style>html,body{margin:0;background:transparent;overflow:hidden}::-webkit-scrollbar{display:none}video{display:block;width:100%;height:auto;max-height:720px;background:#000;object-fit:contain}</style><video src=\"/media#t=0.001\" controls controlslist=\"nodownload\" disablepictureinpicture preload=\"metadata\" playsinline></video>";
 
 /// What a video from the web plays under: as `VIDEO_CSP`, its media from https only.
 pub const REMOTE_VIDEO_CSP: &str = "default-src 'none'; media-src https:; style-src 'unsafe-inline'; form-action 'none'; object-src 'none'; base-uri 'none'";
@@ -710,6 +714,11 @@ mod tests {
                 && !doc.contains(&format!("content=\"{CSP}\""))
         );
         assert!(VIDEO_HTML.contains(&format!("src=\"{MEDIA_PATH}")));
+        assert!(
+            VIDEO_HTML.contains("overflow:hidden")
+                && VIDEO_HTML.contains("::-webkit-scrollbar{display:none}"),
+            "a video's page never scrolls or shows a bar"
+        );
         let remote = remote_video_html("https://cdn.example.com/a.mp4?x=1&y=\"2");
         assert!(
             remote.contains("src=\"https://cdn.example.com/a.mp4?x=1&amp;y=&quot;2#t=0.001\""),

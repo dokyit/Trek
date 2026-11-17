@@ -177,6 +177,56 @@ fn a_card_partly_scrolled_away_shows_only_what_the_transcript_shows() {
 }
 
 #[test]
+fn a_crowd_of_cards_near_the_screen_makes_each_view_once_not_every_frame() {
+    // A thread of many players and pages (a video watched again and again): more cards on or
+    // next to the screen than a window keeps views. The ones on screen and the nearest keep
+    // theirs; the rest used to be made, taken away in the same frame for being past the most,
+    // and made again in the next: a new web view every frame, which flashed white and black over
+    // the cards as they scrolled past.
+    run(async |cx| {
+        let log = fake_web(true).unwrap();
+        let trek = open(cx);
+        cx.simulate_window_resize(trek.window, size(px(1400.), px(1300.)));
+        let blocks: Vec<String> = (0..12)
+            .map(|i| {
+                format!(
+                    "Page {i}:\n\n```trek-html\n<!doctype html><html><body><p>{i}</p></body></html>\n```\n"
+                )
+            })
+            .collect();
+        answered(&trek, cx, &blocks.join("\n"), true);
+        settle(&trek, cx);
+        let showing = cards(&trek, cx)
+            .iter()
+            .filter(|c| {
+                c.body
+                    .zip(c.mask)
+                    .is_some_and(|(b, m)| b.intersect(&m).size.height > px(0.))
+            })
+            .count();
+        assert!(showing >= 2, "{showing} on screen");
+        let with_view = cards(&trek, cx).iter().filter(|c| c.has_view).count();
+        assert!(
+            (showing..=showing.max(trek_app::artifact::MAX_LIVE)).contains(&with_view),
+            "{with_view} views for {showing} showing"
+        );
+        let made = log.borrow().made;
+        for _ in 0..30 {
+            trek.render(cx);
+        }
+        assert_eq!(
+            log.borrow().made,
+            made,
+            "views made again and again while nothing moved"
+        );
+        assert_eq!(
+            cards(&trek, cx).iter().filter(|c| c.has_view).count(),
+            with_view
+        );
+    });
+}
+
+#[test]
 fn trek_overlays_and_other_threads_hide_the_view() {
     run(async |cx| {
         let _log = fake_web(true).unwrap();
