@@ -38,8 +38,9 @@ use surface::{Coverage, Placement, Surface};
 use trek_core::artifact as core;
 
 const PLUGIN: &str = "trek-artifact";
-/// Live web views a window keeps at once; past this, the one farthest off screen is let go.
-const MAX_LIVE: usize = 4;
+/// Live web views a window keeps at once; past this, the one farthest off screen is let go (and
+/// one that wouldn't be among the nearest isn't made).
+pub const MAX_LIVE: usize = 4;
 /// Snapshots kept for cards whose views have gone (by document), by what they weigh. A snapshot
 /// is its card's page at the window's pixels: 5 MB for a card of the default height (360 pt) on
 /// the answer column (880 pt) at 2×, 10 MB for the tallest (720 pt). 64 MiB is the last thirteen
@@ -1076,6 +1077,10 @@ impl ArtifactState {
     ) {
         match made {
             Ok(surface) => {
+                #[cfg(any(test, feature = "test-support", feature = "shots"))]
+                {
+                    cx.default_global::<Registry>().made += 1;
+                }
                 self.surface = Some(surface);
                 self.loaded = false;
                 self._events = Some(cx.spawn_in(window, async move |this, cx| {
@@ -1323,16 +1328,32 @@ impl ArtifactState {
         .detach();
     }
 
+    /// How far the card is from what the transcript shows, in px: 0 while any of it shows, never
+    /// near (infinity) while it hasn't been laid out.
+    fn distance(&self) -> f32 {
+        let Some(g) = &self.geom else {
+            return f32::INFINITY;
+        };
+        if g.body.intersect(&g.mask).size.height > px(0.) {
+            0.
+        } else {
+            surface::gap(g.body, g.mask)
+        }
+    }
+
     /// Place the view for this frame, `frame`, from where the card was laid out and what covers
     /// it. `overlay`: a Trek surface over the window that hides native views (the palette).
+    /// `kept`: the card is among the ones a window keeps views for (`sync_window`), so it may
+    /// have one; a card that isn't has none, rather than one made and let go again every frame.
     fn sync(
         &mut self,
         frame: u64,
         overlay: bool,
         on: bool,
+        kept: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> (bool, f32) {
+    ) {
         // Trek moved its focus elsewhere while the page had the keys (⌘K's palette, ⌘L): the
         // keys follow it, or what's typed into the palette would go to the page.
         if self.has_keys && !self.focus.is_focused(window) {
@@ -1341,7 +1362,7 @@ impl ArtifactState {
         }
         let Some(g) = self.geom.clone() else {
             self.show(None, window, cx);
-            return (self.surface.is_some(), f32::INFINITY);
+            return;
         };
         let visible = g.body.intersect(&g.mask);
         let gap = surface::gap(g.body, g.mask);
@@ -1370,12 +1391,13 @@ impl ArtifactState {
             && self.making.is_none()
             && self.unavailable.is_none()
             && gap <= viewport
+            && kept
             // A capture run's window, kept behind the user's, counts as in front.
             && (window.is_window_active() || crate::mascot::force_active())
         {
             self.make(window, cx);
         }
-        if self.surface.is_some() && (gap > viewport * 2. || !on) {
+        if self.surface.is_some() && (gap > viewport * 2. || !on || !kept) {
             self.drop_surface(window, cx);
         }
         let placement = match coverage {
@@ -1391,14 +1413,6 @@ impl ArtifactState {
             _ => None,
         };
         self.show(placement, window, cx);
-        (
-            self.surface.is_some(),
-            if visible.size.height > px(0.) {
-                0.
-            } else {
-                gap
-            },
-        )
     }
 
     fn show(&mut self, placement: Option<Placement>, window: &mut Window, cx: &mut Context<Self>) {
@@ -1585,6 +1599,10 @@ struct Registry {
     shots: crate::budget::ByteLru<u64, Snap>,
     /// Snapshots no longer kept, to take out of the sprite atlas at the next frame.
     retired: Vec<Arc<RenderImage>>,
+    /// Web views made so far, which the capture build reports (`views_made`): one a frame is a
+    /// card made and let go of over and over.
+    #[cfg(any(test, feature = "test-support", feature = "shots"))]
+    made: u64,
 }
 
 impl Default for Registry {
@@ -1594,6 +1612,8 @@ impl Default for Registry {
             heights: HashMap::new(),
             shots: crate::budget::ByteLru::new(SHOTS_BUDGET, SHOT_CAP),
             retired: Vec::new(),
+            #[cfg(any(test, feature = "test-support", feature = "shots"))]
+            made: 0,
         }
     }
 }
@@ -1741,22 +1761,27 @@ fn sync_window(window: &mut Window, cx: &mut App) {
             ws.overlay_open && ws.main_window == Some(window.window_handle())
         });
     let on = enabled(cx);
-    let mut views: Vec<(Entity<ArtifactState>, f32)> = Vec::new();
-    for state in states {
-        let (has_view, distance) = state.update(cx, |s, cx| s.sync(frame, overlay, on, window, cx));
-        if has_view {
-            views.push((state, distance));
-        }
+    let distances: Vec<f32> = states.iter().map(|s| s.read(cx).distance()).collect();
+    let kept = views_kept(&distances);
+    for (state, kept) in states.into_iter().zip(kept) {
+        state.update(cx, |s, cx| s.sync(frame, overlay, on, kept, window, cx));
     }
-    // Too many views: the ones farthest off screen go.
-    if views.len() > MAX_LIVE {
-        views.sort_by(|a, b| a.1.total_cmp(&b.1));
-        for (state, distance) in views.into_iter().skip(MAX_LIVE) {
-            if distance > 0. {
-                state.update(cx, |s, cx| s.drop_surface(window, cx));
-            }
-        }
+}
+
+/// Which of the cards (by how far each is from what the transcript shows, `distance`) a window
+/// keeps views for: all that show any of themselves, and the nearest of the rest while that's
+/// fewer than [`MAX_LIVE`] in all. A card that isn't kept has no view, and isn't made one: a card
+/// made one only to lose it in the same frame (it was past the most) would be made again in the
+/// next, a new web view every frame, flashing white and black over the transcript as it scrolls.
+fn views_kept(distances: &[f32]) -> Vec<bool> {
+    let mut order: Vec<usize> = (0..distances.len()).collect();
+    order.sort_by(|a, b| distances[*a].total_cmp(&distances[*b]));
+    let showing = distances.iter().filter(|d| **d == 0.).count();
+    let mut kept = vec![false; distances.len()];
+    for i in order.into_iter().take(MAX_LIVE.max(showing)) {
+        kept[i] = true;
     }
+    kept
 }
 
 /// Take the video playing `hash` in `window` (its card in the transcript) to `secs`. False when no
@@ -1934,6 +1959,12 @@ pub fn page_takes_keys(window: &mut Window, cx: &mut App) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// Web views made since Trek started (the capture build's `artifacts` reports it).
+#[cfg(any(test, feature = "test-support", feature = "shots"))]
+pub fn views_made(cx: &App) -> u64 {
+    cx.try_global::<Registry>().map_or(0, |r| r.made)
+}
+
 /// Who has the keys in `window`, as the platform has it (`native::keys_holder`).
 #[cfg(feature = "shots")]
 pub fn keys_holder(window: &Window) -> String {
@@ -2040,7 +2071,7 @@ pub fn load_all(window: &mut Window, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Registry, SHOT_CAP, SHOTS_BUDGET, Snap, font_stack};
+    use super::{MAX_LIVE, Registry, SHOT_CAP, SHOTS_BUDGET, Snap, font_stack, views_kept};
     use gpui_kit::{RenderImage, px, size};
     use std::sync::Arc;
 
@@ -2053,6 +2084,22 @@ mod tests {
             size: size(px(w as f32 / 2.), px(h as f32 / 2.)),
             css: String::new(),
         }
+    }
+
+    #[test]
+    fn views_are_kept_for_the_cards_on_screen_and_the_nearest_few_and_for_no_more() {
+        let inf = f32::INFINITY;
+        // Three on screen, two next to it, one far, one not laid out: the nearest of the rest
+        // takes the one place there is, and the others get no view to be made and lost.
+        let kept = views_kept(&[300., 0., 0., 120., 0., 900., inf]);
+        assert_eq!(kept, [false, true, true, true, true, false, false]);
+        assert_eq!(kept.iter().filter(|k| **k).count(), MAX_LIVE);
+        // More on screen than the most: all keep theirs, and none beyond them.
+        let kept = views_kept(&[0., 0., 0., 0., 0., 10.]);
+        assert_eq!(kept, [true, true, true, true, true, false]);
+        // Few cards: all kept, as far as they are.
+        assert_eq!(views_kept(&[0., 500., inf]), [true, true, true]);
+        assert!(views_kept(&[]).is_empty());
     }
 
     #[test]

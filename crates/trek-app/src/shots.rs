@@ -1190,7 +1190,7 @@ async fn artifacts(
             .flatten()
             .and_then(|r| r.read(cx).view().clone().downcast::<crate::root::TrekWindow>().ok())
             .map(|t| t.read(cx).composer.read(cx).text(cx));
-        serde_json::json!({ "window": rect(window.bounds()), "scale": window.scale_factor(), "artifacts": cards, "keys": crate::artifact::keys_holder(window), "composer": composer })
+        serde_json::json!({ "window": rect(window.bounds()), "scale": window.scale_factor(), "artifacts": cards, "views_made": crate::artifact::views_made(cx), "keys": crate::artifact::keys_holder(window), "composer": composer })
     })?;
     std::fs::write(
         dir.join("artifacts.json"),
