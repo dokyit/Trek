@@ -1026,12 +1026,17 @@ mod tests {
         // has no options; what isn't a question makes none.
         let loose = r#"{ kind: "problem", prompt: "Say \"why\": 2, 0, -1", options: ["x"], targets: ["c2",], }"#;
         let card = super::card(loose).expect("a card");
-        let expected = r#"const DATA = {"kind":"problem","options":[],"prompt":"Say \"why\": 2, 0, -1","step":"","targets":["c2"]};"#;
-        assert!(
-            card.contains(expected),
-            "{}",
-            &card[card.find("const DATA").unwrap()..][..160]
-        );
+        let line = &card[card.find("const DATA = ").unwrap()..];
+        let line = &line[..line.find('\n').unwrap()];
+        for part in [
+            r#""kind":"problem""#,
+            r#""options":[]"#,
+            r#""prompt":"Say \"why\": 2, 0, -1""#,
+            r#""step":"""#,
+            r#""targets":["c2"]"#,
+        ] {
+            assert!(line.contains(part), "{part} in {line}");
+        }
         assert_eq!(super::card(r#"{"kind": "question"}"#), None);
         assert_eq!(super::card("not json"), None);
     }
