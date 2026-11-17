@@ -989,12 +989,20 @@ mod tests {
         assert_eq!(card.matches("const DATA = ").count(), 1);
         assert!(!card.contains("__DATA__"));
         // The question as the page reads it, and nothing in it ends the script.
-        let expected = r#"const DATA = {"kind":"check","options":[],"prompt":"Why $\\sqrt{d}$? <\/script>","step":"Step 2 of 5 · Scaling","targets":["c4"]};"#;
-        assert!(
-            card.contains(expected),
-            "{}",
-            &card[card.find("const DATA").unwrap()..][..200]
-        );
+        // (The order of the keys is serde_json's, which differs with the features a build turns
+        // on: each one is looked for by itself.)
+        let line = &card[card.find("const DATA = ").unwrap()..];
+        let line = &line[..line.find('\n').unwrap()];
+        assert!(line.trim_end().ends_with("};"), "{line}");
+        for part in [
+            r#""kind":"check""#,
+            r#""options":[]"#,
+            r#""prompt":"Why $\\sqrt{d}$? <\/script>""#,
+            r#""step":"Step 2 of 5 · Scaling""#,
+            r#""targets":["c4"]"#,
+        ] {
+            assert!(line.contains(part), "{part} in {line}");
+        }
         // It answers through Trek, says where the learner is, takes the keyboard, keeps still when
         // the system asks for less motion, takes dictation through Trek, and shows an answer sent
         // before (the card drawn again) as it was sent.
