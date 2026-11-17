@@ -436,6 +436,17 @@ impl PageHost {
                     trek_core::plugins::set_storage(&plugin, &value).map(|()| Value::Null)
                 });
             }
+            Request::StateGet => {
+                let state = cx
+                    .try_global::<super::Plugins>()
+                    .and_then(|p| p.states.get(&plugin).cloned())
+                    .unwrap_or_else(|| Value::Object(Default::default()));
+                self.reply(id, Ok(state), cx);
+            }
+            Request::StateSet(patch) => {
+                super::set_state(&plugin, Value::Object(patch), &self.ws, cx);
+                self.reply(id, Ok(Value::Null), cx);
+            }
             Request::Data(name) => match super::data::now(&name, &manifest, &self.ws, cx) {
                 super::data::Answer::Now(value) => self.reply(id, Ok(value), cx),
                 super::data::Answer::Later(work) => self.answer_later(id, window, cx, work),

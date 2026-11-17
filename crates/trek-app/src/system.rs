@@ -847,6 +847,41 @@ pub fn play_alert_sound() {
     SOUNDS.with(|n| n.set(n.get() + 1));
 }
 
+/// Play a WAV file (a plugin's own sound, `plugins::play_sound`) off the main thread, at the
+/// system's volume. One at a time, as the alert sound: a sound asked for while another plays is
+/// let go, so a burst of events chimes once.
+#[cfg(not(any(test, feature = "test-support", feature = "shots")))]
+pub fn play_sound_file(path: std::path::PathBuf) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static PLAYING: AtomicBool = AtomicBool::new(false);
+    if PLAYING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        #[cfg(windows)]
+        crate::winsys::play_sound_file(&path);
+        #[cfg(not(windows))]
+        {
+            use std::process::{Command, Stdio};
+            let _ = Command::new("/usr/bin/afplay")
+                .arg(&path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        PLAYING.store(false, Ordering::SeqCst);
+    });
+}
+
+/// Tests and the isolated app play nothing aloud: the sound is counted (`SOUNDS`), and the
+/// plugin's log says it played.
+#[cfg(any(test, feature = "test-support", feature = "shots"))]
+pub fn play_sound_file(_path: std::path::PathBuf) {
+    #[cfg(any(test, feature = "test-support"))]
+    SOUNDS.with(|n| n.set(n.get() + 1));
+}
+
 /// The Windows release as Settings › About shows it: "Windows 11 24H2 (26100)". Read from the
 /// registry: `ProductName` there still says "Windows 10" on 11, so the build number (22000 and
 /// up is 11) names the major version.

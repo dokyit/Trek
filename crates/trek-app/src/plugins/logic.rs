@@ -240,6 +240,7 @@ fn apply(plugin: &str, run: PluginRun, ws: &Entity<Workspace>, cx: &mut App) {
                 }
             }
             Effect::Page(page) => super::open_page(plugin, &page, ws, cx),
+            Effect::Sound(file) => super::play_sound(plugin, &file, cx),
             // Kept already, off the UI thread.
             Effect::Storage(_) => {}
         }

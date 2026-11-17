@@ -1,9 +1,10 @@
 //! A Trek plugin's logic (`main.js`): one call of it, in QuickJS, with nothing of the machine in
 //! reach. The plugin's file is evaluated in a fresh context, the handler for what happened is
 //! called (a hook's listeners, or a command's function), and what it asked for comes back as
-//! data: its state as it left it, and effects (a toast, a thread to open, a message to send) for
-//! Trek to carry out or refuse by the plugin's permissions. Nothing lives between calls but the
-//! state, so a plugin can't leak, hang on to a timer, or be left half-broken by an error.
+//! data: its state as it left it, and effects (a toast, a thread to open, a message to send, a
+//! sound of its own to play) for Trek to carry out or refuse by the plugin's permissions. Nothing
+//! lives between calls but the state, so a plugin can't leak, hang on to a timer, or be left
+//! half-broken by an error.
 //!
 //! A call has a time budget and a memory cap; past either QuickJS stops it and the call fails.
 
@@ -63,6 +64,8 @@ pub enum Effect {
         text: String,
     },
     Page(String),
+    /// Play this sound file of the plugin's own (a path in its folder).
+    Sound(String),
     /// Keep this as the plugin's storage.
     Storage(Value),
 }
@@ -99,6 +102,7 @@ const trek = Object.freeze({
   newThread: () => { __out.effects.push({ t: 'new-thread' }); },
   send: (thread, text) => { __out.effects.push({ t: 'send', thread: String(thread), text: String(text) }); },
   page: (id) => { __out.effects.push({ t: 'page', page: String(id) }); },
+  sound: (file) => { __out.effects.push({ t: 'sound', file: String(file) }); },
   threads: () => __data.threads || [],
   usage: () => __data.usage || null,
   project: () => __data.project || null,
@@ -211,6 +215,7 @@ fn run(call: &PluginCall, limits: PluginLimits) -> PluginRun {
                     text: text_of(e, "text")?,
                 },
                 "page" => Effect::Page(text_of(e, "page")?),
+                "sound" => Effect::Sound(text_of(e, "file")?),
                 "storage" => Effect::Storage(e.get("value")?.clone()),
                 _ => return None,
             })
@@ -294,7 +299,7 @@ mod tests {
         assert_eq!(registered.state, None, "state untouched isn't sent back");
         let global = run_plugin(
             &call(
-                "function hello() { trek.storage.set({ seen: true }); trek.open('t1'); }",
+                "function hello() { trek.storage.set({ seen: true }); trek.open('t1'); trek.sound('sounds/chime.wav'); }",
                 Handler::Command("hello".into()),
             ),
             PluginLimits::default(),
@@ -303,7 +308,8 @@ mod tests {
             global.effects,
             vec![
                 Effect::Storage(json!({"seen": true})),
-                Effect::Open("t1".into())
+                Effect::Open("t1".into()),
+                Effect::Sound("sounds/chime.wav".into())
             ]
         );
         let missing = run_plugin(

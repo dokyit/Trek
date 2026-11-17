@@ -273,7 +273,29 @@ pub fn data(plugin: &str, place: &Place, cx: &App) -> Value {
             "id": crate::themes::shown_id(cx),
         }),
     );
+    root.insert("now".into(), now(chrono::Local::now().naive_local()));
     Value::Object(root)
+}
+
+/// The time of day as a tree reads it (`{now.part}`, `{now.hour}`, `{now.weekday}`,
+/// `{now.date}`): a greeting or art that follows the day. Read as the tree is drawn, so it
+/// changes at the next redraw after the hour turns.
+pub fn now(at: chrono::NaiveDateTime) -> Value {
+    use chrono::{Datelike as _, Timelike as _};
+    let hour = at.hour();
+    let part = match hour {
+        5..=11 => "morning",
+        12..=16 => "afternoon",
+        17..=21 => "evening",
+        _ => "night",
+    };
+    json!({
+        "hour": hour,
+        "part": part,
+        "weekday": at.format("%A").to_string(),
+        "date": format!("{} {}", at.day(), at.format("%B")),
+        "weekend": matches!(at.weekday(), chrono::Weekday::Sat | chrono::Weekday::Sun),
+    })
 }
 
 /// What a plugin may know of thread `t`: its title, state and agent with `threads:read`, its
@@ -777,8 +799,9 @@ fn node(n: &Node, scope: &Scope, at: &At, count: &mut usize, cx: &App) -> AnyEle
                 inner.items.push((alias.as_str(), v));
                 kids.push(node(item, &inner, at, count, cx));
             }
-            // The entries flow as the element says: a column unless it's a row.
-            let el = styled(flex(v_flex(), n), n, cx).children(kids);
+            // The entries flow as a column, or with `wrap` as a row that wraps (chips).
+            let base = if n.style.wrap { h_flex() } else { v_flex() };
+            let el = styled(flex(base, n), n, cx).children(kids);
             el.into_any_element()
         }
         Kind::When {

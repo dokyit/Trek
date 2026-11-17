@@ -172,6 +172,8 @@ pub fn fonts_css() -> String {
 /// gives the page `window.trek`:
 ///
 /// - `trek.storage.get()` and `trek.storage.set(object)`: the plugin's own storage, kept by Trek;
+/// - `trek.state.get()` and `trek.state.set(patch)`: the state its slots and replacements read
+///   (`{state.…}`), as its logic's `trek.state`; not kept between launches;
 /// - `trek.data(name)`: what the plugin's permissions allow (`threads`, `finished`, `usage`,
 ///   `commits`, `notes`, `project`);
 /// - `trek.open(threadId)`, `trek.newThread()`, `trek.send(threadId, text)`, `trek.toast(text)`;
@@ -226,6 +228,10 @@ const BOOTSTRAP: &str = r#"(() => {
       get: () => call('storage.get'),
       set: (value) => call('storage.set', { value }),
     }),
+    state: Object.freeze({
+      get: () => call('state.get'),
+      set: (patch) => call('state.set', { value: patch }),
+    }),
     data: (name) => call('data', { name: String(name) }),
     open: (thread) => call('open', { thread: String(thread) }),
     newThread: () => call('new-thread'),
@@ -246,6 +252,10 @@ const BOOTSTRAP: &str = r#"(() => {
 pub enum Request {
     StorageGet,
     StorageSet(Map<String, Value>),
+    /// The plugin's state, what its element trees read (`{state.…}`).
+    StateGet,
+    /// Merge this into the plugin's state: a page's way to change what its slots show.
+    StateSet(Map<String, Value>),
     /// Read-only data by name, behind the plugin's permissions.
     Data(String),
     Open(String),
@@ -307,6 +317,8 @@ pub fn parse_request(body: &str, nonce: &str) -> Option<(u64, Request)> {
     let request = match v.get("t")?.as_str()? {
         "storage.get" => Request::StorageGet,
         "storage.set" => Request::StorageSet(v.get("value")?.as_object()?.clone()),
+        "state.get" => Request::StateGet,
+        "state.set" => Request::StateSet(v.get("value")?.as_object()?.clone()),
         "data" => Request::Data(text("name", 64)?),
         "open" => Request::Open(text("thread", 128)?),
         "new-thread" => Request::NewThread,
@@ -447,6 +459,22 @@ mod tests {
         assert_eq!(ok(r#"{"n":"s3cret","id":7,"t":"shell","cmd":"rm"}"#), None);
         assert_eq!(
             ok(r#"{"n":"s3cret","id":7,"t":"storage.set","value":[1]}"#),
+            None
+        );
+        // The state its slots read: an object to merge in, asking for no permission.
+        let mut patch = Map::new();
+        patch.insert("prompts".into(), serde_json::json!(["Explain this"]));
+        assert_eq!(
+            ok(r#"{"n":"s3cret","id":3,"t":"state.set","value":{"prompts":["Explain this"]}}"#),
+            Some((3, Request::StateSet(patch.clone())))
+        );
+        assert_eq!(Request::StateSet(patch).needs(), None);
+        assert_eq!(
+            ok(r#"{"n":"s3cret","id":4,"t":"state.get"}"#),
+            Some((4, Request::StateGet))
+        );
+        assert_eq!(
+            ok(r#"{"n":"s3cret","id":5,"t":"state.set","value":"x"}"#),
             None
         );
         assert_eq!(ok("not json"), None);

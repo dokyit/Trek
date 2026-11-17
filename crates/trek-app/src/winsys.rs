@@ -629,6 +629,26 @@ pub fn play_notification_sound() {
     };
 }
 
+/// A WAV file, waiting until it has played (a plugin's own sound, `system::play_sound_file`).
+#[cfg(windows)]
+#[cfg_attr(
+    any(test, feature = "test-support", feature = "shots"),
+    allow(dead_code)
+)]
+pub fn play_sound_file(path: &std::path::Path) {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_FILENAME, SND_NODEFAULT};
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    // SAFETY: a NUL-ended path; no module handle, as it names a file.
+    unsafe {
+        PlaySoundW(
+            wide.as_ptr(),
+            std::ptr::null_mut(),
+            SND_FILENAME | SND_NODEFAULT,
+        )
+    };
+}
+
 /// Whether the cursor is over window `hwnd` (or a window inside it, a web view), by what the
 /// system says: the window the cursor is over, by its root. Not the window's own notion of it, which
 /// is told when the cursor comes and goes and so lags a draw behind either.
