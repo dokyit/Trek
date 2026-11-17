@@ -11,6 +11,7 @@ mod follow_ups;
 mod limits;
 mod lineage;
 mod mcp;
+mod media_setup;
 mod node_setup;
 mod orchestrate;
 pub mod permission_requests;
@@ -48,6 +49,7 @@ pub use limits::Clock;
 pub use lineage::{LineageRow, ThreadState};
 pub use mcp::{McpCheck, mcp_server_of};
 pub use node_setup::NodeSetup;
+pub use media_setup::MediaSetup;
 pub use orchestrate::{TaskState, waiting_label};
 pub use turn_changes::{TurnRange, TurnSpans};
 pub use verification::ago;
@@ -2157,6 +2159,10 @@ pub struct Workspace {
     pub settings_project: Option<String>,
     /// An agent session started while the user was still typing a new thread's first message.
     pub warm: Option<(WarmKey, trek_agents::SessionHandle, Instant)>,
+    /// ffmpeg or yt-dlp being downloaded for the video watcher (Settings › Tools › Video), or
+    /// failed to download; `media_revision` counts the downloads that finished.
+    pub media_setup: Option<MediaSetup>,
+    pub media_revision: u32,
     /// A `settle_merged` pass is running.
     checking_merges: bool,
     /// When `tidy_inbox` last ran: snoozes that ended since then bring their threads back.
@@ -2680,6 +2686,8 @@ impl Workspace {
             overlay_open: false,
             main_window: None,
             mode: Mode::Agents,
+            media_setup: None,
+            media_revision: 0,
             ide_root: None,
             diagnostics: HashMap::new(),
             reviews: HashMap::new(),
@@ -11861,10 +11869,18 @@ pub(crate) fn agent_notes(
 /// may take minutes (a download, a transcript), past what agents give a tool by default.
 fn video_server(bin: &str) -> McpServer {
     let dir = trek_core::media::video_cache_dir();
-    let mut env = vec![(
-        trek_core::media::ENV_VIDEO_DIR.to_string(),
-        dir.display().to_string(),
-    )];
+    // Where Trek downloads ffmpeg and yt-dlp: the watcher looks there, and downloads there when it
+    // finds none.
+    let mut env = vec![
+        (
+            trek_core::media::ENV_VIDEO_DIR.to_string(),
+            dir.display().to_string(),
+        ),
+        (
+            trek_core::media_tools::ENV_TOOLS_DIR.to_string(),
+            trek_core::media_tools::dir().display().to_string(),
+        ),
+    ];
     // Where dictation keeps a speech model of its own (Windows), the watcher transcribes with it.
     if let Some(models) = crate::dictate::model_dir_in(&trek_core::paths::local_data_dir()) {
         env.push((
@@ -12120,6 +12136,15 @@ mod tests {
             "Trek restarts to update in 10 seconds."
         );
         assert_eq!(
+                // Where ffmpeg and yt-dlp are downloaded: the watcher reads and writes the folder
+                // Trek's Settings and its own PATH use.
+                assert!(
+                    env.contains(&(
+                        "TREK_TOOLS_DIR".to_string(),
+                        trek_core::media_tools::dir().display().to_string()
+                    )),
+                    "{env:?}"
+                );
             restart_message(10, true, &["npm run dev\n# more"]),
             "Trek restarts to update in 10 seconds, stopping npm run dev."
         );

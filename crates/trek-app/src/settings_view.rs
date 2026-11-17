@@ -51,9 +51,11 @@ use crate::workspace::{Route, SettingsPage, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _,
+    h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -337,6 +339,9 @@ pub struct SettingsView {
     /// What the Tools and Snapshots pages show from the Mac's setup, and whether the project's
     /// image icon is still there, each read off the main thread.
     tools: Probe<ToolsProbe>,
+    /// How many downloads of the video watcher's tools Trek had finished when `tools` was last
+    /// invalidated for one.
+    media_revision: u32,
     /// The quiet read of the MCP servers' and added agents' saved values (which are locked).
     secret_scan: Probe<()>,
     /// An Allow access for them is waiting on macOS's prompts.
@@ -431,6 +436,9 @@ pub(super) struct ToolsProbe {
     screen_recording: crate::permissions::Status,
     axe: bool,
     ffmpeg: bool,
+    ytdlp: bool,
+    /// Homebrew (winget on Windows) is here: what a failed download falls back to.
+    package_manager: bool,
     mcp_bundled: bool,
     agent_mcp: Vec<(&'static str, Vec<String>)>,
     plugins: Vec<String>,
@@ -459,6 +467,8 @@ impl ToolsProbe {
             ),
             axe: crate::integrations::axe_path().is_some(),
             ffmpeg: crate::integrations::ffmpeg_installed(),
+            ytdlp: crate::integrations::ytdlp_installed(),
+            package_manager: crate::integrations::package_manager_installed(),
             mcp_bundled: crate::workspace::trek_mcp_binary().is_some(),
             agent_mcp,
             plugins,
@@ -577,6 +587,12 @@ impl SettingsView {
         // Each page reads the Mac again whenever it's opened.
         subs.push(cx.observe(&workspace, |this: &mut Self, ws, cx| {
             let route = ws.read(cx).route.clone();
+            // A tool Trek finished downloading (ffmpeg, yt-dlp) shows as installed at once.
+            let downloaded = ws.read(cx).media_revision;
+            if downloaded != this.media_revision {
+                this.media_revision = downloaded;
+                this.tools.invalidate();
+            }
             if route != Route::Settings(SettingsPage::Skills) {
                 this.skills.invalidate();
             }
@@ -767,6 +783,7 @@ impl SettingsView {
             rules: rules::RulesForm::new(window, cx),
             glass_slider,
             tools: Probe::default(),
+            media_revision: 0,
             secret_scan: Probe::default(),
             unlocking_secrets: false,
             figma_desktop: Probe::default(),
@@ -2038,6 +2055,146 @@ impl SettingsView {
                 .text_color(muted)
                 .child("Checking…")
                 .into_any_element()
+    /// A row of Settings › Tools › Video for a tool the watcher needs: its words, and whether
+    /// it's installed (`probe`: that, and whether Homebrew or winget is here), or the button that
+    /// has Trek download it (no Homebrew or winget needed), with how far it's got or why it
+    /// couldn't, and the package manager as the other way where it's here.
+    fn media_tool_row(
+        &self,
+        tool: trek_core::media_tools::Tool,
+        probe: Option<(bool, bool)>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use trek_core::media_tools::Tool;
+        let name = tool.name();
+        let plan = trek_core::media_tools::plan(tool);
+        let setup = self
+            .workspace
+            .read(cx)
+            .media_setup
+            .clone()
+            .filter(|m| m.tool() == tool);
+        let busy = self.workspace.read(cx).media_setup.as_ref().is_some_and(
+            |m| matches!(m, crate::workspace::MediaSetup::Downloading { .. }),
+        );
+        let (what, when) = match tool {
+            Tool::Ffmpeg => (
+                "Reads the video, takes its frames and its audio.",
+                "watches a video",
+            ),
+            Tool::YtDlp => (
+                "Gets the video out of a YouTube or X link.",
+                "is given such a link",
+            ),
+        };
+        let description = match &plan {
+            Some(plan) => format!(
+                "{what} Trek downloads {name} ({}) the first time an agent {when}, or now with the button.",
+                plan.size_text()
+            ),
+            None => format!(
+                "{what} Trek has no download of {name} for this computer: install it with {}.",
+                match tool {
+                    Tool::Ffmpeg => crate::integrations::FFMPEG_INSTALL,
+                    Tool::YtDlp => crate::integrations::YTDLP_INSTALL,
+                }
+            ),
+        };
+        let (amber, quiet) = (palette::amber(cx), cx.theme().muted_foreground);
+        let line = |text: String, failed: bool| {
+            let color = if failed { amber } else { quiet };
+            div()
+                .id(SharedString::from(format!("{name}-media-status")))
+                .test_support()
+                .text_size(px(text::BODY))
+                .text_color(color)
+                .child(text)
+                .into_any_element()
+        };
+        let package_line = match tool {
+            Tool::Ffmpeg => crate::integrations::FFMPEG_INSTALL,
+            Tool::YtDlp => crate::integrations::YTDLP_INSTALL,
+        };
+        let download = |label: &'static str, cx: &mut Context<Self>| {
+            Button::new(SharedString::from(format!("install-{name}")))
+                .small()
+                .outline()
+                .icon(IconName::ArrowDown)
+                .label(label)
+                .disabled(busy)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if trek_core::media_tools::plan(tool).is_some() {
+                        this.workspace
+                            .update(cx, |ws, cx| ws.install_media_tool(tool, cx));
+                    } else {
+                        this.workspace.update(cx, |_, cx| {
+                            cx.emit(WorkspaceEvent::RunInTerminal {
+                                command: package_line.into(),
+                                cwd: None,
+                            })
+                        });
+                    }
+                }))
+                .into_any_element()
+        };
+        let (extra, control) = match (&setup, probe) {
+            (Some(crate::workspace::MediaSetup::Downloading { .. }), _) => (
+                setup.as_ref().and_then(|s| s.label()).map(|l| line(l, false)),
+                Spinner::new().small().into_any_element(),
+            ),
+            (Some(crate::workspace::MediaSetup::Failed { error, .. }), probe) => {
+                let manager = probe.is_some_and(|(_, manager)| manager);
+                let mut controls = h_flex().gap(px(6.)).child(download("Try again", cx));
+                if manager {
+                    controls = controls.child(
+                        Button::new(SharedString::from(format!("install-{name}-manager")))
+                            .small()
+                            .outline()
+                            .label(if crate::words::is_windows() {
+                                "Use winget"
+                            } else {
+                                "Use Homebrew"
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.workspace.update(cx, |_, cx| {
+                                    cx.emit(WorkspaceEvent::RunInTerminal {
+                                        command: package_line.into(),
+                                        cwd: None,
+                                    })
+                                })
+                            })),
+                    );
+                }
+                (
+                    Some(line(format!("Trek couldn't download {name}: {error}"), true)),
+                    controls.into_any_element(),
+                )
+            }
+            (None, None) => (
+                None,
+                div()
+                    .id(SharedString::from(format!("install-{name}-checking")))
+                    .test_support()
+                    .text_size(px(text::BODY))
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Checking…")
+                    .into_any_element(),
+            ),
+            (None, Some((true, _))) => (
+                None,
+                Self::status_dot(palette::emerald(cx), "Installed"),
+            ),
+            (None, Some((false, _))) => (None, download(
+                match tool {
+                    Tool::Ffmpeg => "Install ffmpeg",
+                    Tool::YtDlp => "Install yt-dlp",
+                },
+                cx,
+            )),
+        };
+        Self::row_with(name, description, extra, control, cx)
+    }
+
         };
         let bundled = probe.as_ref().is_none_or(|p| p.mcp_bundled);
         let workspace = self.workspace.clone();
@@ -2246,24 +2403,16 @@ impl SettingsView {
             ));
         }
         out.push(Self::heading("Video", cx));
-        let ffmpeg_control: AnyElement = match probe.as_ref().map(|p| p.ffmpeg) {
-            None => checking("install-ffmpeg"),
-            Some(true) => Self::status_dot(palette::emerald(cx), "Installed"),
-            Some(false) => Button::new("install-ffmpeg")
-                .small()
-                .outline()
-                .icon(IconName::ArrowDown)
-                .label("Install ffmpeg")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.workspace.update(cx, |_, cx| {
-                        cx.emit(WorkspaceEvent::RunInTerminal {
-                            command: crate::integrations::FFMPEG_INSTALL.into(),
-                            cwd: None,
-                        })
-                    })
-                }))
-                .into_any_element(),
-        };
+        let ffmpeg_row = self.media_tool_row(
+            trek_core::media_tools::Tool::Ffmpeg,
+            probe.as_ref().map(|p| (p.ffmpeg, p.package_manager)),
+            cx,
+        );
+        let ytdlp_row = self.media_tool_row(
+            trek_core::media_tools::Tool::YtDlp,
+            probe.as_ref().map(|p| (p.ytdlp, p.package_manager)),
+            cx,
+        );
         out.push(ui::group(
             vec![
                 Self::row(
@@ -2272,12 +2421,8 @@ impl SettingsView {
                     self.switch("video-tools", s.tools.video, |s, v| s.tools.video = v),
                     cx,
                 ),
-                Self::row(
-                    "ffmpeg",
-                    "Reads the video, takes its frames and its audio. Trek doesn't bundle it.",
-                    ffmpeg_control,
-                    cx,
-                ),
+                ffmpeg_row,
+                ytdlp_row,
             ],
             cx,
         ));

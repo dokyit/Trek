@@ -287,6 +287,65 @@ fn the_settings_scroll_container_can_be_found_by_the_driver() {
     });
 }
 
+/// Settings › Tools › Video says what Trek downloads for the video watcher (no Homebrew or winget
+/// needed), how far a download has got, and why one couldn't be made, with a way to try again.
+#[test]
+fn the_video_tools_say_what_trek_downloads_and_how_far_it_has_got() {
+    use trek_app::workspace::MediaSetup;
+    use trek_core::media_tools::{Progress, Tool};
+    run(async |cx| {
+        let trek = open(cx);
+        trek.update(cx, |ws, cx| {
+            ws.navigate(Route::Settings(SettingsPage::Tools), cx)
+        });
+        cx.simulate_window_resize(
+            trek.window,
+            gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(4000.)),
+        );
+        trek_app::settings_view::shown::take();
+        trek.render(cx);
+        trek.render(cx);
+        let said = trek_app::settings_view::shown::take();
+        let plan = trek_core::media_tools::plan(Tool::Ffmpeg).expect("a build for this computer");
+        assert!(
+            said.iter().any(|t| t.contains(&format!(
+                "Trek downloads ffmpeg ({}) the first time an agent watches a video",
+                plan.size_text()
+            ))),
+            "{said:?}"
+        );
+        assert!(said.iter().any(|t| t.contains("Trek downloads yt-dlp (about")));
+        // Downloading: how far, in words.
+        trek.update(cx, |ws, cx| {
+            ws.media_setup = Some(MediaSetup::Downloading {
+                tool: Tool::Ffmpeg,
+                progress: Some(Progress::Downloading {
+                    done: 42,
+                    total: 100,
+                }),
+            });
+            cx.notify();
+        });
+        trek.render(cx);
+        assert!(trek.visible(cx, "ffmpeg-media-status"));
+        // Failed: why, and again.
+        trek.update(cx, |ws, cx| {
+            ws.media_setup = Some(MediaSetup::Failed {
+                tool: Tool::Ffmpeg,
+                error: "Couldn't reach the download.".into(),
+            });
+            cx.notify();
+        });
+        trek.render(cx);
+        assert!(trek.visible(cx, "ffmpeg-media-status"));
+        assert!(trek.visible(cx, "install-ffmpeg"), "Try again");
+        assert!(
+            !trek.visible(cx, "yt-dlp-media-status"),
+            "the other tool says nothing"
+        );
+    });
+}
+
 #[test]
 fn a_saved_key_can_be_copied_and_says_where_it_lives() {
     run(async |cx| {
