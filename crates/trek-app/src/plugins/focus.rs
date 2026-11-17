@@ -511,7 +511,7 @@ fn chip_element(
         .id("focus-length")
         .test_support()
         .px(px(3.))
-        .rounded(px(4.))
+        .rounded(px(trek_palette::scale::radius::TAG))
         .font_family(theme.mono_font_family.clone())
         .text_color(theme.foreground)
         .font_weight(FontWeight::MEDIUM)
