@@ -27,9 +27,9 @@ impl SettingsView {
         let state = p.state.clone();
         let dir = p.dir().clone();
         let log = p.log.clone();
-        let mut out = vec![];
+        let mut out = vec![self.ask_an_agent(cx)];
 
-        // Waiting first: plugins asked to be turned on (by an agent, from the CLI) that need the
+        // Then what's waiting: plugins asked to be turned on (by an agent, from the CLI) that need the
         // user to allow what they ask for.
         let waiting: Vec<&Plugin> = installed
             .iter()
@@ -45,7 +45,7 @@ impl SettingsView {
         out.push(Self::heading("Installed", cx));
         if installed.is_empty() {
             out.push(Self::note(
-                "No plugins yet. Ask an agent to make one (\"make Trek look like a terminal\", \"add a focus timer round the composer\"), or install an example below.",
+                "No plugins yet. Ask an agent for one (above), or install an example below and change it.",
                 cx,
             ));
         } else {
@@ -510,6 +510,71 @@ impl SettingsView {
             .into_any_element()
     }
 
+    /// The page's first card: a plugin is made by asking an agent, in a sentence. Each sentence
+    /// opens a new thread with it in the composer, to send as it is or change first.
+    fn ask_an_agent(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let sentences = core::ASK_EXAMPLES.iter().enumerate().map(|(i, sentence)| {
+            let ws = self.workspace.clone();
+            let text = sentence.to_string();
+            h_flex()
+                .id(SharedString::from(format!("plugin-ask-{i}")))
+                .test_support()
+                .w_full()
+                .gap(px(10.))
+                .px(px(10.))
+                .py(px(7.))
+                .rounded(px(crate::scale::radius::CONTROL))
+                .cursor_pointer()
+                .hover(|el| el.bg(theme.foreground.opacity(0.05)))
+                .child(
+                    Icon::new(crate::assets::Lucide::Sparkles)
+                        .small()
+                        .text_color(theme.primary),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(text::BODY))
+                        .line_height(relative(1.45))
+                        .child(format!("“{sentence}”")),
+                )
+                .on_click(move |_, _, cx| {
+                    let text = text.clone();
+                    ws.update(cx, |ws, cx| {
+                        ws.navigate(crate::workspace::Route::Draft { project: None }, cx);
+                        cx.emit(crate::workspace::WorkspaceEvent::InsertIntoComposer(text));
+                    });
+                })
+        });
+        v_flex()
+            .id("plugin-ask")
+            .test_support()
+            .gap(px(8.))
+            .pb(px(8.))
+            .child(
+                div()
+                    .text_size(px(text::TITLE))
+                    .font_medium()
+                    .child("Make Trek yours: ask an agent"),
+            )
+            .child(
+                div()
+                    .max_w(px(560.))
+                    .text_size(px(text::BODY))
+                    .line_height(relative(1.5))
+                    .text_color(theme.muted_foreground)
+                    .child(
+                        "Say what you'd like in one sentence: a look, a pet in the sidebar, sounds, a \
+                         screen of your own. The agent writes the plugin, Trek loads it while you \
+                         watch, and it shows up below. Click one to start from it:",
+                    ),
+            )
+            .child(v_flex().gap(px(2.)).children(sentences))
+            .into_any_element()
+    }
+
     fn example_row(
         &self,
         name: &'static str,
@@ -555,7 +620,17 @@ impl SettingsView {
                             .line_height(relative(1.5))
                             .text_color(theme.muted_foreground)
                             .child(field("description")),
-                    ),
+                    )
+                    // The sentence an agent made it from (its README's first line).
+                    .children(core::examples::asked(files).map(|sentence| {
+                        div()
+                            .max_w(px(460.))
+                            .text_size(px(text::LABEL))
+                            .line_height(relative(1.45))
+                            .italic()
+                            .text_color(theme.muted_foreground.opacity(0.85))
+                            .child(format!("Made from “{sentence}”"))
+                    })),
             )
             .child(install)
             .into_any_element()
