@@ -972,7 +972,7 @@ pub struct Appearance {
     /// (`keep_windows_opaque`), so what's chosen from here on stays.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub windows_opaque_applied: bool,
-    /// The Dock icon: the mountain on Night's charcoal, or one of its alternatives.
+    /// The Dock icon: the signpost on Night's navy, or one of its alternatives.
     pub app_icon: AppIcon,
     /// The Trek theme in use (`themes`): a built-in's id or a theme file's name; `trek`, Trek's
     /// own look, by default and in files from before themes.
@@ -986,15 +986,17 @@ pub struct Appearance {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AppIcon {
-    /// The mountain in Trek's orange on the Night theme's charcoal: the icon in the app bundle.
-    /// `ember` is the default of versions before the mountain (stones on an orange tile, which
-    /// is no more): a file that says so gets today's default.
+    /// The signpost, a cream post and ember boards, on a near-black navy tile: the icon in the
+    /// app bundle (before it, the mountain on charcoal). `ember` is the default of versions
+    /// before the mountain (stones on an orange tile, which is no more): a file that says so
+    /// gets today's default.
     #[default]
     #[serde(alias = "ember")]
     Night,
-    /// The mountain on the Paper theme's cream.
+    /// The signpost on a lavender tile, the post near-black ("Lavender" in Settings; the
+    /// mountain on the Paper theme's cream before the signpost, still stored as `paper`).
     Paper,
-    /// A frosted glass mountain against a dusk sky.
+    /// The signpost in glass, ember boards and a frosted post, against a dusk sky.
     Glass,
 }
 
