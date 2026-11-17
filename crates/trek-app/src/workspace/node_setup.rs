@@ -135,6 +135,7 @@ impl Workspace {
         cx: &mut gpui_kit::Context<Self>,
     ) {
         self.account_setup_finished(command, cx);
+        self.login_finished(command, cx);
         let line = command.strip_prefix(BREW_NODE).unwrap_or(command).trim();
         self.setup_ended
             .insert(line.to_string(), std::time::Instant::now());

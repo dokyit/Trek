@@ -13,6 +13,7 @@ mod lineage;
 mod mcp;
 mod media_setup;
 mod node_setup;
+mod sign_in;
 mod orchestrate;
 pub mod permission_requests;
 pub mod phone_use;
@@ -49,6 +50,8 @@ pub use limits::Clock;
 pub use lineage::{LineageRow, ThreadState};
 pub use mcp::{McpCheck, mcp_server_of};
 pub use node_setup::NodeSetup;
+pub use node_setup::NodeSetup;
+pub use sign_in::SignedIn;
 pub use media_setup::MediaSetup;
 pub use orchestrate::{TaskState, waiting_label};
 pub use turn_changes::{TurnRange, TurnSpans};
@@ -2028,6 +2031,13 @@ pub struct Workspace {
     pub setup_ended: HashMap<String, std::time::Instant>,
     /// Agents (`install_hint` keys) whose install ended in a terminal, to say how it went once
     /// they've been looked for again.
+    /// Agents (`AgentId::key`) whose sign-in terminal is open and who weren't signed in: asked
+    /// every `login_recheck` until they are (`sign_in`).
+    login_watch: HashMap<String, sign_in::LoginWatch>,
+    pub login_recheck: std::time::Duration,
+    /// Agents Trek saw sign in after opening their login terminal, for Settings and the terminal
+    /// to say so.
+    signed_in: HashMap<String, SignedIn>,
     installs_awaited: Vec<&'static str>,
     /// A scan was asked for while one ran: another follows, so what it finds is current.
     detect_again: bool,
@@ -2599,6 +2609,9 @@ impl Workspace {
             direct_models: trek_agents::load_all_cached_direct_models(),
             direct_inflight: HashSet::new(),
             setup_ended: HashMap::new(),
+            login_watch: HashMap::new(),
+            login_recheck: sign_in::RECHECK,
+            signed_in: HashMap::new(),
             installs_awaited: Vec::new(),
             detect_again: false,
             key_checks: HashMap::new(),

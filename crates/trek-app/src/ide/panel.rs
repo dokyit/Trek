@@ -121,6 +121,10 @@ impl IdeWorkbench {
             Job::Setup(command) => Some(command.clone()),
             Job::Action(_) => None,
         };
+        // An agent's sign-in is asked after while it's open: its terminal may never end.
+        if let (Some(command), Some(workspace)) = (&setup, ws.upgrade()) {
+            workspace.update(cx, |ws, cx| ws.setup_started(command, cx));
+        }
         let term = cx.new(|cx| {
             let mut t = TerminalPanel::with_command(ws.clone(), cwd, job, shell, cx);
             t.on_exit(move |output, cx| {

@@ -710,6 +710,37 @@ pub fn installed_by(line: &str) -> Option<String> {
     })
 }
 
+/// The keys `agent_setup` knows.
+const SETUP_KEYS: &[&str] = &[
+    "claude-code",
+    "codex",
+    "opencode",
+    "droid",
+    "cursor",
+    "github-copilot",
+    "kimi",
+    "qwen-code",
+    "grok",
+    "devin",
+    "goose",
+    "amp",
+    "pi",
+    "antigravity",
+    "antigravity-acp",
+];
+
+/// The keys (`agent_setup`'s) of the agents whose own sign-in line `line` is: what Settings'
+/// Sign in, "Switch account…" and onboarding run in a terminal. Where the same line signs in
+/// more than one (Antigravity's two keys), all of them.
+pub fn login_keys(line: &str) -> Vec<&'static str> {
+    let line = line.trim();
+    SETUP_KEYS
+        .iter()
+        .copied()
+        .filter(|key| agent_setup(key).is_some_and(|s| s.login == line))
+        .collect()
+}
+
 pub fn agent_setup(key: &str) -> Option<AgentSetup> {
     let (login, account_url) = match key {
         "claude-code" => ("claude auth login", "https://claude.ai/settings/usage"),
@@ -1000,6 +1031,28 @@ mod tests {
             assert!(
                 !line.contains(';') && !line.contains("&&") && !line.contains(".\\"),
                 "{key}: {line}"
+            );
+        }
+    }
+
+    /// Every agent `agent_setup` knows is found by its sign-in line, and no other line is one.
+    #[test]
+    fn a_sign_in_line_names_its_agent() {
+        for key in SETUP_KEYS {
+            let login = agent_setup(key).expect(key).login;
+            assert!(login_keys(login).contains(key), "{key}: {login}");
+        }
+        assert_eq!(login_keys(" claude auth login "), ["claude-code"]);
+        assert_eq!(login_keys("droid"), ["droid"]);
+        assert_eq!(login_keys("agy"), ["antigravity", "antigravity-acp"]);
+        assert!(login_keys("cargo test").is_empty());
+        assert!(login_keys("").is_empty());
+        // The list is whole: nothing `agent_setup` answers for is missing from it.
+        for acp in ACP_AGENTS {
+            assert!(
+                agent_setup(acp.id).is_none() || SETUP_KEYS.contains(&acp.id),
+                "{}",
+                acp.id
             );
         }
     }

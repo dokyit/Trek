@@ -3206,6 +3206,52 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         crate::system::apply_reduce_motion(ws, cx);
         return Ok(());
     }
+    // `sign-in-demo start|done`: Droid (a login that's its own TUI, and never ends) installed and
+    // signed out, its sign-in opened in the terminal dock as Settings' Sign in opens it (the capture
+    // run starts no program); then, as the probe Trek's recheck starts would find it, signed in. The
+    // recheck loop is Trek's own: within seconds a toast, the dock's strip and Settings' row say so.
+    if verb == "sign-in-demo" {
+        use trek_core::AgentId;
+        use trek_core::detect::{Availability, DetectedAgent};
+        let signed_out = match arg {
+            "start" => true,
+            "done" => false,
+            _ => anyhow::bail!("sign-in-demo start|done"),
+        };
+        ws.update(cx, |ws, cx| {
+            if signed_out {
+                ws.agents.retain(|a| a.agent != AgentId::Droid);
+                ws.agents.push(DetectedAgent {
+                    name: AgentId::Droid.display_name(),
+                    agent: AgentId::Droid,
+                    path: None,
+                    version: None,
+                    availability: Availability::Ready,
+                    models: vec![],
+                    install_hint: None,
+                });
+                ws.login_recheck = Duration::from_secs(1);
+            }
+            ws.acp_info.insert(
+                AgentId::Droid.key(),
+                Ok(trek_agents::AcpInfo {
+                    needs_auth: signed_out,
+                    ..Default::default()
+                }),
+            );
+            if signed_out {
+                let line = trek_core::catalog::agent_setup("droid")
+                    .map(|s| s.login.to_string())
+                    .unwrap_or_default();
+                cx.emit(crate::workspace::WorkspaceEvent::RunInTerminal {
+                    command: line,
+                    cwd: None,
+                });
+            }
+            cx.notify();
+        });
+        return Ok(());
+    }
     // `signed-out`: the capture run is signed out of the user's GitHub account: `gh`, started as
     // Trek starts it, has no login (`isolate_accounts`). Passes where there's no `gh` at all.
     if verb == "signed-out" {

@@ -496,6 +496,16 @@ impl Workspace {
         self.read_status(agent, true, force, cx);
     }
 
+    /// Read `agent`'s account again now, whatever was read a moment ago: it was signed in to
+    /// (the terminal of its login ended, or is still open), so what it says about itself changed.
+    pub(super) fn recheck_status(&mut self, agent: AgentId, cx: &mut Context<Self>) {
+        let key = agent.key();
+        self.commands_read.remove(&key);
+        self.usage_fetched.remove(&key);
+        let with_usage = self.usage_shown().contains(&agent);
+        self.read_status(agent, with_usage, true, cx);
+    }
+
     /// Read `agent`'s account, commands and models, and its usage if `with_usage`. Without it,
     /// once a run unless `force` is set.
     fn read_status(

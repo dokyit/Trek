@@ -187,6 +187,11 @@ impl TerminalDock {
             Job::Setup(command) => Some(command.clone()),
             Job::Action(_) => None,
         };
+        // An agent's sign-in is asked after while it's open: its terminal may never end.
+        if let Some(command) = &setup {
+            self.workspace
+                .update(cx, |ws, cx| ws.setup_started(command, cx));
+        }
         let term = cx.new(|cx| {
             let mut t = TerminalPanel::with_command(ws.clone(), cwd, job, shell, cx);
             t.on_exit(move |output, cx| {
@@ -366,8 +371,26 @@ impl Render for TerminalDock {
         let titles: Vec<Option<String>> = self.dock(cx).map_or(vec![], |d| {
             d.terminals
                 .iter()
-                .map(|t| t.read(cx).title().map(str::to_string))
+                .map(|t| {
+                    let t = t.read(cx);
+                    // A sign-in Trek saw work says so on its tab, though its program never ends.
+                    let done = t
+                        .setup_command()
+                        .and_then(|c| self.workspace.read(cx).login_note(c))
+                        .is_some();
+                    let title = t.title().map(str::to_string);
+                    match (title, done) {
+                        (Some(title), true) => Some(format!("{title} · Signed in")),
+                        (None, true) => Some("Signed in".to_string()),
+                        (title, false) => title,
+                    }
+                })
                 .collect()
+        });
+        // What the terminal in front says of the sign-in it ran, if it signed an agent in.
+        let login_note: Option<String> = self.front(cx).and_then(|t| {
+            let command = t.read(cx).setup_command()?.to_string();
+            self.workspace.read(cx).login_note(&command)
         });
 
         let header = h_flex()
@@ -489,10 +512,40 @@ impl Render for TerminalDock {
             );
 
         let body: AnyElement = match self.front(cx) {
-            Some(t) => div()
+            Some(t) => v_flex()
                 .size_full()
-                .pl(px(10.))
-                .child(t.cached(fill))
+                .children(login_note.map(|note| {
+                    h_flex()
+                        .id("terminal-login-note")
+                        .test_support()
+                        .flex_none()
+                        .h(px(28.))
+                        .px(px(14.))
+                        .gap(px(10.))
+                        .items_center()
+                        .text_size(px(text::LABEL))
+                        .text_color(crate::palette::emerald(cx))
+                        .child(Icon::new(IconName::Check).xsmall())
+                        .child(div().flex_1().min_w_0().truncate().child(note))
+                        .child(
+                            crate::ui::icon_button(
+                                "terminal-login-close",
+                                IconName::Close,
+                                "Close this terminal",
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.kill_terminal(window, cx)
+                            })),
+                        )
+                }))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .pl(px(10.))
+                        .child(t.cached(fill)),
+                )
                 .into_any_element(),
             None => crate::panels::empty("No terminal. + starts one in this folder.", cx)
                 .into_any_element(),

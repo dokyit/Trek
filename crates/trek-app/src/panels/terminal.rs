@@ -821,6 +821,8 @@ pub struct TerminalPanel {
     pointer: Option<(Point<Pixels>, bool)>,
     /// The window title the shell or a program set, if any.
     title: Option<String>,
+    /// The line of Trek's own command this terminal runs (an agent's sign-in), if it runs one.
+    setup: Option<String>,
     /// When the bell last rang, while its flash shows.
     bell_at: Option<Instant>,
     /// Redraws as the keys come and go (the cursor is solid only with them), made at first draw.
@@ -912,6 +914,10 @@ impl TerminalPanel {
             hovered: None,
             pointer: None,
             title: None,
+            setup: match &job {
+                Some(Job::Setup(command)) => Some(command.clone()),
+                _ => None,
+            },
             bell_at: None,
             focus_watch: vec![],
         };
@@ -1033,6 +1039,11 @@ impl TerminalPanel {
     /// Runs once when the process exits, with its last lines of output.
     pub fn on_exit(&mut self, f: impl FnOnce(String, &mut App) + 'static) {
         self.on_exit = Some(Box::new(f));
+    }
+
+    /// The line of Trek's own command (an agent's install or sign-in) this terminal runs.
+    pub fn setup_command(&self) -> Option<&str> {
+        self.setup.as_deref()
     }
 
     /// The window title the shell or the program running set (OSC 0 / 2), if it set one.

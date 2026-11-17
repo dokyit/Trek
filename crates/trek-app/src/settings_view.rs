@@ -1383,6 +1383,17 @@ impl SettingsView {
                 true => format!("{} · {account}", crate::workspace::accounts::DEFAULT_LABEL),
                 false => account,
             };
+            // A sign-in Trek saw take, from the terminal it opened: said in plain words, with what's
+            // left to do (the agent's own screen may stay open after it has signed in).
+            let just_signed_in = ws
+                .signed_in_now(&key)
+                .filter(|_| !needs_login)
+                .map(|done| done.ended);
+            let account = match just_signed_in {
+                Some(false) => format!("{account} · It worked: you can close the terminal"),
+                Some(true) => format!("{account} · It worked"),
+                None => account,
+            };
             let title = h_flex()
                 .gap(px(10.))
                 .child(ui::agent_logo(&a.agent, px(22.), cx))
@@ -1396,9 +1407,13 @@ impl SettingsView {
                         )
                         .child(
                             div()
+                                .id(SharedString::from(format!("account-{key}")))
+                                .test_support()
                                 .text_size(px(text::BODY))
                                 .text_color(if needs_login {
                                     palette::amber(cx)
+                                } else if just_signed_in.is_some() {
+                                    palette::emerald(cx)
                                 } else {
                                     muted
                                 })
@@ -2040,21 +2055,6 @@ impl SettingsView {
         cx.notify();
     }
 
-    fn tools_page(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let s = self.workspace.read(cx).settings.clone();
-        let muted = cx.theme().muted_foreground;
-        let mono = cx.theme().mono_font_family.clone();
-        let mut out = vec![];
-        // Read off the main thread when the page opens; until then each check says so.
-        let probe = self.tools.value.clone();
-        let checking = |id: &str| {
-            div()
-                .id(SharedString::from(format!("{id}-checking")))
-                .test_support()
-                .text_size(px(text::BODY))
-                .text_color(muted)
-                .child("Checking…")
-                .into_any_element()
     /// A row of Settings › Tools › Video for a tool the watcher needs: its words, and whether
     /// it's installed (`probe`: that, and whether Homebrew or winget is here), or the button that
     /// has Trek download it (no Homebrew or winget needed), with how far it's got or why it
@@ -2195,6 +2195,21 @@ impl SettingsView {
         Self::row_with(name, description, extra, control, cx)
     }
 
+    fn tools_page(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let s = self.workspace.read(cx).settings.clone();
+        let muted = cx.theme().muted_foreground;
+        let mono = cx.theme().mono_font_family.clone();
+        let mut out = vec![];
+        // Read off the main thread when the page opens; until then each check says so.
+        let probe = self.tools.value.clone();
+        let checking = |id: &str| {
+            div()
+                .id(SharedString::from(format!("{id}-checking")))
+                .test_support()
+                .text_size(px(text::BODY))
+                .text_color(muted)
+                .child("Checking…")
+                .into_any_element()
         };
         let bundled = probe.as_ref().is_none_or(|p| p.mcp_bundled);
         let workspace = self.workspace.clone();
