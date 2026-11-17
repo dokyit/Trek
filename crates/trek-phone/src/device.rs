@@ -846,12 +846,53 @@ pub fn install(udid: Option<&str>, package: &Path) -> Result<(), String> {
     if !package.exists() {
         return Err(format!("{} doesn't exist", package.display()));
     }
-    block_on(async {
+    let limit = install_limit(package_bytes(package));
+    block_on(within(limit, STOPPED_ANSWERING, async {
         let provider = provider(udid).await?;
         idevice::utils::installation::install_package(&provider, package, None)
             .await
             .map_err(err("The install failed"))
-    })?
+    }))?
+}
+
+/// What an install that ran out of time says. A phone that leaves the Wi-Fi mid-copy closes
+/// nothing: without a limit the install waits on it for good (one waited three hours, and held
+/// the phone updater's lock all that time).
+const STOPPED_ANSWERING: &str = "The iPhone stopped answering during the install: unlock it, keep it plugged in or on the same Wi-Fi, and try again.";
+
+/// How long an install of this many bytes may take: three minutes for the phone to unpack and
+/// check it, and the copy at no less than 100 KB a second (a poor Wi-Fi; a cable does 20 MB).
+fn install_limit(bytes: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(180 + bytes / 100_000)
+}
+
+/// The size of a package: a file's, or everything under an `.app` folder.
+fn package_bytes(package: &Path) -> u64 {
+    let Ok(meta) = std::fs::symlink_metadata(package) else {
+        return 0;
+    };
+    if !meta.is_dir() {
+        return meta.len();
+    }
+    std::fs::read_dir(package)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| package_bytes(&entry.path()))
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+/// `work`, or `late` when it takes longer than `limit`.
+async fn within<T>(
+    limit: std::time::Duration,
+    late: &str,
+    work: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    tokio::time::timeout(limit, work)
+        .await
+        .unwrap_or_else(|_| Err(late.to_string()))
 }
 
 /// Where a path goes: the phone's media folder, or `app`'s Documents (file sharing apps).
@@ -972,6 +1013,43 @@ mod tests {
     use std::io::{Read as _, Write as _};
 
     type Answer = Box<dyn FnOnce(&mut std::net::TcpStream) + Send>;
+
+    #[test]
+    fn an_install_that_never_ends_is_given_up_on() {
+        // A phone that left the Wi-Fi mid-copy: nothing closes, nothing answers.
+        let waited = block_on(within(
+            std::time::Duration::from_millis(20),
+            STOPPED_ANSWERING,
+            std::future::pending::<Result<(), String>>(),
+        ))
+        .unwrap();
+        assert_eq!(waited, Err(STOPPED_ANSWERING.to_string()));
+        // One that ends in time keeps its own answer, good or bad.
+        let limit = std::time::Duration::from_secs(5);
+        let done = block_on(within(limit, STOPPED_ANSWERING, async { Ok(7) })).unwrap();
+        assert_eq!(done, Ok(7));
+        let refused = block_on(within(limit, STOPPED_ANSWERING, async {
+            Err::<(), _>("The install failed: no room".to_string())
+        }))
+        .unwrap();
+        assert_eq!(refused, Err("The install failed: no room".to_string()));
+    }
+
+    #[test]
+    fn an_install_gets_longer_for_a_bigger_package() {
+        // Trek for the iPhone is about 57 MB: under thirteen minutes, never hours.
+        assert_eq!(install_limit(0).as_secs(), 180);
+        assert_eq!(install_limit(57_000_000).as_secs(), 750);
+        // A folder counts everything under it; a missing one counts nothing.
+        let dir = std::env::temp_dir().join(format!("trek-package-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("Trek.app/Frameworks")).unwrap();
+        std::fs::write(dir.join("Trek.app/Trek"), [0u8; 300]).unwrap();
+        std::fs::write(dir.join("Trek.app/Frameworks/a.dylib"), [0u8; 200]).unwrap();
+        assert_eq!(package_bytes(&dir.join("Trek.app")), 500);
+        assert_eq!(package_bytes(&dir.join("Trek.app/Trek")), 300);
+        assert_eq!(package_bytes(&dir.join("gone.ipa")), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A usbmuxd of the test's own on a local port, speaking as Apple Mobile Device Service does
     /// on Windows: the n-th connection made to it gets the n-th answer.
