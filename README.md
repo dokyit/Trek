@@ -144,6 +144,13 @@ Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models. On macOS an
     <td valign="top"><img src="docs/assets/icons/features/palette.svg" width="22" height="22" alt=""><br><b>Themes and backgrounds</b><br><sub>Four themes, Paper or Night, glass; painted and ASCII art</sub></td>
     <td valign="top"><img src="docs/assets/icons/features/feather.svg" width="22" height="22" alt=""><br><b>Light and fast</b><br><sub>Rust and GPUI, drawn on the GPU</sub></td>
   </tr>
+  <tr><th colspan="4" align="left">Learning and your own changes</th></tr>
+  <tr>
+    <td valign="top"><img src="docs/assets/icons/features/graduation-cap.svg" width="22" height="22" alt=""><br><b>Study</b><br><sub>Learn or practise with an agent</sub></td>
+    <td valign="top"><img src="docs/assets/icons/features/puzzle.svg" width="22" height="22" alt=""><br><b>Plugins</b><br><sub>Themes, mods and pages; ask an agent for one</sub></td>
+    <td></td>
+    <td></td>
+  </tr>
 </table>
 
 <table>
