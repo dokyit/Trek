@@ -37,7 +37,12 @@ function run(data, replies) {
     trek: { send: (t) => (sent.push(t), true), copy: () => true, replies, canDictate: true, dictate: (on) => (dictated.push(on), true) },
     addEventListener: (t, f) => { (listeners[t] = listeners[t] || []).push(f); },
   };
-  const document = { createElement: (t) => new El(t), getElementById: () => card, addEventListener: () => {} };
+  const document = {
+    createElement: (t) => new El(t),
+    createTextNode: (t) => Object.assign(new El('#text'), { textContent: t }),
+    getElementById: () => card,
+    addEventListener: () => {},
+  };
   vm.runInContext(script.replace('__DATA__', JSON.stringify(data)), vm.createContext({ window, document, navigator: { platform: 'MacIntel' } }));
   const cls = (c) => (e) => e.classList.contains(c);
   return {
@@ -50,6 +55,7 @@ function run(data, replies) {
     main: card.all(cls('go'))[0],
     line: () => (card.all(cls('sent'))[0] || { text: () => null }).text(),
     note: () => card.all(cls('note'))[0].textContent,
+    kept: () => card.all(cls('kept'))[0],
   };
 }
 const on = (list) => list.map((e) => e.classList.contains('on'));
@@ -64,12 +70,19 @@ assert.deepStrictEqual(on(c.options), [false, false, true, false]);
 assert.deepStrictEqual(on(c.sure), [false, true, false, false]);
 assert.strictEqual(c.box.value, "I honestly\ndon't remember");
 assert.ok(c.box.readOnly && c.mic.disabled);
+// Kept as it reads, not as a box: the lines as one paragraph, the box hidden.
+assert.ok(c.box.hidden);
+assert.strictEqual(c.kept().text(), "I honestlydon't remember");
+assert.deepStrictEqual(c.kept().children.map((e) => e.tag), ['p']);
+assert.deepStrictEqual(c.kept().children[0].children.map((e) => e.tag), ['#text', 'br', '#text']);
 assert.strictEqual(c.line(), 'Sent · C. Population growth $\\bar n$ · Unsure (45%)');
 // "I don't know": closed, nothing chosen.
 c = run(question, ["Question\nAnswer: I don't know\nWorking: (none)"]);
 assert.ok(c.card.classList.contains('done'));
 assert.deepStrictEqual(on(c.options), [false, false, false, false]);
 assert.strictEqual(c.box.value, '');
+assert.ok(!c.kept(), 'nothing written, nothing kept');
+assert.ok(c.box.parent.parent.hidden, 'and no empty box');
 // Another card's answer (another head) isn't this one's.
 c = run(question, [answer.replace('Question', 'Check · Step 1 of 4')]);
 assert.ok(!c.card.classList.contains('done'));
@@ -103,13 +116,35 @@ c.options[2].onclick();
 c.sure[1].onclick();
 c.main.onclick();
 assert.deepStrictEqual(c.sent, ['Question\nAnswer: C. Population growth $\\bar n$\nConfidence: Unsure (45%)\nWorking: I think it is population growth']);
-assert.ok(c.card.classList.contains('done') && c.box.readOnly);
+assert.ok(c.card.classList.contains('done') && c.box.readOnly && c.box.hidden);
+assert.strictEqual(c.kept().text(), 'I think it is population growth');
 assert.deepStrictEqual(on(c.options), [false, false, true, false]);
 assert.deepStrictEqual(on(c.sure), [false, true, false, false]);
 assert.strictEqual(c.box.value, 'I think it is population growth');
 // Heard after it closed: nothing changes.
 c.hear({ state: 'done', text: 'late' });
 assert.strictEqual(c.box.value, 'I think it is population growth');
+
+// Maths and Markdown in the thinking: the maths stays text, whole and with its delimiters, for
+// KaTeX to set (a `*` or `_` in it is never emphasis); bold, italic, code and lists are elements.
+const thinking = 'So $f(x)=x^2$ and **not** $a_1 * b_2$, `x*y` _maybe_\n\n- first $$\\int_0^1 f$$\n- second *step*\n1. one';
+c = run(question, [`Question\nAnswer: I don't know\nWorking: ${thinking}`]);
+const k = c.kept();
+const tags = (e) => e.children.map((x) => x.tag);
+assert.deepStrictEqual(tags(k), ['p', 'ul', 'ol']);
+const [p, ul, ol] = k.children;
+assert.deepStrictEqual(tags(p), ['#text', '#text', '#text', 'strong', '#text', '#text', '#text', 'code', '#text', 'em']);
+assert.deepStrictEqual(p.children.filter((e) => e.tag === '#text').map((e) => e.textContent),
+  ['So ', '$f(x)=x^2$', ' and ', ' ', '$a_1 * b_2$', ', ', ' ']);
+assert.strictEqual(p.children[3].text(), 'not');
+assert.strictEqual(p.children[7].text(), 'x*y');
+assert.strictEqual(p.children[9].text(), 'maybe');
+assert.deepStrictEqual(ul.children.map((li) => li.text()), ['first $$\\int_0^1 f$$', 'second step']);
+assert.deepStrictEqual(tags(ul.children[1]), ['#text', 'em']);
+assert.deepStrictEqual(ol.children.map((li) => li.text()), ['one']);
+// Nothing of it is ever HTML: markup typed in it is text.
+c = run(question, ['Question\nAnswer: I don\'t know\nWorking: <img src=x onerror=alert(1)>']);
+assert.strictEqual(c.kept().text(), '<img src=x onerror=alert(1)>');
 
 // A problem stays open for more working until it's solved.
 const problem = { kind: 'problem', step: '', prompt: 'x', options: [], targets: ['c2'] };

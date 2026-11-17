@@ -51,6 +51,13 @@ kbd{font:inherit;font-size:11px;opacity:.6;margin-left:6px}
 .done .opt.on{opacity:1}
 .done .sure button:not(.on){opacity:.55}
 .done textarea{resize:none}
+[hidden]{display:none!important}
+.kept{padding:9px 12px;border:1px solid var(--line);border-radius:10px;line-height:1.5;overflow-wrap:anywhere}
+.kept p,.kept ul,.kept ol{margin:0}
+.kept>*+*{margin-top:6px}
+.kept ul,.kept ol{padding-left:20px}
+.kept code{font-family:var(--trek-mono,ui-monospace,monospace);font-size:.92em;padding:1px 4px;border-radius:4px;background:color-mix(in srgb,var(--trek-fg) 7%,transparent)}
+.kept .katex-display{margin:.4em 0;overflow-x:auto;overflow-y:hidden}
 @keyframes in{from{opacity:0;transform:translateY(2px)}}
 @keyframes beat{50%{transform:scale(.86)}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
@@ -147,16 +154,62 @@ const foot = el("div", "foot"), note = el("span", "note");
 foot.append(note); card.append(foot);
 const button = (text, go, fn) => { const b = el("button", "btn" + (go ? " go" : ""), text); b.type = "button"; b.onclick = fn; foot.append(b); return b; };
 
-// Answered: what they chose, how sure and what they wrote stay, read-only, with what was sent.
+// Maths ($…$, $$…$$, \(…\), \[…\]) typeset by KaTeX once it has loaded; the page's load
+// typesets the whole card, and anything added after that is typeset as it's added.
+const MATH = {delimiters: [{left: "$$", right: "$$", display: true}, {left: "\\[", right: "\\]", display: true},
+  {left: "$", right: "$", display: false}, {left: "\\(", right: "\\)", display: false}], throwOnError: false};
+const typeset = n => { if (window.renderMathInElement) renderMathInElement(n, MATH); };
+
+// What they wrote, as it reads once sent: basic Markdown (paragraphs, lists, **bold**, *italic*,
+// `code`) built as elements, never as HTML, with the maths left as text for KaTeX to set. The
+// maths is set aside first, so a `*` or `_` in it is never taken for emphasis.
+const SPAN = /\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$[^$\n]+?\$/g;
+const INLINE = /(`[^`\n]+`)|\*\*([^*\n]+?)\*\*|\*([^*\s][^*\n]*?)\*|(?<![\w\\])_([^_\n]+?)_(?!\w)|\u0000(\d+)\u0000/g;
+function inline(parent, s, maths) {
+  const re = new RegExp(INLINE.source, "g");
+  let at = 0, m;
+  while ((m = re.exec(s))) {
+    if (m.index > at) parent.append(document.createTextNode(s.slice(at, m.index)));
+    if (m[1]) parent.append(el("code", null, m[1].slice(1, -1)));
+    else if (m[2] != null) { const b = el("strong"); inline(b, m[2], maths); parent.append(b); }
+    else if (m[3] != null || m[4] != null) { const i = el("em"); inline(i, m[3] != null ? m[3] : m[4], maths); parent.append(i); }
+    else parent.append(document.createTextNode(maths[+m[5]]));
+    at = m.index + m[0].length;
+  }
+  if (at < s.length) parent.append(document.createTextNode(s.slice(at)));
+}
+function kept(text) {
+  const maths = [], box = el("div", "kept");
+  const lines = text.replace(SPAN, x => "\u0000" + (maths.push(x) - 1) + "\u0000").split("\n");
+  let list = null, para = null;
+  for (const line of lines) {
+    const item = line.match(/^\s*([-*•]|\d+[.)])\s+(.*)$/);
+    if (item) {
+      const tag = /\d/.test(item[1]) ? "ol" : "ul";
+      if (!list || list.tag !== tag) { list = el(tag); list.tag = tag; box.append(list); }
+      const li = el("li"); inline(li, item[2], maths); list.append(li); para = null;
+    } else if (!line.trim()) { list = null; para = null; }
+    else {
+      list = null;
+      if (para) para.append(el("br")); else { para = el("p"); box.append(para); }
+      inline(para, line, maths);
+    }
+  }
+  return box;
+}
+
+// Answered: what they chose, how sure and what they wrote stay, with what was sent. What they
+// wrote is set as it reads (Markdown and maths typeset), no longer a box to type in.
 function close(lines) {
   closed = true; card.classList.add("done"); work.readOnly = true;
-  if (work.value) { work.style.height = "auto"; work.style.height = (work.scrollHeight + 2) + "px"; }
+  if (work.value.trim()) { const k = kept(work.value); work.hidden = true; wrap.append(k); typeset(k); }
+  else field.hidden = true;
   if (mic) { if (taking) T.dictate(false); mic.disabled = true; }
   card.querySelectorAll("button").forEach(b => b.disabled = true);
   const s = el("div", "sent");
   s.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
   s.append(el("span", null, "Sent · " + lines.map(l => l.replace(/^[^:]+: /, "")).join(" · ")));
-  foot.replaceWith(s);
+  foot.replaceWith(s); typeset(s);
 }
 function send(lines, done) {
   const text = [HEAD, ...lines, "Working: " + (work.value.trim() || "(none)")].join("\n");
@@ -207,6 +260,5 @@ document.addEventListener("keydown", e => {
   const k = e.key.toUpperCase(), i = /^[1-9]$/.test(k) ? +k - 1 : k.length === 1 ? k.charCodeAt(0) - 65 : -1;
   if (i >= 0 && i < rows.length) { e.preventDefault(); choose(i); rows[i].focus(); }
 });
-window.addEventListener("load", () => window.renderMathInElement && renderMathInElement(card, {
-  delimiters: [{left: "$$", right: "$$", display: true}, {left: "$", right: "$", display: false}], throwOnError: false}));
+window.addEventListener("load", () => typeset(card));
 </script></body></html>
