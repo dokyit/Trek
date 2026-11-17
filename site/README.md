@@ -48,8 +48,7 @@ Three views are worth a look before a change goes out:
 - **Paper and Night.** The page follows the system's light or dark setting and has no switch of
   its own. Change the system setting, or the browser's emulation of it, to see the other theme.
 - **Without the script, and with Reduce Motion on.** Nothing is hidden waiting for the script:
-  the window lies flat, every section is there, and each loop shows its first frame with the
-  player's own controls. Every download link leads to the latest release. The page must say the
+  the window lies flat, every section is there, and each loop stays a still picture (its poster). Every download link leads to the latest release. The page must say the
   same things in both.
 - **Narrow, under 768 px.** The first screen's window keeps a near-real size and runs off the right
   edge, so the sidebar and its Inbox stay readable.
@@ -124,8 +123,8 @@ staged in a line beside each picture.
 |---|---|---|
 | `window-paper.webp`, `window-night.webp` | The app's window, 1040 by 700 points, with its shadow: 2172 by 1492 px | At real size, 1086 by 746, in the first screen, tilted back a few degrees until the page scrolls |
 | `features/<name>-paper.webp`, `features/<name>-night.webp` | Crops of real captures of the app at 2x: `access`, `worktree`, `study`, `plugins`, `undo` (Paper only), `iphone-threads` | One per feature, at their 1x size or a little under |
-| `features/<name>.mp4`, `features/<name>-poster.webp` | Silent H.264 loops of real screen recordings and their first frames: `inbox`, `agents`, `themes`, `iphone` | Play while on screen; with Reduce Motion or no script, the first frame and the player's controls |
-| `features/menubar-<state>-<light,dark>.png` | The app's own menu bar icons, copied from `crates/trek-assets/assets/brand/tray` | In the menu bar feature |
+| `features/<name>.mp4`, `features/<name>-poster.webp` | Silent H.264 loops of real screen recordings and their first frames: `inbox`, `agents`, `themes`, `iphone` | The poster is the picture in the page; the script turns it into the recording as it comes near, and it plays while on screen. With Reduce Motion or no script the poster stays |
+| `features/menubar-{idle,working,attention}.svg` | The app's own menu bar icons, copied from `assets/brand` | In the menu bar feature, large, each with its name |
 | `og.jpg` | The share image, 1200 by 630 px: the signpost and the line on the lavender sky | In link previews |
 | `mark.svg`, the icons, `favicon.*`, `apple-touch-icon.png` | The signpost: one post and two boards. `mark.svg` is the only copy of its shape; `script/site/make_icons.py` draws the rest from it | The bar, the first screen, the footer, the browser and the web manifest |
 
