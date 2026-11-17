@@ -71,16 +71,17 @@ enum TextSizeChoice: String, CaseIterable, Identifiable {
     }
 }
 
-/// The app icons, as the Mac offers them (its Settings › Appearance › App icon): Night is the
-/// app's own, and the alternatives are `AppIcon-Paper` and `AppIcon-Glass` in the asset catalog
-/// (ios/scripts/app-icons.sh).
+/// The app icons, as the Mac offers them (its Settings › Appearance › App icon): the signpost
+/// on navy (Night) is the app's own, and the alternatives are the lavender tile (`AppIcon-Paper`,
+/// shown as "Lavender": it was a cream tile once, and the name iOS stores stays) and the glass
+/// one (`AppIcon-Glass`) in the asset catalog (ios/scripts/app-icons.sh).
 enum AppIconChoice: String, CaseIterable, Identifiable {
     case night, paper, glass
     var id: String { rawValue }
     var label: String {
         switch self {
         case .night: "Night"
-        case .paper: "Paper"
+        case .paper: "Lavender"
         case .glass: "Glass"
         }
     }

@@ -31,12 +31,12 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 BRAND = os.path.join(ROOT, "assets", "brand")
 TRAY_OUT = os.path.join(ROOT, "crates", "trek-assets", "assets", "brand", "tray")
 ICO_SIZES = [16, 20, 24, 32, 48, 64, 128, 256]
-# Sizes with art of their own (assets/brand/trek_icon.py's small sizes: the mountain drawn on
-# whole pixels, without its trail at 16 px), where the full art blurs. The rest scale the full art.
+# Sizes with art of their own (assets/brand/trek_icon.py's small sizes: the signpost drawn pixel
+# by pixel), where the full art blurs. The rest scale the full art.
 SMALL_ART = [16, 32]
 TRAY_SIZES = [16, 20, 24, 32]
 STATES = ["idle", "working", "attention"]
-# Night is the Mac bundle's icon (script/bundle.sh: the mountain on charcoal) and the exe's own;
+# Night is the Mac bundle's icon (script/bundle.sh: the signpost on navy) and the exe's own;
 # paper and glass are the other two Appearance can put on the windows while Trek runs.
 APP_ICONS = [("trek.ico", "trek-icon-night.svg"), ("trek-paper.ico", "trek-icon-paper.svg"), ("trek-glass.ico", "trek-icon-glass.svg")]
 

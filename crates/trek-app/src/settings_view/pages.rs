@@ -616,17 +616,19 @@ impl SettingsView {
         h_flex()
             .gap(px(18.))
             .children(
+                // The signpost on navy, on lavender, and in glass at dusk. The ids keep the
+                // names the settings file stores (`paper` was a cream tile once).
                 [
-                    (AppIcon::Night, "Night"),
-                    (AppIcon::Paper, "Paper"),
-                    (AppIcon::Glass, "Glass"),
+                    (AppIcon::Night, "Night", "Night"),
+                    (AppIcon::Paper, "Paper", "Lavender"),
+                    (AppIcon::Glass, "Glass", "Glass"),
                 ]
                 .into_iter()
-                .map(|(choice, label)| {
+                .map(|(choice, key, label)| {
                     let selected = choice == current;
                     let set = set.clone();
                     v_flex()
-                        .id(SharedString::from(format!("app-icon-{label}")))
+                        .id(SharedString::from(format!("app-icon-{key}")))
                         .test_support()
                         .items_center()
                         .gap(px(6.))

@@ -1,58 +1,83 @@
-"""The website's own icons, from the mark's geometry: favicon.svg, favicon.ico, the touch icon and
-the manifest's icons. The small sizes are drawn for their size (no trail dots at 16 px, fewer and
-larger at 32), as the app's are. Needs Google Chrome for rendering and Pillow for the .ico.
-make_icons.py SITE_DIR SCRATCH_DIR"""
-import os, subprocess, sys, shutil, tempfile
+"""The website's own icons and share picture, from the signpost in site/assets/img/mark.svg (the only
+copy of its shape on the site, the app's own geometry): favicon.svg, favicon.ico, the touch icon,
+the manifest's icons and og.jpg. The .ico's 16 and 32 px frames are the app icon's own
+pixel-by-pixel art (assets/brand/trek-icon-paper-{16,32}.svg). Needs Google Chrome for rendering
+and Pillow for the .ico and the .jpg:
+
+    uv run --with pillow python -I script/site/make_icons.py site SCRATCH_DIR
+"""
+import os, re, shutil, subprocess, sys, tempfile
 from PIL import Image
 
-site, scratch = sys.argv[1], sys.argv[2]
+site, scratch = os.path.abspath(sys.argv[1]), sys.argv[2]
+BRAND = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "assets", "brand")
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-OUT = "M9.5 78.5 32.8 46.6 43 43.4 56 21 86.5 78.5Z"
-RIDGE = [(56, 21), (60.6, 39.6), (55, 51.6), (62.6, 64.8), (58.8, 78.5)]
-CLIP = "M56 4 " + " ".join(f"L{x} {y}" for x, y in RIDGE) + " L58.8 96H100V4Z"
-FULL = [(29, 74.2, 2.4), (36, 69.2, 2.4), (43, 66, 2.4), (47.2, 60, 2.4), (44, 53.2, 2.4), (48, 47, 2.4), (51.6, 40.4, 2.4), (53.6, 34, 2.4), (54.6, 28.2, 2)]
-FEW = [(31, 73, 3.6), (43.5, 64.5, 3.6), (45.5, 51, 3.6), (52.5, 38, 3.4)]
-NIGHT = dict(tile="#1A1A1C", lit="#FF7A3D", shade="#C9551F", flag="#FFC7A0")
-PAPER = dict(tile="#FBF8F3", lit="#E85D1F", shade="#B8461A", flag="#B8461A")
 
-def art(c, dots, flag=1.0):
-    body = lambda col: f'<path d="{OUT}" fill="{col}" stroke="{col}" stroke-width="4.5" stroke-linejoin="round"/>'
-    pole_top = 24 - 15.4 * flag
-    cloth = (f'<path d="M56.4 {pole_top} C{56.4+2.9*flag} {pole_top-1.4*flag} {56.4+5.1*flag} {pole_top+1.6*flag} {56.4+9.3*flag} {pole_top+0.2*flag} '
-             f'V{pole_top+6.6*flag} C{56.4+5.1*flag} {pole_top+8*flag} {56.4+2.9*flag} {pole_top+5*flag} 56.4 {pole_top+6.4*flag} Z" fill="{c["flag"]}"/>')
-    return (f'<path d="M56 24V{pole_top}" stroke="{c["flag"]}" stroke-width="{2*flag}" stroke-linecap="round"/>{cloth}'
-            f'{body(c["lit"])}<clipPath id="r"><path d="{CLIP}"/></clipPath><g clip-path="url(#r)">{body(c["shade"])}</g>'
-            f'<g fill="{c["tile"]}">' + "".join(f'<circle cx="{x}" cy="{y}" r="{r}"/>' for x, y, r in dots) + "</g>")
+mark = open(f"{site}/assets/img/mark.svg").read()
+paths = {m.group(1): m.group(0) for m in re.finditer(r'<path id="([\w-]+)"[^>]*/>', mark)}
 
-def svg(c, dots=FULL, flag=1.0, tile="round", scale=1.0):
-    bg = f'<rect width="96" height="96" rx="22" fill="{c["tile"]}"/>' if tile == "round" else f'<rect width="96" height="96" fill="{c["tile"]}"/>'
-    inner = art(c, dots, flag)
-    if scale != 1.0: inner = f'<g transform="translate(48 48) scale({scale}) translate(-48 -48)">{inner}</g>'
-    return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96">{bg}{inner}</svg>\n'
+DAY = dict(tile="#C9C1DE", post="#1F1714", board="#EE5A24")
+NIGHT = dict(tile="#1D1A2C", post="#F6F1EA", board="#FF7A3D")
 
-def render(markup, px, out):
+
+def art(c, cls=False):
+    """The mark's three paths, coloured, in the app icon's 96-unit space (the mark's box is 13 13 70 70)."""
+    def one(key, colour, board):
+        p = paths[key].replace(f' id="{key}"', "")
+        paint = f' class="{"b" if board else "p"}"' if cls else f' fill="{colour}"'
+        return p.replace("<path", "<path" + paint, 1)
+    return one("post", c["post"], False) + one("board-a", c["board"], True) + one("board-b", c["board"], True)
+
+
+def tile(c, size=96, scale=1.0, rounded=True, cls=False):
+    """The mark on its lavender (or night) tile. At scale 1 it sits as on the app icon (a 96-unit
+    tile, corners of 22); a smaller scale leaves more tile around it."""
+    s = 96 / scale  # how much of the mark's space the tile spans
+    x = y = 48 - s / 2
+    r = 22 / scale if rounded else 0
+    bg = f'<rect class="t" x="{x}" y="{y}" width="{s}" height="{s}" rx="{r}"/>' if cls else f'<rect x="{x}" y="{y}" width="{s}" height="{s}" rx="{r}" fill="{c["tile"]}"/>'
+    return f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="{x} {y} {s} {s}">{"%STYLE%" if cls else ""}{bg}{art(c, cls)}</svg>'
+
+
+def render(html, w, h, out):
     d = tempfile.mkdtemp(prefix="trek-icons-")
     page = os.path.join(d, "i.html")
-    open(page, "w").write(f'<!doctype html><style>html,body{{margin:0;background:transparent}}svg{{display:block;width:{px}px;height:{px}px}}</style>{markup}')
+    open(page, "w").write(f"<!doctype html><meta charset=utf-8><style>html,body{{margin:0;background:transparent}}svg{{display:block}}</style>{html}")
     shot = os.path.join(d, "s.png")
-    side = max(px, 600)
     subprocess.run([CHROME, "--headless=new", f"--user-data-dir={d}/p", "--hide-scrollbars", "--force-device-scale-factor=1", "--default-background-color=00000000",
-                    f"--window-size={side},{side}", f"--screenshot={shot}", "file://" + page], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=90)
-    Image.open(shot).convert("RGBA").crop((0, 0, px, px)).save(out)
+                    f"--window-size={max(w, 500)},{max(h, 500)}", f"--screenshot={shot}", "file://" + page], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=90)
+    Image.open(shot).convert("RGBA").crop((0, 0, w, h)).save(out)
     shutil.rmtree(d, ignore_errors=True)
 
+
 os.makedirs(scratch, exist_ok=True)
-open(f"{site}/favicon.svg", "w").write(svg(NIGHT, FEW, 1.2))
-open(f"{site}/assets/img/trek-mark.svg", "w").write(svg(NIGHT))
-open(f"{site}/assets/img/trek-mark-paper.svg", "w").write(svg(PAPER))
-# the .ico: 16 without dots, 32 with a few, 48 with the whole trail
-sizes = {16: svg(NIGHT, [], 1.3), 32: svg(NIGHT, FEW, 1.2), 48: svg(NIGHT)}
-for px, markup in sizes.items(): render(markup, px, f"{scratch}/ico-{px}.png")
+
+# The favicon follows the system's light or dark setting, as the page does.
+style = ("<style>.t{fill:#C9C1DE}.p{fill:#1F1714}.b{fill:#EE5A24}"
+         "@media (prefers-color-scheme:dark){.t{fill:#1D1A2C}.p{fill:#F6F1EA}.b{fill:#FF7A3D}}</style>")
+open(f"{site}/favicon.svg", "w").write(tile(DAY, 96, cls=True).replace("%STYLE%", style) + "\n")
+
+# The .ico: at 16 and 32 px the app's own pixel-tuned icons, at 48 the drawing.
+for px in (16, 32):
+    render(open(os.path.join(BRAND, f"trek-icon-paper-{px}.svg")).read().replace("<svg ", f'<svg width="{px}" height="{px}" ', 1), px, px, f"{scratch}/ico-{px}.png")
+render(tile(DAY, 48), 48, 48, f"{scratch}/ico-48.png")
 ims = [Image.open(f"{scratch}/ico-{px}.png") for px in (48, 32, 16)]
 ims[0].save(f"{site}/favicon.ico", format="ICO", append_images=ims[1:], sizes=[(48, 48), (32, 32), (16, 16)])
-# full-bleed squares: iOS rounds the touch icon itself, and a maskable icon keeps its art in the middle
-render(svg(NIGHT, tile="square", scale=0.86), 180, f"{site}/apple-touch-icon.png")
-render(svg(NIGHT), 192, f"{site}/assets/img/icon-192.png")
-render(svg(NIGHT), 512, f"{site}/assets/img/icon-512.png")
-render(svg(NIGHT, tile="square", scale=0.70), 512, f"{site}/assets/img/icon-maskable-512.png")
+
+# Full-bleed squares: iOS rounds the touch icon itself, and a maskable icon keeps its art in the middle.
+render(tile(DAY, 180, 0.9, rounded=False), 180, 180, f"{site}/apple-touch-icon.png")
+render(tile(DAY, 192), 192, 192, f"{site}/assets/img/icon-192.png")
+render(tile(DAY, 512), 512, 512, f"{site}/assets/img/icon-512.png")
+render(tile(DAY, 512, 0.76, rounded=False), 512, 512, f"{site}/assets/img/icon-maskable-512.png")
+
+# The share picture: the lavender sky, the signpost and the line, in the site's own type.
+font = f"file://{site}/assets/fonts/BricolageGrotesque.woff2"
+og = f"""<style>@font-face{{font-family:B;src:url({font})}}
+.og{{width:1200px;height:630px;box-sizing:border-box;padding:0 96px;display:flex;align-items:center;gap:56px;
+background:linear-gradient(180deg,#C9C1DE,#DCD6EA);font-family:B;color:#1F1714}}
+.og svg{{width:250px;height:250px;flex:none}} .og h1{{margin:0;font-weight:680;font-size:96px;line-height:.95;letter-spacing:-.04em}}
+.og p{{margin:22px 0 0;font-weight:500;font-size:38px;letter-spacing:-.02em;color:#463C47}}</style>
+<div class="og"><svg viewBox="13 13 70 70">{art(DAY)}</svg><div><h1>Every agent.<br>One trail.</h1><p>trekdesktop.com</p></div></div>"""
+render(og, 1200, 630, f"{scratch}/og.png")
+Image.open(f"{scratch}/og.png").convert("RGB").save(f"{site}/assets/img/og.jpg", quality=90, optimize=True)
 print("icons written")

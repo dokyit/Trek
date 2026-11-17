@@ -1227,17 +1227,37 @@ fn page_vars(cx: &App) -> String {
 
 fn internal_page(path: &str, vars: &str) -> (&'static str, Cow<'static, [u8]>) {
     match path {
-        // The mark in the page's theme (`page_vars` says which): Paper's is deeper, with a dark
-        // flag, where Night's flag is light.
+        // The mark in the page's theme (`page_vars` says which): Night's post is cream, for a
+        // dark page, Paper's near-black.
         "/mark.png" => (
             "image/png",
             Cow::Owned(crate::assets::brand_bytes(mark_image(vars)).unwrap_or_default()),
         ),
         _ => (
             "text/html; charset=utf-8",
-            Cow::Owned(START_HTML.replace("/*VARS*/", vars).into_bytes()),
+            // The image's address names the theme, so a page drawn again after the theme
+            // changed doesn't keep the other theme's mark from the web view's cache (Night's
+            // cream post is all but invisible on Paper's white).
+            Cow::Owned(
+                START_HTML
+                    .replace("/*VARS*/", vars)
+                    .replace(
+                        "src=\"/mark.png\"",
+                        &format!("src=\"/{}\"", mark_address(vars)),
+                    )
+                    .into_bytes(),
+            ),
         ),
     }
+}
+
+/// Where an internal page with these variables asks for the mark: the same image (the path
+/// alone picks the route), with its theme in the query.
+fn mark_address(vars: &str) -> String {
+    let theme = mark_image(vars)
+        .trim_start_matches("brand/")
+        .trim_end_matches(".png");
+    format!("mark.png?{theme}")
 }
 
 /// The mark's image for an internal page with these variables.
@@ -4423,6 +4443,14 @@ mod tests {
                 "{image} is embedded and served"
             );
         }
+        // The page asks for each theme's mark at an address of its own, so a cached one of the
+        // other theme isn't shown after a switch.
+        let page =
+            |vars: &str| String::from_utf8(super::internal_page("/", vars).1.into_owned()).unwrap();
+        let (dark, light) = (page("color-scheme:dark;"), page("color-scheme:light;"));
+        assert!(dark.contains("src=\"/mark.png?mark\""), "{dark}");
+        assert!(light.contains("src=\"/mark.png?mark-paper\""));
+        assert!(!dark.contains("src=\"/mark.png\""));
     }
 
     #[test]

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="13 13 70 70">
+<!-- Trek's mark, the signpost: a post with a chamfered cap, the upper board pointing right with a
+     trail blaze cut through it, and a shorter lower board pointing left with a swallowtail. Its
+     geometry is the app's own (assets/brand/trek-mark.svg, written by assets/brand/trek_icon.py);
+     this file is the site's only copy of it. Pages draw it with <use href="/assets/img/mark.svg#post">
+     and #board-a / #board-b, so the page's CSS colours it (each part takes `fill`) and can move each
+     board. script/site/make_icons.py reads the same three paths for the favicon, the touch icon,
+     the manifest's icons and the share picture. When the app's mark changes, copy its three paths
+     here and run that script. -->
+<defs>
+  <path id="post" d="M41.24 19.86A1.26 1.26 0 0 1 41.94 18.73L49.5 14.95A1.26 1.26 0 0 1 51.32 16.08L51.32 79.92A1.26 1.26 0 0 1 50.06 81.18L42.5 81.18A1.26 1.26 0 0 1 41.24 79.92Z"/>
+  <path id="board-a" fill-rule="evenodd" d="M29.25 26.65A1.26 1.26 0 0 1 30.37 25.27L74.65 20.62A1.26 1.26 0 0 1 75.97 22.29L70.77 37.19A1.26 1.26 0 0 1 69.71 38.02L32.12 41.97A1.26 1.26 0 0 1 30.74 40.85ZM59.58 26L62.93 25.65L63.89 34.83L60.55 35.19Z"/>
+  <path id="board-b" fill-rule="evenodd" d="M20.33 50.67A1.26 1.26 0 0 1 21.04 48.53L56.81 43.5A1.26 1.26 0 0 1 58.24 44.57L60.11 57.88A1.26 1.26 0 0 1 59.04 59.31L23.28 64.33A1.26 1.26 0 0 1 22 62.47L25.59 55.95Z"/>
+</defs>
+</svg>

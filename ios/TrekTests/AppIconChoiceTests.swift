@@ -2,12 +2,13 @@ import Testing
 import UIKit
 @testable import Trek
 
-/// The app icon picker: Night is the app's own icon, Paper and Glass the alternatives.
+/// The app icon picker: Night is the app's own icon, Lavender (stored as Paper) and Glass the
+/// alternatives.
 struct AppIconChoiceTests {
     @Test func nightIsTheAppsOwnIcon() {
         #expect(AppIconChoice.night.iconName == nil)
         #expect(AppIconChoice.of(nil) == .night)
-        #expect(AppIconChoice.allCases.map(\.label) == ["Night", "Paper", "Glass"])
+        #expect(AppIconChoice.allCases.map(\.label) == ["Night", "Lavender", "Glass"])
         #expect(AppIconChoice.of("AppIcon-Paper") == .paper)
         #expect(AppIconChoice.of("AppIcon-Glass") == .glass)
     }

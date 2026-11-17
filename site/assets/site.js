@@ -1,14 +1,16 @@
 /* trekdesktop.com
    1. The download: which build is the visitor's, and where the latest release's files are.
-   2. The hiker, walking as he does in the app, on his trail in the story.
-   3. The story in the middle of the page, played by scrolling.
+   2. The bar, which gains a ground once the page has moved under it.
+   3. The first screen's window, which lies back and rises flat as the page scrolls.
+   4. Things that come in as they are reached, and the app's recordings, which play only while seen.
    The page reads whole without any of this. The only request it makes is to GitHub's API. */
 (() => {
   "use strict";
 
   const all = (sel, root = document) => Array.from(root.querySelectorAll(sel));
   const still = matchMedia("(prefers-reduced-motion: reduce)");
-  const dark = matchMedia("(prefers-color-scheme: dark)");
+  const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
+  document.documentElement.classList.add("js");
 
   /* ---------- 1. Download ---------- */
 
@@ -93,53 +95,53 @@
     }
   }
 
+  const link = (href, text) => {
+    const a = document.createElement("a");
+    a.href = href;
+    a.className = "text-link";
+    a.textContent = text;
+    return a;
+  };
+
   function paint(who, release) {
     const assets = (release && release.assets) || {};
     const href = (key) => (assets[key] && assets[key].url) || FALLBACK[key];
 
-    for (const link of all("[data-build]")) {
-      const key = link.dataset.build;
-      link.href = href(key);
-      const size = link.querySelector("[data-size]");
+    for (const a of all("[data-build]")) {
+      const key = a.dataset.build;
+      a.href = href(key);
+      const size = a.querySelector("[data-size]");
       if (size && assets[key] && assets[key].size) size.textContent = megabytes(assets[key].size);
-      link.classList.toggle("is-yours", key === who.build);
+      a.classList.toggle("is-yours", key === who.build);
     }
 
     const primary = document.querySelector("[data-dl-primary]");
     const label = document.querySelector("[data-dl-label]");
+    const other = document.querySelector("[data-dl-other]");
     const fine = document.querySelector("[data-dl-fine]");
-    if (primary && label && fine) {
-      if (who.build) {
-        primary.href = href(who.build);
-        label.textContent = who.os === "windows" ? "Download for Windows" : "Download for macOS";
-        const size = assets[who.build] && assets[who.build].size ? `, ${megabytes(assets[who.build].size)}` : "";
-        const version = release && release.version ? ` Version ${release.version}, ${CHIP[who.build]}${size}.` : "";
-        fine.textContent = `Free and open source.${version} The first launch asks you to `;
-        const once = document.createElement("a");
-        once.href = "#install";
-        once.className = "text-link";
-        once.textContent = "allow it once";
-        fine.append(once, ".");
-        if (who.os === "mac" && !who.sure) {
-          const other = document.createElement("a");
-          other.href = href("mac-intel");
-          other.className = "text-link";
-          other.textContent = "Take the Intel build";
-          fine.append(" On an Intel Mac? ", other, ".");
-        }
-      } else if (who.os === "mobile" || who.os === "linux") {
-        primary.href = "#install";
-        label.textContent = "See the downloads";
-        if (who.os === "mobile") {
-          const remote = document.createElement("a");
-          remote.href = "/remote/";
-          remote.className = "text-link";
-          remote.textContent = "the remote";
-          fine.textContent = "Trek is a desktop app. Open this page on your Mac or PC to download it. On a phone, use ";
-          fine.append(remote, " to answer your agents.");
-        } else {
-          fine.textContent = "There is no Linux build yet. Trek runs on macOS and Windows.";
-        }
+    if (!primary || !label || !fine) return;
+    if (who.build) {
+      const windows = who.os === "windows";
+      primary.href = href(who.build);
+      label.textContent = windows ? "Download for Windows" : "Download for macOS";
+      if (other) {
+        other.href = windows ? href("mac-arm") : href("win-setup");
+        other.textContent = windows ? "For macOS" : "For Windows";
+      }
+      const size = assets[who.build] && assets[who.build].size ? `, ${megabytes(assets[who.build].size)}` : "";
+      const version = release && release.version ? ` Version ${release.version}, ${CHIP[who.build]}${size}.` : "";
+      fine.textContent = `Free and open source.${version} The first launch asks you to `;
+      fine.append(link("#install", "allow it once"), ".");
+      if (who.os === "mac" && !who.sure) fine.append(" On an Intel Mac? ", link(href("mac-intel"), "Take the Intel build"), ".");
+    } else if (who.os === "mobile" || who.os === "linux") {
+      primary.href = "#install";
+      label.textContent = "See the downloads";
+      if (other) other.hidden = true;
+      if (who.os === "mobile") {
+        fine.textContent = "Trek is a desktop app. Open this page on your Mac or PC to download it. On a phone, use ";
+        fine.append(link("/remote/", "the remote"), " to answer your agents.");
+      } else {
+        fine.textContent = "There is no Linux build yet. Trek runs on macOS and Windows.";
       }
     }
 
@@ -157,315 +159,125 @@
     latestRelease().then((release) => { if (release) paint(who, release); });
   });
 
-  /* ---------- 2. The hiker ----------
-     As in the app (crates/trek-mascot/src/lib.rs): a 16-frames-a-second clock, 16 art pixels a
-     second, a pose for every 4 pixels of ground covered, a rest and a turn at each end of the
-     trail. Time moves him; scrolling only starts and stops the clock. Pressing him stops him and
-     sends him on again. */
+  /* ---------- 2. The bar ---------- */
 
-  const POSES = [
-    ["....hhhh....", "..hhhhhhhh..", "....ssss....", "....ssos....", ".EE..ss.....", "EEEEKKKK....", "EEEEKKKKK...", "EeEEKKKKs...", "EeEEKKKK....", ".EEEKKKK....", "....KKKK....", "....KKK.....", "....KKK.....", "....KKK.....", "....KKK.....", "....bbbb...."],
-    ["............", "....hhhh....", "..hhhhhhhh..", "....ssss....", "....ssos....", ".EE..ss.....", "EEEEKKKK....", "EEEEKKKK....", "EeEEKKKK....", "EeEEsKKK....", ".EEEKKKK....", "....KKKK....", "...kkKKKK...", "..kk...KK...", ".kk.....KK..", ".b......bbb."],
-    ["....hhhh....", "..hhhhhhhh..", "....ssss....", "....ssos....", ".EE..ss.....", "EEEEKKKK....", "EEEEKKKKK...", "EeEEKKKKs...", "EeEEKKKK....", ".EEEKKKK....", "....KKKK....", "....KKkk....", "....KK.kk...", "....KK..k...", "....KK..bb..", "....bbb....."],
-    ["............", "....hhhh....", "..hhhhhhhh..", "....ssss....", "....ssos....", ".EE..ss.....", "EEEEKKKK....", "EEEEKKKKK...", "EeEEKKKKKs..", "EeEEKKKK....", ".EEEKKKK....", "....KKKK....", "...KKkkkk...", "..KK...kk...", ".KK.....kk..", ".b......bbb."],
-    ["....hhhh....", "..hhhhhhhh..", "....ssss....", "....ssos....", ".EE..ss.....", "EEEEKKKK....", "EEEEKKKKK...", "EeEEKKKKs...", "EeEEKKKK....", ".EEEKKKK....", "....kkKK....", "....kkKK....", "....kk.KK...", "....kk..K...", "....kk..bb..", "....bbb....."],
-  ];
-  // [night, paper]: the pack is ember, the body is the theme's ink at two strengths.
-  const INK = {
-    h: ["#C9A47C", "#B58A5C"], s: ["#EBC6A0", "#E9BF95"], o: ["#1A1A1C", "#1A1A1C"], K: ["#9A9AA2", "#55555B"],
-    k: ["#5C5C63", "#9C9A95"], b: ["#8A5A2E", "#6B4423"], E: ["#FF7A3D", "#E85D1F"], e: ["#C9551F", "#B8461A"],
-  };
-  const FPS = 16, WALK = 16, RAMP = 0.35, REST = 1.2, STEP = 4, WIDE = 12;
+  const bar = document.querySelector(".bar");
 
-  // One frame on, along a trail `travel` art pixels long. Line for line the app's Walk::step.
-  function step(w, travel) {
-    const dt = 1 / FPS;
-    if (w.rest > 0) {
-      w.rest = Math.max(0, w.rest - dt / REST);
-      if (w.rest > 0) return;
+  /* ---------- 3. The first screen's window ----------
+     It lies back a little, as if standing on the ground line, and comes up flat and a touch nearer
+     over the first screen's height of scrolling. Where there is a mouse it turns a degree or two
+     towards it. Transforms only; it runs backwards as readily. */
+
+  const hero = document.querySelector("[data-hero]");
+  const win = hero && hero.querySelector("[data-window] picture");
+  const mouse = matchMedia("(hover: hover) and (pointer: fine)");
+  const aim = { x: 0 }, look = { x: 0 };
+
+  /* ---------- 4. Drift ----------
+     A panel's picture moves a few pixels against the scroll, so the page has depth as it passes. */
+
+  const drifters = new Set();
+  const driftable = all("[data-drift]");
+
+  let raf = 0, painted = "";
+  function frame() {
+    raf = 0;
+    const y = scrollY, h = innerHeight;
+    if (bar) bar.classList.toggle("is-stuck", y > 8);
+    if (still.matches) return;
+
+    let moving = false;
+    if (win) {
+      look.x += (aim.x - look.x) * 0.12;
+      if (Math.abs(aim.x - look.x) > 0.001) moving = true; else look.x = aim.x;
+      const p = clamp(y / (h * 0.75));
+      const e = 1 - (1 - p) ** 3;
+      const key = `${e.toFixed(4)} ${look.x.toFixed(4)}`;
+      if (key !== painted) {
+        painted = key;
+        win.style.setProperty("--tilt", `${(10 * (1 - e)).toFixed(3)}deg`);
+        win.style.setProperty("--lift", `${(-40 * e).toFixed(2)}px`);
+        win.style.setProperty("--zoom", (0.94 + 0.06 * e).toFixed(4));
+        win.style.rotate = `0 1 0 ${(look.x * 2.2).toFixed(3)}deg`;
+      }
     }
-    travel = Math.max(travel, 1);
-    const left = (w.right ? 1 - w.at : w.at) * travel;
-    const accel = WALK / RAMP;
-    const v = Math.min(w.speed + accel * dt, WALK, Math.sqrt(2 * accel * left));
-    const d = Math.max(v * dt, 0.25);
-    if (d >= left) {
-      w.at = w.right ? 1 : 0; w.right = !w.right; w.speed = 0; w.rest = 1; w.walked = 0;
-    } else {
-      w.at += (w.right ? d : -d) / travel; w.speed = v; w.walked += d;
+    for (const el of drifters) {
+      const box = el.getBoundingClientRect();
+      const k = Number(el.dataset.drift) || 1;
+      const t = clamp((box.top + box.height / 2) / h, -0.2, 1.2) - 0.5; // -0.5 at the top, 0.5 at the bottom
+      const target = el.matches(".phone") ? el : el.querySelector(".shot");
+      if (target) target.style.setProperty("--drift", `${(t * 36 * k).toFixed(1)}px`);
     }
+    if (moving) go();
   }
-  const pose = (w) => (w.rest > 0 ? 0 : 1 + (Math.floor(w.walked / STEP) % 4));
-  const facingRight = (w) => (w.rest > 0.5 ? !w.right : w.right);
+  const go = () => { if (!raf) raf = requestAnimationFrame(frame); };
+  addEventListener("scroll", go, { passive: true });
+  addEventListener("resize", go);
+  addEventListener("pointermove", (e) => {
+    if (e.pointerType !== "mouse" || !mouse.matches || scrollY > innerHeight) return;
+    aim.x = (e.clientX / innerWidth) * 2 - 1;
+    go();
+  }, { passive: true });
+  document.documentElement.addEventListener("pointerleave", () => { aim.x = 0; go(); });
+  go();
 
-  function paintHiker(canvas, p, right, night) {
-    const g = canvas.getContext("2d");
-    g.clearRect(0, 0, WIDE, 16);
-    POSES[p].forEach((row, y) => {
-      for (let x = 0; x < WIDE; x++) {
-        const ink = INK[row[x]];
-        if (!ink) continue;
-        g.fillStyle = ink[night ? 0 : 1];
-        g.fillRect(right ? x : WIDE - 1 - x, y, 1, 1);
-      }
-    });
-  }
-
-  // One art pixel is a whole number of device pixels, as the app's cell_size has it, also where the
-  // story's block has been scaled by `k` to fit a short window.
-  const cellSize = (k = 1) => Math.max(1, Math.round(3 * devicePixelRatio * k)) / (devicePixelRatio * k);
-
-  /** Set a hiker walking. `ground(cell)` says how far he may go, in art pixels, and
-      `place(canvas, x, cell)` puts him `x` art pixels along it. */
-  function walk(canvas, watch, ground, place) {
-    const w = { at: 0, right: true, speed: 0, rest: 0.5, walked: 0 };
-    let seen = false, paused = false, timer = 0, drawn = "";
-
-    function draw() {
-      const cell = cellSize(parseFloat(getComputedStyle(canvas).getPropertyValue("--k")) || 1);
-      canvas.style.setProperty("--cell", `${cell}px`);
-      const travel = Math.max(1, ground(cell));
-      const p = pose(w), right = facingRight(w), night = dark.matches;
-      const key = `${p}${right}${night}`;
-      if (key !== drawn) { paintHiker(canvas, p, right, night); drawn = key; }
-      place(canvas, Math.round(w.at * travel), cell);
-      return travel;
-    }
-
-    function sync() {
-      const go = seen && !paused && !still.matches && document.visibilityState === "visible";
-      if (go && !timer) timer = setInterval(() => { step(w, draw()); draw(); }, 1000 / FPS);
-      if (!go && timer) { clearInterval(timer); timer = 0; }
-      // There is no button for it: pressing the hiker himself stops him and sends him on.
-      if (still.matches) {
-        canvas.removeAttribute("role"); canvas.removeAttribute("tabindex"); canvas.removeAttribute("title"); canvas.setAttribute("aria-hidden", "true");
-      } else {
-        const label = paused ? "Let the hiker walk on" : "Stop the hiker";
-        canvas.removeAttribute("aria-hidden");
-        canvas.setAttribute("role", "button"); canvas.tabIndex = 0;
-        canvas.setAttribute("aria-label", label); canvas.title = label;
-      }
-    }
-
-    const press = () => { if (!still.matches) { paused = !paused; sync(); } };
-    canvas.addEventListener("click", press);
-    canvas.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); press(); } });
-    new IntersectionObserver(([entry]) => { seen = entry.isIntersecting; sync(); }).observe(watch);
-    document.addEventListener("visibilitychange", sync);
-    still.addEventListener("change", sync);
-    dark.addEventListener("change", () => { drawn = ""; draw(); });
-    // A frame later, so the story has refitted its block before he is measured against it.
-    addEventListener("resize", () => requestAnimationFrame(draw));
-    canvas.classList.add("is-live");
-    draw();
-    sync();
-  }
-
-  // On a trail: straight along it.
-  for (const trail of all("[data-trail]")) {
-    walk(trail.querySelector("canvas"), trail,
-      (cell) => Math.floor(trail.clientWidth / cell) - WIDE,
-      (canvas, x, cell) => { canvas.style.translate = `${x * cell}px 0`; });
-  }
-
-  /* ---------- 3. The story ----------
-     One stage, pinned while the page scrolls past it, and the scroll plays it: three threads at
-     work, one stops to ask and goes to the top, the phone can answer it too, it goes back to work,
-     and finished work waits. It runs backwards as readily as forwards. Without this script, and
-     with Reduce Motion on, the page shows the asking moment as a still, with every line under it. */
-
-  const story = document.querySelector("[data-story]");
-  // A window too short to hold the stage (a phone on its side) gets the still, as Reduce Motion does.
-  if (story && !still.matches && !matchMedia("(max-height: 559px)").matches) {
-    const stage = story.querySelector(".stage"), list = story.querySelector(".rows");
-    const card = story.querySelector(".ask-card"), yes = story.querySelector(".yes");
-    const lines = all(".captions li", story);
-    const rows = Object.fromEntries(Array.from(list.children).map((li) => [li.dataset.id, li]));
-    const base = ["tests", "migrate", "tour"];
-    const rank = { needs: 0, done: 1, work: 2 };
-    const project = { tests: "mobile", migrate: "mobile", tour: "atlas-web" };
-    const say = { work: "At work", done: "Finished", needs: "Waiting: run ./migrate?" };
-    // What each moment of the story shows: [migrate, tour, the question is open].
-    const SCENES = [["work", "work", false], ["needs", "work", true], ["needs", "work", true], ["work", "work", false], ["done", "done", false]];
-    const ENDS = [0.18, 0.4, 0.6, 0.8]; // where one moment gives way to the next, as a share of the scroll
-    const actors = story.querySelector(".actors"), captions = story.querySelector(".captions");
-    let shown = -1, said = -2, target = 0, now = 0, near = 0, frame = 0, press = 0, small = 1;
-
-    // Each line of the story comes in a word at a time.
-    for (const li of lines) {
-      const words = li.textContent.trim().split(/\s+/);
-      li.textContent = "";
-      words.forEach((word, i) => {
-        const span = document.createElement("span");
-        span.textContent = word;
-        span.style.transitionDelay = `${170 + i * 55}ms`; // after the line before it has gone
-        li.append(span, " ");
-      });
-    }
-
-    function set(id, state) {
-      if (rows[id].dataset.state === state) return;
-      const why = rows[id].querySelector(".why"), strong = document.createElement("b");
-      rows[id].dataset.state = state;
-      strong.textContent = say[state];
-      why.replaceChildren(strong, ` · ${project[id]}`);
-    }
-
-    // What needs you first, then what has finished, then what is still at work. Rows glide to
-    // their new places; nothing jumps.
-    function sort() {
-      const before = new Map(base.map((id) => [id, rows[id].getBoundingClientRect().top]));
-      const order = [...base].sort((a, b) => rank[rows[a].dataset.state] - rank[rows[b].dataset.state] || base.indexOf(a) - base.indexOf(b));
-      if (order.every((id, i) => list.children[i] === rows[id])) return;
-      order.forEach((id) => list.append(rows[id]));
-      for (const id of base) {
-        const d = before.get(id) - rows[id].getBoundingClientRect().top;
-        // Measured on screen, moved inside the scaled block.
-        if (d) rows[id].animate([{ translate: `0 ${d / small}px` }, { translate: "0 0" }], { duration: 420, easing: "cubic-bezier(0.23, 1, 0.32, 1)" });
-      }
-    }
-
-    function show(i) {
-      if (i === shown) return;
-      const forward = i > shown;
-      shown = i;
-      clearTimeout(press);
-      const [migrate, tour, open] = SCENES[i];
-      const settle = () => { set("migrate", migrate); set("tour", tour); sort(); card.toggleAttribute("data-off", !open); yes.removeAttribute("data-down"); };
-      // Going forward into "it gets back to work", Allow is pressed first.
-      if (i === 3 && forward) { yes.toggleAttribute("data-down", true); press = setTimeout(settle, 220); } else settle();
-    }
-
-    // A line is said only once the stage has arrived, so the first one is not over before it is seen.
-    function speak() {
-      const line = near >= 0.9 ? shown : -1;
-      if (line === said) return;
-      said = line;
-      lines.forEach((li, n) => li.toggleAttribute("data-on", n === line));
-    }
-
-    // Shrink the block to fit a short window, so it never meets the caption under it.
-    function fit() {
-      const tall = actors.offsetHeight; // its own height: scaling does not change it
-      const room = stage.clientHeight - captions.offsetHeight - parseFloat(getComputedStyle(captions).marginBottom)
-        - parseFloat(getComputedStyle(actors).marginTop) - 48;
-      small = Math.min(1, Math.max(0.62, room / tall));
-      stage.style.setProperty("--k", small.toFixed(3));
-      stage.style.setProperty("--tall", `${tall}px`);
-    }
-
-    const clamp = (v) => Math.min(1, Math.max(0, v));
-    const ease = (a, b, v) => { const t = clamp((v - a) / (b - a)); return t * t * (3 - 2 * t); };
-
-    function tick() {
-      now += (target - now) * 0.16;
-      if (Math.abs(target - now) < 0.0004) now = target;
-      const i = ENDS.findIndex((end) => now < end);
-      show(i < 0 ? ENDS.length : i);
-      speak();
-      stage.style.setProperty("--enter", near.toFixed(3));
-      stage.style.setProperty("--phone", (ease(0.4, 0.47, now) * (1 - ease(0.58, 0.63, now))).toFixed(3));
-      frame = now === target ? 0 : requestAnimationFrame(tick);
-    }
-
-    function read() {
-      const box = story.getBoundingClientRect();
-      target = clamp(-box.top / (box.height - innerHeight));
-      near = clamp(1 - box.top / (innerHeight * 0.75)); // the rows gather as the stage comes up
-      if (!frame) frame = requestAnimationFrame(tick);
-    }
-
-    story.classList.add("is-live");
-    addEventListener("scroll", read, { passive: true });
-    addEventListener("resize", () => { fit(); read(); });
-    fit();
-    read();
-
-    /* ---------- 4. The first screen, into the story ----------
-       The photograph is two planes, the sky and the land. Where there is a mouse, the land shifts a
-       little more than the sky as it moves, as a near hill does against the sky. Scrolling holds the
-       scene and walks up the trail: the land draws nearer around the point where the trail meets
-       the ridge, and the dusk comes up from below and down from above, and at the last in from the
-       sides, until only a short line of horizon is lit, as wide as the story's trail. The trail is
-       placed so that its dots arrive on that line as it closes; then the panel comes, and the
-       hiker steps on once the photograph has gone. All of it is transforms and opacity, and it runs backwards as readily. */
-    const hero = document.querySelector("[data-hero]");
-    if (hero) {
-      const scene = hero.querySelector(".scene");
-      const sky = scene.querySelector(".sky"), land = scene.querySelector(".land");
-      const low = scene.querySelector(".dusk-low"), high = scene.querySelector(".dusk-high");
-      const left = scene.querySelector(".dusk-left"), right = scene.querySelector(".dusk-right");
-      const trail = story.querySelector("[data-trail]");
-      const mouse = matchMedia("(hover: hover) and (pointer: fine)");
-      const MEET = 0.71; // where the trail meets the ridge, as a share of the scene's height
-      const aim = { x: 0, y: 0 }, look = { x: 0, y: 0 };
-      let tall = 0, wide = 0, walk = 1, from = 0, to = 0, raf = 0, last = 0, painted = "", gone = false;
-
-      function measure() {
-        tall = scene.offsetHeight;
-        wide = scene.offsetWidth;
-        // The trail's two ends across the screen: where the sides of the dusk stop.
-        const ends = trail.getBoundingClientRect();
-        from = ends.left; to = ends.right;
-        walk = Math.max(1, hero.offsetHeight - tall);
-        // How far below the top of the story its trail's dots are (the stage is the story's first
-        // child, so this holds whether or not it is pinned). The story is drawn up under the held
-        // scene by enough to bring the dots to the horizon just as the scene has closed.
-        const dots = trail.getBoundingClientRect().bottom - stage.getBoundingClientRect().top - 1.5 * small;
-        story.style.marginTop = `${-Math.round(tall * (1 - MEET) + dots)}px`;
-      }
-
-      function paint(now) {
-        raf = 0;
-        const dt = last ? Math.min(0.05, (now - last) / 1000) : 1 / 60;
-        last = now;
-        const k = 1 - Math.exp(-dt / 0.45); // the view follows the mouse in about a second
-        look.x += (aim.x - look.x) * k;
-        look.y += (aim.y - look.y) * k;
-        const settled = Math.abs(aim.x - look.x) + Math.abs(aim.y - look.y) < 0.002;
-        if (settled) { look.x = aim.x; look.y = aim.y; last = 0; }
-
-        const box = hero.getBoundingClientRect();
-        const past = -box.top / walk, q = clamp(past);
-        gone = box.bottom <= 0;
-        // The panel follows the dots, and the hiker steps on only once the photograph has gone.
-        const panel = ease(0.97, 1.05, past), walker = ease(1, 1.1, past);
-        const key = `${q.toFixed(4)} ${walker.toFixed(3)} ${panel.toFixed(3)} ${look.x.toFixed(4)} ${look.y.toFixed(4)} ${tall}`;
-        if (key !== painted) {
-          painted = key;
-          // The dusk moves with the scroll itself, so the last line of light lasts until the dots
-          // reach it; its soft edges are widest half way and sharpen as it closes, and over the last
-          // quarter the sides close in to the trail's two ends.
-          const a = q, b = clamp((q - 0.08) / 0.92), lift = 1 - (1 - q) ** 2, side = ease(0.72, 1, q);
-          const soft = (v) => Math.sin(Math.PI * v) ** 2;
-          sky.style.transform = `translate3d(${(-look.x * 5).toFixed(2)}px, ${(-look.y * 3).toFixed(2)}px, 0) scale(${(1.03 + 0.05 * lift).toFixed(4)})`;
-          land.style.transform = `translate3d(${(-look.x * 14).toFixed(2)}px, ${(-look.y * 7).toFixed(2)}px, 0) scale(${(1.03 + 0.27 * lift).toFixed(4)})`;
-          low.style.setProperty("--low", `${(-(1 - MEET + 0.006) * tall * a).toFixed(1)}px`);
-          low.style.setProperty("--low-edge", (0.14 + (0.01 - 0.14) * a + 0.12 * soft(a)).toFixed(4));
-          high.style.setProperty("--high", `${((MEET + 0.006) * tall * b).toFixed(1)}px`);
-          high.style.setProperty("--high-edge", (0.01 * b + 0.12 * soft(b)).toFixed(4));
-          left.style.transform = `translate3d(${((from + 40) * side).toFixed(1)}px, 0, 0)`;
-          right.style.transform = `translate3d(${(-(wide - to + 40) * side).toFixed(1)}px, 0, 0)`;
-          stage.style.setProperty("--dots", ease(0.88, 1, q).toFixed(3));
-          stage.style.setProperty("--panel", panel.toFixed(3));
-          stage.style.setProperty("--walker", walker.toFixed(3));
-        }
-        if (!settled) raf = requestAnimationFrame(paint);
-      }
-
-      const go = () => { if (!raf) raf = requestAnimationFrame(paint); };
-      addEventListener("pointermove", (e) => {
-        if (e.pointerType !== "mouse" || !mouse.matches || gone) return;
-        aim.x = (e.clientX / innerWidth) * 2 - 1;
-        aim.y = (e.clientY / innerHeight) * 2 - 1;
-        go();
-      }, { passive: true });
-      document.documentElement.addEventListener("pointerleave", () => { aim.x = 0; aim.y = 0; go(); });
-      addEventListener("scroll", go, { passive: true });
-      addEventListener("resize", () => { measure(); painted = ""; go(); });
-      hero.classList.add("is-live");
-      measure();
+  if ("IntersectionObserver" in window) {
+    const near = new IntersectionObserver((entries) => {
+      for (const entry of entries) entry.isIntersecting ? drifters.add(entry.target) : drifters.delete(entry.target);
       go();
+    }, { rootMargin: "20% 0px" });
+    driftable.forEach((el) => near.observe(el));
+
+    // Things come in once, a beat apart when they arrive together.
+    const seen = new IntersectionObserver((entries) => {
+      let n = 0;
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        entry.target.style.setProperty("--delay", `${(n++ * 0.08).toFixed(2)}s`);
+        entry.target.classList.add("is-in");
+        seen.unobserve(entry.target);
+      }
+    }, { rootMargin: "0px 0px -12% 0px" });
+    all(".reveal").forEach((el) => seen.observe(el));
+
+    // Each recording is a still picture in the page (its poster). As one comes near, and only when
+    // motion is welcome, the picture becomes the recording, which plays while it is on screen.
+    // With Reduce Motion on, or without this script, the still stays.
+    const narrow = matchMedia("(max-width: 600px)");
+    const play = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const video = entry.target;
+        if (entry.isIntersecting && !still.matches) { const p = video.play(); if (p) p.catch(() => {}); } else video.pause();
+      }
+    }, { threshold: 0.25 });
+    // A recording made in each theme names its Night copy in data-loop-dark; an empty one means
+    // there is no Night recording, and the Night still stays.
+    const dark = matchMedia("(prefers-color-scheme: dark)");
+    const source = (img) => (dark.matches && "loopDark" in img.dataset ? img.dataset.loopDark : img.dataset.loop);
+    function upgrade(img) {
+      if (!source(img)) return;
+      const video = document.createElement("video");
+      video.className = img.className;
+      video.width = img.width; video.height = img.height;
+      video.muted = true; video.loop = true; video.playsInline = true;
+      video.setAttribute("muted", ""); video.setAttribute("playsinline", "");
+      video.poster = img.currentSrc || img.src;
+      video.src = (narrow.matches && img.dataset.loopNarrow) || source(img);
+      video.setAttribute("aria-label", img.alt);
+      (img.parentElement.matches("picture") ? img.parentElement : img).replaceWith(video);
+      play.observe(video);
     }
+    const posters = all("img[data-loop]");
+    const coming = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting || still.matches) continue;
+        coming.unobserve(entry.target);
+        upgrade(entry.target);
+      }
+    }, { rootMargin: "50% 0px" });
+    posters.forEach((img) => coming.observe(img));
+    still.addEventListener("change", () => { if (still.matches) all("video").forEach((v) => v.pause()); });
+  } else {
+    all(".reveal").forEach((el) => el.classList.add("is-in"));
   }
 })();

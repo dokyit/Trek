@@ -61,11 +61,11 @@ the iPhone app.
 ## Brand Commitments
 
 - The name Trek, and the line "Every agent. One trail."
-- The mark: a mountain with a dotted trail and a summit flag (adopted 2026-11-12, replacing the
-  cairn). The ember accent, and the two themes the app really has: Paper (light, warm) and Night
-  (dusk).
-- The pixel-art hiker from the app, and the dotted trail it walks. On the site he appears only in
-  the story section, never in the first screen, and the mark is never used as scenery.
+- The mark: the signpost, one post and two pointed boards, on a lavender field (the owner chose
+  it on 2026-11-17, replacing the mountain on the site first; the app follows). The lowercase
+  "trek" wordmark in Bricolage Grotesque. The ember boards, ink type, and the lavender sky by day
+  and deep indigo by night. The signpost is brand, never a layout device or scenery.
+- The pixel-art hiker from the app may appear only in a story section, never in the first screen.
 - The owner's standing requirements for the site: it should look official and professional; clean,
   modern and a little minimal; nothing that reads as AI-made (default typefaces, italic or bold
   lead-ins); nobody should be able to say it copies a competitor's site; few product pictures, each a
@@ -80,9 +80,8 @@ the iPhone app.
 
 - Real captures of the app, taken from the isolated test app in its demo dress (believable names,
   staged work). Staged content is said to be staged.
-- The app's own art: the hiker's frames (`crates/trek-mascot`) and the mark (`assets/brand`; the
-  site's copies of it are drawn by `script/site/make_icons.py`). The first screen's picture is a
-  licensed photograph, credited in `site/README.md`.
+- The mark: `site/assets/img/mark.svg`, the only copy of its shape on the site; the icons and
+  the share picture are drawn from it by `script/site/make_icons.py`.
 - There are no testimonials, customer logos, usage numbers, benchmarks or press. None may be
   invented, and the site should not be built to need them.
 
