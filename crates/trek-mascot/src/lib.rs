@@ -5,6 +5,7 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Instant;
 
 /// What Trek says an agent is doing while it works, instead of a plain "Working…". Each says
 /// the agent is making its way: none of them has it resting, finishing or lost. The iPhone app
@@ -62,6 +63,8 @@ pub const FPS: u64 = 16;
 /// Walking pace, in art pixels a second: one pixel a frame at [`FPS`], so the hiker glides
 /// evenly instead of stepping one pixel, then two. On a Retina screen that's 24 pt a second.
 pub const WALK: f32 = 16.;
+/// Most frames a step takes at once: a hiker that wasn't drawn for longer picks up from there.
+const MOST_FRAMES: f32 = 4.;
 /// Waiting on others it paces the same trail at twice the speed (two pixels a frame), and rests
 /// less at the ends: restless where the working walk is steady.
 pub const PACE: f32 = 32.;
@@ -268,7 +271,7 @@ impl Walk {
     /// pacing while it waits on others. `dt` is taken in whole frames at [`FPS`] (a frame at
     /// least, a few at most), so each one moves it whole pixels at full speed.
     pub fn step(&mut self, dt: f32, travel: f32, pacing: bool) {
-        let frames = (dt * FPS as f32).round().clamp(0., 4.);
+        let frames = (dt * FPS as f32).round().clamp(0., MOST_FRAMES);
         if frames == 0. {
             return;
         }
@@ -304,6 +307,37 @@ impl Walk {
             self.at += if self.right { d } else { -d } / travel;
             self.speed = v;
             self.walked += d;
+        }
+    }
+
+    /// Bring the walk up to `now` for whoever draws it at whatever pace its frames come: the time
+    /// since `since` (the last step it took; `None` before the first) in whole frames at [`FPS`],
+    /// at most a few. A draw too soon to move it a whole frame keeps `since`, so the time adds up
+    /// to the next, and the time a step took is taken off, so a walk drawn faster or slower than
+    /// [`FPS`] goes at the same pace. Returns the `since` to hand back next time. A gap longer
+    /// than a few frames (nothing drew it) isn't walked: it picks up from `now`.
+    pub fn advance(
+        &mut self,
+        since: Option<Instant>,
+        now: Instant,
+        travel: f32,
+        pacing: bool,
+    ) -> Option<Instant> {
+        let Some(since) = since else {
+            return Some(now);
+        };
+        let dt = now.saturating_duration_since(since).as_secs_f32();
+        let frames = (dt * FPS as f32).round();
+        if frames < 1. {
+            return Some(since);
+        }
+        let frames = frames.min(MOST_FRAMES);
+        let step = frames / FPS as f32;
+        self.step(step, travel, pacing);
+        if dt > MOST_FRAMES / FPS as f32 {
+            Some(now)
+        } else {
+            Some(since + std::time::Duration::from_secs_f32(step))
         }
     }
 
@@ -575,6 +609,7 @@ pub fn paint_turned(
 #[cfg(test)]
 mod tests {
     use super::{POSES, STAND, STEP, WALK, WORD_EVERY, WORDS, Walk, word};
+    use std::time::Instant;
 
     #[test]
     fn a_pose_every_four_pixels() {
@@ -628,6 +663,40 @@ mod tests {
                 *walk
             })
             .collect()
+    }
+
+    #[test]
+    fn a_walk_drawn_at_any_pace_goes_the_same_way_at_the_same_speed() {
+        // The same ten seconds of clock, drawn every 5 ms, a frame (62.5 ms), a quarter second:
+        // the hiker is where it was at the first pace, give or take a frame, and not standing.
+        let travel = 400.;
+        let start = Instant::now();
+        let after = |every_ms: u64| {
+            let (mut walk, mut since) = (Walk::default(), None);
+            let mut t = 0;
+            while t <= 10_000 {
+                since = walk.advance(
+                    since,
+                    start + std::time::Duration::from_millis(t),
+                    travel,
+                    false,
+                );
+                t += every_ms;
+            }
+            walk
+        };
+        let reference = after(5);
+        assert!(
+            reference.at > 0.05 || reference.right != Walk::default().right,
+            "it walked"
+        );
+        for every in [8, 16, 31, 62, 100, 200] {
+            let walk = after(every);
+            assert!(
+                (walk.at - reference.at).abs() < 0.05 && walk.right == reference.right,
+                "drawn every {every} ms: {walk:?}, against {reference:?}"
+            );
+        }
     }
 
     #[test]

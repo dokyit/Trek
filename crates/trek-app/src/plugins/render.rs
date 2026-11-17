@@ -801,11 +801,17 @@ fn node(n: &Node, scope: &Scope, at: &At, count: &mut usize, cx: &App) -> AnyEle
                 }
             }
         }
-        Kind::Trek(c, props) => component(*c, props, at, cx),
+        Kind::Trek(c, props) => component(*c, props, at, count, cx),
     }
 }
 
-fn component(c: Component, props: &Map<String, Value>, at: &At, cx: &App) -> AnyElement {
+fn component(
+    c: Component,
+    props: &Map<String, Value>,
+    at: &At,
+    count: &mut usize,
+    cx: &App,
+) -> AnyElement {
     match c {
         Component::FocusTimer => super::focus::chip(&at.place.ws, cx),
         Component::CommitTrail => {
@@ -816,10 +822,12 @@ fn component(c: Component, props: &Map<String, Value>, at: &At, cx: &App) -> Any
                 None => div().into_any_element(),
             }
         }
-        Component::Hiker => div()
-            .w(px(64.))
-            .child(trek_mascot::crossing(0.5, false, cx))
-            .into_any_element(),
+        // On a trail of its own, walking while an agent works (it keeps its walk between frames).
+        Component::Hiker => {
+            *count += 1;
+            super::hiker::Placed::new(at.id(*count), at.place.ws.clone(), at.place.thread.clone())
+                .into_any_element()
+        }
         Component::ThreadList | Component::Composer => super::original(c, at.place, cx),
     }
 }

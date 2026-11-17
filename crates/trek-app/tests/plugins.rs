@@ -449,3 +449,95 @@ fn a_plugin_key_that_is_trek_s_own_stays_trek_s() {
         });
     });
 }
+
+#[test]
+fn a_plugin_s_hiker_walks_while_an_agent_works_and_stands_when_none_does() {
+    // `trek:hiker` is "the hiker on a dotted trail, walking while an agent works". It was drawn as
+    // a hiker standing at the middle of a short trail, whatever the agent did.
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    run(async |cx| {
+        use std::time::Duration;
+        use trek_agents::AgentEvent;
+        let trek = start(cx);
+        let dir = trek_core::plugins::dir().join("stroll");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.toml"),
+            "name = \"Stroll\"\n[[slot]]\nat = \"sidebar.top\"\nui = { type = \"trek:hiker\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            trek_core::plugins::dir().join(trek_core::plugins::STATE_FILE),
+            "[plugins.stroll]\non = true\n",
+        )
+        .unwrap();
+        cx.update(|cx| trek_app::plugins::reread(&trek.ws, cx));
+        cx.update(|cx| {
+            assert!(trek_app::plugins::running("stroll", cx));
+            cx.set_reduce_motion(false)
+        });
+        trek.window(cx, |window, _| window.activate_window());
+        let id = trek.quiet_thread(cx);
+        trek.render(cx);
+        let walks = |cx: &mut TestAppContext| cx.update(|cx| trek_app::plugins::hiker::walks(cx));
+        // The clock moves in frames, a render after each, as the window draws them.
+        let watch = |trek: &common::Trek, cx: &mut TestAppContext, secs: u32| {
+            let mut at = Vec::new();
+            for _ in 0..secs * 16 {
+                cx.executor().advance_clock(Duration::from_millis(62));
+                trek.render(cx);
+                at.push(walks(cx).last().copied().expect("a hiker is drawn"));
+            }
+            at
+        };
+
+        // Nothing is working: it stands where it set off.
+        let idle = watch(&trek, cx, 3);
+        assert!(
+            idle.iter().all(|a| *a == 0.),
+            "it moved with no one working: {idle:?}"
+        );
+
+        // An agent works: it sets off, and keeps going for as long as it does.
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![AgentEvent::ToolStarted {
+                    id: "t1".into(),
+                    title: "Run command".into(),
+                    detail: "cargo build".into(),
+                }],
+                cx,
+            )
+        });
+        let working = watch(&trek, cx, 6);
+        let moved = |walk: &[f32]| walk.windows(2).filter(|w| w[0] != w[1]).count();
+        assert!(moved(&working) > 30, "it should walk: {working:?}");
+        let again = watch(&trek, cx, 2);
+        assert!(moved(&again) > 10, "and carry on: {again:?}");
+
+        // The turn is over: it stands where it is, and stays there.
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![
+                    AgentEvent::ToolFinished {
+                        id: "t1".into(),
+                        output: String::new(),
+                        ok: true,
+                    },
+                    AgentEvent::TextDone("Done.".into()),
+                    AgentEvent::TurnComplete { error: None },
+                ],
+                cx,
+            )
+        });
+        trek.render(cx);
+        let stopped = watch(&trek, cx, 2);
+        assert_eq!(
+            moved(&stopped),
+            0,
+            "it stands once the work is done: {stopped:?}"
+        );
+    });
+}
