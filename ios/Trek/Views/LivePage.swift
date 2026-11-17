@@ -279,7 +279,7 @@ enum LivePage {
       if (!h) return;
       const send = (o) => { try { h.postMessage(o); } catch (_) {} };
       const helper = (
-      ((post, live) => {
+      ((post, live, more) => {
         const MAX = 4096;
         // The clock and the encoder are taken now, before the page's own scripts run: a page that
         // replaces `Date.now` or `TextEncoder` later changes nothing here.
@@ -294,7 +294,7 @@ enum LivePage {
           post({ t, text });
           return true;
         };
-        const api = Object.freeze({ send: act('send'), copy: act('copy') });
+        const api = Object.freeze(Object.assign({}, more, { send: act('send'), copy: act('copy') }));
         try { Object.defineProperty(window, 'trek', { value: api, enumerable: true }); } catch (_) {}
       })
       );

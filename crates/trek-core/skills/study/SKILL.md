@@ -173,18 +173,23 @@ One Markdown file per topic, `map/<slug>.md`, kept exactly in this shape so Trek
 
 ## Cards
 
-Ask every question with this card: copy it into your answer as one fenced `trek-html` block, put
-your lead-in prose *before* it, and replace only the `DATA` object. One card per message, as the
-last thing in it. The learner's submission comes back as their next message, starting with the
-card's label.
+Ask every question in a card. Write it as a fenced `trek-study` block holding the question as
+JSON; Trek draws the card from it (the options, the learner's thinking box with a mic, how sure
+they are, "I don't know", the progress bar). Don't write the card's HTML yourself. Put your
+lead-in prose *before* the block. One card per message, as the last thing in it. The learner's
+submission comes back as their next message, starting with the card's label.
 
 - `kind`: `"question"` (probe), `"predict"`, `"check"`, or `"problem"` (practice).
 - `step`: where they are in the plan, `"Step 3 of 8 · Scaled scores"` (the card draws "3 of 8"
   as a progress bar), or `""` while probing and practising.
-- `prompt`: the question. `$…$` math works (write each backslash twice in the JS string:
+- `prompt`: the question. `$…$` math works (JSON strings escape each backslash:
   `"$\\frac{1}{\\sqrt{d}}$"`).
 - `options`: the choices for a multiple-choice card, or `[]` for a free answer. Problems take `[]`.
 - `targets`: the claim ids a problem or check tests (`["c1","c3"]`), or `[]`.
+
+```trek-study
+{"kind": "question", "step": "", "prompt": "Softmax is applied to each row of the score matrix. What does that guarantee about one query's attention weights?", "options": ["They are all positive and sum to 1", "They are orthogonal to each other", "They have unit length", "They are the same for every query"], "targets": []}
+```
 
 Questions, predictions and checks ask how sure the learner is (Guessing, Unsure, Fairly sure,
 Sure: 20, 45, 70 and 95%) and offer "I don't know"; options can be picked with the keyboard (A–D
@@ -199,154 +204,6 @@ Check · Step 3 of 8 · Scaled scores [c4]
 Answer: B. They keep the softmax from saturating
 Confidence: Fairly sure (70%)
 Working: if d is big the dot products grow, so…
-```
-
-```trek-html
-<!doctype html><html><head><meta charset="utf-8"><title>Study</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
-<style>
-:root{--tint:color-mix(in srgb,var(--trek-accent) 10%,transparent);--line:var(--trek-border);--ease:cubic-bezier(.23,1,.32,1)}
-body{margin:0;padding:14px 16px 16px;background:transparent;color:var(--trek-fg);font:14px/1.5 var(--trek-font,system-ui)}
-#card{display:flex;flex-direction:column;gap:14px}
-.where{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--trek-muted)}
-.where .bar{flex:1;max-width:160px;height:4px;border-radius:2px;background:var(--line);overflow:hidden}
-.where .bar i{display:block;height:100%;background:var(--trek-accent);border-radius:2px}
-.q{font-size:16px;font-weight:600;line-height:1.4;text-wrap:pretty}
-.opts{display:flex;flex-direction:column;gap:6px;margin-top:-2px}
-.opt{display:flex;gap:10px;align-items:flex-start;width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;transition:border-color .15s var(--ease),background-color .15s var(--ease)}
-.opt:hover{border-color:color-mix(in srgb,var(--trek-fg) 28%,transparent)}
-.opt:active{transform:scale(.99)}
-.opt.on{border-color:var(--trek-accent);background:var(--tint)}
-.key{flex:none;width:20px;height:20px;margin-top:1px;border-radius:6px;border:1px solid var(--line);display:grid;place-items:center;font-size:11px;font-weight:600;color:var(--trek-muted);transition:background-color .15s var(--ease),color .15s var(--ease),border-color .15s var(--ease)}
-.opt.on .key{background:var(--trek-accent);border-color:var(--trek-accent);color:#1c120c}
-.label{display:flex;justify-content:space-between;align-items:baseline;font-size:12px;color:var(--trek-muted);margin-bottom:6px}
-.label b{font-weight:500;color:var(--trek-fg)}
-textarea{display:block;width:100%;box-sizing:border-box;min-height:64px;resize:vertical;padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:transparent;color:inherit;font:inherit;line-height:1.5;transition:border-color .15s var(--ease)}
-textarea::placeholder{color:var(--trek-muted)}
-textarea:focus{outline:none;border-color:var(--trek-accent)}
-.sure{display:flex;gap:2px;padding:2px;border-radius:8px;background:color-mix(in srgb,var(--trek-fg) 5%,transparent);width:max-content;max-width:100%;flex-wrap:wrap}
-.sure button{border:0;background:transparent;color:var(--trek-muted);padding:4px 10px;border-radius:6px;font:inherit;font-size:12.5px;cursor:pointer;transition:background-color .15s var(--ease),color .15s var(--ease)}
-.sure button:hover{color:var(--trek-fg)}
-.sure button.on{background:color-mix(in srgb,var(--trek-fg) 12%,transparent);color:var(--trek-fg);font-weight:500}
-.foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-top:2px}
-.foot .note{margin-right:auto;font-size:12px;color:var(--trek-muted)}
-.btn{font:inherit;font-size:13px;padding:6px 14px;border-radius:8px;border:1px solid var(--line);background:transparent;color:inherit;cursor:pointer;transition:transform .12s var(--ease),opacity .15s var(--ease)}
-.btn:hover{background:color-mix(in srgb,var(--trek-fg) 5%,transparent)}
-.btn:active{transform:scale(.97)}
-.btn.go{background:var(--trek-fg);border-color:var(--trek-fg);color:var(--trek-bg);font-weight:500}
-.btn:disabled{opacity:.4;cursor:default;transform:none}
-kbd{font:inherit;font-size:11px;opacity:.6;margin-left:6px}
-.sent{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--trek-muted);animation:in .18s var(--ease)}
-.sent svg{flex:none;color:var(--trek-positive,var(--trek-accent))}
-.done .opt,.done textarea,.done .sure button{cursor:default}
-.done .opt:not(.on){opacity:.55}
-@keyframes in{from{opacity:0;transform:translateY(2px)}}
-@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
-</style></head><body>
-<div id="card"></div>
-<script>
-const DATA = {
-  kind: "question",
-  step: "",
-  prompt: "Softmax is applied to each row of the score matrix. What does that guarantee about one query's attention weights?",
-  options: ["They are all positive and sum to 1", "They are orthogonal to each other", "They have unit length", "They are the same for every query"],
-  targets: []
-};
-const LABEL = {question: "Question", predict: "Predict", check: "Check", problem: "Problem"}[DATA.kind] || "Question";
-const problem = DATA.kind === "problem", choice = !problem && DATA.options.length > 0;
-const SURE = [["Guessing", 20], ["Unsure", 45], ["Fairly sure", 70], ["Sure", 95]];
-const mac = /Mac|iPhone|iPad/.test(navigator.platform);
-const el = (t, c, s) => { const e = document.createElement(t); if (c) e.className = c; if (s != null) e.textContent = s; return e; };
-const card = document.getElementById("card");
-let pick = null, sure = null, closed = false, sends = 0;
-
-// Where they are: "Step 3 of 8 · Scaled scores" draws 3 of 8 as a bar.
-if (DATA.step) {
-  const w = el("div", "where"), m = DATA.step.match(/(\d+)\s*of\s*(\d+)/i);
-  w.append(el("span", null, DATA.step));
-  if (m && +m[2] > 0) { const b = el("span", "bar"), i = el("i"); i.style.width = Math.min(100, 100 * m[1] / m[2]) + "%"; b.append(i); w.append(b); }
-  card.append(w);
-}
-card.append(el("div", "q", DATA.prompt));
-
-const rows = [];
-if (choice) {
-  const box = el("div", "opts");
-  DATA.options.forEach((o, i) => {
-    const r = el("button", "opt");
-    r.type = "button";
-    r.append(el("span", "key", String.fromCharCode(65 + i)), el("span", null, o));
-    r.onclick = () => choose(i);
-    rows.push(r); box.append(r);
-  });
-  card.append(box);
-}
-function choose(i) { if (closed || i >= rows.length) return; pick = i; rows.forEach((x, j) => x.classList.toggle("on", j === i)); sync(); }
-
-const field = el("div"), label = el("div", "label"), work = el("textarea");
-label.append(el("b", null, problem ? "Your working" : DATA.kind === "predict" ? "Your prediction" : "Your thinking"),
-  el("span", null, problem ? "send it in pieces as you go" : choice ? "optional · messy is fine" : "messy is fine"));
-work.placeholder = problem ? "What you notice, what you try, where you're stuck…"
-  : DATA.kind === "predict" ? "What do you expect the next move is, and why?"
-  : choice ? "Why this answer? What made you unsure?" : "Think out loud: what comes to mind, what you're unsure of.";
-field.append(label, work); card.append(field);
-
-if (!problem) {
-  const f = el("div"), l = el("div", "label"), row = el("div", "sure");
-  l.append(el("b", null, "How sure are you?"));
-  SURE.forEach(([name], i) => {
-    const b = el("button", null, name); b.type = "button";
-    b.onclick = () => { if (closed) return; sure = i; [...row.children].forEach((x, j) => x.classList.toggle("on", j === i)); };
-    row.append(b);
-  });
-  f.append(l, row); card.append(f);
-}
-
-const foot = el("div", "foot"), note = el("span", "note");
-foot.append(note); card.append(foot);
-const button = (text, go, fn) => { const b = el("button", "btn" + (go ? " go" : ""), text); b.type = "button"; b.onclick = fn; foot.append(b); return b; };
-
-function send(lines, close) {
-  const head = [LABEL, DATA.step].filter(Boolean).join(" · ") + (DATA.targets.length ? " [" + DATA.targets.join(", ") + "]" : "");
-  const text = [head, ...lines, "Working: " + (work.value.trim() || "(none)")].join("\n");
-  if (!window.trek || !window.trek.send(text)) { note.textContent = "Couldn't send: copy your working into the composer."; return; }
-  if (!close) { sends++; work.value = ""; note.textContent = sends === 1 ? "Sent · keep going" : "Sent " + sends + " times · keep going"; sync(); return; }
-  closed = true; card.classList.add("done"); work.readOnly = true;
-  card.querySelectorAll("button").forEach(b => b.disabled = true);
-  const s = el("div", "sent");
-  s.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
-  s.append(el("span", null, "Sent · " + lines.map(l => l.replace(/^[^:]+: /, "")).join(" · ")));
-  foot.replaceWith(s);
-}
-const sureLine = () => "Confidence: " + (sure === null ? "not given" : SURE[sure][0] + " (" + SURE[sure][1] + "%)");
-
-let main;
-if (problem) {
-  button("Hint", false, () => send(["Asking for: a hint"], false));
-  button("Send working", false, () => send(["Status: still working"], false));
-  main = button("Solved", true, () => send(["Status: I think I've solved it"], true));
-} else {
-  button("I don't know", false, () => send(["Answer: I don't know"], true));
-  main = button(choice ? "Answer" : "Send", true, () => send([
-    choice ? "Answer: " + String.fromCharCode(65 + pick) + ". " + DATA.options[pick] : "Answer: (in my thinking)", sureLine()], true));
-}
-main.append(el("kbd", null, mac ? "⌘↩" : "Ctrl+Enter"));
-function sync() { if (!closed) main.disabled = choice ? pick === null : !problem && !work.value.trim(); }
-work.oninput = sync; sync();
-
-// A–D or 1–4 pick an option (outside the text box); ⌘↩ or Ctrl+Enter sends.
-document.addEventListener("keydown", e => {
-  if (closed) return;
-  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { if (!main.disabled) { e.preventDefault(); main.click(); } return; }
-  if (!choice || e.target === work || e.metaKey || e.ctrlKey || e.altKey) return;
-  const k = e.key.toUpperCase(), i = /^[1-9]$/.test(k) ? +k - 1 : k.length === 1 ? k.charCodeAt(0) - 65 : -1;
-  if (i >= 0 && i < rows.length) { e.preventDefault(); choose(i); rows[i].focus(); }
-});
-window.addEventListener("load", () => window.renderMathInElement && renderMathInElement(card, {
-  delimiters: [{left: "$$", right: "$$", display: true}, {left: "$", right: "$", display: false}], throwOnError: false}));
-</script></body></html>
 ```
 
 ## Style

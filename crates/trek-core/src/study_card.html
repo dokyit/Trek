@@ -1,0 +1,212 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Study</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<style>
+:root{--tint:color-mix(in srgb,var(--trek-accent) 10%,transparent);--line:var(--trek-border);--ease:cubic-bezier(.23,1,.32,1)}
+body{margin:0;padding:14px 16px 16px;background:transparent;color:var(--trek-fg);font:14px/1.5 var(--trek-font,system-ui)}
+#card{display:flex;flex-direction:column;gap:14px}
+.where{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--trek-muted)}
+.where .bar{flex:1;max-width:160px;height:4px;border-radius:2px;background:var(--line);overflow:hidden}
+.where .bar i{display:block;height:100%;background:var(--trek-accent);border-radius:2px}
+.q{font-size:16px;font-weight:600;line-height:1.4;text-wrap:pretty}
+.opts{display:flex;flex-direction:column;gap:6px;margin-top:-2px}
+.opt{display:flex;gap:10px;align-items:flex-start;width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;transition:border-color .15s var(--ease),background-color .15s var(--ease)}
+.opt:hover{border-color:color-mix(in srgb,var(--trek-fg) 28%,transparent)}
+.opt:active{transform:scale(.99)}
+.opt.on{border-color:var(--trek-accent);background:var(--tint)}
+.key{flex:none;width:20px;height:20px;margin-top:1px;border-radius:6px;border:1px solid var(--line);display:grid;place-items:center;font-size:11px;font-weight:600;color:var(--trek-muted);transition:background-color .15s var(--ease),color .15s var(--ease),border-color .15s var(--ease)}
+.opt.on .key{background:var(--trek-accent);border-color:var(--trek-accent);color:#1c120c}
+.label{display:flex;justify-content:space-between;align-items:baseline;font-size:12px;color:var(--trek-muted);margin-bottom:6px}
+.label b{font-weight:500;color:var(--trek-fg)}
+.box{position:relative}
+textarea{display:block;width:100%;box-sizing:border-box;min-height:64px;resize:vertical;padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:transparent;color:inherit;font:inherit;line-height:1.5;transition:border-color .15s var(--ease)}
+.talk textarea{padding-right:44px}
+textarea::placeholder{color:var(--trek-muted)}
+textarea:focus{outline:none;border-color:var(--trek-accent)}
+.mic{position:absolute;right:7px;bottom:7px;width:28px;height:28px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:var(--trek-muted);cursor:pointer;transition:background-color .15s var(--ease),color .15s var(--ease)}
+.mic:hover{color:var(--trek-fg);background:color-mix(in srgb,var(--trek-fg) 7%,transparent)}
+.mic.on{color:var(--trek-bg);background:var(--trek-accent)}
+.mic.on svg{animation:beat 1.2s var(--ease) infinite}
+.mic.wait{opacity:.6;cursor:progress}
+.mic:disabled{display:none}
+.listening textarea{border-color:var(--trek-accent)}
+.sure{display:flex;gap:2px;padding:2px;border-radius:8px;background:color-mix(in srgb,var(--trek-fg) 5%,transparent);width:max-content;max-width:100%;flex-wrap:wrap}
+.sure button{border:0;background:transparent;color:var(--trek-muted);padding:4px 10px;border-radius:6px;font:inherit;font-size:12.5px;cursor:pointer;transition:background-color .15s var(--ease),color .15s var(--ease)}
+.sure button:hover{color:var(--trek-fg)}
+.sure button.on{background:color-mix(in srgb,var(--trek-fg) 12%,transparent);color:var(--trek-fg);font-weight:500}
+.foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-top:2px}
+.foot .note{margin-right:auto;font-size:12px;color:var(--trek-muted)}
+.btn{font:inherit;font-size:13px;padding:6px 14px;border-radius:8px;border:1px solid var(--line);background:transparent;color:inherit;cursor:pointer;transition:transform .12s var(--ease),opacity .15s var(--ease)}
+.btn:hover{background:color-mix(in srgb,var(--trek-fg) 5%,transparent)}
+.btn:active{transform:scale(.97)}
+.btn.go{background:var(--trek-fg);border-color:var(--trek-fg);color:var(--trek-bg);font-weight:500}
+.btn:disabled{opacity:.4;cursor:default;transform:none}
+kbd{font:inherit;font-size:11px;opacity:.6;margin-left:6px}
+.sent{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--trek-muted);animation:in .18s var(--ease)}
+.sent svg{flex:none;color:var(--trek-positive,var(--trek-accent))}
+.done .opt,.done textarea,.done .sure button{cursor:default}
+.done .opt:disabled,.done .sure button:disabled{opacity:1}
+.done .opt:not(.on){opacity:.55}
+.done .opt.on{opacity:1}
+.done .sure button:not(.on){opacity:.55}
+.done textarea{resize:none}
+@keyframes in{from{opacity:0;transform:translateY(2px)}}
+@keyframes beat{50%{transform:scale(.86)}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style></head><body>
+<div id="card"></div>
+<script>
+const DATA = __DATA__;
+const LABEL = {question: "Question", predict: "Predict", check: "Check", problem: "Problem"}[DATA.kind] || "Question";
+const problem = DATA.kind === "problem", choice = !problem && DATA.options.length > 0;
+const SURE = [["Guessing", 20], ["Unsure", 45], ["Fairly sure", 70], ["Sure", 95]];
+const HEAD = [LABEL, DATA.step].filter(Boolean).join(" · ") + (DATA.targets.length ? " [" + DATA.targets.join(", ") + "]" : "");
+const mac = /Mac|iPhone|iPad/.test(navigator.platform);
+const el = (t, c, s) => { const e = document.createElement(t); if (c) e.className = c; if (s != null) e.textContent = s; return e; };
+const card = document.getElementById("card");
+let pick = null, sure = null, closed = false, sends = 0;
+
+// Where they are: "Step 3 of 8 · Scaled scores" draws 3 of 8 as a bar.
+if (DATA.step) {
+  const w = el("div", "where"), m = DATA.step.match(/(\d+)\s*of\s*(\d+)/i);
+  w.append(el("span", null, DATA.step));
+  if (m && +m[2] > 0) { const b = el("span", "bar"), i = el("i"); i.style.width = Math.min(100, 100 * m[1] / m[2]) + "%"; b.append(i); w.append(b); }
+  card.append(w);
+}
+card.append(el("div", "q", DATA.prompt));
+
+const rows = [];
+if (choice) {
+  const box = el("div", "opts");
+  DATA.options.forEach((o, i) => {
+    const r = el("button", "opt");
+    r.type = "button";
+    r.append(el("span", "key", String.fromCharCode(65 + i)), el("span", null, o));
+    r.onclick = () => choose(i);
+    rows.push(r); box.append(r);
+  });
+  card.append(box);
+}
+function choose(i) { if (closed || i < 0 || i >= rows.length) return; pick = i; rows.forEach((x, j) => x.classList.toggle("on", j === i)); sync(); }
+
+const field = el("div"), label = el("div", "label"), wrap = el("div", "box"), work = el("textarea");
+label.append(el("b", null, problem ? "Your working" : DATA.kind === "predict" ? "Your prediction" : "Your thinking"),
+  el("span", null, problem ? "send it in pieces as you go" : choice ? "optional · messy is fine" : "messy is fine"));
+work.placeholder = problem ? "What you notice, what you try, where you're stuck…"
+  : DATA.kind === "predict" ? "What do you expect the next move is, and why?"
+  : choice ? "Why this answer? What made you unsure?" : "Think out loud: what comes to mind, what you're unsure of.";
+wrap.append(work); field.append(label, wrap); card.append(field);
+
+// Say it instead: Trek's own dictation (the composer's), into the box. What's heard so far shows
+// in the box as it comes and is revised; the mic again (or sending) ends the take.
+const T = window.trek || {};
+let mic = null, before = null, taking = false;
+const joined = (base, said) => { said = (said || "").trim(); return !said ? base : base + (base && !/\s$/.test(base) ? " " : "") + said; };
+if (T.canDictate && typeof T.dictate === "function") {
+  field.classList.add("talk");
+  mic = el("button", "mic"); mic.type = "button"; mic.title = "Dictate"; mic.setAttribute("aria-label", "Dictate");
+  mic.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><path d="M12 18v4"/></svg>';
+  mic.onclick = () => { if (!closed && !T.dictate(!taking)) note.textContent = "Couldn't start dictation: click the mic again."; };
+  wrap.append(mic);
+  window.addEventListener("trekdictation", e => {
+    const d = (e && e.detail) || {};
+    if (closed) return;
+    if (d.state === "asking" || d.state === "listening" || d.state === "finishing") {
+      if (before === null) before = work.value;
+      taking = d.state !== "finishing";
+      if (d.state !== "asking") work.value = joined(before, d.text);
+      mic.classList.toggle("on", d.state === "listening");
+      mic.classList.toggle("wait", d.state !== "listening");
+      mic.title = d.state === "listening" ? "Stop dictating" : "Dictate";
+      field.classList.toggle("listening", d.state !== "asking");
+    } else {
+      if (before !== null) work.value = d.state === "done" ? joined(before, d.text) : before;
+      before = null; taking = false;
+      mic.classList.remove("on", "wait"); mic.title = "Dictate"; field.classList.remove("listening");
+      if (d.error) note.textContent = d.error;
+    }
+    sync();
+  });
+}
+
+const sureRow = el("div", "sure");
+if (!problem) {
+  const f = el("div"), l = el("div", "label");
+  l.append(el("b", null, "How sure are you?"));
+  SURE.forEach(([name], i) => {
+    const b = el("button", null, name); b.type = "button";
+    b.onclick = () => { if (!closed) setSure(i); };
+    sureRow.append(b);
+  });
+  f.append(l, sureRow); card.append(f);
+}
+function setSure(i) { sure = i; [...sureRow.children].forEach((x, j) => x.classList.toggle("on", j === i)); }
+
+const foot = el("div", "foot"), note = el("span", "note");
+foot.append(note); card.append(foot);
+const button = (text, go, fn) => { const b = el("button", "btn" + (go ? " go" : ""), text); b.type = "button"; b.onclick = fn; foot.append(b); return b; };
+
+// Answered: what they chose, how sure and what they wrote stay, read-only, with what was sent.
+function close(lines) {
+  closed = true; card.classList.add("done"); work.readOnly = true;
+  if (work.value) { work.style.height = "auto"; work.style.height = (work.scrollHeight + 2) + "px"; }
+  if (mic) { if (taking) T.dictate(false); mic.disabled = true; }
+  card.querySelectorAll("button").forEach(b => b.disabled = true);
+  const s = el("div", "sent");
+  s.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+  s.append(el("span", null, "Sent · " + lines.map(l => l.replace(/^[^:]+: /, "")).join(" · ")));
+  foot.replaceWith(s);
+}
+function send(lines, done) {
+  const text = [HEAD, ...lines, "Working: " + (work.value.trim() || "(none)")].join("\n");
+  if (!T.send || !T.send(text)) { note.textContent = "Couldn't send: copy your working into the composer."; return; }
+  if (done) { close(lines); return; }
+  sends++; work.value = ""; before = taking ? "" : null;
+  note.textContent = sends === 1 ? "Sent · keep going" : "Sent " + sends + " times · keep going"; sync();
+}
+const sureLine = () => "Confidence: " + (sure === null ? "not given" : SURE[sure][0] + " (" + SURE[sure][1] + "%)");
+
+let main;
+if (problem) {
+  button("Hint", false, () => send(["Asking for: a hint"], false));
+  button("Send working", false, () => send(["Status: still working"], false));
+  main = button("Solved", true, () => send(["Status: I think I've solved it"], true));
+} else {
+  button("I don't know", false, () => send(["Answer: I don't know"], true));
+  main = button(choice ? "Answer" : "Send", true, () => send([
+    choice ? "Answer: " + String.fromCharCode(65 + pick) + ". " + DATA.options[pick] : "Answer: (in my thinking)", sureLine()], true));
+}
+main.append(el("kbd", null, mac ? "⌘↩" : "Ctrl+Enter"));
+function sync() { if (!closed) main.disabled = choice ? pick === null : !problem && !work.value.trim(); }
+work.oninput = sync; sync();
+
+// Already answered (the card drawn again later): Trek hands the page what the learner sent
+// after it, and the card shows that answer as it was sent.
+(function restore() {
+  const sent = (Array.isArray(T.replies) ? T.replies : []).filter(r => typeof r === "string" && r.split("\n")[0] === HEAD);
+  const last = sent.find(r => /\nStatus: I think I've solved it\n/.test(r) || /\nAnswer: /.test(r)) || null;
+  if (!last) { if (sent.length) { sends = sent.length; note.textContent = "Sent " + (sends === 1 ? "" : sends + " times ") + "· keep going"; } return; }
+  const at = last.indexOf("\nWorking: "), body = at < 0 ? last : last.slice(0, at);
+  const said = at < 0 ? "" : last.slice(at + 10);
+  const lines = body.split("\n").slice(1);
+  for (const l of lines) {
+    let m;
+    if ((m = l.match(/^Answer: ([A-Z])\. /)) && choice) choose(m[1].charCodeAt(0) - 65);
+    if ((m = l.match(/^Confidence: (.+) \(\d+%\)$/))) { const i = SURE.findIndex(([n]) => n === m[1]); if (i >= 0) setSure(i); }
+  }
+  work.value = said === "(none)" ? "" : said;
+  close(lines);
+})();
+
+// A–D or 1–4 pick an option (outside the text box); ⌘↩ or Ctrl+Enter sends.
+document.addEventListener("keydown", e => {
+  if (closed) return;
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { if (!main.disabled) { e.preventDefault(); main.click(); } return; }
+  if (!choice || e.target === work || e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key.toUpperCase(), i = /^[1-9]$/.test(k) ? +k - 1 : k.length === 1 ? k.charCodeAt(0) - 65 : -1;
+  if (i >= 0 && i < rows.length) { e.preventDefault(); choose(i); rows[i].focus(); }
+});
+window.addEventListener("load", () => window.renderMathInElement && renderMathInElement(card, {
+  delimiters: [{left: "$$", right: "$$", display: true}, {left: "$", right: "$", display: false}], throwOnError: false}));
+</script></body></html>

@@ -581,15 +581,223 @@ pub fn words_of(text: &str) -> String {
     out.join(" ")
 }
 
-/// The study guide's card (its one `trek-html` block) with `data`, a JavaScript object literal,
-/// in place of the example's `DATA`: a card as a tutor following `guide` writes it.
-pub fn card_with(guide: &str, data: &str) -> Option<String> {
-    let open = format!("```{}\n", crate::artifact::FENCE);
-    let start = guide.find(&open)? + open.len();
-    let html = &guide[start..start + guide[start..].find("\n```")?];
-    let at = html.find("const DATA = ")? + "const DATA = ".len();
-    let end = at + html[at..].find("\n};")? + 2;
-    Some(format!("{}{data}{}", &html[..at], &html[end..]))
+/// The fence a tutor asks a question in: ```` ```trek-study ```` around the question as JSON
+/// (`kind`, `step`, `prompt`, `options`, `targets`), which Trek draws as the question card
+/// (`card`). Writing only the question, not the card's page, keeps a tutor's turn short: the
+/// page is ~10 KB, some 3,000 tokens to write out for every question.
+pub const FENCE: &str = "trek-study";
+
+/// The question card's page; `__DATA__` is where the question goes.
+const CARD: &str = include_str!("study_card.html");
+
+/// The question card for `data`, a `trek-study` block's question (JSON; a JavaScript object
+/// literal's bare keys and trailing commas are let through too): a `trek-html` page. `None` when
+/// it isn't a question (no `prompt`).
+pub fn card(data: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(data.trim())
+        .or_else(|_| serde_json::from_str(&as_json(data.trim())))
+        .ok()?;
+    let o = value.as_object()?;
+    let text = |k: &str| match o.get(k) {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Null) | None => String::new(),
+        Some(other) => other.to_string(),
+    };
+    let list = |k: &str| -> Vec<String> {
+        o.get(k)
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .map(|v| v.as_str().map_or_else(|| v.to_string(), str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let prompt = text("prompt");
+    if prompt.trim().is_empty() {
+        return None;
+    }
+    let kind = match text("kind").as_str() {
+        k @ ("question" | "predict" | "check" | "problem") => k.to_string(),
+        _ => "question".to_string(),
+    };
+    let options = if kind == "problem" {
+        Vec::new()
+    } else {
+        list("options")
+    };
+    let data = serde_json::json!({
+        "kind": kind,
+        "step": text("step"),
+        "prompt": prompt,
+        "options": options,
+        "targets": list("targets"),
+    });
+    // In a script: nothing in it may close the script element.
+    let js = data.to_string().replace("</", "<\\/");
+    Some(CARD.replacen("__DATA__", &js, 1))
+}
+
+/// A JavaScript object literal as JSON, as far as a question needs: bare keys quoted, trailing
+/// commas dropped. Strings are copied as they are.
+fn as_json(literal: &str) -> String {
+    let chars: Vec<char> = literal.chars().collect();
+    let mut out = String::with_capacity(literal.len() + 16);
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '"' {
+            out.push(c);
+            i += 1;
+            while i < chars.len() {
+                out.push(chars[i]);
+                if chars[i] == '\\' && i + 1 < chars.len() {
+                    out.push(chars[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+                if chars[i - 1] == '"' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if c.is_ascii_alphabetic() || c == '_' {
+            let start = i;
+            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().collect();
+            let next = chars[i..].iter().find(|c| !c.is_whitespace());
+            if next == Some(&':') {
+                out.push('"');
+                out.push_str(&word);
+                out.push('"');
+            } else {
+                out.push_str(&word);
+            }
+            continue;
+        }
+        if c == ',' {
+            let next = chars[i + 1..].iter().find(|c| !c.is_whitespace());
+            if matches!(next, Some('}' | ']')) {
+                i += 1;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// `text` (an answer, as it streams in or once written) with each finished `trek-study` block
+/// drawn as the question card it asks for: a `trek-html` block holding `card`'s page. `None`
+/// when there's none to draw (a block still being written stays as it is, as does one that isn't
+/// a question).
+pub fn expand_cards(text: &str) -> Option<String> {
+    let open = format!("```{FENCE}");
+    if !text.contains(&open) {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len() + CARD.len());
+    let mut rest = text;
+    let mut changed = false;
+    while let Some(at) = rest.find(&open) {
+        let line_start = (at == 0 && (out.is_empty() || out.ends_with('\n')))
+            || (at > 0 && rest.as_bytes()[at - 1] == b'\n');
+        let after = at + open.len();
+        let Some(eol) = rest[after..].find('\n').map(|n| after + n) else {
+            break;
+        };
+        if !line_start || !rest[after..eol].trim().is_empty() {
+            out.push_str(&rest[..after]);
+            rest = &rest[after..];
+            continue;
+        }
+        // The closing fence: a line of just ```.
+        let body = eol + 1;
+        let mut close = None;
+        let mut from = body;
+        loop {
+            let end = rest[from..].find('\n').map_or(rest.len(), |n| from + n);
+            if rest[from..end].trim() == "```" {
+                close = Some((from, end));
+                break;
+            }
+            if end >= rest.len() {
+                break;
+            }
+            from = end + 1;
+        }
+        let Some((close_start, close_end)) = close else {
+            break;
+        };
+        let data = &rest[body..close_start];
+        match card(data) {
+            Some(html) => {
+                out.push_str(&rest[..at]);
+                out.push_str(&format!("```{}\n{html}\n```", crate::artifact::FENCE));
+                changed = true;
+            }
+            None => out.push_str(&rest[..close_end]),
+        }
+        rest = &rest[close_end..];
+    }
+    out.push_str(rest);
+    changed.then_some(out)
+}
+
+/// What a question card sent, read back for the thread to show: its first line (the card's
+/// label, with where in the plan and the claims it tests: "Check · Step 3 of 8 · Scaled scores
+/// [c4]") and its fields in order ("Answer", "Confidence", "Status", "Asking for", "Working"),
+/// each value as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Submission {
+    pub head: String,
+    pub fields: Vec<(String, String)>,
+}
+
+/// `text` if a question card sent it (`Submission`).
+pub fn submission(text: &str) -> Option<Submission> {
+    let text = text.trim_end();
+    let (head, rest) = text.split_once('\n')?;
+    let head = head.trim();
+    let labelled = ["Question", "Predict", "Check", "Problem"]
+        .iter()
+        .any(|l| head == *l || head.starts_with(&format!("{l} ")));
+    let working = if rest.starts_with("Working: ") {
+        0
+    } else {
+        rest.find("\nWorking: ")? + 1
+    };
+    if !labelled {
+        return None;
+    }
+    let mut fields: Vec<(String, String)> = vec![];
+    for line in rest[..working].lines() {
+        match line.split_once(": ") {
+            Some((k, v)) if ["Answer", "Confidence", "Status", "Asking for"].contains(&k) => {
+                fields.push((k.to_string(), v.to_string()))
+            }
+            _ => match fields.last_mut() {
+                Some((_, v)) => {
+                    v.push('\n');
+                    v.push_str(line);
+                }
+                None => return None,
+            },
+        }
+    }
+    fields.push((
+        "Working".to_string(),
+        rest[working + "Working: ".len()..].to_string(),
+    ));
+    Some(Submission {
+        head: head.to_string(),
+        fields,
+    })
 }
 
 /// A session thread's title: "Learn · Transformers".
@@ -774,33 +982,138 @@ mod tests {
     }
 
     #[test]
-    fn the_guide_has_one_card_that_sends_what_the_tutor_reads() {
-        let (_, guide) = crate::skills::SHIPPED
-            .iter()
-            .find(|(n, _)| *n == crate::skills::STUDY)
-            .unwrap();
-        let open = format!("```{}\n", crate::artifact::FENCE);
-        assert_eq!(guide.matches(&open).count(), 1, "one card");
-        let data = r#"{ kind: "check", step: "Step 2 of 5 · Scaling", prompt: "Why?", options: [], targets: ["c4"] }"#;
-        let card = card_with(guide, data).expect("a card");
-        assert!(card.starts_with("<!doctype html>") && card.ends_with("</html>"));
-        assert!(card.contains(&format!("const DATA = {data};")), "{card}");
-        assert_eq!(card.matches("const DATA").count(), 1);
-        // It answers through Trek, says where the learner is, takes the keyboard, and keeps still
-        // when the system asks for less motion.
+    fn a_question_is_drawn_as_the_card_that_sends_what_the_tutor_reads() {
+        let data = r#"{"kind": "check", "step": "Step 2 of 5 · Scaling", "prompt": "Why $\\sqrt{d}$? </script>", "options": [], "targets": ["c4"]}"#;
+        let card = card(data).expect("a card");
+        assert!(card.starts_with("<!doctype html>") && card.trim_end().ends_with("</html>"));
+        assert_eq!(card.matches("const DATA = ").count(), 1);
+        assert!(!card.contains("__DATA__"));
+        // The question as the page reads it, and nothing in it ends the script.
+        let expected = r#"const DATA = {"kind":"check","options":[],"prompt":"Why $\\sqrt{d}$? <\/script>","step":"Step 2 of 5 · Scaling","targets":["c4"]};"#;
+        assert!(
+            card.contains(expected),
+            "{}",
+            &card[card.find("const DATA").unwrap()..][..200]
+        );
+        // It answers through Trek, says where the learner is, takes the keyboard, keeps still when
+        // the system asks for less motion, takes dictation through Trek, and shows an answer sent
+        // before (the card drawn again) as it was sent.
         for needed in [
-            "window.trek.send(text)",
+            "T.send(text)",
             "(\\d+)\\s*of\\s*(\\d+)",
             "addEventListener(\"keydown\"",
             "prefers-reduced-motion",
             "Confidence: ",
             "Working: ",
+            "T.dictate(",
+            "\"trekdictation\"",
+            "T.replies",
         ] {
             assert!(card.contains(needed), "{needed}");
         }
         // Inside Trek's own card: no box drawn around it again.
         assert!(!card.contains(".card{border"));
         assert!(card.len() < 16_000, "{} bytes", card.len());
+        // What a model writes by habit (bare keys, trailing commas) still makes a card; a problem
+        // has no options; what isn't a question makes none.
+        let loose = r#"{ kind: "problem", prompt: "Say \"why\": 2, 0, -1", options: ["x"], targets: ["c2",], }"#;
+        let card = super::card(loose).expect("a card");
+        let expected = r#"const DATA = {"kind":"problem","options":[],"prompt":"Say \"why\": 2, 0, -1","step":"","targets":["c2"]};"#;
+        assert!(
+            card.contains(expected),
+            "{}",
+            &card[card.find("const DATA").unwrap()..][..160]
+        );
+        assert_eq!(super::card(r#"{"kind": "question"}"#), None);
+        assert_eq!(super::card("not json"), None);
+    }
+
+    /// The card's own script, in node with a stand-in page (`study_card_test.js`): an answer sent
+    /// before shows as sent, dictation fills the thinking box, answering keeps it all.
+    #[test]
+    fn the_card_keeps_its_answer_and_takes_dictation() {
+        let dir = env!("CARGO_MANIFEST_DIR");
+        let out = match std::process::Command::new("node")
+            .arg(format!("{dir}/src/study_card_test.js"))
+            .arg(format!("{dir}/src/study_card.html"))
+            .output()
+        {
+            Ok(out) => out,
+            Err(_) => return, // no node here (CI on Windows): the text checks above still run
+        };
+        assert!(
+            out.status.success() && out.stdout == b"ok",
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn a_finished_question_block_becomes_its_card_and_one_being_written_waits() {
+        let q = r#"{"kind": "question", "prompt": "Which?", "options": ["A", "B"]}"#;
+        let html = card(q).unwrap();
+        let text = format!("Next one.\n\n```trek-study\n{q}\n```\n\nTake your time.");
+        assert_eq!(
+            expand_cards(&text).as_deref(),
+            Some(format!("Next one.\n\n```trek-html\n{html}\n```\n\nTake your time.").as_str())
+        );
+        // Drawn already, or nothing to draw: unchanged.
+        assert_eq!(expand_cards(&expand_cards(&text).unwrap()), None);
+        assert_eq!(expand_cards("No card here."), None);
+        // Still being written: left for later.
+        assert_eq!(expand_cards(&format!("Next.\n\n```trek-study\n{q}")), None);
+        assert_eq!(expand_cards("Next.\n\n```trek-study"), None);
+        // At the very start, closed by the answer's end.
+        assert_eq!(
+            expand_cards(&format!("```trek-study\n{q}\n```")),
+            Some(format!("```trek-html\n{html}\n```"))
+        );
+        // Not a question: left as written.
+        let odd = "```trek-study\n{\"kind\": \"question\"}\n```\nthen\n```trek-study\nnot\n```";
+        assert_eq!(expand_cards(odd), None);
+        // Named in a line, not a fence: left alone, and a block after it is still drawn.
+        let mixed = format!("Use ```trek-study blocks.\n```trek-study\n{q}\n```");
+        assert_eq!(
+            expand_cards(&mixed),
+            Some(format!(
+                "Use ```trek-study blocks.\n```trek-html\n{html}\n```"
+            ))
+        );
+    }
+
+    #[test]
+    fn what_a_card_sent_is_read_back_field_by_field() {
+        let s = submission(
+            "Check · Step 3 of 8 · Scaled scores [c4]\nAnswer: C. Population growth $\\bar n$, scaled by $\\gamma$\nConfidence: Unsure (45%)\nWorking: first line\nsecond: line",
+        )
+        .expect("a submission");
+        assert_eq!(s.head, "Check · Step 3 of 8 · Scaled scores [c4]");
+        let f: Vec<(&str, &str)> = s
+            .fields
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        assert_eq!(
+            f,
+            [
+                (
+                    "Answer",
+                    "C. Population growth $\\bar n$, scaled by $\\gamma$"
+                ),
+                ("Confidence", "Unsure (45%)"),
+                ("Working", "first line\nsecond: line"),
+            ]
+        );
+        let p = submission("Problem [c2]\nAsking for: a hint\nWorking: (none)").unwrap();
+        assert_eq!(
+            p.fields[0],
+            ("Asking for".to_string(), "a hint".to_string())
+        );
+        // Not from a card: typed, or a label with no working.
+        assert_eq!(submission("Question: which plan?\nWorking: x"), None);
+        assert_eq!(submission("Question\nAnswer: A. yes"), None);
+        assert_eq!(submission("Hello\nWorking: x"), None);
     }
 
     #[test]
