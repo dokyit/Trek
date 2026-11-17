@@ -17,7 +17,7 @@ struct PairingView: View {
                         Image("TrekMark")
                             .resizable()
                             .scaledToFit()
-                            .frame(width: 84, height: 72)
+                            .frame(width: 72, height: 72)
                             .shadow(color: Color(hex: 0xFF8A3D).opacity(0.5), radius: 24)
                         Text("Trek")
                             .font(.ui(size: 40, weight: .bold))

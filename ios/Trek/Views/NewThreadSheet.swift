@@ -61,7 +61,7 @@ struct NewThreadSheet: View {
                     Image("TrekMark")
                         .resizable()
                         .scaledToFit()
-                        .frame(width: 54, height: 47)
+                        .frame(width: 50, height: 50)
                         .shadow(color: Color(hex: 0xFF8A3D).opacity(0.45), radius: 18)
                     Text("What are we building?")
                         .font(.ui(size: 28, weight: .semibold))
