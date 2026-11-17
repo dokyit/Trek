@@ -1,0 +1,58 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Study</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<style>
+:root{--tint:color-mix(in srgb,var(--trek-accent) 10%,transparent);--line:var(--trek-border);--ease:cubic-bezier(.23,1,.32,1)}
+body{margin:0;padding:14px 16px 16px;background:transparent;color:var(--trek-fg);font:14px/1.5 var(--trek-font,system-ui)}
+#card{display:flex;flex-direction:column;gap:14px}
+.q{font-size:16px;font-weight:600;line-height:1.4}
+.opts{display:flex;flex-direction:column;gap:6px}
+.opt{display:flex;gap:10px;align-items:flex-start;width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.opt.on{border-color:var(--trek-accent);background:var(--tint)}
+.key{flex:none;width:20px;height:20px;border-radius:6px;border:1px solid var(--line);display:grid;place-items:center;font-size:11px;color:var(--trek-muted)}
+.opt.on .key{background:var(--trek-accent);border-color:var(--trek-accent);color:#1c120c}
+.label{display:flex;justify-content:space-between;font-size:12px;color:var(--trek-muted);margin-bottom:6px}
+.label b{color:var(--trek-fg)}
+textarea{display:block;width:100%;box-sizing:border-box;min-height:64px;padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:transparent;color:inherit;font:inherit}
+.sure{display:flex;gap:2px;padding:2px;border-radius:8px;background:color-mix(in srgb,var(--trek-fg) 5%,transparent);width:max-content;flex-wrap:wrap}
+.sure button{border:0;background:transparent;color:var(--trek-muted);padding:4px 10px;border-radius:6px;font:inherit;font-size:12.5px;cursor:pointer}
+.sure button.on{background:color-mix(in srgb,var(--trek-fg) 12%,transparent);color:var(--trek-fg);font-weight:500}
+.foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-top:2px}
+.foot .note{margin-right:auto;font-size:12px;color:var(--trek-muted)}
+.btn{font:inherit;font-size:13px;padding:6px 14px;border-radius:8px;border:1px solid var(--line);background:transparent;color:inherit;cursor:pointer}
+.btn.go{background:var(--trek-fg);border-color:var(--trek-fg);color:var(--trek-bg);font-weight:500}
+.btn:disabled{opacity:.4;cursor:default}
+.sent{font-size:12.5px;color:var(--trek-muted)}
+</style></head><body>
+<div id="card"></div>
+<script>
+const DATA = {
+  kind: "question",
+  step: "",
+  prompt: "For $h(x)=(3x+1)^2$, which correctly identifies the inner and outer functions?",
+  options: ["Inner: $3x+1$; outer: $u^2$", "Inner: $u^2$; outer: $3x+1$", "There is no composition", "Inner: $x$; outer: $3x+1+u^2$"],
+  targets: []
+};
+const LABEL = {question:"Question",predict:"Predict",check:"Check",problem:"Problem"}[DATA.kind]||"Question";
+const problem=DATA.kind==="problem",choice=!problem&&DATA.options.length>0;
+const SURE=[["Guessing",20],["Unsure",45],["Fairly sure",70],["Sure",95]];
+const el=(t,c,s)=>{const e=document.createElement(t);if(c)e.className=c;if(s!=null)e.textContent=s;return e};
+const card=document.getElementById("card");let pick=null,sure=null,closed=false;
+card.append(el("div","q",DATA.prompt));
+const rows=[];
+if(choice){const box=el("div","opts");DATA.options.forEach((o,i)=>{const r=el("button","opt");r.type="button";r.append(el("span","key",String.fromCharCode(65+i)),el("span",null,o));r.onclick=()=>choose(i);rows.push(r);box.append(r)});card.append(box)}
+function choose(i){if(closed)return;pick=i;rows.forEach((x,j)=>x.classList.toggle("on",j===i));sync()}
+const field=el("div"),label=el("div","label"),work=el("textarea");
+label.append(el("b",null,"Your thinking"),el("span",null,"optional · messy is fine"));work.placeholder="Why this answer? What made you unsure?";field.append(label,work);card.append(field);
+const f=el("div"),l=el("div","label"),row=el("div","sure");l.append(el("b",null,"How sure are you?"));
+SURE.forEach(([name],i)=>{const b=el("button",null,name);b.type="button";b.onclick=()=>{sure=i;[...row.children].forEach((x,j)=>x.classList.toggle("on",j===i))};row.append(b)});f.append(l,row);card.append(f);
+const foot=el("div","foot"),note=el("span","note");foot.append(note);card.append(foot);
+const button=(text,go,fn)=>{const b=el("button","btn"+(go?" go":""),text);b.type="button";b.onclick=fn;foot.append(b);return b};
+function send(){const text=["Question","Answer: "+String.fromCharCode(65+pick)+". "+DATA.options[pick],"Confidence: "+(sure===null?"not given":SURE[sure][0]+" ("+SURE[sure][1]+"%)"),"Working: "+(work.value.trim()||"(none)")].join("\n");if(!window.trek||!window.trek.send(text)){note.textContent="Couldn't send: copy your working into the composer.";return}closed=true;card.classList.add("done");work.readOnly=true;card.querySelectorAll("button").forEach(b=>b.disabled=true);foot.replaceWith(el("div","sent","Sent"))}
+button("I don't know",false,()=>{work.value="";send()});
+const main=button("Answer",true,send);main.append(el("kbd",null,"⌘↩"));
+function sync(){main.disabled=pick===null}work.oninput=sync;sync();
+document.addEventListener("keydown",e=>{if(closed)return;if((e.metaKey||e.ctrlKey)&&e.key==="Enter"&&!main.disabled){e.preventDefault();main.click()}});
+window.addEventListener("load",()=>window.renderMathInElement&&renderMathInElement(card,{delimiters:[{left:"$$",right:"$$",display:true},{left:"$",right:"$",display:false}],throwOnError:false}));
+</script></body></html>

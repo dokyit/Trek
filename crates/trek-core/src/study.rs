@@ -1084,8 +1084,14 @@ fn object_in(s: &str) -> Option<&str> {
 /// drew the card itself, and what a tutor may still write in a thread that began then): the
 /// `DATA` object of the question card's script. `None` for any other page.
 fn question_in_page(html: &str) -> Option<Question> {
-    let at = html.find("const DATA = ")?;
-    let is_card = html.contains("question: \"Question\"") && html.contains("problem: \"Problem\"");
+    // However it's spaced: a tutor may write the page out squeezed (Codex on GPT-5.6 Luna did).
+    let at = html
+        .match_indices("DATA")
+        .map(|(at, _)| at)
+        .find(|&at| html[at + 4..].trim_start().starts_with('='))?;
+    let squeezed: String = html.chars().filter(|c| !c.is_whitespace()).collect();
+    let is_card =
+        squeezed.contains("question:\"Question\"") && squeezed.contains("problem:\"Problem\"");
     if !is_card {
         return None;
     }
@@ -1769,6 +1775,16 @@ mod tests {
         );
         // Still being written: left until it's done.
         assert_eq!(expand_cards(cut), None);
+        // Written out squeezed and rewritten (Codex on GPT-5.6 Luna under the 0.4.55 guide, 17
+        // November: its "I don't know" sent "Answer: A. undefined"), drawn as today's card.
+        let page = include_str!("study_fixtures/old-card-codex-squeezed-2026-11-17.html");
+        let out = expand_cards(&format!("```trek-html\n{page}```")).unwrap();
+        let got = cards_drawn(&out);
+        assert_eq!(
+            got[0].prompt,
+            "For $h(x)=(3x+1)^2$, which correctly identifies the inner and outer functions?"
+        );
+        assert_eq!(got[0].options.len(), 4);
         // Any other page is left as it is.
         let other = "```trek-html\n<!doctype html><script>const DATA = {a: 1};</script>\n```";
         assert_eq!(expand_cards(other), None);
