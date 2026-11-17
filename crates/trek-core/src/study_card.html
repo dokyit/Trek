@@ -3,42 +3,45 @@
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
 <style>
-:root{--tint:color-mix(in srgb,var(--trek-accent) 10%,transparent);--line:var(--trek-border);--ease:cubic-bezier(.23,1,.32,1)}
+:root{--tint:color-mix(in srgb,var(--trek-accent) 10%,transparent);--line:var(--trek-border);--ease:cubic-bezier(.23,1,.32,1);--t:.15s var(--ease);--wash:color-mix(in srgb,var(--trek-fg) 6%,transparent)}
 body{margin:0;padding:14px 16px 16px;background:transparent;color:var(--trek-fg);font:14px/1.5 var(--trek-font,system-ui)}
 #card{display:flex;flex-direction:column;gap:14px}
 .where{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--trek-muted)}
 .where .bar{flex:1;max-width:160px;height:4px;border-radius:2px;background:var(--line);overflow:hidden}
 .where .bar i{display:block;height:100%;background:var(--trek-accent);border-radius:2px}
 .q{font-size:16px;font-weight:600;line-height:1.4;text-wrap:pretty}
+.q p,.q ul,.q ol{margin:0}.q>*+*{margin-top:8px}.q ul,.q ol{padding-left:20px}
+code{font-family:var(--trek-mono,ui-monospace,monospace);font-size:.92em}
+pre{margin:0;padding:8px 12px;border-radius:8px;background:var(--wash);overflow-x:auto;font:400 13px/1.45 var(--trek-mono,ui-monospace,monospace)}
 .opts{display:flex;flex-direction:column;gap:6px;margin-top:-2px}
-.opt{display:flex;gap:10px;align-items:flex-start;width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;transition:border-color .15s var(--ease),background-color .15s var(--ease)}
+.opt{display:flex;gap:10px;align-items:flex-start;width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;transition:border-color var(--t),background-color var(--t)}
 .opt:hover{border-color:color-mix(in srgb,var(--trek-fg) 28%,transparent)}
 .opt:active{transform:scale(.99)}
 .opt.on{border-color:var(--trek-accent);background:var(--tint)}
-.key{flex:none;width:20px;height:20px;margin-top:1px;border-radius:6px;border:1px solid var(--line);display:grid;place-items:center;font-size:11px;font-weight:600;color:var(--trek-muted);transition:background-color .15s var(--ease),color .15s var(--ease),border-color .15s var(--ease)}
+.key{flex:none;width:20px;height:20px;margin-top:1px;border-radius:6px;border:1px solid var(--line);display:grid;place-items:center;font-size:11px;font-weight:600;color:var(--trek-muted);transition:background-color var(--t),color var(--t),border-color var(--t)}
 .opt.on .key{background:var(--trek-accent);border-color:var(--trek-accent);color:#1c120c}
 .label{display:flex;justify-content:space-between;align-items:baseline;font-size:12px;color:var(--trek-muted);margin-bottom:6px}
 .label b{font-weight:500;color:var(--trek-fg)}
 .box{position:relative}
-textarea{display:block;width:100%;box-sizing:border-box;min-height:64px;resize:vertical;padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:transparent;color:inherit;font:inherit;line-height:1.5;transition:border-color .15s var(--ease)}
+textarea{display:block;width:100%;box-sizing:border-box;min-height:64px;resize:vertical;padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:transparent;color:inherit;font:inherit;line-height:1.5;transition:border-color var(--t)}
 .talk textarea{padding-right:44px}
 textarea::placeholder{color:var(--trek-muted)}
 textarea:focus{outline:none;border-color:var(--trek-accent)}
-.mic{position:absolute;right:7px;bottom:7px;width:28px;height:28px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:var(--trek-muted);cursor:pointer;transition:background-color .15s var(--ease),color .15s var(--ease)}
-.mic:hover{color:var(--trek-fg);background:color-mix(in srgb,var(--trek-fg) 7%,transparent)}
+.mic{position:absolute;right:7px;bottom:7px;width:28px;height:28px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:var(--trek-muted);cursor:pointer;transition:background-color var(--t),color var(--t)}
+.mic:hover{color:var(--trek-fg);background:var(--wash)}
 .mic.on{color:var(--trek-bg);background:var(--trek-accent)}
 .mic.on svg{animation:beat 1.2s var(--ease) infinite}
 .mic.wait{opacity:.6;cursor:progress}
 .mic:disabled{display:none}
 .listening textarea{border-color:var(--trek-accent)}
-.sure{display:flex;gap:2px;padding:2px;border-radius:8px;background:color-mix(in srgb,var(--trek-fg) 5%,transparent);width:max-content;max-width:100%;flex-wrap:wrap}
-.sure button{border:0;background:transparent;color:var(--trek-muted);padding:4px 10px;border-radius:6px;font:inherit;font-size:12.5px;cursor:pointer;transition:background-color .15s var(--ease),color .15s var(--ease)}
+.sure{display:flex;gap:2px;padding:2px;border-radius:8px;background:var(--wash);width:max-content;max-width:100%;flex-wrap:wrap}
+.sure button{border:0;background:transparent;color:var(--trek-muted);padding:4px 10px;border-radius:6px;font:inherit;font-size:12.5px;cursor:pointer;transition:background-color var(--t),color var(--t)}
 .sure button:hover{color:var(--trek-fg)}
 .sure button.on{background:color-mix(in srgb,var(--trek-fg) 12%,transparent);color:var(--trek-fg);font-weight:500}
 .foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-top:2px}
 .foot .note{margin-right:auto;font-size:12px;color:var(--trek-muted)}
-.btn{font:inherit;font-size:13px;padding:6px 14px;border-radius:8px;border:1px solid var(--line);background:transparent;color:inherit;cursor:pointer;transition:transform .12s var(--ease),opacity .15s var(--ease)}
-.btn:hover{background:color-mix(in srgb,var(--trek-fg) 5%,transparent)}
+.btn{font:inherit;font-size:13px;padding:6px 14px;border-radius:8px;border:1px solid var(--line);background:transparent;color:inherit;cursor:pointer;transition:transform .12s var(--ease),opacity var(--t)}
+.btn:hover{background:var(--wash)}
 .btn:active{transform:scale(.97)}
 .btn.go{background:var(--trek-fg);border-color:var(--trek-fg);color:var(--trek-bg);font-weight:500}
 .btn:disabled{opacity:.4;cursor:default;transform:none}
@@ -56,7 +59,7 @@ kbd{font:inherit;font-size:11px;opacity:.6;margin-left:6px}
 .kept p,.kept ul,.kept ol{margin:0}
 .kept>*+*{margin-top:6px}
 .kept ul,.kept ol{padding-left:20px}
-.kept code{font-family:var(--trek-mono,ui-monospace,monospace);font-size:.92em;padding:1px 4px;border-radius:4px;background:color-mix(in srgb,var(--trek-fg) 7%,transparent)}
+.kept code{padding:1px 4px;border-radius:4px;background:var(--wash)}
 .kept .katex-display{margin:.4em 0;overflow-x:auto;overflow-y:hidden}
 @keyframes in{from{opacity:0;transform:translateY(2px)}}
 @keyframes beat{50%{transform:scale(.86)}}
@@ -81,7 +84,55 @@ if (DATA.step) {
   if (m && +m[2] > 0) { const b = el("span", "bar"), i = el("i"); i.style.width = Math.min(100, 100 * m[1] / m[2]) + "%"; b.append(i); w.append(b); }
   card.append(w);
 }
-card.append(el("div", "q", DATA.prompt));
+// The question, and what they wrote as it reads once sent: basic Markdown (paragraphs, lists,
+// **bold**, *italic*, `code`, fenced code) built as elements, never as HTML, with the maths left
+// as text for KaTeX to set. The maths is set aside first, so a `*` or `_` in it is never taken
+// for emphasis.
+const SPAN = /\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$[^$\n]+?\$/g;
+const INLINE = /(`[^`\n]+`)|\*\*([^*\n]+?)\*\*|\*([^*\s][^*\n]*?)\*|(?<![\w\\])_([^_\n]+?)_(?!\w)|\u0000(\d+)\u0000/g;
+function inline(parent, s, maths) {
+  const re = new RegExp(INLINE.source, "g");
+  let at = 0, m;
+  while ((m = re.exec(s))) {
+    if (m.index > at) parent.append(document.createTextNode(s.slice(at, m.index)));
+    if (m[1]) parent.append(el("code", null, m[1].slice(1, -1)));
+    else if (m[2] != null) { const b = el("strong"); inline(b, m[2], maths); parent.append(b); }
+    else if (m[3] != null || m[4] != null) { const i = el("em"); inline(i, m[3] != null ? m[3] : m[4], maths); parent.append(i); }
+    else parent.append(document.createTextNode(maths[+m[5]]));
+    at = m.index + m[0].length;
+  }
+  if (at < s.length) parent.append(document.createTextNode(s.slice(at)));
+}
+function md(text, cls) {
+  const maths = [], box = el("div", cls);
+  const lines = text.replace(SPAN, x => "\u0000" + (maths.push(x) - 1) + "\u0000").split("\n");
+  let list = null, para = null, code = null;
+  for (const line of lines) {
+    if (/^\s*(```|~~~)/.test(line)) {
+      if (code) code = null; else { const pre = el("pre"); code = el("code"); pre.append(code); box.append(pre); list = para = null; }
+      continue;
+    }
+    if (code) { code.textContent += (code.textContent ? "\n" : "") + line.replace(/\u0000(\d+)\u0000/g, (_, n) => maths[+n]); continue; }
+    const item = line.match(/^\s*([-*•]|\d+[.)])\s+(.*)$/);
+    if (item) {
+      const tag = /\d/.test(item[1]) ? "ol" : "ul";
+      if (!list || list.tag !== tag) { list = el(tag); list.tag = tag; box.append(list); }
+      const li = el("li"); inline(li, item[2], maths); list.append(li); para = null;
+    } else if (!line.trim()) list = para = null;
+    else {
+      list = null;
+      if (para) para.append(el("br")); else { para = el("p"); box.append(para); }
+      inline(para, line, maths);
+    }
+  }
+  return box;
+}
+const kept = text => md(text, "kept");
+// A line of text with its Markdown and maths set, into `parent`.
+function line(parent, text) { const maths = []; inline(parent, text.replace(SPAN, x => "\u0000" + (maths.push(x) - 1) + "\u0000"), maths); return parent; }
+
+
+card.append(md(DATA.prompt, "q"));
 
 const rows = [];
 if (choice) {
@@ -89,7 +140,7 @@ if (choice) {
   DATA.options.forEach((o, i) => {
     const r = el("button", "opt");
     r.type = "button";
-    r.append(el("span", "key", String.fromCharCode(65 + i)), el("span", null, o));
+    r.append(el("span", "key", String.fromCharCode(65 + i)), line(el("span"), o));
     r.onclick = () => choose(i);
     rows.push(r); box.append(r);
   });
@@ -113,7 +164,7 @@ const joined = (base, said) => { said = (said || "").trim(); return !said ? base
 if (T.canDictate && typeof T.dictate === "function") {
   field.classList.add("talk");
   mic = el("button", "mic"); mic.type = "button"; mic.title = "Dictate"; mic.setAttribute("aria-label", "Dictate");
-  mic.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><path d="M12 18v4"/></svg>';
+  mic.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><path d="M12 18v4"/></svg>';
   mic.onclick = () => { if (!closed && !T.dictate(!taking)) note.textContent = "Couldn't start dictation: click the mic again."; };
   wrap.append(mic);
   window.addEventListener("trekdictation", e => {
@@ -160,44 +211,6 @@ const MATH = {delimiters: [{left: "$$", right: "$$", display: true}, {left: "\\[
   {left: "$", right: "$", display: false}, {left: "\\(", right: "\\)", display: false}], throwOnError: false};
 const typeset = n => { if (window.renderMathInElement) renderMathInElement(n, MATH); };
 
-// What they wrote, as it reads once sent: basic Markdown (paragraphs, lists, **bold**, *italic*,
-// `code`) built as elements, never as HTML, with the maths left as text for KaTeX to set. The
-// maths is set aside first, so a `*` or `_` in it is never taken for emphasis.
-const SPAN = /\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$[^$\n]+?\$/g;
-const INLINE = /(`[^`\n]+`)|\*\*([^*\n]+?)\*\*|\*([^*\s][^*\n]*?)\*|(?<![\w\\])_([^_\n]+?)_(?!\w)|\u0000(\d+)\u0000/g;
-function inline(parent, s, maths) {
-  const re = new RegExp(INLINE.source, "g");
-  let at = 0, m;
-  while ((m = re.exec(s))) {
-    if (m.index > at) parent.append(document.createTextNode(s.slice(at, m.index)));
-    if (m[1]) parent.append(el("code", null, m[1].slice(1, -1)));
-    else if (m[2] != null) { const b = el("strong"); inline(b, m[2], maths); parent.append(b); }
-    else if (m[3] != null || m[4] != null) { const i = el("em"); inline(i, m[3] != null ? m[3] : m[4], maths); parent.append(i); }
-    else parent.append(document.createTextNode(maths[+m[5]]));
-    at = m.index + m[0].length;
-  }
-  if (at < s.length) parent.append(document.createTextNode(s.slice(at)));
-}
-function kept(text) {
-  const maths = [], box = el("div", "kept");
-  const lines = text.replace(SPAN, x => "\u0000" + (maths.push(x) - 1) + "\u0000").split("\n");
-  let list = null, para = null;
-  for (const line of lines) {
-    const item = line.match(/^\s*([-*•]|\d+[.)])\s+(.*)$/);
-    if (item) {
-      const tag = /\d/.test(item[1]) ? "ol" : "ul";
-      if (!list || list.tag !== tag) { list = el(tag); list.tag = tag; box.append(list); }
-      const li = el("li"); inline(li, item[2], maths); list.append(li); para = null;
-    } else if (!line.trim()) { list = null; para = null; }
-    else {
-      list = null;
-      if (para) para.append(el("br")); else { para = el("p"); box.append(para); }
-      inline(para, line, maths);
-    }
-  }
-  return box;
-}
-
 // Answered: what they chose, how sure and what they wrote stay, with what was sent. What they
 // wrote is set as it reads (Markdown and maths typeset), no longer a box to type in.
 function close(lines) {
@@ -207,7 +220,7 @@ function close(lines) {
   if (mic) { if (taking) T.dictate(false); mic.disabled = true; }
   card.querySelectorAll("button").forEach(b => b.disabled = true);
   const s = el("div", "sent");
-  s.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+  s.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M20 6 9 17l-5-5"/></svg>';
   s.append(el("span", null, "Sent · " + lines.map(l => l.replace(/^[^:]+: /, "")).join(" · ")));
   foot.replaceWith(s); typeset(s);
 }

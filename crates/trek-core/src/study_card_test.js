@@ -146,6 +146,18 @@ assert.deepStrictEqual(ol.children.map((li) => li.text()), ['one']);
 c = run(question, ['Question\nAnswer: I don\'t know\nWorking: <img src=x onerror=alert(1)>']);
 assert.strictEqual(c.kept().text(), '<img src=x onerror=alert(1)>');
 
+// The question and its options read as written, Markdown set (a tutor's `**minimum**` is bold,
+// not asterisks), a code block kept as code, the maths left for KaTeX.
+const marked = { kind: 'question', step: '', prompt: 'What is the **minimum** of $f(x)$?\n```\nlet r = f [3; -1]\n```', options: ['`2`', 'the *least* $f(x)$'], targets: [] };
+c = run(marked, []);
+const q = c.card.all((e) => e.classList.contains('q'))[0];
+assert.deepStrictEqual(tags(q), ['p', 'pre']);
+assert.deepStrictEqual(tags(q.children[0]), ['#text', 'strong', '#text', '#text', '#text']);
+assert.strictEqual(q.children[0].text(), 'What is the minimum of $f(x)$?');
+assert.strictEqual(q.children[1].text(), 'let r = f [3; -1]');
+assert.strictEqual(c.options[0].text(), 'A2');
+assert.deepStrictEqual(tags(c.options[1].children[1]), ['#text', 'em', '#text', '#text']);
+
 // A problem stays open for more working until it's solved.
 const problem = { kind: 'problem', step: '', prompt: 'x', options: [], targets: ['c2'] };
 c = run(problem, ['Problem [c2]\nStatus: still working\nWorking: abc']);
