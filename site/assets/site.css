@@ -23,7 +23,7 @@
   --board-hover: #F26A37;
   --board-ink: #1F1714;
   --post: #1F1714;
-  --shade: 44 28 72;
+  --shade: 31 23 20;
   --display: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
   --text: "Hanken Grotesk", ui-sans-serif, system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, monospace;
@@ -73,10 +73,10 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
 .text-link { text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 36%, transparent); text-underline-offset: 3px; transition: text-decoration-color 150ms var(--out); }
 .text-link:hover { text-decoration-color: currentColor; }
 
-/* ---------- The mark: one post, two boards, from /assets/img/mark.svg?v=cc78c821 ---------- */
+/* ---------- The mark: one post, two boards, from /assets/img/mark.svg?v=7cbb7d26 ---------- */
 .mark { overflow: visible; }
 .mark .post { fill: var(--post); }
-.mark .board { fill: var(--board); stroke: var(--board); }
+.mark .board { fill: var(--board); }
 
 /* ---------- Buttons ---------- */
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 10px; border-radius: 14px; font: 600 16px/1 var(--text); white-space: nowrap;
@@ -128,8 +128,8 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
 /* The boards come round the post once and settle. */
 @media (prefers-reduced-motion: no-preference) {
   .mark-hero .board { transform-box: fill-box; animation: board 1.5s var(--out) both; }
-  .mark-hero .board-a { transform-origin: 49.2% 50%; animation-delay: 0.25s; }
-  .mark-hero .board-b { transform-origin: 50.8% 50%; animation-delay: 0.42s; animation-name: board-b; }
+  .mark-hero .board-a { transform-origin: 36.5% 50%; animation-delay: 0.25s; }
+  .mark-hero .board-b { transform-origin: 65.3% 50%; animation-delay: 0.42s; animation-name: board-b; }
   .mark-hero .post { animation: post 0.7s var(--out) both; transform-box: fill-box; transform-origin: 50% 100%; }
   .hero h1, .hero .lede, .hero .cta, .hero .fine { animation: rise 1s var(--out) both; }
   .hero h1 { animation-delay: 0.1s; }
