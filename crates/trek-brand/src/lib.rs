@@ -433,7 +433,7 @@ mod tests {
         assert_eq!(Drawn::at(POST_RISES).post, 1.);
         // They swing in from opposite sides: the upper tipped down at its tip, the lower at its
         // tail end.
-        assert!(SWING_FROM[0] > 0. && SWING_FROM[1] < 0.);
+        const { assert!(SWING_FROM[0] > 0. && SWING_FROM[1] < 0.) };
     }
 
     #[test]
