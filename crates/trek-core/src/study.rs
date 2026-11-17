@@ -635,7 +635,14 @@ pub fn card(data: &str) -> Option<String> {
     });
     // In a script: nothing in it may close the script element.
     let js = data.to_string().replace("</", "<\\/");
-    Some(CARD.replacen("__DATA__", &js, 1))
+    // The page's own comments are for whoever reads its source here, not for every card a
+    // transcript keeps: whole-line `//` comments are left out.
+    let page: String = CARD
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("// "))
+        .flat_map(|l| [l, "\n"])
+        .collect();
+    Some(page.replacen("__DATA__", &js, 1))
 }
 
 /// A JavaScript object literal as JSON, as far as a question needs: bare keys quoted, trailing
