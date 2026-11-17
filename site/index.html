@@ -30,8 +30,8 @@
 <link rel="manifest" href="/site.webmanifest?v=3e8b1bb9">
 <link rel="preload" href="/assets/fonts/BricolageGrotesque.woff2?v=a79fdb52" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/assets/fonts/HankenGrotesk.woff2?v=e9201edd" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="/assets/site.css?v=5375fc16">
-<script src="/assets/site.js?v=356c607b" defer></script>
+<link rel="stylesheet" href="/assets/site.css?v=94b5c324">
+<script src="/assets/site.js?v=347cc48e" defer></script>
 
 <script type="application/ld+json">
 {
@@ -108,17 +108,17 @@
       <p>Running and waiting threads on top. One stops to ask, goes to the top, and gets back to work once you answer.</p>
     </div>
     <div class="panel panel-tall reveal" data-drift>
-      <img class="shot" data-loop="/assets/img/features/inbox.mp4?v=f4103dd4" src="/assets/img/features/inbox-poster.webp?v=740d08fe" width="274" height="330" loading="lazy" decoding="async" alt="Trek's sidebar: a thread stops to ask for ./migrate and moves to the top of the Inbox, is allowed, and goes back to work while another finishes.">
+      <picture><source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/inbox-night-poster.webp?v=d4e72c69"><img class="shot" data-loop="/assets/img/features/inbox.mp4?v=f4103dd4" data-loop-dark="/assets/img/features/inbox-night.mp4?v=d1aa43dd" src="/assets/img/features/inbox-poster.webp?v=740d08fe" width="274" height="330" loading="lazy" decoding="async" alt="Trek's sidebar: threads at work, and one that stops to ask goes to the top of the Inbox with its question."></picture>
     </div>
   </article>
 
   <article class="feat feat-wide">
     <div class="feat-text feat-text-row reveal">
       <h3>Agents consult agents</h3>
-      <p>Codex reviews Claude's plan, and back. Here one agent sends two sub-agents ahead and waits for both.</p>
+      <p>Codex reviews Claude's plan, and back. Here Claude Code asks GPT-5.6 Luna for a second opinion and waits for it.</p>
     </div>
     <div class="panel panel-wide panel-bleed reveal">
-      <picture><source media="(max-width: 600px)" srcset="/assets/img/features/agents-narrow-poster.webp?v=5d7354d9"><img class="shot" data-loop="/assets/img/features/agents.mp4?v=e3e9c071" data-loop-narrow="/assets/img/features/agents-narrow.mp4?v=3848400f" src="/assets/img/features/agents-poster.webp?v=56796fa1" width="900" height="345" loading="lazy" decoding="async" alt="A thread in Trek: the agent sends two sub-agents, Map the HTTP routes and Audit error handling, and waits on both while they run."></picture>
+      <img class="shot" data-loop="/assets/img/features/consult.mp4?v=052c6e6c" src="/assets/img/features/consult-poster.webp?v=f081344d" width="900" height="450" loading="lazy" decoding="async" alt="A thread in Trek: Claude Code is asked for a second opinion, hands the review to GPT-5.6 Luna, and waits on it while it runs.">
     </div>
   </article>
 
@@ -126,7 +126,7 @@
     <article class="feat feat-card feat-7">
       <div class="panel panel-mid reveal" data-drift>
         <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/access-night.webp?v=8ae219ce">
+          <source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/access-night.webp?v=7a3f086c">
           <img class="shot" src="/assets/img/features/access-paper.webp?v=ffe0e94f" width="346" height="328" loading="lazy" decoding="async" alt="The access menu: Supervised, Auto-accept edits, Auto, and Full access, with the Plan button beside it.">
         </picture>
       </div>
@@ -159,12 +159,10 @@
     </div>
     <div class="phones reveal">
       <figure class="phone phone-back" data-drift="-1">
-        <picture>
-          <img src="/assets/img/features/iphone-threads-paper.webp?v=ccba25fb" width="288" height="605" loading="lazy" decoding="async" alt="Trek for iPhone: Threads, with the ones that need you on top.">
-        </picture>
+        <picture><source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/iphone-threads-night.webp?v=a91d0bf3"><img class="phone-screen" src="/assets/img/features/iphone-threads-paper.webp?v=a7ee221d" width="295" height="638" loading="lazy" decoding="async" alt="Trek for iPhone: Threads, with the ones that need you on top."></picture>
       </figure>
       <figure class="phone phone-front">
-        <img class="phone-screen" data-loop="/assets/img/features/iphone.mp4?v=ca859399" src="/assets/img/features/iphone-poster.webp?v=8d5e3001" width="295" height="638" loading="lazy" decoding="async" alt="Trek for iPhone: Claude Code wants to run ./migrate, and Allow is pressed.">
+        <picture><source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/iphone-night.webp?v=e1403d80"><img class="phone-screen" data-loop="/assets/img/features/iphone.mp4?v=ca859399" data-loop-dark="" src="/assets/img/features/iphone-poster.webp?v=8d5e3001" width="295" height="638" loading="lazy" decoding="async" alt="Trek for iPhone: Claude Code wants to run a command, with Deny and Allow."></picture>
       </figure>
     </div>
   </div>
@@ -185,33 +183,27 @@
     </article>
     <article class="feat feat-mini reveal">
       <div class="mini-media">
-        <img class="shot" src="/assets/img/features/undo-paper.webp?v=9fcdf9b5" width="410" height="110" loading="lazy" decoding="async" alt="The end of an agent's turn, with its buttons: copy, undo, retry, retry with another model, and fork.">
+        <picture><source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/undo-night.webp?v=2f3b73f3"><img class="shot" src="/assets/img/features/undo-paper.webp?v=9fcdf9b5" width="410" height="110" loading="lazy" decoding="async" alt="The end of an agent's turn, with its buttons: copy, undo, retry, retry with another model, and fork."></picture>
       </div>
       <h3>Undo any turn</h3>
       <p>Edit, retry or fork. Files roll back too.</p>
     </article>
     <article class="feat feat-mini reveal">
       <div class="mini-media">
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/study-night.webp?v=76bfc112">
-          <img class="shot" src="/assets/img/features/study-paper.webp?v=a8acbae5" width="466" height="154" loading="lazy" decoding="async" alt="Study in Trek: Learn or Practice, and the question What do you want to learn? It starts from what you already know.">
-        </picture>
+        <img class="shot" src="/assets/img/features/plugins.webp?v=97fa6052" width="420" height="115" loading="lazy" decoding="async" alt="A plugin at work: a focus timer on the composer, with the hiker walking along its edge.">
       </div>
-      <h3>Study</h3>
-      <p>Learn or practise with an agent. It starts from what you already know.</p>
+      <h3>Plugins</h3>
+      <p>Themes, mods and pages that change how Trek looks and works. Ask an agent for one.</p>
     </article>
   </div>
 
   <article class="feat feat-split feat-split-flip">
-    <div class="panel panel-crop reveal" data-drift>
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/plugins-night.webp?v=7d212625">
-        <img class="shot" src="/assets/img/features/plugins-paper.webp?v=9863fdbe" width="652" height="742" loading="lazy" decoding="async" alt="Trek's Plugins settings, with examples to install: Focus timer, Commit trail, Summit log, Trail board and Terminal look.">
-      </picture>
+    <div class="panel panel-mid reveal" data-drift>
+      <img class="shot shot-study" src="/assets/img/features/study.webp?v=e5332ba9" width="790" height="550" loading="lazy" decoding="async" alt="Study in Trek: a question it set, What does the derivative f prime of x tell you, with four answers, a box for your thinking and how sure you are.">
     </div>
     <div class="feat-text reveal">
-      <h3>Plugins</h3>
-      <p>Themes, mods and pages that change how Trek looks and works. Ask an agent to make one.</p>
+      <h3>Study</h3>
+      <p>Learn or practise with an agent. It starts from what you already know.</p>
     </div>
   </article>
 
@@ -221,7 +213,7 @@
       <p>Four themes, Paper or Night, glass. Painted and ASCII art.</p>
     </div>
     <div class="panel panel-wide panel-bleed reveal">
-      <img class="shot" data-loop="/assets/img/features/themes.mp4?v=8cee7a3b" src="/assets/img/features/themes-poster.webp?v=f35cceea" width="1000" height="636" loading="lazy" decoding="async" alt="One Trek window changing through its four themes, then taking a painted background.">
+      <img class="shot" data-loop="/assets/img/features/themes.mp4?v=5e969fb2" src="/assets/img/features/themes-poster.webp?v=31b8e307" width="1000" height="625" loading="lazy" decoding="async" alt="One Trek window changing through its themes, glass and painted backgrounds.">
     </div>
   </article>
   <p class="staged reveal">The real app, with staged threads.</p>

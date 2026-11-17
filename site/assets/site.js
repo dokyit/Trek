@@ -250,14 +250,19 @@
         if (entry.isIntersecting && !still.matches) { const p = video.play(); if (p) p.catch(() => {}); } else video.pause();
       }
     }, { threshold: 0.25 });
+    // A recording made in each theme names its Night copy in data-loop-dark; an empty one means
+    // there is no Night recording, and the Night still stays.
+    const dark = matchMedia("(prefers-color-scheme: dark)");
+    const source = (img) => (dark.matches && "loopDark" in img.dataset ? img.dataset.loopDark : img.dataset.loop);
     function upgrade(img) {
+      if (!source(img)) return;
       const video = document.createElement("video");
       video.className = img.className;
       video.width = img.width; video.height = img.height;
       video.muted = true; video.loop = true; video.playsInline = true;
       video.setAttribute("muted", ""); video.setAttribute("playsinline", "");
       video.poster = img.currentSrc || img.src;
-      video.src = (narrow.matches && img.dataset.loopNarrow) || img.dataset.loop;
+      video.src = (narrow.matches && img.dataset.loopNarrow) || source(img);
       video.setAttribute("aria-label", img.alt);
       (img.parentElement.matches("picture") ? img.parentElement : img).replaceWith(video);
       play.observe(video);
