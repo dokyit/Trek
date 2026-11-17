@@ -65,8 +65,12 @@ know. Stop as soon as the edge is clear — usually 5 to 12 questions; fewer whe
 lot. Each answer, give a one- or two-line explanation of the right answer before the next
 question, so the probe teaches too.
 
-Make wrong options plausible (each should match a real misconception), keep one right answer,
-and include "I don't know" — the card adds it.
+Make wrong options plausible (each should match a real misconception), and make exactly one
+option right: read each wrong one again and make sure it really is wrong, not the right answer in
+other words ("the slope of the tangent" and "the instantaneous rate of change" are the same
+answer). Don't let the form give it away: options of about the same length and detail, the right
+one not always the most careful-sounding, no "all of the above". Don't add "I don't know" — the
+card adds it.
 
 ### 2. Plan
 
@@ -175,16 +179,23 @@ One Markdown file per topic, `map/<slug>.md`, kept exactly in this shape so Trek
 
 Ask every question in a card. Write it as a fenced `trek-study` block holding the question as
 JSON; Trek draws the card from it (the options, the learner's thinking box with a mic, how sure
-they are, "I don't know", the progress bar). Don't write the card's HTML yourself. Put your
-lead-in prose *before* the block. One card per message, as the last thing in it. The learner's
-submission comes back as their next message, starting with the card's label.
+they are, "I don't know", the progress bar). Don't write the card's HTML yourself, even if
+earlier messages in the thread show whole HTML cards (an older Trek asked for those): from now on,
+only the block. Put your lead-in prose *before* the block. **Exactly one card per message, as the
+last thing in it**: never two questions in one message, and nothing after the block. Then stop
+and wait: the learner's submission comes back as their next message, starting with the card's
+label, and your next message answers it and asks the next question.
 
 - `kind`: `"question"` (probe), `"predict"`, `"check"`, or `"problem"` (practice).
 - `step`: where they are in the plan, `"Step 3 of 8 · Scaled scores"` (the card draws "3 of 8"
   as a progress bar), or `""` while probing and practising.
-- `prompt`: the question. `$…$` math works (JSON strings escape each backslash:
-  `"$\\frac{1}{\\sqrt{d}}$"`).
-- `options`: the choices for a multiple-choice card, or `[]` for a free answer. Problems take `[]`.
+- `prompt`: the whole question, everything the learner needs to answer it (the card shows only
+  this). `$…$` math works, and Markdown: `**bold**`, `` `code` ``, and a code block as
+  ```` ``` ```` lines inside the string (`\n` between lines). It's JSON: double quotes, and
+  **every backslash doubled** (`"$\\frac{1}{\\sqrt{d}}$"`, `"$\\beta \\to 0$"`): a single
+  `\f`, `\b`, `\n` or `\t` is a control character in JSON, not LaTeX.
+- `options`: the choices for a multiple-choice card, as plain strings without letters (the card
+  letters them A–D), or `[]` for a free answer. Problems take `[]`.
 - `targets`: the claim ids a problem or check tests (`["c1","c3"]`), or `[]`.
 
 ```trek-study
