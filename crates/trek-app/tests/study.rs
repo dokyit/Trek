@@ -484,6 +484,340 @@ fn a_tutors_question_is_drawn_as_the_card_and_keeps_the_answer_it_got() {
     });
 }
 
+/// What tutors were seen to write (Claude Code and Codex, 17 November) comes out as one card a
+/// turn: Codex on GPT-5.6 Luna said its message twice in one turn (the same question card twice);
+/// a turn that ended inside its block is drawn as far as it got; a tutor that still writes the
+/// whole HTML card (a thread begun on an older Trek) gets today's card.
+#[test]
+fn a_turn_shows_one_card_however_the_tutor_wrote_it() {
+    run(async |cx| {
+        let _log = trek_app::artifact::fake_web(true).unwrap();
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        let cards = |trek: &common::Trek, cx: &gpui_kit::TestAppContext| -> usize {
+            trek.items(cx, &id)
+                .iter()
+                .map(|i| match i {
+                    Item::Assistant { text } => text.matches("const DATA = ").count(),
+                    _ => 0,
+                })
+                .sum()
+        };
+        let turn = |events: Vec<trek_agents::AgentEvent>, cx: &mut gpui_kit::TestAppContext| {
+            let mut events = events;
+            events.push(trek_agents::AgentEvent::TurnComplete { error: None });
+            trek.update(cx, |ws, cx| ws.apply_events(&id, events, cx));
+            settle(&trek, cx);
+        };
+        use trek_agents::AgentEvent::{TextDelta, TextDone};
+        // Codex, its message twice (raw, as it came).
+        let said = "Let's locate the edge of what you already know.\n\n```trek-study\n{\"kind\":\"question\",\"step\":\"\",\"prompt\":\"What does $f'(x)$ tell you at a particular input $x$?\",\"options\":[\"The exact value of $f(x)$\",\"The instantaneous rate at which $f$ changes as $x$ changes\",\"The average value of $f$ over all inputs\",\"The input where $f$ is largest\"],\"targets\":[]}\n```";
+        turn(
+            vec![
+                TextDelta(said.into()),
+                TextDone(said.into()),
+                TextDelta(said.into()),
+                TextDone(said.into()),
+            ],
+            cx,
+        );
+        assert_eq!(cards(&trek, cx), 1, "{:?}", trek.items(cx, &id));
+        // The turn ended inside the block.
+        let cut = "Next.\n\n```trek-study\n{\"kind\": \"check\", \"prompt\": \"Why $\\frac{1}{2}$?\", \"options\": [\"a\", \"b\"";
+        turn(vec![TextDelta(cut.into()), TextDone(cut.into())], cx);
+        assert_eq!(cards(&trek, cx), 2);
+        // A whole HTML card, as the 0.4.55 guide asked for.
+        let old = format!(
+            "Next one.\n\n```trek-html\n{}```",
+            include_str!("../../trek-core/src/study_fixtures/old-card-opus-2026-10-29.html")
+        );
+        turn(vec![TextDelta(old.clone()), TextDone(old)], cx);
+        assert_eq!(cards(&trek, cx), 3);
+        let last = trek.answers(cx, &id);
+        assert!(last.contains("T.replies"), "today's card");
+    });
+}
+
+/// One question a live tutor asked, read back from a drawn card's page.
+#[derive(Debug, Clone)]
+struct Asked {
+    kind: String,
+    step: String,
+    prompt: String,
+    options: Vec<String>,
+    targets: Vec<String>,
+}
+
+/// Each card drawn in `text` (an answer), as the question it asks.
+fn cards_in(text: &str) -> Vec<Asked> {
+    let mut out = vec![];
+    for part in text.split("```trek-html\n").skip(1) {
+        let Some(at) = part.find("const DATA = ") else {
+            continue;
+        };
+        let line = &part[at + "const DATA = ".len()..];
+        let line = &line[..line.find('\n').unwrap_or(line.len())];
+        let json = line.trim_end().trim_end_matches(';').replace("<\\/", "</");
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) else {
+            continue;
+        };
+        let s = |k: &str| v[k].as_str().unwrap_or_default().to_string();
+        let l = |k: &str| -> Vec<String> {
+            v[k].as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        out.push(Asked {
+            kind: s("kind"),
+            step: s("step"),
+            prompt: s("prompt"),
+            options: l("options"),
+            targets: l("targets"),
+        });
+    }
+    out
+}
+
+/// What the card for `q` sends when the learner picks the second option (or works a problem), a
+/// little unsure: the same text the card's own script writes.
+fn answer_to(q: &Asked, turn: usize) -> String {
+    let label = match q.kind.as_str() {
+        "predict" => "Predict",
+        "check" => "Check",
+        "problem" => "Problem",
+        _ => "Question",
+    };
+    let mut head = [label, q.step.as_str()]
+        .iter()
+        .filter(|s| !s.is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if !q.targets.is_empty() {
+        head.push_str(&format!(" [{}]", q.targets.join(", ")));
+    }
+    let working = [
+        "I think it's this because the outer part changes with the inner one, so you multiply the rates.",
+        "Not sure. I tried a small case with $x = 2$ and it seemed to work out.",
+        "My guess: differentiate the outside, keep the inside, then times the inside's derivative.",
+        "I worked it through: $\\frac{d}{dx}(3x+1)^2 = 2(3x+1)\\cdot 3 = 18x + 6$.",
+    ][turn % 4];
+    if q.kind == "problem" {
+        return format!("{head}\nStatus: I think I've solved it\nWorking: {working}");
+    }
+    let answer = match q.options.get(1).or(q.options.first()) {
+        Some(o) => format!(
+            "Answer: {}. {o}",
+            if q.options.len() > 1 { 'B' } else { 'A' }
+        ),
+        None => "Answer: (in my thinking)".to_string(),
+    };
+    format!("{head}\n{answer}\nConfidence: Fairly sure (70%)\nWorking: {working}")
+}
+
+/// Study with real tutors: for each `agent:model` in `TREK_STUDY_MODELS` (default Claude Code on
+/// Haiku 4.5), a Learn and a Practice session on a small topic with maths, answered card by card
+/// as the card would (`TREK_STUDY_TURNS` questions each, default 4). Prints, for every turn,
+/// whether exactly one card was drawn, how long it took, and what the tutor wrote when it wasn't.
+/// Not run by default (it costs what the turns cost):
+/// `TREK_LIVE_AGENT=study cargo test -p trek-app --test study live_study -- --ignored --nocapture`.
+#[test]
+#[ignore = "live: runs real agents"]
+fn live_study_sessions_ask_one_card_a_turn() {
+    use std::time::{Duration, Instant};
+    use trek_agents::Decision;
+    use trek_core::{AgentId, RunState};
+    let models = std::env::var("TREK_STUDY_MODELS")
+        .unwrap_or_else(|_| "claude-code:claude-haiku-4-5".into());
+    let turns: usize = std::env::var("TREK_STUDY_TURNS")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(4);
+    let kinds = std::env::var("TREK_STUDY_KINDS").unwrap_or_else(|_| "learn,practice".into());
+    let mut report: Vec<String> = vec![];
+    let mut bad = 0;
+    for spec in models.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (agent, model) = spec.split_once(':').expect("agent:model");
+        let agent = AgentId::from_key(agent);
+        for kind in kinds.split(',').map(str::trim) {
+            let kind = if kind == "practice" {
+                study::Kind::Practice
+            } else {
+                study::Kind::Learn
+            };
+            let topic = match kind {
+                study::Kind::Learn => "the chain rule for derivatives, with the maths",
+                study::Kind::Practice => {
+                    "differentiating with the chain rule, e.g. sin(x^2) and (3x+1)^5"
+                }
+            };
+            let (agent, model) = (agent.clone(), model.to_string());
+            run(async |cx| {
+                let trek = common::open_with(cx, |s| {
+                    s.general.default_agent = agent.key();
+                    s.general.default_model = Some(model.clone());
+                    s.general.hand_holding = trek_core::HandHolding::AutoAcceptEdits;
+                });
+                trek.update(cx, |ws, cx| {
+                    ws.agents = [
+                        (AgentId::ClaudeCode, "Claude Code"),
+                        (AgentId::Codex, "Codex"),
+                    ]
+                    .into_iter()
+                    .map(|(a, n)| trek_core::detect::DetectedAgent {
+                        agent: a,
+                        name: n.into(),
+                        path: None,
+                        version: None,
+                        availability: trek_core::detect::Availability::Ready,
+                        models: vec![],
+                        install_hint: None,
+                    })
+                    .collect();
+                    ws.draft_prefs.agent = agent.clone();
+                    ws.draft_prefs.model = Some(model.clone());
+                    ws.navigate(Route::Study, cx);
+                    ws.study.kind = kind;
+                    ws.start_study(kind, topic.to_string(), None, cx);
+                    // An older guide in its place (`TREK_STUDY_GUIDE`), before the tutor reads it:
+                    // how a release's tutors asked.
+                    if let Ok(old) = std::env::var("TREK_STUDY_GUIDE") {
+                        let guide = trek_core::skills::shipped(trek_core::skills::STUDY).unwrap();
+                        std::fs::write(guide, std::fs::read_to_string(old).unwrap()).unwrap();
+                    }
+                });
+                let Route::Thread(id) = trek.read(cx, |ws, _| ws.route.clone()) else {
+                    panic!("a session opened");
+                };
+                // Until the turn is over, allowing what it asks to do.
+                let done = async |cx: &mut gpui_kit::TestAppContext| -> Result<(), String> {
+                    let deadline = Instant::now() + Duration::from_secs(360);
+                    loop {
+                        cx.run_until_parked();
+                        let asking = trek.read(cx, |ws, _| {
+                            ws.pending_request(&id).map(|p| p.request_id.clone())
+                        });
+                        if let Some(rid) = asking {
+                            trek.update(cx, |ws, cx| ws.respond(&id, &rid, Decision::Allow, cx));
+                        }
+                        let state = trek.read(cx, |ws, _| {
+                            (ws.thread(&id).map(|t| t.run_state), ws.turn_running(&id))
+                        });
+                        match state {
+                            (Some(RunState::Idle), false) => return Ok(()),
+                            (Some(RunState::Failed), _) => return Err("the turn failed".into()),
+                            _ => {}
+                        }
+                        if Instant::now() > deadline {
+                            return Err("timed out".into());
+                        }
+                        cx.background_executor
+                            .timer(Duration::from_millis(100))
+                            .await;
+                    }
+                };
+                let mut asked = 0;
+                for turn in 0..turns {
+                    let began = Instant::now();
+                    let outcome = done(cx).await;
+                    let secs = began.elapsed().as_secs_f32();
+                    // What the tutor wrote this turn: the answers after the last message.
+                    let items = trek.items(cx, &id);
+                    let from = items
+                        .iter()
+                        .rposition(|i| matches!(i, Item::User { .. }))
+                        .unwrap_or(0);
+                    let said: Vec<String> = items[from..]
+                        .iter()
+                        .filter_map(|i| match i {
+                            Item::Assistant { text } => Some(text.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    let all = said.join("\n\n");
+                    let cards = cards_in(&all);
+                    let raw = all.matches("```trek-study").count();
+                    let last = said.last().cloned().unwrap_or_default();
+                    let after = last
+                        .rfind("\n```")
+                        .map(|at| last[at + 4..].trim().to_string())
+                        .unwrap_or_default();
+                    let plan = all.contains("```trek-viz");
+                    let ok = outcome.is_ok() && cards.len() == 1 && raw == 0;
+                    if cards.len() > 1 {
+                        for (n, s) in said.iter().enumerate() {
+                            println!(
+                                "  answer {n}: {} bytes, {} cards, starts {:?}",
+                                s.len(),
+                                cards_in(s).len(),
+                                s.chars().take(60).collect::<String>()
+                            );
+                        }
+                    }
+                    let what = match (&outcome, cards.len(), raw) {
+                        (Err(e), _, _) => e.clone(),
+                        (_, 1, 0) => format!(
+                            "card {} ({} options){}: {}",
+                            cards[0].kind,
+                            cards[0].options.len(),
+                            if after.is_empty() {
+                                ""
+                            } else {
+                                ", prose after it"
+                            },
+                            cards[0].prompt.chars().take(70).collect::<String>()
+                        ),
+                        (_, 0, 0) if plan => "plan, no card".into(),
+                        (_, n, r) => format!("{n} cards drawn, {r} not drawn"),
+                    };
+                    let line = format!(
+                        "{spec} {} turn {} · {secs:.0}s · {what}",
+                        kind.label(),
+                        turn + 1
+                    );
+                    println!("{line}");
+                    if !ok && !(plan && cards.is_empty() && raw == 0) {
+                        bad += 1;
+                        println!("--- raw ---\n{}\n--- end ---", {
+                            // The drawn cards' pages are long: shown as their question.
+                            let mut t = all.clone();
+                            while let Some(at) = t.find("```trek-html\n<!doctype") {
+                                let end = t[at..]
+                                    .find("</html>\n```")
+                                    .map_or(t.len(), |e| at + e + 11);
+                                t.replace_range(at..end, "[card]");
+                            }
+                            t
+                        });
+                    }
+                    report.push(line);
+                    if outcome.is_err() {
+                        break;
+                    }
+                    asked += cards.len();
+                    let reply = match cards.last() {
+                        Some(q) => answer_to(q, turn),
+                        None if plan => "The plan looks good. Go ahead.".to_string(),
+                        // Typed in the composer, as a learner does when there's no card to answer in.
+                        None => "Not sure how to write it out. Is it the outer derivative times the inner one?".to_string(),
+                    };
+                    if turn + 1 < turns {
+                        trek.update(cx, |ws, cx| ws.send_to(&id, reply, vec![], cx));
+                    }
+                }
+                println!("{spec} {}: {asked} cards", kind.label());
+            });
+        }
+    }
+    println!("\n=== live study ===\n{}", report.join("\n"));
+    println!("turns without exactly one card (not a plan): {bad}");
+}
+
 /// The thinking box's mic is Trek's own dictation: the page asks for a take (only after the
 /// learner's click), what's heard so far goes to the page as it's revised, and the mic again
 /// ends the take with its words kept.
