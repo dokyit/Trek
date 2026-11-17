@@ -3,71 +3,89 @@
 #
 #   feature_media.sh            make every picture and loop under site/assets/img/features/
 #
-# The page names each one by file name only (features/<name>-paper.webp, -night.webp for Night,
-# <name>.mp4 and <name>-poster.webp for a loop), so a better capture replaces one by being written
-# under the same name: drop it in, run `python3 script/site/stamp.py site`, done. Sizes on the page
-# come from the CSS, not from the files, so a new capture may be cropped differently.
+# The page names each one by file name only: features/<name>-paper.webp and -night.webp for a
+# picture in each theme, <name>.webp for one that serves both, <name>.mp4 (and <name>-night.mp4) for
+# a loop with <name>-poster.webp (and <name>-night-poster.webp) as its still. A better capture
+# replaces one by being written under the same name: drop it in, run
+# `python3 script/site/stamp.py site`, done. Sizes on the page come from the CSS, so a new capture
+# may be cropped differently.
 #
-# Sources (all real captures of the app, staged threads, no private data):
-#   ATLAS   the 0.4.54 screenshot atlas, 2560x1644 (2x), mock agent; crops leave out its "Mock" names
-#   FOOT    the 2026-11-14 launch footage, 2640x1680 (2x) at 60 fps, demo dress (Claude Code, Sonnet 5.5)
-#   R3      the 2026-11-17 launch captures; anything found there under a slot's name wins
+# Sources, all real captures of the app with staged threads and no private data:
+#   R3      the 17 November 2026 launch captures: the signpost in the title bar, real agents (Claude
+#           Code with Haiku 4.5, a consult with GPT-5.6 Luna), Night theme; raw window frames
+#           (capture/raw, 2880x1800 at 2x) and screen recordings (capture/video, 60 fps)
+#   ATLAS   the 0.4.54 screenshot atlas, 2560x1644 (2x), mock agent; Paper versions where R3 has
+#           none, cropped so no "Mock" name shows
+#   FOOT    the 14 November launch footage, Paper, demo dress (Claude Code, Sonnet 5.5)
+# Only raw app frames are used: none of the finished stills, with their captions and backdrops.
 HERE=${0:A:h}
 W=${TREK_REPO:-${HERE:h:h}}
 B=${TREK_BUSINESS:-$HOME/Developer/Trek-business-2026-11}
+R3=${R3:-$B/2026-11-17-launch-r3/capture}
 ATLAS=${ATLAS:-$B/2026-11-15-audit/atlas}
 FOOT=${FOOT:-$B/2026-11-14-launch/footage/app}
-R3=${R3:-$B/2026-11-17-launch-r3/out/site}
 O=$W/site/assets/img/features
 T=$(mktemp -d "${TMPDIR:-/tmp}/trek-features.XXXXXX")
 trap "rm -rf $T" EXIT
 mkdir -p $O
 set -e
 
-# still NAME SRC_BASE X Y W H: an atlas crop in Paper and Night (2x pixels kept).
-still() {
-  local name=$1 src=$2 x=$3 y=$4 w=$5 h=$6
-  for theme in paper night; do
-    if [[ -f $R3/$name-$theme.webp ]]; then cp $R3/$name-$theme.webp $O/; continue; fi
-    ffmpeg -v error -y -i $ATLAS/$src--$theme.png -vf "crop=$w:$h:$x:$y" $T/$name-$theme.png
-    cwebp -quiet -q 90 -m 6 $T/$name-$theme.png -o $O/$name-$theme.webp
-  done
+# crop SRC.png OUT.webp W H X Y [SCALE_W]: a crop of a still, as 8-bit RGB, to WebP.
+crop() {
+  local src=$1 out=$2 w=$3 h=$4 x=$5 y=$6 sw=$7
+  ffmpeg -v error -y -i $src -vf "crop=$w:$h:$x:$y${sw:+,scale=$sw:-2:flags=lanczos},format=rgb24" $T/c.png
+  cwebp -quiet -q 90 -m 6 $T/c.png -o $O/$out
 }
 
-# loop NAME SRC START LENGTH CROP SCALE_W [POSTER_AT]: a silent H.264 loop, and a frame of it (the
-# first, or the one POSTER_AT seconds in) as the poster shown before it plays and without motion.
+# loop SRC.mp4 NAME START LENGTH CROP SCALE_W [POSTER_AT]: a silent H.264 loop, and a frame of it
+# (the first, or the one POSTER_AT seconds in) as its still.
 loop() {
-  local name=$1 src=$2 ss=$3 len=$4 crop=$5 width=$6 at=${7:-0}
-  if [[ -f $R3/$name.mp4 ]]; then cp $R3/$name.mp4 $O/; else
-    ffmpeg -v error -y -ss $ss -t $len -i $FOOT/$src -an \
-      -vf "${crop:+crop=$crop,}scale=$width:-2:flags=lanczos,fps=30,format=yuv420p" \
-      -c:v libx264 -profile:v high -preset slow -crf ${CRF:-24} -movflags +faststart $O/$name.mp4
-  fi
-  ffmpeg -v error -y -ss $at -i $O/$name.mp4 -frames:v 1 $T/$name-poster.png
-  cwebp -quiet -q 86 -m 6 $T/$name-poster.png -o $O/$name-poster.webp
+  local src=$1 name=$2 ss=$3 len=$4 cr=$5 width=$6 at=${7:-0}
+  ffmpeg -v error -y -ss $ss -t $len -i $src -an \
+    -vf "${cr:+crop=$cr,}scale=$width:-2:flags=lanczos,fps=30,format=yuv420p" \
+    -c:v libx264 -profile:v high -preset slow -crf ${CRF:-24} -movflags +faststart $O/$name.mp4
+  ffmpeg -v error -y -ss $at -i $O/$name.mp4 -frames:v 1 $T/p.png
+  cwebp -quiet -q 86 -m 6 $T/p.png -o $O/$name-poster.webp
 }
 
-# Pictures: the access levels, the worktree choice, Study, Plugins.
-still access   composer--access-menu    1282 262  691 655
-still worktree composer--env-place      1136 600  500 259
-still study    v2--study-start           768 372  932 307
-still plugins  v2--settings-plugins      884 144 1303 1484
+# One inbox. Paper: the sidebar through the 14 November story (one stops to ask, goes to the top,
+# is allowed, finishes). Night: the sidebar as three threads arrive in the Inbox, each waiting.
+loop $FOOT/story.mp4     inbox        0  34 548:660:0:330    548 9
+loop $R3/video/inbox.mp4 inbox-night 36  16 540:600:0:300    540 13.5
 
-# Loops. The Inbox: the sidebar through the whole story (one stops to ask, goes to the top, is
-# allowed, finishes). Sub-agents: the first ten seconds of the same story, the thread's middle.
-# Themes: the four looks and a painted background. iPhone: Allow pressed on the phone.
-loop inbox    story.mp4        0 34   548:660:0:330      548  9
-loop agents   story.mp4      0.4 9.6  1800:690:680:180   1280
-# The same for a phone's width: the left of the thread, where the sub-agents are.
-loop agents-narrow story.mp4 0.4 9.6  1000:690:680:180   800
-loop themes   themes.mp4       0 15   ""                 1600
-loop iphone   phone-allow.mp4  0 8.4  ""                 590
+# Agents consult agents: Claude Code hands a review to GPT-5.6 Luna and waits on it.
+loop $R3/video/consult.mp4 consult   16  20 1640:820:570:165 1280 9
 
-# The end of a turn with its actions (undo, retry, fork), from the same story: the left of it, so
-# the buttons stay large enough to see.
-if [[ ! -f $R3/undo-paper.webp ]]; then
-  ffmpeg -v error -y -ss 30 -i $FOOT/story.mp4 -frames:v 1 -vf "crop=820:220:690:910" $T/undo-paper.png
-  cwebp -quiet -q 90 -m 6 $T/undo-paper.png -o $O/undo-paper.webp
-else cp $R3/undo-paper.webp $O/; fi
+# You stay in charge: the access menu. Night from R3, Paper from the atlas.
+crop $R3/raw/access_menu.png access-night.webp 760 680 1120 1040
+crop $ATLAS/composer--access-menu--paper.png access-paper.webp 691 655 1282 262
 
-ls -la $O
+# Worktrees: where a new thread runs. The atlas has both themes.
+crop $ATLAS/composer--env-place--paper.png worktree-paper.webp 500 259 1136 600
+crop $ATLAS/composer--env-place--night.png worktree-night.webp 500 259 1136 600
+
+# Undo any turn: the end of a turn with its buttons (copy, undo, retry, retry with, fork).
+ffmpeg -v error -y -ss 30 -i $FOOT/story.mp4 -frames:v 1 -vf "crop=820:220:690:910" $T/u.png
+cwebp -quiet -q 90 -m 6 $T/u.png -o $O/undo-paper.webp
+crop $R3/raw/T_night.png undo-night.webp 820 180 590 1118
+
+# Study: a question it set, with its answers and how sure you are.
+crop $R3/raw/S_study_question.png study.webp 1580 1100 600 240
+
+# Plugins: one at work, the focus timer round the composer.
+crop $R3/raw/P_focus.png plugins.webp 1680 460 560 620
+
+# Themes and backgrounds: the window through its looks, glass and painted backgrounds.
+loop $R3/video/themes.mp4 themes 0 12.28 "" 1600
+
+# iPhone: the phone's own screens, framed alike by the page. Paper: Allow pressed (a loop) beside
+# Threads. Night: the same two screens as stills.
+loop $FOOT/phone-allow.mp4 iphone 0 8.4 "" 590
+for t in light dark; do
+  ffmpeg -v error -y -i $R3/raw/phone/threads-$t.png -vf "scale=590:-2:flags=lanczos,format=rgb24" $T/t.png
+  cwebp -quiet -q 88 -m 6 $T/t.png -o $O/iphone-threads-${${t/light/paper}/dark/night}.webp
+done
+ffmpeg -v error -y -i $R3/raw/phone/approval-dark.png -vf "scale=590:-2:flags=lanczos,format=rgb24" $T/a.png
+cwebp -quiet -q 88 -m 6 $T/a.png -o $O/iphone-night.webp
+
+ls $O
