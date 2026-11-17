@@ -717,13 +717,15 @@ fn option_text(v: &serde_json::Value) -> String {
     use serde_json::Value;
     match v {
         Value::String(s) => s.trim().to_string(),
-        Value::Object(o) => ["text", "label", "option", "content", "value", "answer", "choice"]
-            .iter()
-            .find_map(|k| o.get(*k).and_then(Value::as_str))
-            .or_else(|| o.values().filter_map(Value::as_str).max_by_key(|s| s.len()))
-            .unwrap_or_default()
-            .trim()
-            .to_string(),
+        Value::Object(o) => [
+            "text", "label", "option", "content", "value", "answer", "choice",
+        ]
+        .iter()
+        .find_map(|k| o.get(*k).and_then(Value::as_str))
+        .or_else(|| o.values().filter_map(Value::as_str).max_by_key(|s| s.len()))
+        .unwrap_or_default()
+        .trim()
+        .to_string(),
         Value::Null => String::new(),
         other => other.to_string(),
     }
@@ -754,15 +756,20 @@ fn tidy_options(options: Vec<String>) -> Vec<String> {
         let rest = c.as_str();
         rest.starts_with(' ').then_some(len)
     };
-    let all_lettered =
-        options.len() > 1 && options.iter().enumerate().all(|(i, o)| lettered(i, o).is_some());
+    let all_lettered = options.len() > 1
+        && options
+            .iter()
+            .enumerate()
+            .all(|(i, o)| lettered(i, o).is_some());
     options
         .into_iter()
         .enumerate()
-        .map(|(i, o)| match all_lettered.then(|| lettered(i, &o)).flatten() {
-            Some(n) => o[n..].trim().to_string(),
-            None => o,
-        })
+        .map(
+            |(i, o)| match all_lettered.then(|| lettered(i, &o)).flatten() {
+                Some(n) => o[n..].trim().to_string(),
+                None => o,
+            },
+        )
         .filter(|o| {
             let plain = o
                 .trim()
@@ -805,9 +812,38 @@ pub fn card_for(q: &Question) -> String {
 /// LaTeX commands that start with a letter JSON reads as an escape (`\n`, `\t`, `\r`): written
 /// outside `$…$` with one backslash they're still taken as LaTeX, not a line break or a tab.
 const LATEX_NTR: &[&str] = &[
-    "nabla", "neq", "ne", "nu", "not", "notin", "ni", "nmid", "newline", "neg", "nleq", "ngeq",
-    "theta", "tau", "times", "to", "text", "textbf", "textit", "tfrac", "tan", "tanh", "top",
-    "triangle", "tilde", "rho", "right", "rightarrow", "rangle", "rceil", "rfloor", "Rightarrow",
+    "nabla",
+    "neq",
+    "ne",
+    "nu",
+    "not",
+    "notin",
+    "ni",
+    "nmid",
+    "newline",
+    "neg",
+    "nleq",
+    "ngeq",
+    "theta",
+    "tau",
+    "times",
+    "to",
+    "text",
+    "textbf",
+    "textit",
+    "tfrac",
+    "tan",
+    "tanh",
+    "top",
+    "triangle",
+    "tilde",
+    "rho",
+    "right",
+    "rightarrow",
+    "rangle",
+    "rceil",
+    "rfloor",
+    "Rightarrow",
 ];
 
 /// A question as a model writes it, as strict JSON (`Question::read`). Outside strings: bare keys
@@ -1112,9 +1148,17 @@ fn expand(text: &str, done: bool) -> Option<String> {
             let t = l.trim();
             t.len() >= fence.len() && t.chars().all(|c| c == ch)
         });
-        let lang = info.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+        let lang = info
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
         let question_fence = is_question_fence(info);
-        let maybe = question_fence || matches!(lang.as_str(), "json" | "json5" | "js" | "javascript" | "trek-html" | "html");
+        let maybe = question_fence
+            || matches!(
+                lang.as_str(),
+                "json" | "json5" | "js" | "javascript" | "trek-html" | "html"
+            );
         let (body_end, end, block_end) = match close {
             Some(k) => {
                 let (cs, cl) = lines[i + 1 + k];
@@ -1124,7 +1168,10 @@ fn expand(text: &str, done: bool) -> Option<String> {
             None if !done || !maybe => break,
             None => (text.len(), text.len(), lines.len()),
         };
-        let body_start = lines.get(i + 1).map_or(text.len(), |(s, _)| *s).min(body_end);
+        let body_start = lines
+            .get(i + 1)
+            .map_or(text.len(), |(s, _)| *s)
+            .min(body_end);
         let body = &text[body_start..body_end];
         let asked = if question_fence {
             Some(Question::read(body).ok_or(body))
@@ -1150,7 +1197,11 @@ fn expand(text: &str, done: bool) -> Option<String> {
             out.push_str(&text[copied..start]);
             match asked {
                 Ok(q) if cards == 0 => {
-                    out.push_str(&format!("```{}\n{}\n```", crate::artifact::FENCE, card_for(&q)));
+                    out.push_str(&format!(
+                        "```{}\n{}\n```",
+                        crate::artifact::FENCE,
+                        card_for(&q)
+                    ));
                     cards += 1;
                 }
                 Ok(q) => out.push_str(&q.markdown()),
@@ -1569,7 +1620,12 @@ mod tests {
         );
         assert_eq!(
             got.options,
-            ["$\\to 0$", "$\\neq 1$", "$\\textbf{x}$", "\\(\\tfrac{a}{b}\\)"]
+            [
+                "$\\to 0$",
+                "$\\neq 1$",
+                "$\\textbf{x}$",
+                "\\(\\tfrac{a}{b}\\)"
+            ]
         );
         // Strict JSON with doubled backslashes reads the same.
         let strict = r#"{"kind": "check", "prompt": "$\\frac{1}{2}\\beta$\nnext", "options": []}"#;
@@ -1604,16 +1660,21 @@ mod tests {
         assert_eq!(n.targets, ["c1", "c2"]);
         assert_eq!(n.step, "3");
         // Options keyed by letter.
-        let keyed = r#"{"kind": "question", "prompt": "Pick", "options": {"A": "one", "B": "two"}}"#;
+        let keyed =
+            r#"{"kind": "question", "prompt": "Pick", "options": {"A": "one", "B": "two"}}"#;
         assert_eq!(q(keyed).options, ["one", "two"]);
         // Options that only start with a letter aren't stripped.
         let words = r#"{"prompt": "Pick", "options": ["A. one", "Because"]}"#;
         assert_eq!(q(words).options, ["A. one", "Because"]);
         // Wrapped, or a list: the (first) question.
-        assert_eq!(q(r#"{"question": {"prompt": "In", "kind": "check"}}"#).kind, "check");
+        assert_eq!(
+            q(r#"{"question": {"prompt": "In", "kind": "check"}}"#).kind,
+            "check"
+        );
         assert_eq!(q(r#"[{"prompt": "One"}, {"prompt": "Two"}]"#).prompt, "One");
         // A problem has no options; a kind spelt otherwise is the one meant.
-        let problem = r#"{"kind": "Practice", "prompt": "Differentiate $\sin(x^2)$", "options": ["x"]}"#;
+        let problem =
+            r#"{"kind": "Practice", "prompt": "Differentiate $\sin(x^2)$", "options": ["x"]}"#;
         let p = q(problem);
         assert_eq!((p.kind.as_str(), p.options.len()), ("problem", 0));
         assert_eq!(p.prompt, "Differentiate $\\sin(x^2)$");
@@ -1689,7 +1750,10 @@ mod tests {
         let out = expand_cards(&text).unwrap();
         let got = cards_drawn(&out);
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].prompt, "Using the code above: what value is bound to r?");
+        assert_eq!(
+            got[0].prompt,
+            "Using the code above: what value is bound to r?"
+        );
         assert_eq!(got[0].options, ["2", "3", "4", "7"]);
         assert!(out.starts_with("First question.\n\n```trek-html\n<!doctype html>"));
         assert!(out.contains("T.replies"), "the card of today");
