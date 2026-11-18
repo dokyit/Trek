@@ -826,7 +826,7 @@ fn chips_row(chips: Vec<Chip>, cx: &App) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{TRANSCRIPT_PRESETS, ZOOM_MAX, ZOOM_PRESETS, clamp_text, preset_of};
 
     #[test]
     fn sizes_are_presets_or_custom_and_kept_in_range() {

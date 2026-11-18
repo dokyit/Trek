@@ -603,7 +603,8 @@ pub fn palette_entries(cx: &App) -> Vec<PaletteEntry> {
                     plugin: m.id.clone(),
                     command: c.id.clone(),
                     title: c.title.clone(),
-                    key: free_key(&m.id, &c.id, c.key.as_deref(), cx).map(|k| k.unparse()),
+                    key: crate::keys::plugin_key(&m.id, &c.id, c.key.as_deref())
+                        .filter(|_| free_key(&m.id, &c.id, c.key.as_deref(), cx).is_some()),
                 });
             }
             for page in &m.pages {

@@ -75,12 +75,17 @@ fn the_shortcuts_page_shows_the_tables_rows() {
             ws.navigate(Route::Settings(SettingsPage::Shortcuts), cx)
         });
         trek.render(cx);
-        let groups = keys::shortcut_groups(keys::is_mac(), false);
-        assert_eq!(groups[0].0, "Threads");
-        for (label, _) in &groups[0].1 {
+        let page = keys::page(keys::is_mac(), false, &[]);
+        assert_eq!(page[0].0, "Threads");
+        for row in &page[0].1 {
+            // A command's row is named by its id; one the user can't change, by its title.
+            let id = match row {
+                keys::Row::Command(c) => c.name.clone(),
+                keys::Row::Fixed(title, _) => title.to_string(),
+            };
             assert!(
-                trek.visible(cx, SharedString::from(format!("shortcut-{label}"))),
-                "{label}"
+                trek.visible(cx, SharedString::from(format!("shortcut-{id}"))),
+                "{id}"
             );
         }
     });

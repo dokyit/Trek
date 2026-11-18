@@ -678,14 +678,19 @@ fn the_keys_are_in_the_shortcuts_list_and_the_palette() {
         assert_eq!(keys::hint_for(Id::BackToLastPrompt, true), "⌘⇧B");
         assert_eq!(keys::hint_for(Id::BackToLastPrompt, false), "Ctrl+Shift+B");
         for mac in [true, false] {
-            let groups = keys::shortcut_groups(mac, false);
-            let threads = &groups.iter().find(|(g, _)| *g == "Threads").unwrap().1;
+            let page = keys::page(mac, false, &[]);
+            let threads = &page.iter().find(|(g, _)| g == "Threads").unwrap().1;
             for name in [
                 "Next thread that needs you",
                 "Back to where you last sent a prompt",
             ] {
-                let row = threads.iter().find(|(n, _)| *n == name);
-                assert!(row.is_some_and(|(_, chips)| !chips.is_empty()), "{name}");
+                let row = threads.iter().find(|r| r.title() == name);
+                assert!(
+                    row.is_some_and(
+                        |r| matches!(r, keys::Row::Command(c) if !c.chips(mac).is_empty())
+                    ),
+                    "{name}"
+                );
             }
         }
 

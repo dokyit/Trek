@@ -266,10 +266,62 @@ area = "Composer"
 what = "Keyboard shortcuts"
 macos = "yes"
 windows = "yes"
-live = ["route settings:keyboard-shortcuts", "wait 300", "count shortcut-New thread 1", "count shortcut-Send 1"]
+live = ["route settings:keyboard-shortcuts", "wait 300", "count shortcut-new-thread 1", "count shortcut-Send 1"]
 how = { macos = "⌘ chords.", windows = "Ctrl for ⌘; ⌥⌘ becomes Alt+Shift (AltGr is Ctrl+Alt)." }
 code = ["crates/trek-app/src/keys.rs"]
 tests = ["crates/trek-app/tests/keys.rs", "crates/trek-app/tests/tabs.rs", "crates/trek-app/tests/editor_polish.rs"]
+
+[[feature]]
+id = "custom-shortcuts"
+area = "App"
+what = "Every keyboard shortcut can be changed or taken away in Settings › Keyboard Shortcuts (searchable), with conflicts shown and keys the system or text fields need refused; the menus, tooltips, the palette and plugins' commands show the user's keys, and only changes are saved"
+macos = "yes"
+windows = "yes"
+live = ["route settings:keyboard-shortcuts", "wait 300", "reveal shortcut-keys-open-settings", "click shortcut-keys-open-settings", "key secondary-shift-,", "wait 300", "file settings.toml contains open-settings", "count shortcut-reset-open-settings 1", "route basecamp", "wait 300", "key secondary-shift-,", "wait 500", "count settings-content 1", "reveal shortcut-keys-open-settings", "click shortcut-keys-open-settings", "key secondary-n", "wait 300", "count shortcut-take 1", "click shortcut-cancel", "reveal shortcuts-reset-all", "click shortcuts-reset-all", "wait 300", "count shortcut-reset-open-settings 0"]
+how = { macos = "Changes are saved under [keys.mac], ⌘ chords; the menu bar shows them (it reads the keymap). macOS's own (⌘Tab, ⌘Space, ⇧⌘3–6, ⌃ arrows) and the text fields' (⌘C/V/X/A/Z) are refused.", windows = "Changes are saved under [keys.windows], apart from the Mac's (their defaults differ). A Ctrl+letter the user picks is still the shell's in the terminal panel, as Trek's own are; the Windows key, Ctrl+Alt (AltGr), Alt+Tab/F4/Space and the terminal's Ctrl+Shift+C/V are refused." }
+code = ["crates/trek-app/src/keys.rs", "crates/trek-app/src/settings_view/keyboard.rs", "crates/trek-core/src/settings.rs", "crates/trek-app/src/plugins/mod.rs"]
+tests = ["crates/trek-app/src/keys.rs", "crates/trek-core/src/settings.rs"]
+
+[[feature.promise]]
+what = "A changed shortcut is what's bound, and what hints, sentences and the page show; the old keys do nothing"
+macos = "crates/trek-app/src/keys.rs::a_changed_shortcut_is_bound_and_shown_everywhere"
+windows = "crates/trek-app/src/keys.rs::a_changed_shortcut_is_bound_and_shown_everywhere"
+
+[[feature.promise]]
+what = "A Ctrl+letter the user chooses on Windows is still the shell's in the terminal"
+macos = "crates/trek-app/src/keys.rs::a_ctrl_letter_the_user_chose_is_the_shells_in_the_terminal"
+windows = "crates/trek-app/src/keys.rs::a_ctrl_letter_the_user_chose_is_the_shells_in_the_terminal"
+
+[[feature.promise]]
+what = "Only differences from Trek's defaults are saved, per platform"
+macos = "crates/trek-app/src/keys.rs::only_differences_from_the_defaults_are_saved"
+windows = "crates/trek-app/src/keys.rs::only_differences_from_the_defaults_are_saved"
+
+[[feature.promise]]
+what = "Keys the system and text fields need are refused; the same keys in the same place are a conflict"
+macos = "crates/trek-app/src/keys.rs::keys_the_system_and_text_need_are_refused"
+windows = "crates/trek-app/src/keys.rs::conflicts_are_the_same_keys_in_the_same_place"
+
+[[feature]]
+id = "zoom"
+area = "App"
+what = "Zoom the whole interface (Cmd/Ctrl + and −, 0 to reset; the View menu and the palette), with Settings › Appearance › Text size's presets and a Custom size from 50% to 300%, and a Custom conversation text size"
+macos = "yes"
+windows = "yes"
+live = ["route settings:appearance", "wait 300", "key secondary-=", "wait 300", "file settings.toml contains zoom = 1.1", "key secondary-0", "wait 300", "file settings.toml contains zoom = 1.0", "reveal zoom-size#4", "click zoom-size#4", "wait 300", "count zoom-custom 1", "reveal text-size#4", "click text-size#4", "wait 300", "count text-custom 1"]
+how = { macos = "Shared code: the window is zoomed in GPUI (Window::set_ui_zoom: laid out smaller, drawn larger), so the terminal and editor zoom with it on top of their own sizes, and web views are placed and zoomed to match. The traffic lights keep their room at any zoom. In the Browser, ⌘+/− zoom the page while it has the keys.", windows = "The same code; the caption buttons are Trek's own and zoom with the rest. With the page focused, WebView2 takes Ctrl+/− for its own page zoom." }
+code = ["crates/trek-app/src/zoom.rs", "crates/trek-app/src/chrome.rs", "crates/trek-app/src/settings_view/keyboard.rs", "vendor/gpui-pre/src/window.rs", "crates/trek-core/src/settings.rs"]
+tests = ["crates/trek-app/src/zoom.rs", "crates/trek-core/src/settings.rs"]
+
+[[feature.promise]]
+what = "The keys step through the presets and past them, between 50% and 300%, and ⌘0 is 100% from anywhere"
+macos = "crates/trek-core/src/settings.rs::zoom_is_kept_in_range_and_steps_through_the_presets_and_past_them"
+windows = "crates/trek-core/src/settings.rs::zoom_is_kept_in_range_and_steps_through_the_presets_and_past_them"
+
+[[feature.promise]]
+what = "A window too small for the zoom is drawn at what fits, never below 100% for that"
+macos = "crates/trek-app/src/zoom.rs::a_window_too_small_for_the_zoom_is_drawn_at_what_fits"
+windows = "crates/trek-app/src/zoom.rs::a_window_too_small_for_the_zoom_is_drawn_at_what_fits"
 
 [[feature]]
 id = "attach-files"
@@ -1018,7 +1070,7 @@ area = "App"
 what = "Hide Trek or minimize its window from the keyboard"
 macos = "yes"
 windows = "n/a"
-live_macos = ["route settings:keyboard-shortcuts", "wait 300", "reveal shortcut-Hide Trek", "count shortcut-Hide Trek 1", "count shortcut-Minimize 1"]
+live_macos = ["route settings:keyboard-shortcuts", "wait 300", "reveal shortcut-hide-app", "count shortcut-hide-app 1", "count shortcut-minimize 1"]
 how = { macos = "⌘H and ⌘M.", windows = "Hiding an app isn't a Windows idea; Win+Down minimizes any window." }
 code = ["crates/trek-app/src/keys.rs"]
 tests = ["crates/trek-app/tests/keys.rs"]

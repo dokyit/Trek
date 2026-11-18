@@ -821,9 +821,9 @@ fn a_viewed_file_folds_in_a_review_and_opens_again_on_a_click() {
 
 #[test]
 fn the_keyboard_shortcuts_page_lists_a_diffs_keys() {
-    let groups = trek_app::keys::shortcut_groups(trek_app::keys::is_mac(), false);
-    let (name, rows) = groups.last().unwrap();
-    assert_eq!(*name, "Diff review");
+    let page = trek_app::keys::page(trek_app::keys::is_mac(), false, &[]);
+    let (name, rows) = page.last().unwrap();
+    assert_eq!(name, "Diff review");
     for row in [
         "Next hunk",
         "Next file",
@@ -831,6 +831,6 @@ fn the_keyboard_shortcuts_page_lists_a_diffs_keys() {
         "Mark the file viewed",
         "Stage or unstage the hunk",
     ] {
-        assert!(rows.iter().any(|(n, _)| *n == row), "{row}");
+        assert!(rows.iter().any(|r| r.title() == row), "{row}");
     }
 }

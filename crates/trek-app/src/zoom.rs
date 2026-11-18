@@ -188,7 +188,8 @@ fn from_app(s: Step, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Step, after, fitted};
+    use gpui_kit::px;
 
     #[test]
     fn the_keys_step_and_come_back() {

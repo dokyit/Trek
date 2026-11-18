@@ -455,8 +455,8 @@ fn a_plugin_key_that_is_trek_s_own_stays_trek_s() {
                     ("theirs".to_string(), None)
                 ]
             );
-            assert!(trek_app::plugins::free_key("cmd-n", cx).is_none());
-            assert!(trek_app::plugins::free_key("cmd-alt-j", cx).is_some());
+            assert!(trek_app::plugins::free_key("p", "c", Some("cmd-n"), cx).is_none());
+            assert!(trek_app::plugins::free_key("p", "c", Some("cmd-alt-j"), cx).is_some());
         });
     });
 }
