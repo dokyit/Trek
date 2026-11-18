@@ -3840,7 +3840,10 @@ impl Render for Sidebar {
         v_flex()
             .id("sidebar")
             .test_support()
-            .w(px(crate::root::SIDEBAR_WIDTH))
+            .w(px(self
+                .workspace
+                .read(cx)
+                .sidebar_width(window.viewport_size().width.as_f32())))
             .h_full()
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| this.hover_changed(*hovered, cx)))
             .flex_none()

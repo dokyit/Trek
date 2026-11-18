@@ -316,6 +316,32 @@ pub fn panel_bg(glass: Option<f32>, cx: &App) -> Hsla {
     }
 }
 
+/// The grab strip on the edge of a column the user resizes by dragging (the sidebar, the tools
+/// panel): a 13-point-wide hit area with the resize cursor and a 2-point line that shows on hover
+/// and while held. The caller places it (`left`, `top`, `bottom`) and hears the press.
+pub fn column_grab(id: &'static str, held: bool, cx: &App) -> Stateful<Div> {
+    let theme = cx.theme();
+    div()
+        .id(id)
+        .absolute()
+        .top_0()
+        .w(px(13.))
+        .flex()
+        .justify_center()
+        .cursor(CursorStyle::ResizeLeftRight)
+        .group(id)
+        .child(
+            div()
+                .w(px(2.))
+                .h_full()
+                .rounded_full()
+                .when(held, |el| el.bg(theme.foreground.opacity(0.35)))
+                .when(!held, |el| {
+                    el.group_hover(id, |s| s.bg(theme.foreground.opacity(0.2)))
+                }),
+        )
+}
+
 /// An inset panel's edge: under glass a faint rim of light, as glass catches it; on Windows'
 /// glass the stroke its solid cards have.
 pub fn panel_border(glass: Option<f32>, cx: &App) -> Hsla {
@@ -1423,16 +1449,16 @@ pub fn background_source(spec: &str, cx: &App) -> ImageSource {
 /// window under the scrim they always had; ASCII art fills the sidebar's column alone (and so
 /// isn't drawn in a window `without_sidebar`), under a scrim that keeps the sidebar's own text at
 /// 4.5:1. Laid over the window's background, before its content.
-pub fn window_backdrop(spec: &str, dim: f32, with_sidebar: bool, cx: &App) -> Vec<AnyElement> {
+pub fn window_backdrop(spec: &str, dim: f32, sidebar: Option<f32>, cx: &App) -> Vec<AnyElement> {
     let theme = cx.theme();
     let side = theme.sidebar;
     let dark = theme.mode.is_dark();
     let collection = crate::backgrounds::collection_of(spec);
     let layer = || div().absolute().top_0().left_0().h_full();
     if collection.in_sidebar_column() {
-        if !with_sidebar {
+        let Some(sidebar_width) = sidebar else {
             return Vec::new();
-        }
+        };
         // The column holds the sidebar's own text; the list lays a backing of its own under
         // its rows for their grey text (`backgrounds::sidebar_scrims`).
         let (alpha, _) = crate::backgrounds::sidebar_scrims(
@@ -1443,7 +1469,7 @@ pub fn window_backdrop(spec: &str, dim: f32, with_sidebar: bool, cx: &App) -> Ve
             theme.muted_foreground,
             dark,
         );
-        let width = px(crate::root::SIDEBAR_WIDTH);
+        let width = px(sidebar_width);
         return vec![
             layer()
                 .w(width)

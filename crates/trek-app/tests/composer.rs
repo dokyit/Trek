@@ -237,10 +237,16 @@ fn command_e_settles_with_an_undo() {
 #[test]
 fn a_narrow_window_makes_room_for_the_tools_panel() {
     use trek_app::root::{SIDEBAR_WIDTH, overlay_panel, sidebar_yields};
-    assert!(!sidebar_yields(1280., true, false));
-    assert!(sidebar_yields(760., true, false));
-    assert!(!sidebar_yields(760., false, false), "only for the panel");
-    assert!(!sidebar_yields(760., true, true), "settings have no panel");
+    assert!(!sidebar_yields(1280., SIDEBAR_WIDTH, true, false));
+    assert!(sidebar_yields(760., SIDEBAR_WIDTH, true, false));
+    assert!(
+        !sidebar_yields(760., SIDEBAR_WIDTH, false, false),
+        "only for the panel"
+    );
+    assert!(
+        !sidebar_yields(760., SIDEBAR_WIDTH, true, true),
+        "settings have no panel"
+    );
     assert!(
         !overlay_panel(760. - 8. - 16.),
         "the smallest window fits chat and panel once the sidebar steps aside"

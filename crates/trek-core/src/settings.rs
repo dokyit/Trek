@@ -287,6 +287,9 @@ impl ProjectPrefs {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Layout {
+    /// Width of the left sidebar, in points: the last width the user left it at. It stays while
+    /// the sidebar is folded away, so showing it again brings it back as it was.
+    pub sidebar_width: f32,
     /// Width of the right tools panel, in points.
     pub right_panel_width: f32,
     /// Height of the terminal docked under the chat, in points.
@@ -314,6 +317,7 @@ pub struct SplitLayout {
 impl Default for Layout {
     fn default() -> Self {
         Self {
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             right_panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
             terminal_height: DEFAULT_TERMINAL_HEIGHT,
             terminal_open: false,
@@ -324,6 +328,51 @@ impl Default for Layout {
 }
 
 pub const DEFAULT_RIGHT_PANEL_WIDTH: f32 = 440.;
+/// The sidebar as it opens, and what a double-click on its edge puts it back to.
+pub const DEFAULT_SIDEBAR_WIDTH: f32 = 272.;
+/// The narrowest the sidebar is drawn: its rows, counts and the foot still fit.
+pub const MIN_SIDEBAR_WIDTH: f32 = 208.;
+/// The widest it is drawn, whatever the window.
+pub const MAX_SIDEBAR_WIDTH: f32 = 480.;
+/// Dragged narrower than this, the sidebar folds away (as the toggle does).
+pub const SIDEBAR_SNAP_WIDTH: f32 = 164.;
+/// Once folded by a drag, it opens again only past the snap by this much, so the pointer
+/// resting at the line doesn't make it flicker.
+pub const SIDEBAR_SNAP_HYSTERESIS: f32 = 20.;
+
+/// A sidebar width as it can be drawn: between the minimum and the maximum, and no wider than
+/// `room` (what the window leaves for it). A width that isn't a number is the default.
+pub fn fit_sidebar_width(width: f32, room: f32) -> f32 {
+    let width = if width.is_finite() {
+        width
+    } else {
+        DEFAULT_SIDEBAR_WIDTH
+    };
+    let most = room.min(MAX_SIDEBAR_WIDTH).max(MIN_SIDEBAR_WIDTH);
+    width.clamp(MIN_SIDEBAR_WIDTH, most)
+}
+
+/// What a drag on the sidebar's edge makes of the sidebar.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SidebarDrag {
+    /// Shown, this wide.
+    Open(f32),
+    /// Folded away.
+    Folded,
+}
+
+/// Where the sidebar goes when its edge is dragged to `wanted` points from the window's left:
+/// the width, held within its range (`room` is the most the window allows), or folded when it's
+/// pulled narrower than the snap. `folded` is how it is now: from there it takes a little more
+/// than the snap to open again. A sidebar that can't fold (Settings' own list) stops at the minimum.
+pub fn sidebar_drag(wanted: f32, room: f32, folded: bool, can_fold: bool) -> SidebarDrag {
+    let line = SIDEBAR_SNAP_WIDTH + if folded { SIDEBAR_SNAP_HYSTERESIS } else { 0. };
+    if can_fold && wanted < line {
+        SidebarDrag::Folded
+    } else {
+        SidebarDrag::Open(fit_sidebar_width(wanted, room))
+    }
+}
 pub const DEFAULT_TERMINAL_HEIGHT: f32 = 240.;
 pub const MIN_TERMINAL_HEIGHT: f32 = 120.;
 
@@ -1660,6 +1709,57 @@ pub mod secrets {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_sidebar_stays_in_its_range_and_folds_when_pulled_narrow() {
+        use super::*;
+        let room = 1000.;
+        assert_eq!(fit_sidebar_width(10., room), MIN_SIDEBAR_WIDTH);
+        assert_eq!(fit_sidebar_width(9000., room), MAX_SIDEBAR_WIDTH);
+        assert_eq!(fit_sidebar_width(300., room), 300.);
+        // A narrow window leaves less than the maximum, never less than the minimum.
+        assert_eq!(fit_sidebar_width(400., 350.), 350.);
+        assert_eq!(fit_sidebar_width(400., 100.), MIN_SIDEBAR_WIDTH);
+        assert_eq!(fit_sidebar_width(f32::NAN, room), DEFAULT_SIDEBAR_WIDTH);
+        assert_eq!(Layout::default().sidebar_width, DEFAULT_SIDEBAR_WIDTH);
+        // Between the snap and the minimum it holds at the minimum; under the snap it folds.
+        assert_eq!(
+            sidebar_drag(SIDEBAR_SNAP_WIDTH + 1., room, false, true),
+            SidebarDrag::Open(MIN_SIDEBAR_WIDTH)
+        );
+        assert_eq!(
+            sidebar_drag(SIDEBAR_SNAP_WIDTH - 1., room, false, true),
+            SidebarDrag::Folded
+        );
+        assert_eq!(
+            sidebar_drag(320., room, false, true),
+            SidebarDrag::Open(320.)
+        );
+        // Folded, it takes a little more than the snap to open again.
+        assert_eq!(
+            sidebar_drag(SIDEBAR_SNAP_WIDTH + 1., room, true, true),
+            SidebarDrag::Folded
+        );
+        assert_eq!(
+            sidebar_drag(
+                SIDEBAR_SNAP_WIDTH + SIDEBAR_SNAP_HYSTERESIS + 1.,
+                room,
+                true,
+                true
+            ),
+            SidebarDrag::Open(MIN_SIDEBAR_WIDTH)
+        );
+        // A list that can't fold (Settings') stops at the minimum.
+        assert_eq!(
+            sidebar_drag(0., room, false, false),
+            SidebarDrag::Open(MIN_SIDEBAR_WIDTH)
+        );
+        // A settings file from before the width has the default.
+        let old: Settings = toml::from_str("[layout]\nright_panel_width = 500.0\n").unwrap();
+        assert_eq!(old.layout.sidebar_width, DEFAULT_SIDEBAR_WIDTH);
+        let kept: Settings = toml::from_str("[layout]\nsidebar_width = 333.0\n").unwrap();
+        assert_eq!(kept.layout.sidebar_width, 333.);
+    }
+
     #[test]
     fn page_scheme_follows_trek_only_on_auto() {
         use super::PageScheme::*;

@@ -198,14 +198,17 @@ impl SettingsNav {
 }
 
 impl Render for SettingsNav {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let current = match self.workspace.read(cx).route {
             Route::Settings(p) => p,
             _ => SettingsPage::General,
         };
         let theme = cx.theme().clone();
         v_flex()
-            .w(px(crate::root::SIDEBAR_WIDTH))
+            .w(px(self
+                .workspace
+                .read(cx)
+                .sidebar_width(window.viewport_size().width.as_f32())))
             .h_full()
             .flex_none()
             .px(px(10.))

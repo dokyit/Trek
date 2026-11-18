@@ -2067,6 +2067,8 @@ pub struct Workspace {
     /// The agent CLIs' versions and updates asked for.
     pub agent_updates: crate::agent_updates::AgentUpdates,
     pub sidebar_collapsed: bool,
+    /// The sidebar's edge is in hand (`root`'s drag): its width follows the pointer, not a spring.
+    pub sidebar_dragging: bool,
     /// The threads open as tabs in the main window, by id, in order (see `tabs`).
     pub tabs: Vec<String>,
     /// The phone server, while Settings › Phone has it on (see `remote`).
@@ -2635,6 +2637,7 @@ impl Workspace {
             updater: Default::default(),
             agent_updates: Default::default(),
             sidebar_collapsed: false,
+            sidebar_dragging: false,
             tabs: if cfg!(any(test, feature = "test-support")) {
                 vec![]
             } else {
@@ -3149,6 +3152,21 @@ impl Workspace {
     /// Motion is allowed: neither Trek's Reduce motion setting nor the system asks for less.
     pub fn motion(&self, cx: &App) -> bool {
         !self.settings.appearance.reduce_motion && !cx.reduce_motion()
+    }
+
+    /// The sidebar's width in a window `window_width` wide: what the user left it at, held within
+    /// its range and what the window leaves it.
+    pub fn sidebar_width(&self, window_width: f32) -> f32 {
+        trek_core::settings::fit_sidebar_width(
+            self.settings.layout.sidebar_width,
+            crate::root::sidebar_room(window_width),
+        )
+    }
+
+    /// Whether the sidebar's opening or folding is animated: not while the pointer is bringing it
+    /// out (it keeps up with the pointer), and not with motion off.
+    pub fn sidebar_animates(&self, folded: bool, cx: &App) -> bool {
+        self.motion(cx) && (folded || !self.sidebar_dragging)
     }
 
     /// How far `id`'s new title has animated in (0 to 1), and the title it replaces, while it does.
