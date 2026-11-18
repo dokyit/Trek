@@ -153,7 +153,12 @@ actions!(
         SendFeedback,
         ZoomIn,
         ZoomOut,
-        ResetZoom
+        ResetZoom,
+        TerminalBigger,
+        TerminalSmaller,
+        TerminalActualSize,
+        PreviewActualPixels,
+        PreviewFit
     ]
 );
 

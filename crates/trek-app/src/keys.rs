@@ -343,6 +343,16 @@ pub enum Id {
     ZoomInShift,
     ZoomOut,
     ResetZoom,
+    /// The terminal's own text size, while it has the keys (the same keys as the app's zoom).
+    TerminalBigger,
+    TerminalBiggerShift,
+    TerminalSmaller,
+    TerminalActualSize,
+    /// An attachment's preview: the image at actual pixels, or fit to the window.
+    PreviewActualPixels,
+    PreviewActualPixelsShift,
+    PreviewFit,
+    PreviewFitMinus,
 }
 
 /// Which list of bindings a row goes into (each file binds its own).
@@ -1030,6 +1040,73 @@ static TABLE: LazyLock<Vec<Binding>> = LazyLock::new(|| {
         row(ZoomInShift, App, "cmd-+", Same, None, act!(crate::ZoomIn)),
         row(ZoomOut, App, "cmd--", Same, None, act!(crate::ZoomOut)),
         row(ResetZoom, App, "cmd-0", Same, None, act!(crate::ResetZoom)),
+        // Where something has a size of its own, the same keys are its while it has the keys (a
+        // binding in a deeper context wins), and the app's zoom everywhere else: the terminal's
+        // text, as in Windows Terminal; an image preview's actual pixels or fit.
+        row(
+            TerminalBigger,
+            App,
+            "cmd-=",
+            Same,
+            Some("Terminal"),
+            act!(crate::TerminalBigger),
+        ),
+        row(
+            TerminalBiggerShift,
+            App,
+            "cmd-+",
+            Same,
+            Some("Terminal"),
+            act!(crate::TerminalBigger),
+        ),
+        row(
+            TerminalSmaller,
+            App,
+            "cmd--",
+            Same,
+            Some("Terminal"),
+            act!(crate::TerminalSmaller),
+        ),
+        row(
+            TerminalActualSize,
+            App,
+            "cmd-0",
+            Same,
+            Some("Terminal"),
+            act!(crate::TerminalActualSize),
+        ),
+        row(
+            PreviewActualPixels,
+            App,
+            "cmd-=",
+            Same,
+            Some("AttachmentPreview"),
+            act!(crate::PreviewActualPixels),
+        ),
+        row(
+            PreviewActualPixelsShift,
+            App,
+            "cmd-+",
+            Same,
+            Some("AttachmentPreview"),
+            act!(crate::PreviewActualPixels),
+        ),
+        row(
+            PreviewFit,
+            App,
+            "cmd-0",
+            Same,
+            Some("AttachmentPreview"),
+            act!(crate::PreviewFit),
+        ),
+        row(
+            PreviewFitMinus,
+            App,
+            "cmd--",
+            Same,
+            Some("AttachmentPreview"),
+            act!(crate::PreviewFit),
+        ),
         // Not Trek's.
         row(Redo, System, "cmd-shift-z", Keys("ctrl-y"), None, None),
     ]
@@ -1594,6 +1671,27 @@ const PAGE: &[(&str, &[(&str, Show)])] = &[
         ],
     ),
     (
+        "Terminal",
+        &[
+            ("Bigger text", Bound(Id::TerminalBigger)),
+            ("Bigger text, with Shift", Bound(Id::TerminalBiggerShift)),
+            ("Smaller text", Bound(Id::TerminalSmaller)),
+            ("Text at its usual size", Bound(Id::TerminalActualSize)),
+        ],
+    ),
+    (
+        "Image preview",
+        &[
+            ("Actual pixels", Bound(Id::PreviewActualPixels)),
+            (
+                "Actual pixels, with Shift",
+                Bound(Id::PreviewActualPixelsShift),
+            ),
+            ("Fit to the window", Bound(Id::PreviewFit)),
+            ("Fit to the window, with minus", Bound(Id::PreviewFitMinus)),
+        ],
+    ),
+    (
         "Notes",
         &[
             ("New note", Bound(Id::NewNote)),
@@ -2062,8 +2160,9 @@ mod tests {
             .filter_map(|b| resolve(b, true))
             .map(|r| format!("{}|{}", r.keystroke, r.context.unwrap_or_default()))
             .collect();
-        // The 44 in main.rs, the 13 in notes.rs, the 2 in editor.rs, a diff's 17 and zoom's 4.
-        assert_eq!(mac.len(), 44 + 13 + 2 + 17 + 4);
+        // The 44 in main.rs, the 13 in notes.rs, the 2 in editor.rs, a diff's 17, zoom's 4, and the
+        // terminal's and a preview's own 4 each.
+        assert_eq!(mac.len(), 44 + 13 + 2 + 17 + 4 + 8);
         for (keys, ctx) in [
             ("cmd-q", ""),
             ("alt-cmd-e", ""),
@@ -2427,6 +2526,8 @@ mod tests {
                 "Editor",
                 "Window",
                 "Zoom",
+                "Terminal",
+                "Image preview",
                 "Notes",
                 "Diff review"
             ]
@@ -2698,6 +2799,21 @@ mod tests {
             ["open-notes"]
         );
         assert!(conflicts(&all, "open-settings", "cmd-alt-shift-9", true).is_empty());
+        // The terminal's and a preview's own ⌘= / ⌘0 aren't the app's zoom's: other places.
+        for mac in both() {
+            let page = super::page(mac, false, &[]);
+            let all = commands(&page);
+            for c in &all {
+                let Some(keys) = c.keys.as_deref() else {
+                    continue;
+                };
+                assert!(
+                    conflicts(&all, &c.name, keys, mac).is_empty(),
+                    "{} conflicts as shipped (mac: {mac})",
+                    c.name
+                );
+            }
+        }
     }
 
     #[test]
@@ -2784,7 +2900,7 @@ mod tests {
                 .sum();
             // Windows drops Hide, Minimize and Copy working directory (Ctrl+Shift+C is the
             // terminal's copy there) and adds Ctrl+Shift+P and Ctrl+F4.
-            assert_eq!(n, if mac { 80 } else { 80 - 3 + 2 }, "mac: {mac}");
+            assert_eq!(n, if mac { 88 } else { 88 - 3 + 2 }, "mac: {mac}");
         }
     }
 

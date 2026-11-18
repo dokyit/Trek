@@ -514,8 +514,6 @@ impl ImagePreview {
             "left" if plain => self.step(-1, cx),
             "right" if plain => self.step(1, cx),
             "space" if plain && !m.shift => self.toggle_actual(None, window, cx),
-            "=" | "+" if m.secondary() => self.set_actual(true, window, cx),
-            "0" | "-" if m.secondary() => self.set_actual(false, window, cx),
             "c" if m.secondary() && !m.shift => self.copy(window, cx),
             "backspace" | "delete" if m.secondary() && removable => self.remove(window, cx),
             _ => return,
@@ -1110,6 +1108,15 @@ impl Render for ImagePreview {
                     .on_key_down(
                         cx.listener(|this, ev: &KeyDownEvent, window, cx| this.key(ev, window, cx)),
                     )
+                    // ⌘= / ⌘0 (bindings of the preview's own in `keys`): the image, not the app.
+                    .on_action(
+                        cx.listener(|this, _: &crate::PreviewActualPixels, window, cx| {
+                            this.set_actual(true, window, cx)
+                        }),
+                    )
+                    .on_action(cx.listener(|this, _: &crate::PreviewFit, window, cx| {
+                        this.set_actual(false, window, cx)
+                    }))
                     // ⌘W puts the preview away rather than the tab or window under it.
                     .on_action(
                         cx.listener(|this, _: &crate::CloseTab, window, cx| this.close(window, cx)),

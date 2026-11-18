@@ -444,20 +444,17 @@ enum Shortcut {
     LineStart,
     LineEnd,
     DeleteLine,
-    /// The text a size bigger or smaller, or back to the usual size.
-    Bigger,
-    Smaller,
-    ActualSize,
     /// Not the terminal's: the app's shortcuts get it.
     PassThrough,
 }
 
-/// The terminal's shortcuts. On a Mac they're Cmd+V, Cmd+C, Cmd+K, Cmd+arrows, Cmd+Backspace and
-/// Cmd+= / - / 0, and every other Cmd key is the app's. Elsewhere `secondary` (Ctrl) is what the
-/// shell's own keys use (Ctrl+C is interrupt, Ctrl+V is PowerShell's paste, which reads the
-/// clipboard itself), so the terminal doesn't take it as the app's: copying and pasting are
-/// Ctrl+Shift+C and Ctrl+Shift+V (or Shift+Insert), and the text size Ctrl+= / - / 0, as in
-/// Windows Terminal.
+/// The terminal's shortcuts. On a Mac they're Cmd+V, Cmd+C, Cmd+K, Cmd+arrows and Cmd+Backspace,
+/// and every other Cmd key is the app's. Elsewhere `secondary` (Ctrl) is what the shell's own keys
+/// use (Ctrl+C is interrupt, Ctrl+V is PowerShell's paste, which reads the clipboard itself), so
+/// the terminal doesn't take it as the app's: copying and pasting are Ctrl+Shift+C and
+/// Ctrl+Shift+V (or Shift+Insert). The text size (⌘= / − / 0, Ctrl on Windows as in Windows
+/// Terminal) is a binding in `keys` with the terminal's own context, so the user can change it
+/// on the Keyboard Shortcuts page and the app's zoom keeps the same keys everywhere else.
 fn shortcut(key: &str, m: &Modifiers, windows: bool) -> Option<Shortcut> {
     if !windows {
         let plain = !m.alt && !m.control && !m.shift;
@@ -468,9 +465,6 @@ fn shortcut(key: &str, m: &Modifiers, windows: bool) -> Option<Shortcut> {
             "left" if plain => Shortcut::LineStart,
             "right" if plain => Shortcut::LineEnd,
             "backspace" if plain => Shortcut::DeleteLine,
-            "=" | "+" => Shortcut::Bigger,
-            "-" => Shortcut::Smaller,
-            "0" => Shortcut::ActualSize,
             _ => Shortcut::PassThrough,
         });
     }
@@ -479,9 +473,6 @@ fn shortcut(key: &str, m: &Modifiers, windows: bool) -> Option<Shortcut> {
         "v" if m.control && m.shift && !m.alt => Some(Shortcut::Paste),
         "insert" if m.shift && !m.control && !m.alt => Some(Shortcut::Paste),
         "c" if m.control && m.shift && !m.alt => Some(Shortcut::Copy),
-        "=" | "+" if m.control && !m.alt => Some(Shortcut::Bigger),
-        "-" if m.control && !m.shift && !m.alt => Some(Shortcut::Smaller),
-        "0" if m.control && !m.shift && !m.alt => Some(Shortcut::ActualSize),
         _ => None,
     }
 }
@@ -1397,9 +1388,6 @@ impl TerminalPanel {
                     b"\x05"
                 }),
                 Shortcut::DeleteLine => self.write(b"\x15"),
-                Shortcut::Bigger => self.set_font_size(self.font_size + 1., cx),
-                Shortcut::Smaller => self.set_font_size(self.font_size - 1., cx),
-                Shortcut::ActualSize => self.set_font_size(FONT_SIZE, cx),
                 Shortcut::PassThrough => return, // let app shortcuts through
             }
             cx.stop_propagation();
@@ -1838,6 +1826,17 @@ impl Render for TerminalPanel {
             .test_support()
             .key_context("Terminal")
             .track_focus(&self.focus)
+            // The text size, its keys the table's (`keys`): ⌘= / ⌘− / ⌘0 here, the app's zoom
+            // elsewhere.
+            .on_action(cx.listener(|this, _: &crate::TerminalBigger, _, cx| {
+                this.set_font_size(this.font_size + 1., cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::TerminalSmaller, _, cx| {
+                this.set_font_size(this.font_size - 1., cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::TerminalActualSize, _, cx| {
+                this.set_font_size(FONT_SIZE, cx)
+            }))
             .relative()
             .size_full()
             .px_3()
@@ -2302,17 +2301,13 @@ mod tests {
             Some(Shortcut::PassThrough),
             "⌘⇧← isn't the line's start"
         );
-        assert_eq!(shortcut("=", &cmd, false), Some(Shortcut::Bigger));
-        assert_eq!(shortcut("+", &cmd_shift, false), Some(Shortcut::Bigger));
-        assert_eq!(shortcut("-", &cmd, false), Some(Shortcut::Smaller));
-        assert_eq!(shortcut("0", &cmd, false), Some(Shortcut::ActualSize));
-        // Windows: Ctrl+= / - / 0, as Windows Terminal has them; ⌥ keys stay the shell's.
+        // The text size is a binding of its own (`keys`), not a key the terminal reads.
+        assert_eq!(shortcut("=", &cmd, false), Some(Shortcut::PassThrough));
         let ctrl = Modifiers {
             control: true,
             ..Default::default()
         };
-        assert_eq!(shortcut("=", &ctrl, true), Some(Shortcut::Bigger));
-        assert_eq!(shortcut("0", &ctrl, true), Some(Shortcut::ActualSize));
+        assert_eq!(shortcut("=", &ctrl, true), None);
         assert_eq!(
             shortcut("left", &ctrl, true),
             None,
