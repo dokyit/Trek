@@ -220,11 +220,27 @@ pub fn shipped(name: &str) -> anyhow::Result<PathBuf> {
         .find(|(n, _)| *n == name)
         .ok_or_else(|| anyhow::anyhow!("Trek ships no skill called {name}"))?;
     let md = shipped_home().join(name).join("SKILL.md");
-    if std::fs::read_to_string(&md).ok().as_deref() != Some(*text) {
+    let text = written_text(text);
+    if std::fs::read_to_string(&md).ok().as_deref() != Some(text.as_str()) {
         std::fs::create_dir_all(md.parent().unwrap_or(&md))?;
         std::fs::write(&md, text)?;
     }
     Ok(md)
+}
+
+/// A shipped skill as it's written for this computer: `<data>` is this install's data folder and
+/// `<trek>` the program that runs `trek plugin …`, so an agent has the exact folder and command
+/// and doesn't go looking (the plugin skill's first fix: an agent took Claude Code's own "mods"
+/// folder for Trek's).
+pub fn written_text(text: &str) -> String {
+    if !text.contains("<data>") && !text.contains("<trek>") {
+        return text.to_string();
+    }
+    let data = paths::data_dir().display().to_string();
+    let trek = std::env::current_exe()
+        .map(|p| format!("\"{}\"", p.display()))
+        .unwrap_or_else(|_| "trek".into());
+    text.replace("<data>", &data).replace("<trek>", &trek)
 }
 
 fn disabled_root() -> PathBuf {

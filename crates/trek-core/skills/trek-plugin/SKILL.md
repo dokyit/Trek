@@ -1,6 +1,6 @@
 ---
 name: trek-plugin
-description: Make a Trek plugin - a folder that makes Trek the user's own (a whole look, a pet or sticker in the sidebar, sounds when agents finish, their own new-thread screen, a status in the title bar, buttons and chips in the composer, a page or a panel of their own HTML, palette commands with keys, logic that hears Trek's events), checked by Trek and loaded live. Use when the user asks you to restyle, personalise, mod, extend or add something to Trek ("make Trek feel like a campfire", "put a marmot in my sidebar that whistles when an agent needs me", "play a chime when an agent finishes", "greet me on the new-thread screen", "add a focus timer round the composer", "show token burn in the thread header").
+description: Make a Trek plugin - a folder in Trek's plugins folder that makes Trek the user's own (a whole look or theme, a pet or sticker in the sidebar, sounds when agents finish, their own new-thread screen, a status in the title bar, buttons and chips in the composer, a page or a panel of their own HTML, palette commands with keys, logic that hears Trek's events), checked by Trek, loaded live and listed in Settings › Plugins, where the user turns it off or deletes it. This is Trek's own system: not Claude Code's mods, plugins, skills or hooks, and never written into ~/.claude. Use when the user asks you to restyle, personalise, theme, mod, extend or add something to Trek ("make Trek feel like a campfire", "a Trek look called Dusk", "put a marmot in my sidebar that whistles when an agent needs me", "play a chime when an agent finishes", "greet me on the new-thread screen", "add a focus timer round the composer", "show token burn in the thread header").
 ---
 
 # Trek plugin
@@ -19,43 +19,55 @@ Build all of what the sentence asks, make it look right in both the light and th
 theme's colour names, not your own, except in pictures), and don't rebuild what Trek has (a
 page of finished threads is Basecamp; a list of what needs the user is the sidebar's inbox).
 
-A plugin is a folder with a `plugin.toml`. Trek reads every folder in `<data>/plugins/`, reads it
-again within two seconds of any change, and lists it in Settings › Plugins. You make one by
-writing the folder; the user sees it appear.
+## Read this first: Trek's, not Claude Code's
 
-For a look alone (colours, fonts, corners), the `trek-theme` skill has the theme file's format;
-a plugin can carry that theme (`[[theme]]`) along with everything else here.
+"Trek" here is the app the user is talking to. Whatever you were asked to change about *it* is a
+Trek plugin, written in **Trek's plugins folder** and nowhere else:
+
+- Trek's data folder on this computer: `<data>`
+- Trek plugins live in **`<data>/plugins/<id>/`** (`<id>`: lower case letters, digits and dashes).
+- Never write into `~/.claude`, `.claude`, `dev-mods`, `mods` or any other folder of Claude Code's,
+  Codex's or another agent's: those are the agent's own features (Claude Code has "mods" and its
+  own plugin skill) and Trek reads none of them, so nothing you write there ever shows up in Trek.
+  If you were about to use another skill for "make a plugin", this one is the one for Trek.
+- A look (theme) is a plugin too: a plugin with a `[[theme]]`. Don't write loose files into
+  `<data>/themes/`.
+
+Trek reads every folder in `<data>/plugins/` at launch and again within two seconds of any change,
+checks it, lists it in **Settings › Plugins** and tells the user it was added. You make a plugin by
+writing the folder; there's nothing to register. The user can turn it off, back on, or delete it
+there at any time.
 
 ## Where it goes, and how it's turned on
 
-This skill's file is `<data>/skills/trek-plugin/SKILL.md`; plugins live in **`<data>/plugins/<id>/`**
-(two folders up from this file, then `plugins`). The folder's name is the plugin's id: lower case
-letters, digits and dashes.
-
-1. Write `<data>/plugins/<id>/plugin.toml` and the files it names.
+1. Write `<data>/plugins/<id>/plugin.toml` and the files it names (create the folders).
 2. Read `<data>/plugins/problems.txt` two seconds later. It's there only while a plugin has a
    problem, one line each: `<id>: <what's wrong>`. Fix yours until it isn't listed.
-3. Turn it on by adding it to `<data>/plugins/state.toml` (keep what's there):
+3. Turn it on. A plugin that asks for **no permissions** is yours to turn on: run
+   `<trek> plugin enable <id>`, or add it to `<data>/plugins/state.toml` (keep what's there):
    ```
    [plugins.<id>]
    on = true
    ```
-   A plugin that asks for **no permissions** runs at once. One that asks for some needs the user:
-   write `waiting = true` instead of `on = true`, and tell them to allow it in Settings ›
-   Plugins, where what it asks is shown in words. Permissions are the user's to give: Trek
-   seals each grant with a key of its own, so a `granted` list written into the file counts for
-   nothing. The grant is for the plugin as the user saw it: edit any of its files afterwards and
-   it waits to be allowed again (say so when you change one).
+   One that asks for some needs the user: run the same command (it only marks the plugin as
+   waiting) and tell them to allow it in Settings › Plugins, where what it asks is shown in
+   words. Permissions are the user's to give: Trek seals each grant with a key of its own, so a
+   `granted` list written into the file counts for nothing. The grant is for the plugin as the
+   user saw it: edit any of its files afterwards and it waits to be allowed again (say so when
+   you change one).
    A `[[replace]]` shows once it's chosen: add `thread-list = "<id>"` (or `composer`,
    `new-thread`) under `[replace]` in the same file, or let the user pick it in Settings.
-4. Tell the user what you made, where it shows, and that Settings › Plugins turns it off or
-   removes it.
+4. A look: once it's on, write the look's id (the plugin's id, when it has one `[[theme]]`) alone
+   to `<data>/themes/apply`; Trek switches to it within a couple of seconds and removes the file.
+5. Tell the user what you made, where it shows, and that **Settings › Plugins** turns it off,
+   back on, or deletes it (for a look, choosing another look in Settings › Appearance puts this
+   one off, and its switch there brings it back).
 
-Trek's own program does the same from a terminal, if it's on the PATH: `trek plugin install
-<folder | git URL | example:<name>>`, `list`, `enable <id>`, `disable <id>`, `reload`, `remove
-<id>`, `dev <folder> --once` (reads a folder in place while you work on it), `new <id>`,
-`examples`. Trek ships examples to read and copy, each made from the sentence at the top of its
-README: `trek plugin install example:campfire` (a whole look), `trailhead` (a new-thread screen
+Trek's own program does the same from a terminal: `<trek> plugin install <folder | git URL |
+example:<name>>`, `list`, `enable <id>`, `disable <id>`, `reload`, `remove <id>`, `dev <folder>
+--once` (reads a folder in place while you work on it), `new <id>` (a starting folder in the
+current directory, not in Trek's plugins folder: `install` it when it's ready), `examples`.
+Trek ships examples to read and copy, each made from the sentence at the top of its README: `trek plugin install example:campfire` (a whole look), `trailhead` (a new-thread screen
 with a page), `marmot` (a pet in the sidebar, with hooks), `soft-sounds` (sounds, with a panel),
 `now-playing` (the title bar, with permissions), `focus-timer` (the composer's edge).
 
