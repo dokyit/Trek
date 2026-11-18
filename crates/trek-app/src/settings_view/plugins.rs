@@ -42,17 +42,22 @@ impl SettingsView {
             out.push(self.waiting_card(pl, &state.missing(&pl.manifest), cx));
         }
 
+        // Looks that are loose files in the themes folder (made before plugins carried them, or by
+        // hand) are listed with the plugins: a switch (in use) and Delete, as any plugin has.
+        let loose = crate::themes::loose_looks(cx);
+        let shown = crate::themes::shown_id(cx);
         out.push(Self::heading("Installed", cx));
-        if installed.is_empty() {
+        if installed.is_empty() && loose.is_empty() {
             out.push(Self::note(
                 "No plugins yet. Ask an agent for one (above), or install an example below and change it.",
                 cx,
             ));
         } else {
-            let rows = installed
+            let mut rows: Vec<AnyElement> = installed
                 .iter()
                 .map(|pl| self.plugin_row(pl, &state, log.as_ref(), cx))
                 .collect();
+            rows.extend(loose.iter().map(|t| self.look_row(t, &shown, cx)));
             out.push(ui::group(rows, cx));
         }
 
@@ -376,6 +381,71 @@ impl SettingsView {
                     .child(bits.join(" · ")),
             );
         }
+        // When it was added, and by which agent if Trek could tell.
+        let added = match &choice.added {
+            Some(a) => plugins::added_text(Some(a.at), a.by.as_deref(), a.title.as_deref()),
+            None => plugins::added_text(plugins::made_at(&pl.dir), None, None),
+        };
+        if !added.is_empty() {
+            lines = lines.child(
+                div()
+                    .id(SharedString::from(format!("plugin-added-{}", m.id)))
+                    .test_support()
+                    .text_size(px(text::LABEL))
+                    .text_color(theme.muted_foreground.opacity(0.85))
+                    .child(added),
+            );
+        }
+        // A plugin's look is on only while it's the one on screen: say which it is, so a plugin
+        // never reads as on while another look is up.
+        if m.has_look() {
+            let in_use = plugins::look_in_use(&m, cx);
+            let shown = crate::themes::shown_id(cx);
+            let (words, tone) = if in_use {
+                ("Its look is in use.".to_string(), theme.muted_foreground)
+            } else if running {
+                (
+                    "Its look isn't in use: another look is chosen.".to_string(),
+                    crate::palette::amber(cx),
+                )
+            } else if choice.look.is_some() {
+                (
+                    format!(
+                        "Its look is off: {} is in use. Turn it on to bring it back.",
+                        crate::themes::find(&shown, cx)
+                            .map(|t| t.name)
+                            .unwrap_or(shown)
+                    ),
+                    theme.muted_foreground,
+                )
+            } else {
+                (String::new(), theme.muted_foreground)
+            };
+            if !words.is_empty() {
+                let use_it = (running && !in_use)
+                    .then(|| m.themes.first().map(|t| t.id.clone()))
+                    .flatten()
+                    .map(|look| {
+                        let ws = ws.clone();
+                        Button::new(SharedString::from(format!("plugin-use-look-{id}")))
+                            .xsmall()
+                            .ghost()
+                            .label("Use it")
+                            .on_click(move |_, _, cx| crate::themes::switch_to(&look, &ws, cx))
+                    });
+                lines = lines.child(
+                    h_flex()
+                        .id(SharedString::from(format!("plugin-look-{id}")))
+                        .test_support()
+                        .gap(px(6.))
+                        .text_size(px(text::LABEL))
+                        .text_color(tone)
+                        .child(Icon::new(crate::assets::Lucide::Palette).xsmall())
+                        .child(words)
+                        .children(use_it),
+                );
+            }
+        }
         if !m.permissions.is_empty() {
             lines = lines.child(
                 v_flex()
@@ -454,17 +524,17 @@ impl SettingsView {
                         )
                         .separator()
                         .item(
-                            PopupMenuItem::new("Remove…")
+                            PopupMenuItem::new("Delete…")
                                 .icon(IconName::Delete)
                                 .on_click(move |_, window, cx| {
                                     let (id4, ws4, name) = (id3.clone(), ws3.clone(), name.clone());
                                     window.open_alert_dialog(cx, move |alert, _, _| {
                                         let (id5, ws5) = (id4.clone(), ws4.clone());
                                         alert
-                                            .title(format!("Remove “{name}”?"))
+                                            .title(format!("Delete “{name}”?"))
                                             .description(gone)
                                             .confirm()
-                                            .ok_text("Remove")
+                                            .ok_text("Delete")
                                             .ok_variant(
                                                 gpui_kit::component::button::ButtonVariant::Danger,
                                             )
@@ -500,6 +570,155 @@ impl SettingsView {
                     .gap(px(4.))
                     .child(title)
                     .child(lines),
+            )
+            .child(
+                h_flex()
+                    .gap(px(6.))
+                    .child(more)
+                    .child(div().pl(px(4.)).child(switch)),
+            )
+            .into_any_element()
+    }
+
+    /// A look that is a loose file in the themes folder: its name, what it is, when it was made,
+    /// a switch (on while it's the look on screen: off puts Trek's own back) and Delete.
+    fn look_row(
+        &self,
+        look: &trek_core::themes::Theme,
+        shown: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let id = look.id.clone();
+        let in_use = shown == id;
+        let ws = self.workspace.clone();
+        let file = match &look.origin {
+            trek_core::themes::Origin::File(f) => Some(f.clone()),
+            trek_core::themes::Origin::BuiltIn => None,
+        };
+        let added = file
+            .as_deref()
+            .and_then(plugins::made_at)
+            .map(|at| plugins::added_text(Some(at), None, None))
+            .unwrap_or_default();
+        let more = Button::new(SharedString::from(format!("look-more-{id}")))
+            .ghost()
+            .small()
+            .icon(Icon::new(IconName::Ellipsis).text_color(theme.muted_foreground))
+            .dropdown_menu_with_anchor(Anchor::TopRight, {
+                let (id, ws, name, file) = (id.clone(), ws.clone(), look.name.clone(), file.clone());
+                move |menu, _, _| {
+                    let (id2, ws2, name, file2) = (id.clone(), ws.clone(), name.clone(), file.clone());
+                    menu.min_w(px(190.))
+                        .item(
+                            PopupMenuItem::new(crate::words::words().show_in_file_manager)
+                                .on_click(move |_, _, cx| {
+                                    if let Some(f) = &file2 {
+                                        cx.reveal_path(f)
+                                    }
+                                }),
+                        )
+                        .separator()
+                        .item(
+                            PopupMenuItem::new("Delete…")
+                                .icon(IconName::Delete)
+                                .on_click(move |_, window, cx| {
+                                    let (id3, ws3, name) = (id2.clone(), ws2.clone(), name.clone());
+                                    window.open_alert_dialog(cx, move |alert, _, _| {
+                                        let (id4, ws4) = (id3.clone(), ws3.clone());
+                                        alert
+                                            .title(format!("Delete “{name}”?"))
+                                            .description(
+                                                "Its file is deleted. If it's the look on screen, Trek's own comes back.",
+                                            )
+                                            .confirm()
+                                            .ok_text("Delete")
+                                            .ok_variant(
+                                                gpui_kit::component::button::ButtonVariant::Danger,
+                                            )
+                                            .on_ok(move |_, window, cx| {
+                                                if let Err(e) =
+                                                    crate::themes::delete_look(&id4, &ws4, cx)
+                                                {
+                                                    crate::toast::push(window, e, cx);
+                                                }
+                                                true
+                                            })
+                                    });
+                                }),
+                        )
+                }
+            });
+        let switch = Switch::new(SharedString::from(format!("look-on-{id}")))
+            .checked(in_use)
+            .on_click({
+                let (id, ws) = (id.clone(), ws.clone());
+                move |on: &bool, _, cx| {
+                    let to = if *on {
+                        id.as_str()
+                    } else {
+                        trek_core::themes::DEFAULT
+                    };
+                    crate::themes::switch_to(to, &ws, cx)
+                }
+            });
+        h_flex()
+            .id(SharedString::from(format!("look-row-{id}")))
+            .test_support()
+            .w_full()
+            .items_start()
+            .gap(px(32.))
+            .py(px(14.))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(4.))
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_size(px(text::TITLE))
+                                    .font_medium()
+                                    .when(!in_use, |el| el.text_color(theme.muted_foreground))
+                                    .child(look.name.clone()),
+                            )
+                            .child(badge("Look", cx)),
+                    )
+                    .child(
+                        v_flex()
+                            .gap(px(3.))
+                            .max_w(px(500.))
+                            .text_size(px(text::BODY))
+                            .when(!look.description.is_empty(), |el| {
+                                el.child(
+                                    div()
+                                        .text_color(theme.muted_foreground)
+                                        .line_height(relative(1.5))
+                                        .child(look.description.clone()),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .text_size(px(text::LABEL))
+                                    .text_color(theme.muted_foreground.opacity(0.85))
+                                    .child(format!(
+                                        "A look · {}",
+                                        if in_use { "in use" } else { "not in use" }
+                                    )),
+                            )
+                            .when(!added.is_empty(), |el| {
+                                el.child(
+                                    div()
+                                        .id(SharedString::from(format!("look-added-{id}")))
+                                        .test_support()
+                                        .text_size(px(text::LABEL))
+                                        .text_color(theme.muted_foreground.opacity(0.85))
+                                        .child(added.clone()),
+                                )
+                            }),
+                    ),
             )
             .child(
                 h_flex()

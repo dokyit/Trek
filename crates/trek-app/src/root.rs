@@ -2237,6 +2237,7 @@ pub fn toast_button_label(action: &UndoAction) -> &'static str {
         UndoAction::MoveTrek => "Move Trek",
         UndoAction::RemoveOldCopy(_) => "Remove old copy",
         UndoAction::OpenThread(_) => "Open thread",
+        UndoAction::OpenPlugins => "Manage",
         UndoAction::RevealFile(_) => crate::words::words().show_in_file_manager,
         UndoAction::OpenPrivacy(_) => "Open Settings",
         UndoAction::RestartToUpdate => "Restart",

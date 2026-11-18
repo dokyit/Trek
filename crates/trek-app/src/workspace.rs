@@ -1809,6 +1809,8 @@ pub enum UndoAction {
     RemoveOldCopy(PathBuf),
     /// Not an undo: open a thread (one an agent started or handed off to).
     OpenThread(String),
+    /// Not an undo: open Settings › Plugins (a plugin was added).
+    OpenPlugins,
     /// Not an undo: show a file in Finder (File Explorer), a download that just landed.
     RevealFile(PathBuf),
     /// Not an undo: open the system's pane where `Permission` is turned on for Trek.
@@ -9600,6 +9602,10 @@ impl Workspace {
                 cx.emit(WorkspaceEvent::ActivateMain);
             }
             UndoAction::OpenThread(_) => {}
+            UndoAction::OpenPlugins => {
+                self.navigate(Route::Settings(SettingsPage::Plugins), cx);
+                cx.emit(WorkspaceEvent::ActivateMain);
+            }
             UndoAction::RevealFile(path) => cx.reveal_path(&path),
             UndoAction::OpenPrivacy(permission) => crate::permissions::open_pane(permission, cx),
             UndoAction::RestartToUpdate | UndoAction::InstallWhenFree => {
@@ -11966,7 +11972,7 @@ pub(crate) fn agent_notes(
     let transcript = format!(
         "{} {}",
         trek_core::session_log::AGENT_NOTE,
-        trek_core::plugins::AGENT_NOTE
+        trek_core::plugins::agent_note()
     );
     let notes: Vec<String> =
         std::iter::once(trek_core::visualization::AGENT_INSTRUCTIONS.to_string())

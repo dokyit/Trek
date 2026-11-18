@@ -199,6 +199,54 @@ pub fn running(id: &str, cx: &App) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether one of plugin `id`'s looks is the one on screen.
+pub fn look_in_use(m: &Manifest, cx: &App) -> bool {
+    let shown = crate::themes::shown_id(cx);
+    m.themes.iter().any(|t| t.id == shown)
+}
+
+/// A look was chosen over another (`from` to `to`; Settings › Appearance, the palette, a plugin
+/// turned on, an agent's `apply`). The running plugin whose look `from` was, if `to` isn't its
+/// own, is put off and remembers it: a plugin's look is on only while it's the one on screen,
+/// so Settings never shows a plugin on whose look isn't, and turning it on brings the look
+/// back (`set_on`).
+pub fn look_changed(from: &str, to: &str, ws: &Entity<Workspace>, cx: &mut App) {
+    if from == to {
+        return;
+    }
+    let Some(p) = cx.try_global::<Plugins>() else {
+        return;
+    };
+    let displaced: Vec<String> = p
+        .plugins
+        .iter()
+        .filter(|pl| {
+            let m = &pl.manifest;
+            p.state.running(m)
+                && m.themes.iter().any(|t| t.id == from)
+                && !m.themes.iter().any(|t| t.id == to)
+        })
+        .map(|pl| pl.manifest.id.clone())
+        .collect();
+    if displaced.is_empty() {
+        return;
+    }
+    update_state(ws, cx, |s| {
+        for id in &displaced {
+            s.turn_off(id);
+            if let Some(c) = s.plugins.get_mut(id) {
+                c.look = Some(from.to_string());
+            }
+        }
+    });
+    for id in &displaced {
+        core::log(
+            id,
+            &format!("turned off: the look {to} was chosen over its own"),
+        );
+    }
+}
+
 /// The running plugins' manifests.
 pub fn running_manifests(cx: &App) -> Vec<Manifest> {
     let Some(p) = cx.try_global::<Plugins>() else {
@@ -305,7 +353,7 @@ pub fn looked(print: core::Fingerprint, asked: bool, ws: &Entity<Workspace>, cx:
             .await;
         cx.update(|cx| {
             if let Some(ws) = ws.upgrade() {
-                apply_scan(scan, state, print, &ws, cx);
+                apply_scan(scan, state, print, true, &ws, cx);
             }
         });
     })
@@ -314,10 +362,15 @@ pub fn looked(print: core::Fingerprint, asked: bool, ws: &Entity<Workspace>, cx:
 
 /// Take a read of the folder: what's new is on offer, a bad plugin is said once, and what the
 /// running plugins bring is indexed again.
+///
+/// A plugin that wasn't there before is announced (`announce`): the user hears that it was added
+/// and where to manage it, whoever wrote it (an agent, by hand, the CLI), and it's noted when it
+/// appeared and which agent was at work then (`Added`).
 fn apply_scan(
     scan: core::Scan,
     state: State,
     print: core::Fingerprint,
+    announce: bool,
     ws: &Entity<Workspace>,
     cx: &mut App,
 ) {
@@ -325,6 +378,16 @@ fn apply_scan(
         return;
     };
     let dir = p.dir.clone();
+    let fresh: Vec<Plugin> = scan
+        .plugins
+        .iter()
+        .filter(|pl| {
+            !p.plugins
+                .iter()
+                .any(|old| old.manifest.id == pl.manifest.id)
+        })
+        .cloned()
+        .collect();
     let new_problems: Vec<Problem> = scan
         .problems
         .iter()
@@ -335,17 +398,43 @@ fn apply_scan(
         .plugins
         .iter()
         .filter(|pl| {
-            state.choice(&pl.manifest.id).waiting && !p.state.choice(&pl.manifest.id).waiting
+            state.choice(&pl.manifest.id).waiting
+                && !p.state.choice(&pl.manifest.id).waiting
+                && !fresh.iter().any(|f| f.manifest.id == pl.manifest.id)
         })
         .map(|pl| pl.manifest.name.clone())
         .collect();
+    let mut state = state;
+    let mut print = print;
+    let by = if fresh.is_empty() {
+        None
+    } else {
+        at_work(ws, cx)
+    };
+    let mut noted = false;
+    for pl in &fresh {
+        let added = core::Added {
+            at: trek_core::store::now_ms(),
+            by: by.as_ref().map(|w| w.agent.clone()),
+            thread: by.as_ref().map(|w| w.thread.clone()),
+            title: by.as_ref().map(|w| w.title.clone()),
+        };
+        noted |= state.note_added(&pl.manifest.id, added);
+    }
+    if noted {
+        // Kept with the user's choices; what was just written isn't news to the next look.
+        if let Err(e) = state.write(&dir) {
+            tracing::warn!("plugins: couldn't note what was added: {e}");
+        }
+        print = core::fingerprint(&dir);
+    }
     core::write_problems(&dir, &scan.problems);
     {
         let p = cx.global_mut::<Plugins>();
         p.generation += 1;
         p.plugins = scan.plugins;
         p.problems = scan.problems;
-        p.state = state;
+        p.state = state.clone();
         p.fingerprint = print;
         p.index();
         if let Some((id, _)) = p.log.clone() {
@@ -376,7 +465,104 @@ fn apply_scan(
             cx,
         );
     }
+    if announce && !fresh.is_empty() {
+        let message = added_message(&fresh, &state, by.as_ref());
+        ws.update(cx, |_, cx| {
+            cx.emit(WorkspaceEvent::Toast {
+                message,
+                undo: Some(crate::workspace::UndoAction::OpenPlugins),
+            })
+        });
+    }
     contributions_changed(ws, cx);
+}
+
+/// When a plugin was added and by whom, for its row in Settings ("Added 18 Nov 2026 by Codex
+/// (“Add a marmot”)"). `at` is milliseconds since the epoch; nothing known gives an empty line.
+pub fn added_text(at: Option<i64>, by: Option<&str>, title: Option<&str>) -> String {
+    use chrono::TimeZone as _;
+    let when = at
+        .and_then(|ms| chrono::Local.timestamp_millis_opt(ms).single())
+        .map(|t| t.format("%-d %b %Y").to_string());
+    match (when, by) {
+        (None, None) => String::new(),
+        (Some(w), None) => format!("Added {w}"),
+        (None, Some(b)) => format!("Added by {b}"),
+        (Some(w), Some(b)) => match title.filter(|t| !t.trim().is_empty()) {
+            Some(t) => format!(
+                "Added {w} by {b} (“{}”)",
+                t.chars().take(40).collect::<String>().trim()
+            ),
+            None => format!("Added {w} by {b}"),
+        },
+    }
+}
+
+/// When the plugin's folder (or the theme's file) appeared, as the file system has it: what
+/// Settings says of one Trek wasn't running when it was added.
+pub fn made_at(path: &std::path::Path) -> Option<i64> {
+    let meta = std::fs::metadata(path).ok()?;
+    let t = meta.created().or_else(|_| meta.modified()).ok()?;
+    let ms = t.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+    i64::try_from(ms).ok()
+}
+
+/// An agent at work in a thread, as Settings names who made a plugin.
+pub struct AtWork {
+    pub agent: String,
+    pub thread: String,
+    pub title: String,
+}
+
+/// The agent at work right now, when it's exactly one: a plugin that appears then was most
+/// likely its doing. With none at work, or several, nobody is named.
+pub fn at_work(ws: &Entity<Workspace>, cx: &App) -> Option<AtWork> {
+    let ws = ws.read(cx);
+    let mut working = ws.threads.iter().filter(|t| {
+        t.archived_at.is_none()
+            && (t.run_state == trek_core::RunState::Working || ws.turn_running(&t.id))
+    });
+    let t = working.next()?;
+    working.next().is_none().then(|| AtWork {
+        agent: t.agent.display_name(),
+        thread: t.id.clone(),
+        title: t.title.clone(),
+    })
+}
+
+/// What the user is told when `fresh` plugins appear: what was added, by whom if known, whether
+/// it runs or waits, and where to manage it.
+pub fn added_message(fresh: &[Plugin], state: &State, by: Option<&AtWork>) -> String {
+    let who = by.map(|w| format!(" by {}", w.agent)).unwrap_or_default();
+    match fresh {
+        [one] => {
+            let m = &one.manifest;
+            if !m.permissions.is_empty() && !state.missing(m).is_empty() {
+                format!(
+                    "{} was added{who} and asks for permissions. Allow it in Settings › Plugins.",
+                    m.name
+                )
+            } else if state.running(m) {
+                format!(
+                    "{} was added{who} and is on. Manage it in Settings › Plugins.",
+                    m.name
+                )
+            } else {
+                format!(
+                    "{} was added{who}; it's off. Turn it on in Settings › Plugins.",
+                    m.name
+                )
+            }
+        }
+        many => {
+            let names: Vec<&str> = many.iter().map(|p| p.manifest.name.as_str()).collect();
+            format!(
+                "{} plugins were added{who}: {}. Manage them in Settings › Plugins.",
+                many.len(),
+                names.join(", ")
+            )
+        }
+    }
 }
 
 /// Whether a running plugin places Trek's component `c` anywhere.
@@ -629,13 +815,26 @@ pub fn set_on(id: &str, on: bool, ws: &Entity<Workspace>, cx: &mut App) {
         None
     };
     let mut allowed = true;
+    let mut kept_look = None;
     update_state(ws, cx, |s| {
         if on {
+            kept_look = s.plugins.get_mut(id).and_then(|c| c.look.take());
             allowed = s.turn_on_allowing(&plugin, key.as_ref());
         } else {
             s.turn_off(&plugin.manifest.id);
         }
     });
+    if allowed && on && plugin.manifest.has_look() {
+        // Turning a plugin on brings its look back: the one it had when another was chosen, or
+        // its first.
+        let themes = &plugin.manifest.themes;
+        let look = kept_look
+            .filter(|k| themes.iter().any(|t| &t.id == k))
+            .or_else(|| themes.first().map(|t| t.id.clone()));
+        if let Some(look) = look {
+            crate::themes::switch_to(&look, ws, cx);
+        }
+    }
     if !allowed {
         let message = cant_allow(&plugin);
         ws.update(cx, |_, cx| {
@@ -794,7 +993,7 @@ pub fn install(src: String, ws: &Entity<Workspace>, cx: &mut App) {
                     })
                 });
             }
-            reread(&ws, cx);
+            reread_quiet(&ws, cx);
         });
     })
     .detach();
@@ -834,7 +1033,19 @@ pub fn reread(ws: &Entity<Workspace>, cx: &mut App) {
     let print = core::fingerprint(&dir);
     let scan = core::scan(&dir);
     let state = checked_state(&dir, &scan);
-    apply_scan(scan, state, print, ws, cx);
+    apply_scan(scan, state, print, true, ws, cx);
+}
+
+/// The same, with nothing announced: what Settings just did itself (an install the user asked
+/// for) needn't be told back to them.
+fn reread_quiet(ws: &Entity<Workspace>, cx: &mut App) {
+    let Some(dir) = cx.try_global::<Plugins>().map(|p| p.dir.clone()) else {
+        return;
+    };
+    let print = core::fingerprint(&dir);
+    let scan = core::scan(&dir);
+    let state = checked_state(&dir, &scan);
+    apply_scan(scan, state, print, false, ws, cx);
 }
 
 /// Merge `patch` (an object) into plugin `id`'s state, and draw what reads it.

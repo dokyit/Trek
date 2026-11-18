@@ -47,7 +47,14 @@ pub struct Themes {
     switch: Option<Switch>,
     /// The theme files running plugins bring: (id, file).
     plugin_files: Vec<(String, PathBuf)>,
+    /// A theme an agent asked for (`themes/apply`) that isn't known yet, and when it asked: the
+    /// plugin that brings it may still be being read (the two folders are looked at on one tick),
+    /// so it waits a little for it (`APPLY_WAIT`).
+    pending: Option<(String, Instant)>,
 }
+
+/// How long an asked-for theme waits for the plugin that brings it.
+const APPLY_WAIT: Duration = Duration::from_secs(15);
 
 impl Global for Themes {}
 
@@ -494,6 +501,36 @@ pub fn list(cx: &App) -> Vec<Theme> {
         .unwrap_or_else(core::built_in)
 }
 
+/// The looks that are loose files in the themes folder (made before plugins carried them, or by
+/// hand): Settings › Plugins lists them beside the plugins, as looks. A plugin's own are not here.
+pub fn loose_looks(cx: &App) -> Vec<Theme> {
+    let Some(t) = cx.try_global::<Themes>() else {
+        return Vec::new();
+    };
+    t.list
+        .iter()
+        .filter(
+            |l| matches!(&l.origin, core::Origin::File(f) if f.parent() == Some(t.dir.as_path())),
+        )
+        .cloned()
+        .collect()
+}
+
+/// Delete the loose look `id`'s file. The theme folder is read again at once: a look that was on
+/// screen gives way to Trek's own.
+pub fn delete_look(id: &str, ws: &Entity<Workspace>, cx: &mut App) -> Result<(), String> {
+    let theme = find(id, cx).ok_or("there's no such look")?;
+    let core::Origin::File(file) = &theme.origin else {
+        return Err("a built-in look can't be deleted".into());
+    };
+    if file.parent() != cx.try_global::<Themes>().map(|t| t.dir.as_path()) {
+        return Err("it's a plugin's look: delete the plugin".into());
+    }
+    std::fs::remove_file(file).map_err(|e| format!("couldn't delete {}: {e}", file.display()))?;
+    reread(ws, cx);
+    Ok(())
+}
+
 /// The theme files Trek couldn't use, and why (Settings lists them under the tiles).
 pub fn problems(cx: &App) -> Vec<core::Problem> {
     cx.try_global::<Themes>()
@@ -537,6 +574,7 @@ pub fn init(ws: &Entity<Workspace>, cx: &mut App) {
         fingerprint,
         switch: None,
         plugin_files: Vec::new(),
+        pending: None,
     });
     watch(ws.downgrade(), cx);
 }
@@ -597,20 +635,32 @@ pub fn reread(ws: &Entity<Workspace>, cx: &mut App) {
             scan.themes.push(t);
         }
     }
-    let request = core::take_apply_request(&dir);
+    let asked = core::take_apply_request(&dir).map(|id| (id, Instant::now()));
+    let waiting = asked.or_else(|| cx.global::<Themes>().pending.clone());
     let mut problems = scan.problems;
     problems.extend(from_plugins.problems);
-    if let Some(id) = request.as_deref()
-        && !core::built_in()
-            .iter()
-            .chain(&scan.themes)
-            .any(|t| t.id == id)
-    {
-        problems.push(core::Problem {
-            file: dir.join(core::APPLY_FILE),
-            message: format!("there's no theme called \"{id}\" to switch to"),
-        });
-    }
+    let (request, pending) = match waiting {
+        Some((id, _))
+            if core::built_in()
+                .iter()
+                .chain(&scan.themes)
+                .any(|t| t.id == id) =>
+        {
+            (Some(id), None)
+        }
+        Some((id, at)) if at.elapsed() < APPLY_WAIT => (None, Some((id, at))),
+        Some((id, _)) => {
+            problems.push(core::Problem {
+                file: dir.join(core::APPLY_FILE),
+                message: format!(
+                    "there's no theme called \"{id}\" to switch to (a plugin's look is there once the plugin is on)"
+                ),
+            });
+            (None, None)
+        }
+        None => (None, None),
+    };
+    cx.global_mut::<Themes>().pending = pending;
     core::write_problems(&dir, &problems);
     let list = full_list(scan.themes);
     let themes = cx.global::<Themes>();
@@ -809,6 +859,7 @@ pub fn switch_to(id: &str, ws: &Entity<Workspace>, cx: &mut App) {
 
 /// The settings and the look of `to`, all at once.
 fn finish(to: Theme, ws: &Entity<Workspace>, cx: &mut App) {
+    let from = ws.read(cx).settings.appearance.trek_theme.clone();
     ws.update(cx, |ws, cx| {
         core::apply(&to, &mut ws.settings.appearance);
         ws.save_settings(cx);
@@ -817,6 +868,8 @@ fn finish(to: Theme, ws: &Entity<Workspace>, cx: &mut App) {
     show(&to, cx);
     let choice = ws.read(cx).settings.appearance.theme;
     crate::apply_theme(choice, None, cx);
+    // A plugin's look that this one displaced is off in Settings › Plugins.
+    crate::plugins::look_changed(&from, &to.id, ws, cx);
 }
 
 /// `t` (0 to 1) eased in and out.
@@ -901,6 +954,7 @@ fn step(ws: &Entity<Workspace>, cx: &mut App) -> bool {
         if let Some(s) = cx.global_mut::<Themes>().switch.as_mut() {
             s.swapped = true;
         }
+        let from = ws.read(cx).settings.appearance.trek_theme.clone();
         ws.update(cx, |ws, cx| {
             core::apply(&to, &mut ws.settings.appearance);
             ws.save_settings(cx);
@@ -908,6 +962,7 @@ fn step(ws: &Entity<Workspace>, cx: &mut App) -> bool {
         cx.global_mut::<Themes>().shown = to.clone();
         cx.set_global(ConversationFont(conversation(&to)));
         show_look(&to, cx);
+        crate::plugins::look_changed(&from, &to.id, ws, cx);
     }
     trek_palette::set_theme_accents(accents, cx);
     set_corner_scale(corners);
