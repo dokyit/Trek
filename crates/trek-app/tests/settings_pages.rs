@@ -415,3 +415,46 @@ fn a_trek_replaced_on_disk_offers_a_restart_in_place_of_allow() {
         );
     });
 }
+
+/// Custom… at the foot of the window (where the driver's `reveal` leaves a row it scrolled to)
+/// opens its editor under the row in view, not below the page's edge: the page scrolls to it.
+/// Both sizes, on whichever platform runs it (Windows' Appearance page is laid out apart).
+#[test]
+fn custom_opens_its_editor_in_view_from_the_foot_of_the_page() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.update(cx, |ws, cx| {
+            ws.navigate(Route::Settings(SettingsPage::Appearance), cx)
+        });
+        trek.render(cx);
+        for (control, editor) in [("zoom-size", "zoom-custom"), ("text-size", "text-custom")] {
+            scroll_settings(&trek, cx, -100_000.);
+            let mut steps = 0;
+            while trek.bounds(cx, (control, 4usize)).is_none() {
+                scroll_settings(&trek, cx, 250.);
+                steps += 1;
+                assert!(steps < 60, "{control} never came into view");
+            }
+            // The control's foot on the page's foot.
+            let page = trek.bounds(cx, "settings-content").expect("the page");
+            let at = trek.bounds(cx, (control, 4usize)).expect("drawn");
+            scroll_settings(&trek, cx, f32::from(at.bottom() - page.bottom()) + 2.);
+            assert!(
+                trek.bounds(cx, (control, 4usize)).is_some(),
+                "{control} still in view"
+            );
+            trek.click(cx, (control, 4usize));
+            trek.render(cx);
+            trek.render(cx);
+            let shown = trek
+                .bounds(cx, editor)
+                .unwrap_or_else(|| panic!("{editor} drawn"));
+            assert!(
+                shown.bottom() <= page.bottom(),
+                "{editor} ends at {:?}, the page at {:?}",
+                shown.bottom(),
+                page.bottom()
+            );
+        }
+    });
+}

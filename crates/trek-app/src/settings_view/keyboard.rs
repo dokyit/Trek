@@ -54,6 +54,9 @@ pub(super) struct Sizes {
     zoom_slider: Entity<SliderState>,
     custom_zoom: bool,
     custom_text: bool,
+    /// Custom… was just picked: its editor, under the row, is scrolled into view once drawn
+    /// (a row near the window's foot would otherwise open it out of sight).
+    reveal: std::rc::Rc<std::cell::Cell<Option<&'static str>>>,
     /// The sizes the fields were last given, so one changed elsewhere (⌘+) is shown.
     shown: Option<(f32, f32)>,
 }
@@ -145,6 +148,7 @@ impl Sizes {
                 zoom_slider,
                 custom_zoom: false,
                 custom_text: false,
+                reveal: Default::default(),
                 shown: None,
             },
             subs,
@@ -239,6 +243,9 @@ impl SettingsView {
             move |v: u8, _: &mut Window, cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     this.sizes.custom_zoom = v == CUSTOM;
+                    this.sizes
+                        .reveal
+                        .set((v == CUSTOM).then_some("zoom-custom"));
                     if let Some(z) = ZOOM_PRESETS.get(v as usize) {
                         crate::zoom::set(*z, cx);
                     }
@@ -249,6 +256,9 @@ impl SettingsView {
         let text_choice = move |v: u8, _: &mut Window, cx: &mut App| {
             let _ = view.update(cx, |this, cx| {
                 this.sizes.custom_text = v == CUSTOM;
+                this.sizes
+                    .reveal
+                    .set((v == CUSTOM).then_some("text-custom"));
                 if let Some(p) = TRANSCRIPT_PRESETS.get(v as usize) {
                     this.set_text_size(*p, cx);
                 }
@@ -300,6 +310,33 @@ impl SettingsView {
         vec![Self::heading("Text size", cx), ui::group(rows, cx)]
     }
 
+    /// Scrolls Settings' page so the element it's drawn in is in view, once, after Custom… was
+    /// picked (`Sizes::reveal`): an invisible layer the size of its parent.
+    fn reveal_when_drawn(&self, editor: &'static str) -> AnyElement {
+        let (scroll, reveal) = (self.scroll.clone(), self.sizes.reveal.clone());
+        canvas(
+            move |bounds, window, _| {
+                if reveal.get() != Some(editor) {
+                    return;
+                }
+                reveal.set(None);
+                let view = scroll.bounds();
+                // Below the page's foot by this much, with the row's own padding under it.
+                let over = bounds.bottom() + px(24.) - view.bottom();
+                if over > px(0.) {
+                    let mut offset = scroll.offset();
+                    offset.y -= over;
+                    scroll.set_offset(offset);
+                    window.refresh();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full()
+        .into_any_element()
+    }
+
     /// − field + and a slider: the zoom in steps of 5%, from 50% to 300%.
     fn custom_zoom_row(&self, zoom: f32, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
@@ -327,8 +364,10 @@ impl SettingsView {
             h_flex()
                 .id("zoom-custom")
                 .test_support()
+                .relative()
                 .gap(px(8.))
                 .items_center()
+                .child(self.reveal_when_drawn("zoom-custom"))
                 .child(
                     div()
                         .w(px(140.))
@@ -379,8 +418,10 @@ impl SettingsView {
             h_flex()
                 .id("text-custom")
                 .test_support()
+                .relative()
                 .gap(px(8.))
                 .items_center()
+                .child(self.reveal_when_drawn("text-custom"))
                 .child(nudge("text-custom-less", -0.5).disabled(size <= lo))
                 .child(
                     div()
