@@ -1778,8 +1778,13 @@ impl PlatformInputHandler {
     }
 
     pub fn bounds_for_range(&mut self, range_utf16: Range<usize>) -> Option<Bounds<Pixels>> {
+        // Trek: the platform's points, not the zoomed layout's (`Window::set_ui_zoom`).
         self.cx
-            .update(|window, cx| self.handler.bounds_for_range(range_utf16, window, cx))
+            .update(|window, cx| {
+                self.handler
+                    .bounds_for_range(range_utf16, window, cx)
+                    .map(|b| window.zoom_bounds(b))
+            })
             .ok()
             .flatten()
     }
@@ -1834,6 +1839,7 @@ impl PlatformInputHandler {
         Self::compute_ime_candidate_bounds(marked_range, &selection, |range| {
             self.handler.bounds_for_range(range, window, cx)
         })
+        .map(|b| window.zoom_bounds(b))
     }
 
     pub fn ime_candidate_bounds(&mut self) -> Option<Bounds<Pixels>> {
@@ -1847,7 +1853,10 @@ impl PlatformInputHandler {
     #[allow(unused)]
     pub fn character_index_for_point(&mut self, point: Point<Pixels>) -> Option<usize> {
         self.cx
-            .update(|window, cx| self.handler.character_index_for_point(point, window, cx))
+            .update(|window, cx| {
+                let point = window.unzoom_point(point);
+                self.handler.character_index_for_point(point, window, cx)
+            })
             .ok()
             .flatten()
     }
@@ -1865,7 +1874,11 @@ impl PlatformInputHandler {
     /// See [`InputHandler::element_bounds`].
     pub fn element_bounds(&mut self) -> Option<Bounds<Pixels>> {
         self.cx
-            .update(|window, cx| self.handler.element_bounds(window, cx))
+            .update(|window, cx| {
+                self.handler
+                    .element_bounds(window, cx)
+                    .map(|b| window.zoom_bounds(b))
+            })
             .ok()
             .flatten()
     }

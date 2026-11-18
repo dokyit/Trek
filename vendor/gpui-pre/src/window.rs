@@ -975,6 +975,21 @@ pub(crate) struct DeferredDraw {
     paint_range: Range<PaintIndex>,
 }
 
+/// Trek: the zoom a new window opens at (`Window::set_default_ui_zoom`), as f32 bits.
+static DEFAULT_UI_ZOOM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+
+fn default_ui_zoom() -> f32 {
+    f32::from_bits(DEFAULT_UI_ZOOM.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn clamp_ui_zoom(zoom: f32) -> f32 {
+    if zoom.is_finite() {
+        zoom.clamp(0.25, 5.0)
+    } else {
+        1.0
+    }
+}
+
 /// Trek: an element's hover listener as painted in a frame, so one that stops painting while
 /// hovered (hidden, removed, replaced) still hears that it isn't hovered any more.
 #[derive(Clone)]
@@ -1217,6 +1232,12 @@ pub struct Window {
     modifiers: Modifiers,
     capslock: Capslock,
     scale_factor: f32,
+    /// Trek: the display's own scale, before `ui_zoom` (`scale_factor` is the two multiplied).
+    platform_scale_factor: f32,
+    /// Trek: how far the whole window is zoomed, as a browser zooms a page (1 = not at all):
+    /// everything is laid out in a viewport `ui_zoom` times smaller and drawn `ui_zoom` times
+    /// larger, and the pointer's positions are taken back into it as they arrive.
+    ui_zoom: f32,
     pub(crate) bounds_observers: SubscriberSet<(), AnyObserver>,
     appearance: WindowAppearance,
     pub(crate) appearance_observers: SubscriberSet<(), AnyObserver>,
@@ -1595,8 +1616,12 @@ impl Window {
         let mouse_position = platform_window.mouse_position();
         let modifiers = platform_window.modifiers();
         let capslock = platform_window.capslock();
-        let content_size = platform_window.content_size();
-        let scale_factor = platform_window.scale_factor();
+        // Trek: a new window opens at the zoom the app has (`Window::set_default_ui_zoom`).
+        let ui_zoom = default_ui_zoom();
+        let mouse_position = mouse_position / ui_zoom;
+        let content_size = platform_window.content_size().map(|d| d / ui_zoom);
+        let platform_scale_factor = platform_window.scale_factor();
+        let scale_factor = platform_scale_factor * ui_zoom;
         let appearance = platform_window.appearance();
         let text_system = Arc::new(WindowTextSystem::new(cx.text_system().clone()));
         let invalidator = WindowInvalidator::new(handle.window_id());
@@ -1956,7 +1981,12 @@ impl Window {
             let mut cx = cx.to_async();
             Box::new(move |event| {
                 handle
-                    .update(&mut cx, |_, window, cx| window.dispatch_event(event, cx))
+                    .update(&mut cx, |_, window, cx| {
+                        // Trek: the platform's positions are the window's points; the layout's
+                        // are `ui_zoom` times smaller.
+                        let event = window.unzoom_input(event);
+                        window.dispatch_event(event, cx)
+                    })
                     .log_err()
                     .unwrap_or(DispatchEventResult::default())
             })
@@ -2076,6 +2106,8 @@ impl Window {
             modifiers,
             capslock,
             scale_factor,
+            platform_scale_factor,
+            ui_zoom,
             bounds_observers: SubscriberSet::new(),
             appearance,
             appearance_observers: SubscriberSet::new(),
@@ -2712,10 +2744,11 @@ impl Window {
     /// the platform window, then notifies observers. Normally called automatically
     /// by the platform's resize callback, but exposed publicly for test infrastructure.
     pub fn bounds_changed(&mut self, cx: &mut App) {
-        self.scale_factor = self.platform_window.scale_factor();
-        self.viewport_size = self.platform_window.content_size();
+        self.platform_scale_factor = self.platform_window.scale_factor();
+        self.scale_factor = self.platform_scale_factor * self.ui_zoom;
+        self.viewport_size = self.platform_window.content_size().map(|d| d / self.ui_zoom);
         self.display_id = self.platform_window.display().map(|display| display.id());
-        self.mouse_position = self.platform_window.mouse_position();
+        self.mouse_position = self.platform_window.mouse_position() / self.ui_zoom;
 
         self.refresh();
 
@@ -2861,7 +2894,7 @@ impl Window {
 
     /// Opens the native title bar context menu, useful when implementing client side decorations (Wayland and X11)
     pub fn show_window_menu(&self, position: Point<Pixels>) {
-        self.platform_window.show_window_menu(position)
+        self.platform_window.show_window_menu(position * self.ui_zoom)
     }
 
     /// Handle window movement for Linux and macOS.
@@ -2960,8 +2993,112 @@ impl Window {
     /// Overrides the display scale factor for tests.
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_scale_factor(&mut self, scale_factor: f32) {
+        self.platform_scale_factor = scale_factor / self.ui_zoom;
         self.scale_factor = scale_factor;
         self.refresh();
+    }
+
+    /// Trek: how far the window is zoomed (1 = not at all). See `set_ui_zoom`.
+    pub fn ui_zoom(&self) -> f32 {
+        self.ui_zoom
+    }
+
+    /// Trek: zoom the whole window, as a browser zooms a page: what's in it is laid out in a
+    /// viewport `zoom` times smaller than the window and drawn `zoom` times larger, so text,
+    /// controls and gaps all grow together and stay sharp (`scale_factor` is the display's
+    /// times `zoom`). Positions the window is told (the pointer, a drop) are taken back into the
+    /// layout's points; a native view placed over an element is placed at its bounds times
+    /// `ui_zoom` (macOS, which places in points) or `scale_factor` (device pixels). Kept between
+    /// 0.25 and 5.
+    pub fn set_ui_zoom(&mut self, zoom: f32, cx: &mut App) {
+        let zoom = clamp_ui_zoom(zoom);
+        if zoom == self.ui_zoom {
+            return;
+        }
+        self.ui_zoom = zoom;
+        self.bounds_changed(cx);
+    }
+
+    /// Trek: the zoom windows opened from now on start at (`set_ui_zoom`).
+    pub fn set_default_ui_zoom(zoom: f32) {
+        DEFAULT_UI_ZOOM.store(
+            clamp_ui_zoom(zoom).to_bits(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// Trek: a position the platform gave, in the window's points, in the layout's.
+    pub fn unzoom_point(&self, point: Point<Pixels>) -> Point<Pixels> {
+        point / self.ui_zoom
+    }
+
+    /// Trek: bounds in the layout's points, in the window's (what the platform is given).
+    pub fn zoom_bounds(&self, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+        Bounds {
+            origin: bounds.origin * self.ui_zoom,
+            size: bounds.size.map(|d| d * self.ui_zoom),
+        }
+    }
+
+    /// Trek: an event from the platform, its positions (and a scroll's pixels) in the layout's
+    /// points.
+    fn unzoom_input(&self, event: PlatformInput) -> PlatformInput {
+        let z = self.ui_zoom;
+        if z == 1.0 {
+            return event;
+        }
+        match event {
+            PlatformInput::MouseDown(mut e) => {
+                e.position = e.position / z;
+                PlatformInput::MouseDown(e)
+            }
+            PlatformInput::MouseUp(mut e) => {
+                e.position = e.position / z;
+                PlatformInput::MouseUp(e)
+            }
+            PlatformInput::MouseMove(mut e) => {
+                e.position = e.position / z;
+                PlatformInput::MouseMove(e)
+            }
+            PlatformInput::MousePressure(mut e) => {
+                e.position = e.position / z;
+                PlatformInput::MousePressure(e)
+            }
+            PlatformInput::MouseExited(mut e) => {
+                e.position = e.position / z;
+                PlatformInput::MouseExited(e)
+            }
+            PlatformInput::ScrollWheel(mut e) => {
+                e.position = e.position / z;
+                if let crate::ScrollDelta::Pixels(delta) = e.delta {
+                    e.delta = crate::ScrollDelta::Pixels(delta / z);
+                }
+                PlatformInput::ScrollWheel(e)
+            }
+            PlatformInput::Pinch(mut e) => {
+                e.position = e.position / z;
+                PlatformInput::Pinch(e)
+            }
+            PlatformInput::Touch(mut e) => {
+                e.position = e.position / z;
+                e.predicted_position = e.predicted_position.map(|p| p / z);
+                PlatformInput::Touch(e)
+            }
+            PlatformInput::FileDrop(drop) => PlatformInput::FileDrop(match drop {
+                FileDropEvent::Entered { position, paths } => FileDropEvent::Entered {
+                    position: position / z,
+                    paths,
+                },
+                FileDropEvent::Pending { position } => FileDropEvent::Pending {
+                    position: position / z,
+                },
+                FileDropEvent::Submit { position } => FileDropEvent::Submit {
+                    position: position / z,
+                },
+                other => other,
+            }),
+            other => other,
+        }
     }
 
     /// The size of an em for the base font of the application. Adjusting this value allows the
