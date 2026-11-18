@@ -51,6 +51,41 @@ of seconds. What's wrong with a plugin is shown in Settings › Plugins and writ
 `<data>/plugins/state.toml` is what the user chose: which plugins are on, the permissions each
 was granted, and which surface each replacement slot shows. Settings writes it; so does the CLI.
 
+## One list for everything an agent makes
+
+"Ask an agent to change Trek" lands in one place: a folder in `<data>/plugins/`, listed in
+Settings › Plugins, whoever wrote it.
+
+| Where it comes from | What happens |
+|---|---|
+| An agent follows `trek-plugin` and writes `<data>/plugins/<id>/` | Picked up within 1.5 s, validated, listed. The user is told ("Pip was added by Codex and is on. Manage it in Settings › Plugins", with a Manage button), and Trek notes when it appeared and which agent was at work (`Choice::added`, shown in the row). |
+| An agent follows `trek-theme` | The same: a look is a plugin with a `[[theme]]` (`look.toml` beside a four-line `plugin.toml`). One list, one switch, one Delete, who and when, and the permission machinery for free (a look asks for none). |
+| `trek plugin install / dev / enable / remove`, a folder copied in by hand, Settings › Install | The same folder, the same list. |
+| A loose theme file already in `<data>/themes/` (a "Dusk" made before looks travelled in plugins, or by hand) | Still works, and is listed in Settings › Plugins as a **Look** with a switch (on while it's the one on screen) and Delete. |
+| Claude Code's own "mods", `~/.claude/dev-mods`, its plugin skill | Not Trek's. Trek reads none of it. The skill and the note every request carries say so, name Trek's folder, and say never to write into `~/.claude`. |
+
+Why a look is a plugin rather than a second kind of thing: the plugin format already carries
+`[[theme]]` (Campfire is one), so the simpler robust design is to send looks the same way and keep
+one registry, one state file and one place the user manages them. Loose theme files stay supported
+and listed, so nothing an agent made last week goes missing.
+
+**A look is on only while it's the one on screen.** Choosing another look (Settings › Appearance,
+the palette, another plugin's look turning on) turns the plugin whose look was up off, and it
+remembers the look (`Choice::look`); its row says "Its look is off: Night is in use. Turn it on to
+bring it back", and turning it on brings that look back. The other way round, turning a plugin off
+while its look is up gives Trek's own back. There is no state where Settings shows a plugin on and
+another look up. A plugin's other parts (a sidebar pet, a composer chip) are on while the plugin is
+and gone the moment it's off, no restart; for a plugin that carries a look, choosing another look
+is turning it off. `themes/apply` naming a look that a plugin about to be read brings waits for it
+(`APPLY_WAIT`, 15 s) instead of being refused: the two folders are read on one tick.
+
+**Registration doesn't depend on the agent.** The folder is the interface. A plugin that asks for
+no permissions runs when it's turned on (by the agent through `state.toml` or `trek plugin enable`):
+there is nothing for a permission to gate, and the parse refuses every gated feature without its
+permission (`a_plugin_that_asks_for_nothing_reaches_nothing_a_permission_gates`). One that asks for
+permissions waits for the user's Allow in Trek, sealed as above, however it was written; the
+notice says it asks.
+
 ## The examples
 
 Trek ships six (`plugins/examples/`, installed from Settings › Plugins or `trek plugin install
@@ -180,7 +215,8 @@ element's `set:key=value` action sets it.
 
 ## What a plugin can contribute
 
-**Looks.** `[[theme]] file = "look.toml"` adds a theme to Settings › Appearance and the palette.
+**Looks.** `[[theme]] file = "look.toml"` adds a theme to Settings › Appearance and the palette
+while the plugin is on.
 A theme is the `trek-theme` skill's file, widened so a look can really be different: every colour
 the kit draws with (`[dark.kit]`, `[light.kit]`, by its key), the interface, conversation and
 code fonts (Trek's three, or font files the plugin ships), sizes, corners, border weight,

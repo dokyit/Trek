@@ -26,7 +26,9 @@ use gpui_kit::*;
 
 pub mod split;
 
-pub const SIDEBAR_WIDTH: f32 = 272.;
+/// The sidebar as it opens (and in the editor's own side bar): the user's own width is
+/// `Workspace::sidebar_width`.
+pub const SIDEBAR_WIDTH: f32 = trek_core::settings::DEFAULT_SIDEBAR_WIDTH;
 /// What the pinned hub needs: its own column and a transcript 600 wide beside it.
 const HUB_ROOM: f32 = 600. + 316.;
 /// The pinned hub's column.
@@ -72,6 +74,9 @@ pub struct TrekWindow {
     composer_changed: bool,
     /// Right-panel resize in progress: (pointer x at grab, width at grab).
     panel_drag: Option<(Pixels, f32)>,
+    /// Sidebar resize in progress: pointer x at grab, the width at grab (0 from the folded
+    /// edge), and the width it had before this drag, which a drag that folds it keeps.
+    sidebar_drag: Option<(Pixels, f32, f32)>,
     /// The right pane of a split (`split`), while there is one.
     pub beside: Option<split::BesidePane>,
     /// The split's threads when last looked: left and right.
@@ -116,10 +121,20 @@ const MIN_CHAT: f32 = 440.;
 
 /// Whether the sidebar steps aside for the open tools panel: the window can't fit the sidebar,
 /// the chat at its narrowest and the panel at its narrowest.
-pub fn sidebar_yields(window_width: f32, panel_open: bool, in_settings: bool) -> bool {
+pub fn sidebar_yields(
+    window_width: f32,
+    sidebar_width: f32,
+    panel_open: bool,
+    in_settings: bool,
+) -> bool {
     panel_open
         && !in_settings
-        && window_width - SIDEBAR_WIDTH - 16. < MIN_CHAT + crate::panels::MIN_PANEL
+        && window_width - sidebar_width - 16. < MIN_CHAT + crate::panels::MIN_PANEL
+}
+
+/// The most the sidebar may be in a window `window_width` wide: the chat keeps its width.
+pub fn sidebar_room(window_width: f32) -> f32 {
+    window_width - MIN_CHAT - 16.
 }
 
 /// Whether the tools panel floats over the chat rather than beside it: when `room` (the width
@@ -137,8 +152,10 @@ fn toggle_sidebar(
     cx: &mut App,
 ) {
     let in_settings = matches!(workspace.read(cx).route, Route::Settings(_));
+    let window_width = window.viewport_size().width.as_f32();
     if sidebar_yields(
-        window.viewport_size().width.as_f32(),
+        window_width,
+        workspace.read(cx).sidebar_width(window_width),
         right_panel.read(cx).open,
         in_settings,
     ) {
@@ -642,6 +659,7 @@ impl TrekWindow {
             focus: cx.focus_handle(),
             composer_changed: true,
             panel_drag: None,
+            sidebar_drag: None,
             beside: None,
             split_shown: None,
             pane_press: None,
@@ -778,10 +796,11 @@ impl WindowTitle {
         toggle: Option<AnyElement>,
         wordmark: bool,
         shown: f32,
+        sidebar_width: f32,
         cx: &App,
     ) -> Div {
         let theme = cx.theme();
-        let width = crate::chrome::left_cluster(SIDEBAR_WIDTH);
+        let width = crate::chrome::left_cluster(sidebar_width);
         h_flex()
             .gap_2()
             .when(shown > 0., |el| el.min_w(px(width * shown)))
@@ -911,6 +930,7 @@ impl WindowTitle {
                         None,
                         true,
                         if layout.primary_open { 1. } else { 0. },
+                        SIDEBAR_WIDTH,
                         cx,
                     ))
                     .child(crate::chrome::no_drag(
@@ -1037,16 +1057,19 @@ impl Render for WindowTitle {
             return self.render_editor(cx);
         }
         let ws = self.workspace.read(cx);
+        let window_width = window.viewport_size().width.as_f32();
+        let sidebar_width = ws.sidebar_width(window_width);
         let collapsed = ws.sidebar_collapsed
             || sidebar_yields(
-                window.viewport_size().width.as_f32(),
+                window_width,
+                sidebar_width,
                 self.right_panel.read(cx).open,
                 matches!(ws.route, Route::Settings(_)),
             );
         let shown = sidebar_shown(
             &self.sidebar_motion,
             collapsed,
-            ws.motion(cx),
+            ws.sidebar_animates(collapsed, cx),
             crate::motion::now(cx),
             window,
         );
@@ -1218,7 +1241,13 @@ impl Render for WindowTitle {
                                     .bg(crate::palette::needs_you(cx)),
                             )
                         });
-                        self.left_cluster(Some(toggle.into_any_element()), !narrow, shown, cx)
+                        self.left_cluster(
+                            Some(toggle.into_any_element()),
+                            !narrow,
+                            shown,
+                            sidebar_width,
+                            cx,
+                        )
                     })
                     .child(crate::chrome::no_drag(
                         "mode-switch",
@@ -2213,6 +2242,7 @@ pub fn toast_button_label(action: &UndoAction) -> &'static str {
         UndoAction::MoveTrek => "Move Trek",
         UndoAction::RemoveOldCopy(_) => "Remove old copy",
         UndoAction::OpenThread(_) => "Open thread",
+        UndoAction::OpenPlugins => "Manage",
         UndoAction::RevealFile(_) => crate::words::words().show_in_file_manager,
         UndoAction::OpenPrivacy(_) => "Open Settings",
         UndoAction::RestartToUpdate => "Restart",
@@ -2235,6 +2265,78 @@ fn copy_focused(ws: &Entity<Workspace>, what: crate::thread_menu::Copy, cx: &mut
 }
 
 impl TrekWindow {
+    /// The sidebar's edge is pressed at `x`: from the folded edge the drag starts at no width, and
+    /// the width the sidebar had is what a drag that folds it again gives back.
+    fn begin_sidebar_drag(&mut self, x: Pixels, window: &Window, cx: &mut Context<Self>) {
+        let folded = self.sidebar_motion.borrow().target() == 0.;
+        let before = self
+            .workspace
+            .read(cx)
+            .sidebar_width(window.viewport_size().width.as_f32());
+        self.sidebar_drag = Some((x, if folded { 0. } else { before }, before));
+        self.workspace.update(cx, |ws, cx| {
+            ws.sidebar_dragging = true;
+            // Native views (browser, simulator) would swallow the drag.
+            ws.overlay_open = true;
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    /// The pointer is at `x`: the sidebar's width follows it within its range, and folds when it's
+    /// pulled narrower than the snap (and opens again when brought back out).
+    fn drag_sidebar(&mut self, x: Pixels, window_width: f32, cx: &mut Context<Self>) {
+        let Some((x0, w0, _)) = self.sidebar_drag else {
+            return;
+        };
+        let wanted = w0 + (x - x0).as_f32();
+        self.workspace.update(cx, |ws, cx| {
+            let can_fold = !matches!(ws.route, Route::Settings(_));
+            match trek_core::settings::sidebar_drag(
+                wanted,
+                sidebar_room(window_width),
+                ws.sidebar_collapsed,
+                can_fold,
+            ) {
+                trek_core::settings::SidebarDrag::Open(w) => {
+                    ws.settings.layout.sidebar_width = w;
+                    ws.sidebar_collapsed = false;
+                }
+                trek_core::settings::SidebarDrag::Folded => ws.sidebar_collapsed = true,
+            }
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    /// The pointer is let go: the width is kept (a sidebar left folded keeps the width it had
+    /// before the drag, for the toggle to bring back).
+    fn end_sidebar_drag(&mut self, cx: &mut Context<Self>) {
+        let Some((_, _, before)) = self.sidebar_drag.take() else {
+            return;
+        };
+        self.workspace.update(cx, |ws, cx| {
+            if ws.sidebar_collapsed {
+                ws.settings.layout.sidebar_width = before;
+            }
+            ws.sidebar_dragging = false;
+            ws.overlay_open = false;
+            ws.save_settings(cx);
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    /// A double-click on the edge: Trek's own width, shown.
+    fn reset_sidebar_width(&mut self, cx: &mut Context<Self>) {
+        self.workspace.update(cx, |ws, cx| {
+            ws.settings.layout.sidebar_width = trek_core::settings::DEFAULT_SIDEBAR_WIDTH;
+            ws.sidebar_collapsed = false;
+            ws.save_settings(cx);
+            cx.notify();
+        });
+    }
+
     fn end_panel_drag(&mut self, cx: &mut Context<Self>) {
         if self.panel_drag.take().is_none() {
             return;
@@ -2259,9 +2361,12 @@ impl Render for TrekWindow {
         let route = self.workspace.read(cx).route.clone();
         // A window too narrow for the sidebar, the chat and the tools panel: the sidebar steps aside.
         let in_settings = matches!(route, Route::Settings(_));
+        let window_width = window.viewport_size().width.as_f32();
+        let sidebar_width = self.workspace.read(cx).sidebar_width(window_width);
         let collapsed = self.workspace.read(cx).sidebar_collapsed
             || sidebar_yields(
-                window.viewport_size().width.as_f32(),
+                window_width,
+                sidebar_width,
                 self.right_panel.read(cx).open,
                 in_settings,
             );
@@ -2323,7 +2428,8 @@ impl Render for TrekWindow {
         );
         let ide = self.workspace.read(cx).ide();
         let (now, motion) = (crate::motion::now(cx), self.workspace.read(cx).motion(cx));
-        let shown = sidebar_shown(&self.sidebar_motion, collapsed, motion, now, window);
+        let animates = self.workspace.read(cx).sidebar_animates(collapsed, cx);
+        let shown = sidebar_shown(&self.sidebar_motion, collapsed, animates, now, window);
         self.mode_motion.set(if ide { 1. } else { 0. }, motion, now);
         let editor_in = self.mode_motion.frame(now, window).clamp(0., 1.);
         let crossing = self.mode_motion.moving(now);
@@ -2343,7 +2449,7 @@ impl Render for TrekWindow {
         let side = if collapsed || in_settings {
             8.
         } else {
-            SIDEBAR_WIDTH
+            sidebar_width
         };
         let room = window.viewport_size().width.as_f32() - side - 16.;
         let overlay = overlay_panel(room);
@@ -2354,6 +2460,7 @@ impl Render for TrekWindow {
         };
         let right_width = wanted_width.clamp(crate::panels::MIN_PANEL.min(max_width), max_width);
         let dragging = self.panel_drag.is_some();
+        let sidebar_held = self.sidebar_drag.is_some();
         let dock_dragging = self.terminal_dock.read(cx).dragging();
         let split_dragging = self.split_drag.is_some();
         let split_live = self.workspace.read(cx).split_live().is_some();
@@ -2372,6 +2479,7 @@ impl Render for TrekWindow {
                 right_width,
                 overlay,
                 dragging,
+                (sidebar_width, sidebar_held),
                 window,
                 cx,
             );
@@ -2426,6 +2534,7 @@ impl Render for TrekWindow {
                 right_width,
                 overlay,
                 dragging,
+                (sidebar_width, sidebar_held),
                 window,
                 cx,
             )
@@ -2455,6 +2564,30 @@ impl Render for TrekWindow {
                     .on_mouse_up_out(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| this.end_panel_drag(cx)),
+                    )
+            })
+            // The sidebar's edge, likewise.
+            .when(sidebar_held, |el| {
+                el.cursor(CursorStyle::ResizeLeftRight)
+                    .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, cx| {
+                        // Let go before this frame was drawn to hear it.
+                        if e.dragging() {
+                            this.drag_sidebar(
+                                e.position.x,
+                                window.viewport_size().width.as_f32(),
+                                cx,
+                            )
+                        } else {
+                            this.end_sidebar_drag(cx)
+                        }
+                    }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| this.end_sidebar_drag(cx)),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| this.end_sidebar_drag(cx)),
                     )
             })
             // The split's divider, likewise.
@@ -2721,8 +2854,12 @@ impl Render for TrekWindow {
             }))
             .bg(crate::ui::chrome_bg(glass, cx))
             .when_some(backdrop.clone(), |el, (spec, dim)| {
-                el.relative()
-                    .children(crate::ui::window_backdrop(&spec, dim, true, cx))
+                el.relative().children(crate::ui::window_backdrop(
+                    &spec,
+                    dim,
+                    Some(sidebar_width),
+                    cx,
+                ))
             })
             .child(self.focus_anchor())
             // Interactive artifacts' web views: numbered here, placed by `layer_end` below.
@@ -2768,6 +2905,7 @@ impl TrekWindow {
         right_width: f32,
         overlay: bool,
         dragging: bool,
+        (sidebar_width, sidebar_held): (f32, bool),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -2779,7 +2917,7 @@ impl TrekWindow {
         // Only with room for it beside the transcript: what's left of the window once the sidebar
         // and a docked tools panel have theirs. A narrower window keeps the transcript whole.
         let room = window.viewport_size().width.as_f32()
-            - SIDEBAR_WIDTH * shown
+            - sidebar_width * shown
             - if right_open && !overlay {
                 right_width
             } else {
@@ -3086,12 +3224,13 @@ impl TrekWindow {
         h_flex()
             .flex_1()
             .min_h_0()
+            .relative()
             // The sidebar slides out to the left as it folds (`shown` of it showing), the
             // content widening into its room; at rest it's simply there or not.
             .when(shown > 0. && !in_settings, |el| {
                 let sidebar = self.sidebar.clone().cached(
                     StyleRefinement::default()
-                        .w(px(SIDEBAR_WIDTH))
+                        .w(px(sidebar_width))
                         .h_full()
                         .flex_none(),
                 );
@@ -3105,15 +3244,15 @@ impl TrekWindow {
                         sidebar.into_any_element()
                     };
                     div()
-                        .w(px(SIDEBAR_WIDTH * shown))
+                        .w(px(sidebar_width * shown))
                         .h_full()
                         .flex_none()
                         .overflow_hidden()
                         .child(
                             div()
-                                .w(px(SIDEBAR_WIDTH))
+                                .w(px(sidebar_width))
                                 .h_full()
-                                .ml(px(-SIDEBAR_WIDTH * (1. - shown)))
+                                .ml(px(-sidebar_width * (1. - shown)))
                                 .child(sidebar),
                         )
                         .into_any_element()
@@ -3143,32 +3282,36 @@ impl TrekWindow {
                             .children(drop_zones),
                     ),
             )
+            // Grab strip on the sidebar's right edge (on the folded edge, to bring it out): drag to
+            // resize and to fold, double-click for the default width.
+            .child({
+                let edge = if in_settings {
+                    sidebar_width
+                } else {
+                    sidebar_width * shown
+                };
+                crate::ui::column_grab("sidebar-resize", sidebar_held, cx)
+                    .bottom_0()
+                    .left(px((edge - 6.).max(0.)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, e: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            if e.click_count >= 2 {
+                                this.reset_sidebar_width(cx);
+                                return;
+                            }
+                            this.begin_sidebar_drag(e.position.x, window, cx);
+                        }),
+                    )
+                    .test_support()
+            })
             .when(right_open && !in_settings, |el| {
                 let theme = cx.theme().clone();
                 // Grab strip on the panel's left edge: drag to resize, double-click to reset.
-                let handle = div()
-                    .id("panel-resize")
-                    .absolute()
-                    .top_0()
+                let handle = crate::ui::column_grab("panel-resize", dragging, cx)
                     .bottom(px(8.))
                     .left(px(-9.))
-                    .w(px(13.))
-                    .flex()
-                    .justify_center()
-                    .cursor(CursorStyle::ResizeLeftRight)
-                    .group("panel-resize")
-                    .child(
-                        div()
-                            .w(px(2.))
-                            .h_full()
-                            .rounded_full()
-                            .when(dragging, |el| el.bg(theme.foreground.opacity(0.35)))
-                            .when(!dragging, |el| {
-                                el.group_hover("panel-resize", |s| {
-                                    s.bg(theme.foreground.opacity(0.2))
-                                })
-                            }),
-                    )
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, e: &MouseDownEvent, _, cx| {

@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{Trek, mock, open, run};
+use common::{Trek, mock, open, open_with, run};
 use gpui_kit::TestAppContext;
 use trek_app::workspace::Route;
 use trek_core::store::now_ms;
@@ -1166,5 +1166,143 @@ fn counts_times_and_devices_end_on_one_right_hand_column() {
             .right()
             .as_f32();
         assert!((right - edge).abs() < 0.5);
+    });
+}
+
+// ---------- the sidebar's width ----------
+
+use gpui_kit::test::TestWindowExt as _;
+use gpui_kit::{point, px};
+use trek_core::settings::{
+    DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, SIDEBAR_SNAP_WIDTH,
+};
+
+fn sidebar_width(trek: &Trek, cx: &mut TestAppContext) -> f32 {
+    trek.bounds(cx, "sidebar")
+        .map(|b| b.size.width.as_f32())
+        .unwrap_or(0.)
+}
+
+fn saved_width() -> f32 {
+    trek_core::settings::Settings::load().layout.sidebar_width
+}
+
+/// Press the sidebar's edge and pull it to `x`, as the pointer would.
+fn pull_edge(trek: &Trek, cx: &mut TestAppContext, x: f32) {
+    let at = trek.bounds(cx, "sidebar-resize").expect("edge").center();
+    trek.window(cx, |window, cx| {
+        window.drag(at, point(px(x), at.y), cx);
+    });
+    trek.render(cx);
+    cx.run_until_parked();
+    trek.render(cx);
+}
+
+#[test]
+fn the_sidebars_edge_drags_its_width_within_a_range_and_remembers_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        assert_eq!(sidebar_width(&trek, cx), DEFAULT_SIDEBAR_WIDTH);
+        // Narrower and wider, live.
+        pull_edge(&trek, cx, 240.);
+        assert!(
+            (sidebar_width(&trek, cx) - 240.).abs() < 2.,
+            "{}",
+            sidebar_width(&trek, cx)
+        );
+        pull_edge(&trek, cx, 360.);
+        assert!((sidebar_width(&trek, cx) - 360.).abs() < 2.);
+        // Held inside its range at both ends.
+        pull_edge(&trek, cx, 5000.);
+        assert_eq!(sidebar_width(&trek, cx), MAX_SIDEBAR_WIDTH);
+        pull_edge(&trek, cx, MIN_SIDEBAR_WIDTH - 20.);
+        assert_eq!(sidebar_width(&trek, cx), MIN_SIDEBAR_WIDTH);
+        assert!(trek.read(cx, |ws, _| !ws.sidebar_collapsed));
+        // The title bar's cluster ends where the sidebar does (the mode switch follows it).
+        let side = trek.bounds(cx, "sidebar").unwrap();
+        let switch = trek.bounds(cx, "mode-switch").unwrap().origin.x;
+        assert!(
+            (switch - (side.size.width + px(8.))).abs() <= px(1.),
+            "{switch:?}"
+        );
+        // Kept for the next launch, and the native views are back after the drag.
+        assert_eq!(saved_width(), MIN_SIDEBAR_WIDTH);
+        assert!(trek.read(cx, |ws, _| !ws.overlay_open && !ws.sidebar_dragging));
+    });
+}
+
+#[test]
+fn pulled_narrower_than_the_snap_the_sidebar_folds_and_the_toggle_brings_back_its_width() {
+    run(async |cx| {
+        let trek = open(cx);
+        pull_edge(&trek, cx, 330.);
+        let good = sidebar_width(&trek, cx);
+        assert!((good - 330.).abs() < 2.);
+        // Past the snap: folded, as the toggle leaves it, with the width it had before the drag.
+        pull_edge(&trek, cx, SIDEBAR_SNAP_WIDTH - 40.);
+        assert!(trek.read(cx, |ws, _| ws.sidebar_collapsed));
+        assert!(!trek.visible(cx, "sidebar"));
+        assert!((saved_width() - good).abs() < 2., "{}", saved_width());
+        // The same toggle (⌘B) shows it again, at that width.
+        trek.press(cx, "secondary-b");
+        trek.render(cx);
+        cx.run_until_parked();
+        trek.render(cx);
+        assert!(trek.read(cx, |ws, _| !ws.sidebar_collapsed));
+        assert!((sidebar_width(&trek, cx) - good).abs() < 2.);
+    });
+}
+
+#[test]
+fn dragging_out_from_the_folded_edge_opens_it_and_a_double_click_resets_the_width() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.update(cx, |ws, cx| {
+            ws.settings.layout.sidebar_width = 400.;
+            ws.sidebar_collapsed = true;
+            cx.notify();
+        });
+        trek.render(cx);
+        cx.run_until_parked();
+        trek.render(cx);
+        assert!(!trek.visible(cx, "sidebar"));
+        // A short pull stays folded; a longer one opens it where the pointer is.
+        let at = trek
+            .bounds(cx, "sidebar-resize")
+            .expect("folded edge")
+            .center();
+        trek.window(cx, |window, cx| window.drag(at, point(px(60.), at.y), cx));
+        trek.render(cx);
+        assert!(trek.read(cx, |ws, _| ws.sidebar_collapsed));
+        trek.window(cx, |window, cx| window.drag(at, point(px(300.), at.y), cx));
+        trek.render(cx);
+        cx.run_until_parked();
+        trek.render(cx);
+        assert!(trek.read(cx, |ws, _| !ws.sidebar_collapsed));
+        let width = sidebar_width(&trek, cx);
+        assert!((width - 300.).abs() < 12., "{width}");
+        // Double-click: Trek's own width.
+        trek.window(cx, |window, cx| window.double_click("sidebar-resize", cx));
+        trek.render(cx);
+        assert_eq!(sidebar_width(&trek, cx), DEFAULT_SIDEBAR_WIDTH);
+        assert_eq!(saved_width(), DEFAULT_SIDEBAR_WIDTH);
+    });
+}
+
+#[test]
+fn a_saved_width_is_what_a_new_window_opens_with_and_a_small_window_holds_it_back() {
+    run(async |cx| {
+        let trek = open_with(cx, |s| s.layout.sidebar_width = 420.);
+        assert_eq!(sidebar_width(&trek, cx), 420.);
+        // A window that can't give the chat its room gives the sidebar less than it was left at.
+        cx.simulate_window_resize(trek.window, gpui_kit::size(px(800.), px(700.)));
+        trek.render(cx);
+        let held = sidebar_width(&trek, cx);
+        assert!((MIN_SIDEBAR_WIDTH..420.).contains(&held), "{held}");
+        // Not a width the file is changed to.
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.settings.layout.sidebar_width),
+            420.
+        );
     });
 }

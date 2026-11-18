@@ -44,8 +44,15 @@ pub const ASK_EXAMPLES: [&str; 3] = [
     "Put a little marmot at the bottom of my sidebar that naps when nothing's running, keeps watch while agents work, and whistles when one needs me.",
     "Play a soft chime when an agent finishes and a gentle knock when one needs me, and let me pick other sounds.",
 ];
-/// What every agent is told, so "make Trek…" finds the skill.
-pub const AGENT_NOTE: &str = "To restyle Trek itself (a Trek theme), follow Trek's built-in skill trek-theme; to add to Trek or change how it works (buttons, pages, panels, a board, commands: a plugin), trek-plugin.";
+/// What every agent is told, so "make Trek…" finds the skill, and which folder is Trek's: a
+/// theme is a plugin with a look, and Claude Code's own "mods" and plugins are not Trek's (an
+/// agent that took them for Trek's wrote into the user's `~/.claude`).
+pub fn agent_note() -> String {
+    format!(
+        "To restyle or add to Trek itself (a look, a pet, sounds, buttons, pages: a Trek plugin), follow Trek's built-in skill {SKILL} and write only in {}. Trek's plugins are not Claude Code's mods or plugins: never write into ~/.claude or dev-mods.",
+        dir().display()
+    )
+}
 /// A plugin's own storage, at most.
 pub const STORAGE_LIMIT: usize = 1 << 20;
 /// A plugin's log is cut back to half of this when it grows past it.
@@ -444,6 +451,11 @@ impl Manifest {
     /// Whether it asks for `p`.
     pub fn wants(&self, p: &Permission) -> bool {
         self.permissions.contains(p)
+    }
+
+    /// Whether it brings a look (a theme), which is on screen only while it's the one chosen.
+    pub fn has_look(&self) -> bool {
+        !self.themes.is_empty()
     }
 
     /// What it adds, in a few words for Settings ("a theme, 2 slots, a page").
@@ -1108,6 +1120,29 @@ pub struct Choice {
     /// Why Trek stopped it, when it did (an error in its logic, a frame it couldn't draw).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped: Option<String>,
+    /// For a plugin with a look: the id of the look it had on screen when another was chosen (a
+    /// built-in one in Settings › Appearance, say). Turning the plugin on brings that look back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub look: Option<String>,
+    /// When and by whom it was added, as Trek noticed it (`Added`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added: Option<Added>,
+}
+
+/// When a plugin appeared in the folder and, if Trek could tell, which agent was at work then:
+/// shown in Settings › Plugins, so the user can tell what an agent made.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Added {
+    /// Milliseconds since the epoch.
+    pub at: i64,
+    /// The agent that was working when it appeared ("Codex"), if exactly one was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+    /// That agent's thread, and its title then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// `state.toml`.
@@ -1269,6 +1304,17 @@ impl State {
         let c = self.plugins.entry(id.to_string()).or_default();
         c.stopped = Some(why.chars().take(300).collect());
         self.replace.retain(|_, p| p != id);
+    }
+
+    /// Note that `id` appeared at `at`, made while `by` was at work, unless that's known already.
+    /// Whether it was new.
+    pub fn note_added(&mut self, id: &str, added: Added) -> bool {
+        let c = self.plugins.entry(id.to_string()).or_default();
+        if c.added.is_some() {
+            return false;
+        }
+        c.added = Some(added);
+        true
     }
 
     pub fn forget(&mut self, id: &str) {
@@ -1496,6 +1542,95 @@ run = "reset"
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A plugin that asks for nothing (and so runs the moment an agent turns it on, with no
+    /// prompt) can't reach anything a permission gates: each of those is refused when the plugin
+    /// is read, and only what it asks for is ever allowed.
+    #[test]
+    fn a_plugin_that_asks_for_nothing_reaches_nothing_a_permission_gates() {
+        let root = scratch("nothing");
+        let refused = |manifest: &str, needs: &str| {
+            let _ = std::fs::remove_dir_all(root.join("x2"));
+            plugin(&root, "x2", manifest);
+            let e = parse(manifest, &root.join("x2"), "x2").unwrap_err();
+            assert!(e.contains(needs), "{manifest}: {e}");
+        };
+        // Opening and starting threads (a button, a command, a thread's own id).
+        for on in ["new-thread", "open:{thread.id}"] {
+            refused(
+                &format!(
+                    "name = \"X\"\n[[slot]]\nat = \"thread.header\"\nui = {{ type = \"button\", text = \"Go\", on = \"{on}\" }}\n"
+                ),
+                "threads:open",
+            );
+        }
+        // The user's threads, and the git history.
+        refused(
+            "name = \"X\"\n[[replace]]\nsurface = \"thread-list\"\nui = { type = \"trek:thread-list\" }\n",
+            "threads:read",
+        );
+        refused(
+            "name = \"X\"\n[[slot]]\nat = \"sidebar.foot\"\nui = { type = \"trek:commit-trail\" }\n",
+            "git:read",
+        );
+        // A plugin with no permissions is what the CLI (an agent) may turn on; one with some is
+        // only marked as waiting, whatever the file says.
+        let m = |perms: &str| {
+            let _ = std::fs::remove_dir_all(root.join("x3"));
+            let text = format!("name = \"X\"\npermissions = {perms}\n");
+            plugin(&root, "x3", &text);
+            parse(&text, &root.join("x3"), "x3").unwrap()
+        };
+        let mut state = State::default();
+        assert!(state.ask_on(&m("[]")), "no permissions: on at once");
+        assert!(state.running(&m("[]")));
+        let mut state = State::default();
+        let asking = m("[\"threads:send\"]");
+        assert!(!state.ask_on(&asking), "an agent can't turn on what asks");
+        assert!(!state.running(&asking));
+        assert!(state.choice("x3").waiting);
+        // Granted by hand in the file, with no seal that verifies: nothing.
+        let mut state: State = toml::from_str(
+            "[plugins.x3]\non = true\ngranted = [\"threads:send\"]\nseal = \"00\"\n",
+        )
+        .unwrap();
+        let plugin = Plugin {
+            manifest: asking.clone(),
+            dir: root.join("x3"),
+            origin: Origin::Installed,
+            hash: Some("abc".into()),
+        };
+        let voided = state.verify(&[plugin], Some(&[7; 32]));
+        assert_eq!(voided, ["x3"]);
+        assert!(!state.running(&asking));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// When a plugin appeared and who was at work is noted once, with the user's choices.
+    #[test]
+    fn when_a_plugin_was_added_is_noted_once_and_kept_with_its_choice() {
+        let mut state = State::default();
+        let added = Added {
+            at: 1_700_000_000_000,
+            by: Some("Codex".into()),
+            thread: Some("t1".into()),
+            title: Some("Add a marmot".into()),
+        };
+        assert!(state.note_added("pip", added.clone()));
+        assert!(
+            !state.note_added("pip", Added::default()),
+            "the first note stands"
+        );
+        let text = toml::to_string_pretty(&state).unwrap();
+        let back: State = toml::from_str(&text).unwrap();
+        assert_eq!(back.choice("pip").added, Some(added));
+        assert!(!back.choice("pip").on, "noting turns nothing on");
+        // A look remembered for turning the plugin back on survives the file too.
+        let mut state = State::default();
+        state.plugins.entry("dusk".into()).or_default().look = Some("dusk".into());
+        let back: State = toml::from_str(&toml::to_string_pretty(&state).unwrap()).unwrap();
+        assert_eq!(back.choice("dusk").look.as_deref(), Some("dusk"));
+    }
+
     #[test]
     fn the_folder_is_read_with_links_and_problems() {
         let root = scratch("scan");
@@ -1614,7 +1749,9 @@ run = "reset"
         for (name, _) in examples::ALL {
             assert!(skill.contains(name), "example {name}");
         }
-        assert!(AGENT_NOTE.contains(SKILL) && AGENT_NOTE.contains(crate::themes::SKILL));
+        let note = agent_note();
+        assert!(note.contains(SKILL) && note.contains(&dir().display().to_string()));
+        assert!(note.contains("~/.claude") && note.contains("dev-mods"));
         let _ = std::fs::remove_dir_all(root);
     }
 

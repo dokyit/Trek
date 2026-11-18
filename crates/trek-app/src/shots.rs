@@ -44,6 +44,10 @@
 //! `click|rclick|hover <element id>` (`name#3` for a row's id; `elements` writes the ids on screen
 //! to `elements.txt`), `type <text>` (into the focused field, else the main composer),
 //! `count <element id>[*] <n>[+]` (fails unless n such elements are on screen, or n or more with `+`; `*` ends a prefix), `reveal <element id>` (Settings scrolled until it is on screen; `reveal-in <scrolling element id> <element id>` for another),
+//! `drag <element id> <x> [<y>]` (press on the element, pull to that point of the window in logical px and let go,
+//! as a pointer would: the sidebar's `sidebar-resize` edge, the tools panel's `panel-resize`),
+//! `sidebar width <px>` / `sidebar folded <0|1>` (checks: the sidebar as it was drawn is that wide, or
+//! folded away),
 //! `key <keystroke>…` (`secondary-k`: ⌘K on a Mac, Ctrl+K on Windows; `escape`, `shift-tab`,
 //! `down down enter`; `cmd`/`win`/`super` modifiers are read as `secondary`, so one manifest is
 //! right on both platforms), `scroll <element id> <px>`
@@ -2823,6 +2827,8 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
             | "elements"
             | "count"
             | "within"
+            | "drag"
+            | "sidebar"
     ) {
         let main = ws
             .read(cx)
@@ -2831,6 +2837,51 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         main.update(cx, |root, window, cx| -> anyhow::Result<()> {
             match verb {
                 "click" | "rclick" | "hover" => pointer(window, verb, arg, cx),
+                "drag" => {
+                    use gpui_kit::test::TestWindowExt as _;
+                    let mut parts = arg.split_whitespace();
+                    let id = parts.next().unwrap_or_default();
+                    let x: f32 = parts
+                        .next()
+                        .and_then(|x| x.parse().ok())
+                        .ok_or_else(|| anyhow::anyhow!("drag <element id> <x> [<y>]"))?;
+                    let y: Option<f32> = parts.next().and_then(|y| y.parse().ok());
+                    // Looked at as `click` does: one element, on screen.
+                    pointer(window, "hover", id, cx)?;
+                    let at = window
+                        .try_find(element_id(id))
+                        .map(|e| e.bounds().center())
+                        .ok_or_else(|| anyhow::anyhow!("drag: nothing on screen is {id}"))?;
+                    window.drag(at, point(px(x), y.map_or(at.y, px)), cx);
+                    Ok(())
+                }
+                // `sidebar width <px>`, `sidebar folded <0|1>`: what the last frame drew.
+                "sidebar" => {
+                    use gpui_kit::test::TestWindowExt as _;
+                    window.render_frame(cx);
+                    let drawn = window
+                        .try_find(element_id("sidebar"))
+                        .filter(|e| e.visible())
+                        .map(|e| e.bounds().size.width.as_f32());
+                    let (what, want) = arg
+                        .split_once(' ')
+                        .ok_or_else(|| anyhow::anyhow!("sidebar width <px> | folded <0|1>"))?;
+                    match what {
+                        "width" => {
+                            let want: f32 = want.trim().parse()?;
+                            anyhow::ensure!(
+                                drawn.is_some_and(|w| (w - want).abs() <= 1.5),
+                                "sidebar width {want}: it is {drawn:?}"
+                            );
+                        }
+                        "folded" => anyhow::ensure!(
+                            drawn.is_none() == (want.trim() == "1"),
+                            "sidebar folded {want}: it is drawn {drawn:?}"
+                        ),
+                        _ => anyhow::bail!("sidebar width <px> | folded <0|1>"),
+                    }
+                    Ok(())
+                }
                 "type" => {
                     anyhow::ensure!(!arg.is_empty(), "type needs text");
                     type_text(root, window, arg, cx)
@@ -3925,7 +3976,8 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
     // Plugins: `plugin install <folder | example:<name>>` (as `trek plugin install`, then read at
     // once), `plugin on|off <id>` (as Settings' switch: on allows what it asks for), `plugin
     // reread`, `plugin focus start|pause|stop|at <seconds>` (the focus timer, `at` as if it had
-    // started that long ago), and checks: `plugin running <id>`, `plugin problems <n>`.
+    // started that long ago), `plugin delete <id>` (as Delete confirms), and checks: `plugin running
+    // <id>`, `plugin listed|stopped|gone <id>`, `plugin problems <n>`.
     if verb == "plugin" {
         let (what, rest) = arg.split_once(' ').unwrap_or((arg, ""));
         let rest = rest.trim();
@@ -4020,6 +4072,22 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                 crate::plugins::running(rest, cx),
                 "plugin running {rest}: it isn't"
             ),
+            // `plugin listed <id>` (in Settings › Plugins, on or off), `plugin stopped <id>` (listed
+            // and off), `plugin gone <id>` (not there), `plugin delete <id>` (as Delete confirms).
+            "listed" | "stopped" | "gone" => {
+                let listed = cx
+                    .try_global::<crate::plugins::Plugins>()
+                    .is_some_and(|p| p.find(rest).is_some());
+                match what {
+                    "listed" => anyhow::ensure!(listed, "plugin listed {rest}: it isn't"),
+                    "gone" => anyhow::ensure!(!listed, "plugin gone {rest}: it's listed"),
+                    _ => anyhow::ensure!(
+                        listed && !crate::plugins::running(rest, cx),
+                        "plugin stopped {rest}: it's not listed, or it's running"
+                    ),
+                }
+            }
+            "delete" => crate::plugins::remove(rest, &ws, cx).map_err(|e| anyhow::anyhow!(e))?,
             "problems" => {
                 let n = cx
                     .try_global::<crate::plugins::Plugins>()

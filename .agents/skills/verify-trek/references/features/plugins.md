@@ -33,9 +33,24 @@ Settings › Plugins: first, "Make Trek yours: ask an agent" with three sentence
 
 The same `trek plugin …` CLI works against the isolated profile: run the capture build's own binary (`<runtime_dir>/bin/trek plugin list`) with `TREK_DATA_DIR=<data_dir>` from `status`.
 
+## What an agent makes shows up in the list
+
+`send mock:plugin` (a Trail notes plugin) and `send mock:look` (a look called Dusk, as a plugin with a `[[theme]]`, turned on and asked for through `themes/apply`) are the scripted agents that write into the plugins folder as the `trek-plugin` and `trek-theme` skills say. Within about two seconds the plugin is listed, running, announced by a toast ("Trail notes was added … Manage it in Settings › Plugins", button Manage), and its row says when it was added (and by which agent when exactly one was at work). Checks and steps for it:
+
+```sh
+./.agents/skills/verify-trek/scripts/trek-dev control plugin listed dusk      # in Settings › Plugins, on or off
+./.agents/skills/verify-trek/scripts/trek-dev control plugin stopped dusk     # listed and off
+./.agents/skills/verify-trek/scripts/trek-dev control plugin delete dusk      # as Delete confirms: folder, what it kept, choices
+./.agents/skills/verify-trek/scripts/trek-dev control plugin gone dusk        # a check: not there
+./.agents/skills/verify-trek/scripts/trek-dev control look console            # choose a built-in look: Dusk's switch goes off, Trek shows Console
+./.agents/skills/verify-trek/scripts/trek-dev control plugin on dusk          # as its switch: its look is back
+```
+
+A look is on only while it's the one on screen: another look puts the plugin off (its row says "Its look is off…"); turning the plugin on brings the look back. A theme file written loose into `<data>/themes/` is listed too, as a Look (`look-row-<id>`, switch `look-on-<id>`, `look-added-<id>`).
+
 ## Elements to check
 
-`plugin-row-<id>`, `plugin-waiting-<id>`, `plugin-problem-<id>`, `plugin-log-<id>` (Settings › Plugins); `plugin-ask` (Settings' first card); `focus-chip`, `focus-length`, `focus-start`, `focus-pause`, `focus-break` (the timer's chip on the composer); `plugin-surface-thread-list` (a replacement drawn in place of the thread list; `-composer`, `-new-thread`); `plugin-page` (a page's pane); `page-<plugin>-<page>` (its row in the sidebar's Pages group).
+`plugin-row-<id>`, `plugin-on-<id>` (its switch), `plugin-added-<id>` (when and by whom), `plugin-look-<id>` and `plugin-use-look-<id>` (a plugin's look: in use or not), `look-row-<id>` (a loose theme file), `plugin-waiting-<id>`, `plugin-problem-<id>`, `plugin-log-<id>` (Settings › Plugins); `plugin-ask` (Settings' first card); `focus-chip`, `focus-length`, `focus-start`, `focus-pause`, `focus-break` (the timer's chip on the composer); `plugin-surface-thread-list` (a replacement drawn in place of the thread list; `-composer`, `-new-thread`); `plugin-page` (a page's pane); `page-<plugin>-<page>` (its row in the sidebar's Pages group).
 
 ## Notes
 

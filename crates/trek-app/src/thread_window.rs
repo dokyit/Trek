@@ -465,7 +465,7 @@ impl Render for ThreadWindow {
             }))
             .when_some(backdrop, |el, (spec, dim)| {
                 el.relative()
-                    .children(crate::ui::window_backdrop(&spec, dim, false, cx))
+                    .children(crate::ui::window_backdrop(&spec, dim, None, cx))
             })
             .child(crate::artifact::layer_start())
             .child(self.title_bar(window.viewport_size().width < px(640.), cx))

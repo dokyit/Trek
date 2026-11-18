@@ -1,42 +1,62 @@
 ---
 name: trek-theme
-description: Make a Trek theme - a whole look for Trek itself in one small TOML file (light or dark, colours, the fonts for the interface and the conversation, corner roundness, density, background art, glass and motion), checked by Trek and switched to with a cross-fade. Use when the user asks you to restyle Trek, change how Trek looks, or make Trek look like something ("a 90s terminal", "a newspaper", "my editor's theme").
+description: Make a Trek theme - a whole look for Trek itself in one small TOML file (light or dark, colours, the fonts for the interface and the conversation, corner roundness, density, background art, glass and motion), carried by a Trek plugin so it's listed in Settings › Plugins and Appearance, checked by Trek and switched to with a cross-fade. Use when the user asks you to restyle Trek, change how Trek looks, or make Trek look like something ("a Trek look called Dusk", "a 90s terminal", "a newspaper", "my editor's theme"). This is Trek's own theme system, not Claude Code's: never write into ~/.claude.
 ---
 
 # Trek theme
 
-A Trek theme is one TOML file that sets Trek's whole look. Trek reads every `*.toml` in its
-themes folder, watches it, and lists each theme in Settings › Appearance › Theme and in the
-command palette ("Use … theme"). You make one by writing a file there, then ask Trek to switch to
-it by writing its name to one more file. Trek cross-fades to it.
+A Trek theme is one TOML file that sets Trek's whole look. It travels in a Trek plugin (a folder
+with a four-line `plugin.toml` and the theme file), so it's listed in **Settings › Plugins** with
+a switch and Delete, and in Settings › Appearance › Theme and the command palette ("Use … theme").
+You make one by writing that folder, then ask Trek to switch to it by writing its id to one more
+file. Trek cross-fades to it.
 
 A theme is a look and nothing else, with fonts from the three below. To add things to Trek or
 change how it works (buttons, chips and meters, pages and panels, a board in place of the thread
-list, commands, logic), make a plugin: the `trek-plugin` skill. A plugin can carry a theme too.
+list, commands, logic), make a plugin: the `trek-plugin` skill, and put the theme in the same one.
 
 ## Where it goes
 
-This skill's own file is `<data>/skills/trek-theme/SKILL.md`, where `<data>` is Trek's data
-folder. Themes live in **`<data>/themes/`** (two folders up from this file, then `themes`). Create
-the folder if it isn't there. The file's name is the theme's id: `ninety-terminal.toml` is
-`ninety-terminal`. Lower case and dashes; never `trek`, `console`, `journal` or `alpenglow` (the
-built-in ones).
+This skill's own file is `<data>/skills/trek-theme/SKILL.md`, where `<data>` is Trek's data folder:
+`<data>` on this computer. Write only there, never into `~/.claude` or any folder of Claude Code's
+or another agent's: those are the agent's own features, and Trek reads none of them.
+
+- The plugin: **`<data>/plugins/<id>/plugin.toml`** (below).
+- The theme file: **`<data>/plugins/<id>/look.toml`**, in the format below.
+
+`<id>` is lower case letters, digits and dashes, and it is the theme's id; never `trek`,
+`console`, `journal` or `alpenglow` (the built-in ones). `plugin.toml`:
+
+```
+id = "dusk"
+name = "Dusk"
+description = "Violet evening light, answers in a serif."
+trek = ">=0.4.55"
+[[theme]]
+file = "look.toml"
+```
+
+(That's the whole file: a look needs no permissions and no logic.) Old themes may still be loose
+files in `<data>/themes/<id>.toml`: Trek lists them too (Settings › Plugins, as looks), but write
+new ones as plugins.
 
 ## Steps
 
 1. Pick the look with the user's words: dark or light, two or three colours that carry it, which
    font for the interface and which for the conversation, square or soft corners, compact or roomy,
    art or none.
-2. Write `<data>/themes/<id>.toml` (format below).
-3. Read `<data>/themes/problems.txt`, a second or two later. It's there only while a file in the
-   folder has a problem, one line per file: `<file>: <what's wrong>`. Fix your file until your
-   file isn't in it.
-4. Apply it: write the id alone to **`<data>/themes/apply`** (for example `ninety-terminal`).
-   Trek switches within a couple of seconds and removes that file. If the file is still there
-   after five seconds, Trek isn't running from that folder: tell the user to pick the theme in
-   Settings › Appearance.
-5. Tell the user what you made and that they can go back with "Use Trek theme" in the palette
-   (⌘K / Ctrl+K), which restores exactly what they had before they first switched.
+2. Write `<data>/plugins/<id>/plugin.toml` and `<data>/plugins/<id>/look.toml` (format below).
+3. Read `<data>/plugins/problems.txt` (and `<data>/themes/problems.txt`), a second or two later.
+   They're there only while something has a problem, one line each. Fix yours until it isn't in them.
+4. Turn the plugin on: `<trek> plugin enable <id>` (a look asks for no permissions, so that turns it
+   on), then apply it: write the id alone to **`<data>/themes/apply`** (for example `dusk`). Trek
+   switches within a couple of seconds and removes that file. If the file is still there after five
+   seconds, Trek isn't running from that folder: tell the user to turn the plugin on in Settings ›
+   Plugins and pick the theme in Settings › Appearance.
+5. Tell the user what you made, and that Settings › Plugins lists it with a switch and Delete.
+   Picking another theme in Settings › Appearance, or "Use Trek theme" in the palette (⌘K / Ctrl+K),
+   puts it off (its switch shows that), and turning it back on there brings it back, with nothing to
+   write again.
 
 To change a theme that's in use, edit its file: Trek reloads it and takes the new values.
 
@@ -176,7 +196,7 @@ And for a theme that looks made, not generated:
 
 ## Example: "make Trek look like a 90s terminal"
 
-`<data>/themes/ninety-terminal.toml`:
+`<data>/plugins/ninety-terminal/look.toml`:
 
 ```toml
 name = "Ninety Terminal"
@@ -217,4 +237,6 @@ muted = "#75654A"
 border = "#E0D5BD"
 ```
 
-Then write `ninety-terminal` to `<data>/themes/apply`.
+As a plugin: `<data>/plugins/ninety-terminal/look.toml` is the file above, `plugin.toml` names it
+(`[[theme]] file = "look.toml"`), then `<trek> plugin enable ninety-terminal` and write
+`ninety-terminal` to `<data>/themes/apply`.

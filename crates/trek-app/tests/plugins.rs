@@ -796,3 +796,392 @@ fn trailheads_prompts_come_from_its_logic_and_its_page() {
         );
     });
 }
+
+// ---------- what an agent (or anyone) creates to customise Trek ----------
+//
+// An agent writes a folder into the plugins folder, as the trek-plugin skill tells it to. Trek
+// notices without a restart, lists it, says it was added, and the user's switch turns it off and
+// on at once; a look is on only while it's the one on screen; Delete takes its files.
+
+use trek_core::plugins as core;
+
+/// A throwaway agent at work in a thread of the harness project, as a mock agent would be.
+fn agent_at_work(trek: &common::Trek, cx: &mut TestAppContext, title: &str) -> String {
+    trek.update(cx, |ws, cx| {
+        let mut t = ws
+            .store
+            .create_thread(
+                Some(&trek.project),
+                common::mock(),
+                None,
+                trek_core::Effort::Medium,
+                trek_core::HandHolding::Auto,
+            )
+            .expect("thread");
+        t.title = title.into();
+        t.run_state = trek_core::RunState::Working;
+        ws.store.save_thread(&t).expect("save");
+        ws.reload(cx);
+        t.id
+    })
+}
+
+/// Pip, as Codex wrote it: a marmot at the foot of the sidebar, no permissions.
+fn write_pip(permissions: &str) {
+    let dir = core::dir().join("pip");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("plugin.toml"),
+        format!(
+            "name = \"Pip\"\ndescription = \"A marmot at the foot of the sidebar.\"\nauthor = \"Codex\"\npermissions = {permissions}\n\n[[slot]]\nat = \"sidebar.foot\"\nui = {{ type = \"text\", text = \"pip\" }}\n"
+        ),
+    )
+    .unwrap();
+}
+
+/// What the watch does on its tick: look at the folder, and read it again if it changed.
+fn watch_tick(trek: &common::Trek, cx: &mut TestAppContext) {
+    let dir = core::dir();
+    let (print, asked) = trek_app::plugins::look(&dir);
+    cx.update(|cx| trek_app::plugins::looked(print, asked, &trek.ws, cx));
+    cx.run_until_parked();
+}
+
+fn state_on_disk() -> core::State {
+    core::State::read(&core::dir())
+}
+
+fn listed(id: &str, cx: &mut TestAppContext) -> bool {
+    cx.update(|cx| cx.global::<trek_app::plugins::Plugins>().find(id).is_some())
+}
+
+/// A look's file, a dusky violet, as `trek-theme` writes one.
+const DUSK: &str = "name = \"Dusk\"\ndescription = \"Violet evening light.\"\nmode = \"dark\"\n\n[dark]\naccent = \"#B58CFF\"\non_accent = \"#10081F\"\nwindow = \"#14101F\"\nsidebar = \"#171226\"\nsurface = \"#1E1830\"\nraised = \"#1A1529\"\ntext = \"#E6DFF5\"\nmuted = \"#9A8FB8\"\nborder = \"#2A2340\"\n";
+
+/// A look as a plugin: the folder `trek-theme` says to write.
+fn write_dusk_plugin() {
+    let dir = core::dir().join("dusk");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("plugin.toml"),
+        "id = \"dusk\"\nname = \"Dusk\"\ndescription = \"Violet evening light.\"\ntrek = \">=0.4.55\"\n\n[[theme]]\nfile = \"look.toml\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("look.toml"), DUSK).unwrap();
+}
+
+fn enable_from_cli(id: &str) {
+    let mut out = Vec::new();
+    let code = core::cli::run(&["enable".into(), id.into()], &core::dir(), &mut out);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&out));
+}
+
+#[test]
+fn a_folder_an_agent_writes_is_picked_up_listed_announced_and_switches_live() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    run(async |cx| {
+        let trek = start(cx);
+        let toasts = common::toasts(&trek, cx);
+        let _thread = agent_at_work(&trek, cx, "Add a marmot");
+
+        // The agent writes the folder and turns it on in state.toml: it asks for nothing, so
+        // that's all it takes. No restart, no click.
+        write_pip("[]");
+        std::fs::write(
+            core::dir().join(core::STATE_FILE),
+            "[plugins.pip]\non = true\n",
+        )
+        .unwrap();
+        let before = cx.update(|cx| cx.global::<trek_app::plugins::Plugins>().generation);
+        watch_tick(&trek, cx);
+        assert!(listed("pip", cx), "it's in Settings › Plugins");
+        assert!(cx.update(|cx| trek_app::plugins::running("pip", cx)));
+        assert_eq!(
+            cx.update(|cx| trek_app::plugins::slot(Slot::SidebarFoot, cx).len()),
+            1
+        );
+        assert!(cx.update(|cx| cx.global::<trek_app::plugins::Plugins>().generation) > before);
+
+        // The user hears of it, with where to manage it and which agent was at work.
+        let told = toasts.borrow().clone();
+        let (message, undo) = told
+            .iter()
+            .find(|(m, _)| m.contains("Pip was added"))
+            .unwrap_or_else(|| panic!("no announcement in {told:?}"));
+        assert!(message.contains("Settings › Plugins"), "{message}");
+        assert!(message.contains("is on"), "{message}");
+        assert!(
+            message.contains(" by "),
+            "the agent at work is named: {message}"
+        );
+        assert!(matches!(
+            undo,
+            Some(trek_app::workspace::UndoAction::OpenPlugins)
+        ));
+        // And it's noted for the row: when, and who.
+        let added = state_on_disk().choice("pip").added.expect("noted");
+        assert!(
+            added.at > 0 && added.by.is_some() && added.title.as_deref() == Some("Add a marmot")
+        );
+        // A second look at the same folder says nothing more.
+        let count = toasts.borrow().len();
+        watch_tick(&trek, cx);
+        assert_eq!(toasts.borrow().len(), count);
+
+        // Off is gone at once, and the file says so; on is back at once, with no restart.
+        cx.update(|cx| trek_app::plugins::set_on("pip", false, &trek.ws, cx));
+        assert!(cx.update(|cx| trek_app::plugins::slot(Slot::SidebarFoot, cx).is_empty()));
+        assert!(!state_on_disk().choice("pip").on);
+        assert!(
+            listed("pip", cx),
+            "off is still listed, for turning on again"
+        );
+        cx.update(|cx| trek_app::plugins::set_on("pip", true, &trek.ws, cx));
+        assert_eq!(
+            cx.update(|cx| trek_app::plugins::slot(Slot::SidebarFoot, cx).len()),
+            1
+        );
+        assert!(state_on_disk().choice("pip").on);
+
+        // Delete takes the folder and what it kept.
+        core::log("pip", "something");
+        cx.update(|cx| trek_app::plugins::remove("pip", &trek.ws, cx))
+            .unwrap();
+        assert!(!listed("pip", cx));
+        assert!(!core::dir().join("pip").exists());
+        assert!(!core::data_dir("pip").exists());
+        assert!(cx.update(|cx| trek_app::plugins::slot(Slot::SidebarFoot, cx).is_empty()));
+    });
+}
+
+#[test]
+fn the_plugins_page_lists_what_an_agent_made_with_its_switch_and_who_made_it() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    run(async |cx| {
+        let trek = start(cx);
+        let _thread = agent_at_work(&trek, cx, "Add a marmot");
+        write_pip("[]");
+        enable_from_cli("pip");
+        watch_tick(&trek, cx);
+        trek.update(cx, |ws, cx| {
+            ws.navigate(
+                Route::Settings(trek_app::workspace::SettingsPage::Plugins),
+                cx,
+            )
+        });
+        trek.render(cx);
+        assert!(trek.visible(cx, "plugin-row-pip"));
+        assert!(trek.visible(cx, "plugin-added-pip"), "when and by whom");
+        // Its switch is on, and a click turns it off at once.
+        assert!(cx.update(|cx| trek_app::plugins::running("pip", cx)));
+        trek.click(cx, "plugin-on-pip");
+        trek.render(cx);
+        assert!(!cx.update(|cx| trek_app::plugins::running("pip", cx)));
+        assert!(trek.visible(cx, "plugin-row-pip"), "still listed");
+        trek.click(cx, "plugin-on-pip");
+        assert!(cx.update(|cx| trek_app::plugins::running("pip", cx)));
+    });
+}
+
+#[test]
+fn a_plugin_that_asks_for_permissions_is_announced_and_waits_for_the_user() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    run(async |cx| {
+        let trek = start(cx);
+        let toasts = common::toasts(&trek, cx);
+        // The agent writes a plugin that reads threads, and tries to grant itself by hand.
+        write_pip("[\"threads:read\"]");
+        std::fs::write(
+            core::dir().join(core::STATE_FILE),
+            "[plugins.pip]\non = true\ngranted = [\"threads:read\"]\nseal = \"abcdef\"\n",
+        )
+        .unwrap();
+        watch_tick(&trek, cx);
+        assert!(listed("pip", cx));
+        assert!(
+            !cx.update(|cx| trek_app::plugins::running("pip", cx)),
+            "never granted by the agent"
+        );
+        assert!(cx.update(|cx| trek_app::plugins::slot(Slot::SidebarFoot, cx).is_empty()));
+        let told = toasts.borrow().clone();
+        assert!(
+            told.iter()
+                .any(|(m, _)| m.contains("Pip was added") && m.contains("asks for permissions")),
+            "{told:?}"
+        );
+        // The user's Allow in Trek is what runs it.
+        cx.update(|cx| trek_app::plugins::set_on("pip", true, &trek.ws, cx));
+        assert!(cx.update(|cx| trek_app::plugins::running("pip", cx)));
+    });
+}
+
+#[test]
+fn a_plugins_look_is_off_when_another_look_is_chosen_and_comes_back_when_it_is_turned_on() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    run(async |cx| {
+        let trek = start(cx);
+        let running =
+            |cx: &mut TestAppContext| cx.update(|cx| trek_app::plugins::running("dusk", cx));
+        let shown = |cx: &mut TestAppContext| cx.update(|cx| trek_app::themes::shown_id(cx));
+        let chosen = |cx: &mut TestAppContext| {
+            trek.read(cx, |ws, _| ws.settings.appearance.trek_theme.clone())
+        };
+
+        // The agent writes the plugin that carries the look, turns it on and asks for it.
+        write_dusk_plugin();
+        enable_from_cli("dusk");
+        std::fs::create_dir_all(trek_core::themes::dir()).unwrap();
+        std::fs::write(
+            trek_core::themes::dir().join(trek_core::themes::APPLY_FILE),
+            "dusk\n",
+        )
+        .unwrap();
+        // The two folders are looked at on one tick, the themes first: the request waits for
+        // the plugin that brings the look instead of being refused.
+        cx.update(|cx| trek_app::themes::reread(&trek.ws, cx));
+        assert_eq!(shown(cx), "trek", "not known yet");
+        watch_tick(&trek, cx);
+        assert!(running(cx));
+        assert_eq!(shown(cx), "dusk", "the look the agent asked for is up");
+        assert_eq!(chosen(cx), "dusk");
+        assert!(cx.update(|cx| {
+            trek_app::plugins::look_in_use(
+                &cx.global::<trek_app::plugins::Plugins>()
+                    .find("dusk")
+                    .unwrap()
+                    .manifest,
+                cx,
+            )
+        }));
+
+        // The user picks a built-in theme: it shows, and the plugin's look is off, not fighting.
+        cx.update(|cx| trek_app::themes::switch_to("console", &trek.ws, cx));
+        assert_eq!(shown(cx), "console");
+        assert!(!running(cx), "one look on at a time");
+        assert!(!state_on_disk().choice("dusk").on);
+        assert_eq!(state_on_disk().choice("dusk").look.as_deref(), Some("dusk"));
+        assert!(
+            cx.update(|cx| trek_app::themes::find("dusk", cx)).is_none(),
+            "an off plugin's look isn't on offer"
+        );
+        assert!(
+            listed("dusk", cx),
+            "but the plugin is still there to turn on"
+        );
+
+        // Settings › Plugins says so, and turning it back on brings the look back.
+        trek.update(cx, |ws, cx| {
+            ws.navigate(
+                Route::Settings(trek_app::workspace::SettingsPage::Plugins),
+                cx,
+            )
+        });
+        trek.render(cx);
+        assert!(
+            trek.visible(cx, "plugin-look-dusk"),
+            "its look is shown as off"
+        );
+        cx.update(|cx| trek_app::plugins::set_on("dusk", true, &trek.ws, cx));
+        assert!(running(cx));
+        assert_eq!(shown(cx), "dusk");
+        assert_eq!(chosen(cx), "dusk");
+        assert_eq!(state_on_disk().choice("dusk").look, None);
+
+        // Another plugin's look, or turning it off, leaves nothing half on.
+        cx.update(|cx| trek_app::plugins::set_on("dusk", false, &trek.ws, cx));
+        assert_eq!(shown(cx), "trek", "Trek's own is back when the look goes");
+        assert!(!running(cx));
+
+        // Delete: the folder goes, and Trek's own stays.
+        cx.update(|cx| trek_app::plugins::set_on("dusk", true, &trek.ws, cx));
+        assert_eq!(shown(cx), "dusk");
+        cx.update(|cx| trek_app::plugins::remove("dusk", &trek.ws, cx))
+            .unwrap();
+        assert!(!core::dir().join("dusk").exists());
+        assert_eq!(shown(cx), "trek");
+    });
+}
+
+#[test]
+fn a_loose_theme_file_in_the_themes_folder_is_listed_switches_and_deletes_like_a_plugin() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    run(async |cx| {
+        let trek = start(cx);
+        // A "Dusk" an agent made last week, before looks travelled in plugins.
+        let themes = trek_core::themes::dir();
+        std::fs::create_dir_all(&themes).unwrap();
+        std::fs::write(themes.join("dusk-old.toml"), DUSK).unwrap();
+        cx.update(|cx| trek_app::themes::reread(&trek.ws, cx));
+        let loose = cx.update(|cx| trek_app::themes::loose_looks(cx));
+        assert_eq!(loose.len(), 1);
+        assert_eq!(loose[0].id, "dusk-old");
+
+        trek.update(cx, |ws, cx| {
+            ws.navigate(
+                Route::Settings(trek_app::workspace::SettingsPage::Plugins),
+                cx,
+            )
+        });
+        trek.render(cx);
+        assert!(
+            trek.visible(cx, "look-row-dusk-old"),
+            "listed beside the plugins"
+        );
+        // Its switch is its look being on screen: on is the look, off is Trek's own.
+        trek.click(cx, "look-on-dusk-old");
+        assert_eq!(cx.update(|cx| trek_app::themes::shown_id(cx)), "dusk-old");
+        trek.render(cx);
+        trek.click(cx, "look-on-dusk-old");
+        assert_eq!(cx.update(|cx| trek_app::themes::shown_id(cx)), "trek");
+
+        // Delete takes the file; one on screen gives way to Trek's own.
+        cx.update(|cx| trek_app::themes::switch_to("dusk-old", &trek.ws, cx));
+        cx.update(|cx| trek_app::themes::delete_look("dusk-old", &trek.ws, cx))
+            .unwrap();
+        assert!(!themes.join("dusk-old.toml").exists());
+        assert_eq!(cx.update(|cx| trek_app::themes::shown_id(cx)), "trek");
+        assert!(cx.update(|cx| trek_app::themes::loose_looks(cx)).is_empty());
+        // A built-in one isn't deletable.
+        assert!(
+            cx.update(|cx| trek_app::themes::delete_look("console", &trek.ws, cx))
+                .is_err()
+        );
+    });
+}
+
+#[test]
+fn the_agents_are_told_trek_s_exact_folder_and_not_to_use_claude_codes() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    // The note every request carries, and the skill as written for this computer.
+    let note = core::agent_note();
+    let plugins = core::dir().display().to_string();
+    assert!(note.contains(&plugins), "{note}");
+    assert!(
+        note.contains("~/.claude") && note.contains("dev-mods"),
+        "{note}"
+    );
+    let skill = trek_core::skills::shipped(core::SKILL).unwrap();
+    let text = std::fs::read_to_string(skill).unwrap();
+    let data = trek_core::paths::data_dir().display().to_string();
+    assert!(
+        !text.contains("<data>") && !text.contains("<trek>"),
+        "filled in"
+    );
+    assert!(
+        text.contains(&format!("{data}/plugins/<id>/")),
+        "the exact folder"
+    );
+    assert!(text.contains("plugin enable <id>"), "the exact command");
+    assert!(
+        text.contains("Never write into `~/.claude`"),
+        "and where not to write"
+    );
+    // The theme skill sends looks to the same place.
+    let theme =
+        std::fs::read_to_string(trek_core::skills::shipped(trek_core::themes::SKILL).unwrap())
+            .unwrap();
+    assert!(
+        theme.contains(&format!("{data}/plugins/<id>/look.toml")),
+        "{theme}"
+    );
+}

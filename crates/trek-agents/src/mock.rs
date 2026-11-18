@@ -308,6 +308,9 @@ enum Script {
     Write(Option<String>),
     /// Write a small Trek plugin into the plugins folder (`mock:plugin`).
     Plugin,
+    /// Write a look as a Trek plugin, turn it on and ask for it (`mock:look`): what
+    /// "a Trek look called Dusk" comes to when an agent follows the trek-theme skill.
+    Look,
     /// `gh run watch <id>` run for real, as an agent's command call (Trek's run card).
     WatchRun(String),
     /// Edit lines of a file in place, as Trek's ⌘K inline edit asks (`trek_core::inline_edit`).
@@ -490,6 +493,7 @@ impl Script {
                 // A plugin written into Trek's plugins folder, as the trek-plugin skill has an agent
                 // do it: only by its full name.
                 "plugin" if w.starts_with("mock:") => Script::Plugin,
+                "look" if w.starts_with("mock:") => Script::Look,
                 // The one script that changes files: only when asked for by its full name.
                 "write" if w.starts_with("mock:") => Script::Write(
                     raw.get(i + 1)
@@ -644,6 +648,7 @@ pub fn title(request: &str) -> String {
         Script::Sandbox => "Run the tests",
         Script::Write(_) => "Add a note",
         Script::Plugin => "Make a trail notes plugin",
+        Script::Look => "Make a Trek look called Dusk",
         Script::WatchRun(_) => "Watch the CI run",
         Script::InlineEdit { .. } => "Edit the selection",
         Script::Compact => "Compacted the conversation",
@@ -1356,6 +1361,7 @@ impl Session {
             Script::History(rounds) => self.history(rounds).await?,
             Script::Write(file) => self.write(file.as_deref().unwrap_or("NOTES.md")).await?,
             Script::Plugin => self.plugin().await?,
+            Script::Look => self.look().await?,
             Script::WatchRun(id) => {
                 self.say("Watching the CI run.").await?;
                 let ok = self
@@ -2592,6 +2598,40 @@ impl Session {
         trek_core::plugins::cli::run(&["enable".into(), PLUGIN_ID.into()], &plugins, &mut out);
         self.say(
             "I made a plugin, **Trail notes**: a page in the sidebar's Pages group for jotting waypoints, kept between launches, and a chip in each thread's header. It asks for no permissions, so it's on. Turn it off or remove it in Settings › Plugins.",
+        )
+        .await
+    }
+
+    /// Write a look as a plugin (the trek-theme skill's folder), turn it on as `trek plugin
+    /// enable` does and ask Trek to switch to it, as an agent does.
+    async fn look(&mut self) -> Step {
+        let dir = trek_core::plugins::dir().join(LOOK_ID);
+        let files = [("plugin.toml", LOOK_MANIFEST), ("look.toml", LOOK_FILE)];
+        for (rel, text) in files {
+            let id = self.id("tool");
+            self.tool_start(&id, "Write", &format!("plugins/{LOOK_ID}/{rel}"))
+                .await?;
+            self.pause(paced(150)).await?;
+            let path = dir.join(rel);
+            let wrote = path
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::write(&path, text));
+            let (output, ok) = match wrote {
+                Ok(()) => (format!("Wrote {rel}"), true),
+                Err(e) => (format!("Couldn't write {rel}: {e}"), false),
+            };
+            self.emit(AgentEvent::ToolFinished { id, output, ok })
+                .await?;
+        }
+        let plugins = trek_core::plugins::dir();
+        let mut out = Vec::new();
+        trek_core::plugins::cli::run(&["enable".into(), LOOK_ID.into()], &plugins, &mut out);
+        let themes = trek_core::themes::dir();
+        let _ = std::fs::create_dir_all(&themes);
+        let _ = std::fs::write(themes.join(trek_core::themes::APPLY_FILE), LOOK_ID);
+        self.say(
+            "I made a look, **Dusk**, as a plugin: violet evening light, answers in a serif. It asks for no permissions, so it's on, and Trek is switching to it. Settings › Plugins turns it off, back on, or deletes it.",
         )
         .await
     }
@@ -4249,6 +4289,37 @@ const MAIN_RS: &str =
     "mod cli;\n\nfn main() {\n    let cfg = cli::parse_args();\n    app::run(cfg);\n}";
 
 const TEST_OUTPUT: &str = "running 14 tests\n..............\ntest result: ok. 14 passed; 0 failed; 0 ignored; finished in 0.42s";
+
+/// What `mock:look` makes: a look as a plugin.
+const LOOK_ID: &str = "dusk";
+const LOOK_MANIFEST: &str = r#"id = "dusk"
+name = "Dusk"
+version = "1.0.0"
+description = "Violet evening light, answers in a serif."
+author = "Mock agent"
+trek = ">=0.4.55"
+
+[[theme]]
+file = "look.toml"
+"#;
+const LOOK_FILE: &str = r##"name = "Dusk"
+description = "Violet evening light, answers in a serif."
+mode = "dark"
+
+[fonts]
+conversation = "serif"
+
+[dark]
+accent = "#B58CFF"
+on_accent = "#10081F"
+window = "#14101F"
+sidebar = "#171226"
+surface = "#1E1830"
+raised = "#1A1529"
+text = "#E6DFF5"
+muted = "#9A8FB8"
+border = "#2A2340"
+"##;
 
 /// What `mock:plugin` makes.
 const PLUGIN_ID: &str = "trail-notes";
