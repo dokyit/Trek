@@ -103,12 +103,12 @@ tests = ["crates/trek-app/tests/themes.rs"]
 [[feature]]
 id = "plugins"
 area = "App"
-what = "Plugins: a folder, usually made by an agent from one sentence, that makes Trek the user's own (a look, element trees in the composer, a thread's header, the sidebar, the new-thread screen and the title bar, a surface of its own in place of the thread list, the composer or the new-thread screen, palette commands with keys, text effects, logic that hears Trek's events and plays sounds of its own), installed with trek plugin, listed with its permissions in Settings › Plugins (which opens with sentences to ask an agent with), read again as it changes; six examples (Campfire, Trailhead, Pip the marmot, Soft sounds, Now playing, Focus walk)"
+what = "Plugins: a folder, usually made by an agent from one sentence, that makes Trek the user's own (a look, element trees in the composer, a thread's header, the sidebar, the new-thread screen and the title bar, a surface of its own in place of the thread list, the composer or the new-thread screen, palette commands with keys, text effects, logic that hears Trek's events and plays sounds of its own), installed with trek plugin, listed with its permissions in Settings › Plugins (which opens with sentences to ask an agent with), read again as it changes, whoever wrote the folder (an agent's plugin or look is announced, listed with who and when, switched off and on at once and deleted there; a look is on only while it's the one on screen, and loose theme files are listed beside them); six examples (Campfire, Trailhead, Pip the marmot, Soft sounds, Now playing, Focus walk)"
 macos = "yes"
 windows = "yes"
-live = ["plugin install example:focus-timer", "plugin install example:campfire", "plugin install example:marmot", "plugin install example:trailhead", "plugin on trailhead", "plugin install example:now-playing", "plugin on now-playing", "plugin problems 0", "route settings:plugins", "wait 300", "count plugin-ask 1", "reveal plugin-row-focus-timer", "count plugin-row-focus-timer 1", "plugin running focus-timer", "plugin running marmot", "plugin running now-playing", "route project:{project}", "new", "wait 500", "count plugin-surface-new-thread 1", "count focus-chip 1", "plugin focus at 300", "wait 300", "look campfire", "wait 1500", "look is campfire", "look trek", "wait 1500", "look is trek", "plugin off trailhead", "wait 300", "count plugin-surface-new-thread 0", "plugin focus stop", "plugin off focus-timer", "wait 300", "count focus-chip 0"]
+live = ["plugin install example:focus-timer", "plugin install example:campfire", "plugin install example:marmot", "plugin install example:trailhead", "plugin on trailhead", "plugin install example:now-playing", "plugin on now-playing", "plugin problems 0", "route settings:plugins", "wait 300", "count plugin-ask 1", "reveal plugin-row-focus-timer", "count plugin-row-focus-timer 1", "plugin running focus-timer", "plugin running marmot", "plugin running now-playing", "route project:{project}", "new", "wait 500", "count plugin-surface-new-thread 1", "count focus-chip 1", "plugin focus at 300", "wait 300", "look campfire", "wait 1500", "look is campfire", "look trek", "wait 1500", "look is trek", "plugin off trailhead", "wait 300", "count plugin-surface-new-thread 0", "plugin focus stop", "plugin off focus-timer", "wait 300", "count focus-chip 0", "route project:{project}", "pace 0", "send mock:plugin", "wait idle 30000", "wait 2500", "plugin running trail-notes", "send mock:look", "wait idle 30000", "wait 2500", "plugin running dusk", "look is dusk", "route settings:plugins", "wait 300", "reveal plugin-row-dusk", "count plugin-row-dusk 1", "count plugin-added-dusk 1", "count plugin-look-dusk 1", "look console", "wait 1500", "look is console", "plugin stopped dusk", "plugin running trail-notes", "plugin on dusk", "wait 1500", "look is dusk", "plugin running dusk", "plugin delete dusk", "wait 1500", "plugin gone dusk", "look is trek"]
 how = { macos = "Shared code: the manifest, the folder, the CLI and the element trees' format in trek_core::plugins; drawing with GPUI, the registry and Settings in trek-app's plugins; logic in the QuickJS trek-script already ships; line weight, shadows and square pills as scales in GPUI's quad painting. `cmd` in a plugin's key is Cmd.", windows = "The same code. `cmd` in a plugin's key is Ctrl (keys::is_mac, a runtime value). A release trek.exe is a GUI program with no output of its own: `trek plugin` typed at a console attaches to the parent's console to print (procs::parent_console), and an agent's pipe gets its output as on the Mac. A plugin file that is a link is sealed as what it points to on both; the test that makes a link runs on Unix only, since Windows makes one only in Developer Mode or as an administrator." }
-code = ["crates/trek-core/src/plugins/mod.rs", "crates/trek-core/src/plugins/grant.rs", "crates/trek-core/src/plugins/ui.rs", "crates/trek-core/src/plugins/cli.rs", "crates/trek-core/src/plugins/data.rs", "crates/trek-core/src/plugins/examples.rs", "crates/trek-app/src/plugins/mod.rs", "crates/trek-app/src/plugins/render.rs", "crates/trek-app/src/plugins/logic.rs", "crates/trek-app/src/plugins/focus.rs", "crates/trek-app/src/plugins/trail.rs", "crates/trek-app/src/settings_view/plugins.rs", "crates/trek-script/src/plugin.rs", "vendor/gpui-pre/src/corner_scale.rs"]
+code = ["crates/trek-core/src/skills.rs", "crates/trek-core/skills/trek-plugin/SKILL.md", "crates/trek-core/skills/trek-theme/SKILL.md", "crates/trek-core/src/plugins/mod.rs", "crates/trek-core/src/plugins/grant.rs", "crates/trek-core/src/plugins/ui.rs", "crates/trek-core/src/plugins/cli.rs", "crates/trek-core/src/plugins/data.rs", "crates/trek-core/src/plugins/examples.rs", "crates/trek-app/src/plugins/mod.rs", "crates/trek-app/src/plugins/render.rs", "crates/trek-app/src/plugins/logic.rs", "crates/trek-app/src/plugins/focus.rs", "crates/trek-app/src/plugins/trail.rs", "crates/trek-app/src/settings_view/plugins.rs", "crates/trek-script/src/plugin.rs", "vendor/gpui-pre/src/corner_scale.rs"]
 tests = ["crates/trek-core/src/plugins/mod.rs", "crates/trek-core/src/plugins/ui.rs", "crates/trek-core/src/plugins/cli.rs", "crates/trek-script/src/plugin.rs", "crates/trek-app/tests/plugins.rs"]
 
 [[feature.promise]]
@@ -135,6 +135,36 @@ windows = "crates/trek-app/tests/plugins.rs::no_plugins_nothing_drawn_and_a_plug
 what = "A replacement gives the surface back to Trek's own when its plugin stops or the user says so"
 macos = "crates/trek-app/tests/plugins.rs::a_plugin_that_asks_waits_and_a_replacement_gives_way_when_its_plugin_stops"
 windows = "crates/trek-app/tests/plugins.rs::a_plugin_that_asks_waits_and_a_replacement_gives_way_when_its_plugin_stops"
+
+[[feature.promise]]
+what = "A plugin folder written by any agent (or by hand, or the CLI) is picked up without a restart, listed in Settings › Plugins with who and when, announced to the user, switched off and on at once, and deleted with its files"
+macos = "crates/trek-app/tests/plugins.rs::a_folder_an_agent_writes_is_picked_up_listed_announced_and_switches_live"
+windows = "crates/trek-app/tests/plugins.rs::a_folder_an_agent_writes_is_picked_up_listed_announced_and_switches_live"
+
+[[feature.promise]]
+what = "A plugin that asks for permissions is announced as asking and waits for the user's Allow, whoever wrote it and whatever the file says"
+macos = "crates/trek-app/tests/plugins.rs::a_plugin_that_asks_for_permissions_is_announced_and_waits_for_the_user"
+windows = "crates/trek-app/tests/plugins.rs::a_plugin_that_asks_for_permissions_is_announced_and_waits_for_the_user"
+
+[[feature.promise]]
+what = "A plugin that asks for no permissions (and so runs when an agent turns it on) reaches nothing a permission gates"
+macos = "crates/trek-core/src/plugins/mod.rs::a_plugin_that_asks_for_nothing_reaches_nothing_a_permission_gates"
+windows = "crates/trek-core/src/plugins/mod.rs::a_plugin_that_asks_for_nothing_reaches_nothing_a_permission_gates"
+
+[[feature.promise]]
+what = "A plugin's look is off when another look is chosen (Settings shows it off, nothing fights) and turning the plugin on brings it back, with no restart"
+macos = "crates/trek-app/tests/plugins.rs::a_plugins_look_is_off_when_another_look_is_chosen_and_comes_back_when_it_is_turned_on"
+windows = "crates/trek-app/tests/plugins.rs::a_plugins_look_is_off_when_another_look_is_chosen_and_comes_back_when_it_is_turned_on"
+
+[[feature.promise]]
+what = "A theme file already in the themes folder is listed with the plugins, switches by being the look on screen, and deletes"
+macos = "crates/trek-app/tests/plugins.rs::a_loose_theme_file_in_the_themes_folder_is_listed_switches_and_deletes_like_a_plugin"
+windows = "crates/trek-app/tests/plugins.rs::a_loose_theme_file_in_the_themes_folder_is_listed_switches_and_deletes_like_a_plugin"
+
+[[feature.promise]]
+what = "Agents are told Trek's exact plugins folder and command, and never to write into ~/.claude or Claude Code's mods"
+macos = "crates/trek-app/tests/plugins.rs::the_agents_are_told_trek_s_exact_folder_and_not_to_use_claude_codes"
+windows = "crates/trek-app/tests/plugins.rs::the_agents_are_told_trek_s_exact_folder_and_not_to_use_claude_codes"
 
 [[feature.promise]]
 what = "A wrong plugin says what's wrong and where, and isn't loaded"
@@ -1443,6 +1473,22 @@ windows = "yes"
 live = ["route project:{project}", "wait 300", "key secondary-a", "key backspace", "type @READ", "wait 700", "count picker-list 1", "key escape"]
 how = { macos = "Paths as the Mac's file system gives them.", windows = "Paths written with `/`, as on the Mac and as git writes them: a `\\` becomes `/` when the folder is read, so matching, recent files and what @ inserts are the same on both." }
 code = ["crates/trek-mentions/src/lib.rs"]
+
+[[feature]]
+id = "sidebar-width"
+area = "App"
+what = "The left sidebar's width: drag its edge (resize cursor, a highlight, a wide grab strip) between a minimum and a maximum, pulled narrower than a snap it folds away as the toggle leaves it, and it comes back at the width it had; a double-click on the edge resets the width; the width is kept"
+macos = "yes"
+windows = "yes"
+live = ["route project:{project}", "wait 500", "sidebar width 272", "drag sidebar-resize 380", "wait 300", "sidebar width 380", "drag sidebar-resize 240", "wait 300", "sidebar width 240", "drag sidebar-resize 100", "wait 800", "sidebar folded 1", "key secondary-b", "wait 800", "sidebar folded 0", "sidebar width 240", "drag sidebar-resize 272", "wait 300", "sidebar width 272", "count sidebar-resize 1"]
+how = { macos = "Shared code: the width, its range and the snap in trek_core::settings (Layout::sidebar_width), the drag and the grab strip in trek-app's root (the strip is ui::column_grab, the one the tools panel's edge uses).", windows = "The same code, with no platform branch: the cursor and the strip are GPUI's. The title bar's left cluster takes the sidebar's width on both." }
+code = ["crates/trek-core/src/settings.rs", "crates/trek-app/src/root.rs", "crates/trek-app/src/ui.rs"]
+tests = ["crates/trek-app/tests/sidebar.rs", "crates/trek-core/src/settings.rs"]
+
+[[feature.promise]]
+what = "A sidebar pulled narrower than the snap folds away and the toggle brings it back at the width it had; the width stays within its range and is kept"
+macos = "crates/trek-app/tests/sidebar.rs::pulled_narrower_than_the_snap_the_sidebar_folds_and_the_toggle_brings_back_its_width"
+windows = "crates/trek-app/tests/sidebar.rs::pulled_narrower_than_the_snap_the_sidebar_folds_and_the_toggle_brings_back_its_width"
 
 [[feature]]
 id = "title-bar"
