@@ -451,7 +451,14 @@ fn a_plugin_key_that_is_trek_s_own_stays_trek_s() {
             assert_eq!(
                 keys,
                 [
-                    ("mine".to_string(), Some("cmd-alt-j".to_string())),
+                    // The manifest's `cmd` as the platform has it: Ctrl off the Mac.
+                    (
+                        "mine".to_string(),
+                        Some(trek_app::keys::manifest_keystroke(
+                            "cmd-alt-j",
+                            trek_app::keys::is_mac()
+                        ))
+                    ),
                     ("theirs".to_string(), None)
                 ]
             );
