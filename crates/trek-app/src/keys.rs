@@ -3,7 +3,7 @@
 //!
 //! `TABLE` holds every binding (what `main.rs`, `notes.rs` and `editor.rs` bind), with the keys
 //! each platform has it on. Where Windows differs, the row says why. Everything that shows a
-//! shortcut draws on it: the Keyboard Shortcuts page (`shortcut_groups`), the palette's hints
+//! shortcut draws on it: the Keyboard Shortcuts page (`page`), the palette's hints
 //! (`hint`) and, for the tooltips and sentences written with Mac glyphs, `localize`, which turns
 //! a glyph run like `⌥⌘E` into the keys the Windows build really binds (Alt+Shift+E), not just
 //! the same letters with other modifiers.
@@ -11,6 +11,12 @@
 //! The Mac side is what Trek has always had, byte for byte; the Windows side is the same keys
 //! with Ctrl where the Mac has ⌘, except where that would collide with Windows or with the shell
 //! in the terminal panel (see the rows).
+//!
+//! The table is the defaults. The user can change any binding on the Keyboard Shortcuts page:
+//! their changes (`Settings::keys`, only what differs from the table, per platform) are laid over
+//! it here (`set_changes`), so the keymap (`rebind`), the menus, the hints and the sentences all
+//! show what they chose. A Ctrl+letter they choose on Windows is still the shell's in the
+//! terminal panel, as the table's are.
 
 use gpui_kit::KeyBinding;
 use std::borrow::Cow;
@@ -331,6 +337,12 @@ pub enum Id {
     DiffClear,
     /// The text fields' own redo (the kit binds it): ⇧⌘Z on a Mac, Ctrl+Y on Windows.
     Redo,
+    /// The whole interface larger, smaller, as designed (`zoom`).
+    ZoomIn,
+    /// ⌘+ as typed with Shift (⌘= is the same key without it).
+    ZoomInShift,
+    ZoomOut,
+    ResetZoom,
 }
 
 /// Which list of bindings a row goes into (each file binds its own).
@@ -1012,6 +1024,12 @@ static TABLE: LazyLock<Vec<Binding>> = LazyLock::new(|| {
             DIFF,
             act!(crate::diff_review::ClearCursor),
         ),
+        // The whole interface, as browsers and editors zoom: ⌘= and ⌘+ (one key, with Shift or
+        // without), ⌘− and ⌘0. No letter in them, so the terminal on Windows doesn't need them.
+        row(ZoomIn, App, "cmd-=", Same, None, act!(crate::ZoomIn)),
+        row(ZoomInShift, App, "cmd-+", Same, None, act!(crate::ZoomIn)),
+        row(ZoomOut, App, "cmd--", Same, None, act!(crate::ZoomOut)),
+        row(ResetZoom, App, "cmd-0", Same, None, act!(crate::ResetZoom)),
         // Not Trek's.
         row(Redo, System, "cmd-shift-z", Keys("ctrl-y"), None, None),
     ]
@@ -1040,13 +1058,22 @@ fn stroke_of(b: &Binding, mac: bool) -> Option<Stroke> {
     }
 }
 
+/// The keys a row has on a platform now: the user's (`set_changes`) where they changed them,
+/// else the table's.
+fn current_stroke(b: &Binding, mac: bool) -> Option<Stroke> {
+    match change_for(&b.id.name(), mac) {
+        Some(Some(keys)) => Stroke::parse(&keys, mac).or_else(|| stroke_of(b, mac)),
+        Some(None) => None,
+        None => stroke_of(b, mac),
+    }
+}
+
 fn resolve(b: &Binding, mac: bool) -> Option<Resolved> {
-    let stroke = stroke_of(b, mac)?;
+    let stroke = current_stroke(b, mac)?;
     // The Mac's keys go to gpui as they're written in the table.
-    let keystroke = if mac {
-        b.mac?.to_string()
-    } else {
-        stroke.keystroke()
+    let keystroke = match (mac, change_for(&b.id.name(), mac)) {
+        (true, None) => b.mac?.to_string(),
+        _ => stroke.keystroke(),
     };
     let context = match (mac, &stroke) {
         (true, _) => b.context.map(str::to_string),
@@ -1066,16 +1093,182 @@ pub fn bindings(group: Group) -> Vec<KeyBinding> {
     bindings_for(group, is_mac())
 }
 
-/// The bindings of `group` on a Mac (`mac`) or Windows.
+/// The bindings of `group` on a Mac (`mac`) or Windows, as the user has them.
 pub fn bindings_for(group: Group, mac: bool) -> Vec<KeyBinding> {
     TABLE
         .iter()
         .filter(|b| b.group == group)
         .filter_map(|b| {
             let r = resolve(b, mac)?;
-            Some((b.build?)(&r.keystroke, r.context.as_deref()))
+            Some((b.build?)(&r.keystroke, r.context.as_deref()).with_meta(TREK))
         })
         .collect()
+}
+
+/// What marks a binding in gpui's keymap as one of Trek's own, so `rebind` can take Trek's out and
+/// put them back as the user has them, leaving the kit's own (its text fields', its lists') be.
+pub const TREK: gpui_kit::KeyBindingMetaIndex = gpui_kit::KeyBindingMetaIndex(0x7e3c);
+
+/// While a shortcut is being recorded (Settings › Keyboard Shortcuts) Trek's keys are off, so
+/// pressing ⌘Q there records it instead of quitting.
+static SUSPENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Every binding of Trek's, as the user has them, tagged `TREK`: none while recording.
+pub fn trek_bindings() -> Vec<KeyBinding> {
+    if SUSPENDED.load(std::sync::atomic::Ordering::Relaxed) {
+        return Vec::new();
+    }
+    let mut out = crate::key_bindings();
+    out.extend(bindings(Group::Notes));
+    out.extend(bindings(Group::Editor));
+    out
+}
+
+/// Put Trek's bindings in gpui's keymap again as the user has them now (after a change in
+/// Settings, or a settings file read at start), the menus with them (the Mac's menu bar shows
+/// each command's keys from the keymap) and the plugins' keys after them (a key the user gave a
+/// command of Trek's isn't a plugin's to take).
+pub fn rebind(cx: &mut gpui_kit::App) {
+    let keymap = cx.key_bindings();
+    let kept: Vec<KeyBinding> = keymap
+        .borrow()
+        .bindings()
+        .filter(|b| b.meta() != Some(TREK))
+        .cloned()
+        .collect();
+    cx.clear_key_bindings();
+    cx.bind_keys(kept);
+    cx.bind_keys(trek_bindings());
+    cx.set_menus(crate::menus());
+    crate::plugins::keys_changed(cx);
+}
+
+/// Turn Trek's keys off while a shortcut is recorded, and on again after.
+pub fn suspend(on: bool, cx: &mut gpui_kit::App) {
+    if SUSPENDED.swap(on, std::sync::atomic::Ordering::Relaxed) != on {
+        rebind(cx);
+    }
+}
+
+/// Whether Trek's keys are off for a recording (`suspend`).
+pub fn suspended() -> bool {
+    SUSPENDED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+// ───────────────────────────── the user's changes ─────────────────────────────
+
+impl Id {
+    /// The name a change to it is saved under (`new-thread`): its own, in kebab case.
+    pub fn name(self) -> String {
+        let debug = format!("{self:?}");
+        let mut out = String::with_capacity(debug.len() + 4);
+        for (i, c) in debug.chars().enumerate() {
+            if c.is_ascii_uppercase() {
+                if i > 0 {
+                    out.push('-');
+                }
+                out.push(c.to_ascii_lowercase());
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+}
+
+/// The shortcuts the user changed, as the settings file has them (`Settings::keys`).
+static CHANGES: LazyLock<std::sync::RwLock<trek_core::settings::Keys>> =
+    LazyLock::new(Default::default);
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TEST_CHANGES: std::cell::RefCell<Option<trek_core::settings::Keys>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Take the user's changes (from the settings file): whether they differ from what was had.
+/// `rebind` puts them in the keymap.
+pub fn set_changes(keys: &trek_core::settings::Keys) -> bool {
+    let mut held = CHANGES.write().unwrap_or_else(|e| e.into_inner());
+    if *held == *keys {
+        return false;
+    }
+    *held = keys.clone();
+    true
+}
+
+/// Run `f` with these changes in place of the user's, on this thread only (the tests').
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_changes<T>(keys: trek_core::settings::Keys, f: impl FnOnce() -> T) -> T {
+    let before = TEST_CHANGES.with(|c| c.replace(Some(keys)));
+    let out = f();
+    TEST_CHANGES.with(|c| *c.borrow_mut() = before);
+    out
+}
+
+fn any_changes(mac: bool) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(found) =
+        TEST_CHANGES.with(|c| c.borrow().as_ref().map(|k| !k.for_platform(mac).is_empty()))
+    {
+        return found;
+    }
+    !CHANGES
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .for_platform(mac)
+        .is_empty()
+}
+
+/// What the user changed `name` to on a platform: `None` where they left it, `Some(None)` where
+/// they took its keys away.
+fn change_for(name: &str, mac: bool) -> Option<Option<String>> {
+    let pick = |keys: &trek_core::settings::Keys| {
+        keys.for_platform(mac)
+            .get(name)
+            .map(|k| Some(k.trim().to_string()).filter(|k| !k.is_empty()))
+    };
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(found) = TEST_CHANGES.with(|c| c.borrow().as_ref().map(pick)) {
+        return found;
+    }
+    pick(&CHANGES.read().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// The keys a plugin's command has on the platform running: the user's where they changed them
+/// (`plugin:<id>/<command>`), else what its manifest says (`cmd` is Ctrl off the Mac). `None`:
+/// none.
+pub fn plugin_key(plugin: &str, command: &str, manifest: Option<&str>) -> Option<String> {
+    plugin_key_for(plugin, command, manifest, is_mac())
+}
+
+pub fn plugin_key_for(
+    plugin: &str,
+    command: &str,
+    manifest: Option<&str>,
+    mac: bool,
+) -> Option<String> {
+    match change_for(&plugin_name(plugin, command), mac) {
+        Some(changed) => changed,
+        None => manifest.map(|m| manifest_keystroke(m, mac)),
+    }
+}
+
+/// A manifest's key (`cmd-alt-f`) as a platform has it: `cmd` is Ctrl off the Mac.
+pub fn manifest_keystroke(key: &str, mac: bool) -> String {
+    if mac {
+        key.to_string()
+    } else {
+        key.split('-')
+            .map(|part| if part == "cmd" { "ctrl" } else { part })
+            .collect::<Vec<_>>()
+            .join("-")
+    }
+}
+
+/// The name a plugin command's change is saved under.
+pub fn plugin_name(plugin: &str, command: &str) -> String {
+    format!("plugin:{plugin}/{command}")
 }
 
 fn row_of(id: Id) -> Option<&'static Binding> {
@@ -1098,7 +1291,7 @@ pub fn hint(id: Id) -> String {
 
 pub fn hint_for(id: Id, mac: bool) -> String {
     row_of(id)
-        .and_then(|b| stroke_of(b, mac))
+        .and_then(|b| current_stroke(b, mac))
         .map(|s| s.label(mac))
         .unwrap_or_default()
 }
@@ -1135,9 +1328,11 @@ pub fn shared(text: &str) -> gpui_kit::SharedString {
 }
 
 pub fn localize_for(text: &str, mac: bool) -> Cow<'_, str> {
-    if mac || !has_glyphs(text) {
+    // On a Mac the text is written as it's shown, unless the user changed a shortcut in it.
+    if !has_glyphs(text) || (mac && !any_changes(true)) {
         return Cow::Borrowed(text);
     }
+    let mut taken_away = false;
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len() + 8);
     let mut i = 0;
@@ -1149,6 +1344,7 @@ pub fn localize_for(text: &str, mac: bool) -> Cow<'_, str> {
         }
         let mut stroke = Stroke::default();
         let mut modifiers = 0;
+        let start = i;
         while i < chars.len() && is_modifier_glyph(chars[i]) {
             match chars[i] {
                 '⌃' => stroke.ctrl = true,
@@ -1192,16 +1388,42 @@ pub fn localize_for(text: &str, mac: bool) -> Cow<'_, str> {
             Some(key) => {
                 i += 1;
                 if modifiers == 0 {
-                    out.push_str(&windows_key(&key));
+                    if mac {
+                        out.extend(&chars[start..i]);
+                    } else {
+                        out.push_str(&windows_key(&key));
+                    }
                 } else {
                     stroke.key = key;
-                    out.push_str(&on_windows(&stroke).label(false));
+                    match (mac, on_platform(&stroke, mac)) {
+                        // Left as it was: written as the text has it.
+                        (true, Shown::Default) => out.extend(&chars[start..i]),
+                        (false, Shown::Default) => {
+                            out.push_str(&stroke.ctrl_for_cmd().label(false))
+                        }
+                        (_, Shown::Keys(s)) => out.push_str(&s.label(mac)),
+                        (_, Shown::None) => taken_away = true,
+                    }
                 }
             }
+            None if mac => out.extend(&chars[start..i]),
             None => out.push_str(&windows_modifiers_alone(&stroke)),
         }
     }
+    if taken_away {
+        // "Settings (⌘,)" with ⌘, taken away is "Settings", not "Settings ()".
+        out = out.replace(" ()", "").replace("()", "");
+    }
     Cow::Owned(out)
+}
+
+/// What a glyph run in a sentence shows on a platform.
+enum Shown {
+    /// What the text has (on Windows: its keys with Ctrl for ⌘): no row has those keys.
+    Default,
+    Keys(Stroke),
+    /// The user took the row's keys away.
+    None,
 }
 
 /// A modifier with no key after it ("⌘-click", "hold ⌥"): Ctrl, Alt…
@@ -1209,14 +1431,25 @@ fn windows_modifiers_alone(stroke: &Stroke) -> String {
     stroke.ctrl_for_cmd().windows_modifiers().join("+")
 }
 
-/// What Windows has for the Mac keystroke `mac`: the row's own keys where Trek binds it, else the
-/// same with Ctrl for ⌘.
-fn on_windows(mac: &Stroke) -> Stroke {
-    TABLE
-        .iter()
-        .filter(|b| b.mac.and_then(|m| Stroke::parse(m, true)).as_ref() == Some(mac))
-        .find_map(windows_stroke)
-        .unwrap_or_else(|| mac.ctrl_for_cmd())
+/// What a platform has for the Mac keystroke `stroke` as a sentence wrote it: the first row with
+/// those keys on a Mac, as the user has it here (the row's own keys on Windows, or the user's).
+fn on_platform(stroke: &Stroke, mac: bool) -> Shown {
+    let rows = || {
+        TABLE
+            .iter()
+            .filter(|b| b.mac.and_then(|m| Stroke::parse(m, true)).as_ref() == Some(stroke))
+    };
+    let Some(first) = rows().next() else {
+        return Shown::Default;
+    };
+    match change_for(&first.id.name(), mac) {
+        Some(_) => current_stroke(first, mac).map_or(Shown::None, Shown::Keys),
+        None if mac => Shown::Default,
+        // The first row Windows binds (a row dropped there leaves it to the next).
+        None => rows()
+            .find_map(windows_stroke)
+            .map_or(Shown::Default, Shown::Keys),
+    }
 }
 
 // ───────────────────────────── the Keyboard Shortcuts page ─────────────────────────────
@@ -1236,24 +1469,25 @@ impl Chip {
 
 /// Where a row of the page gets its keys.
 enum Show {
-    /// A binding in the table.
+    /// A binding in the table, which the user can change.
     Bound(Id),
     /// Keys that aren't Trek's to bind (the clipboard's, the input's Enter), written as a keystroke.
     Keys(&'static str),
     /// One key cap with this text on both.
     Cap(&'static str),
-    /// Next / previous change: ⌥⌘↓ ↑ on a Mac.
-    Hunks,
-    /// Either of two bindings.
-    Either(Id, Id),
 }
 
-use Show::{Bound, Cap, Hunks};
+use Show::{Bound, Cap};
+/// Every binding Trek has, in the page's sections, and the keys that aren't its to change.
 const PAGE: &[(&str, &[(&str, Show)])] = &[
     (
         "Threads",
         &[
             ("Search threads and commands", Bound(Id::OpenPalette)),
+            (
+                "Search threads and commands, anywhere",
+                Bound(Id::OpenPaletteAnywhere),
+            ),
             ("New thread", Bound(Id::NewThread)),
             ("Open a folder", Bound(Id::OpenFolder)),
             (
@@ -1282,7 +1516,7 @@ const PAGE: &[(&str, &[(&str, Show)])] = &[
     (
         "Composer",
         &[
-            // "Send" and "New line" swap their keys with the setting (`shortcut_groups`).
+            // "Send" and "New line" swap their keys with the setting (`page`).
             ("Send", Show::Keys("enter")),
             ("New line", Show::Keys("shift-enter")),
             (
@@ -1303,26 +1537,47 @@ const PAGE: &[(&str, &[(&str, Show)])] = &[
         &[
             ("Go to file", Bound(Id::QuickOpen)),
             ("Edit the picked lines", Bound(Id::InlineEdit)),
+            ("Save the file", Bound(Id::SaveFile)),
             ("Format the document", Bound(Id::FormatDocument)),
             ("Keep a change", Bound(Id::KeepHunk)),
             ("Undo a change", Bound(Id::UndoHunk)),
-            ("Next or previous change", Hunks),
+            ("Next change", Bound(Id::NextHunk)),
+            ("Previous change", Bound(Id::PreviousHunk)),
             ("Keep all changes", Show::Keys("secondary-enter")),
             ("Undo all changes (press twice)", Bound(Id::UndoAllOrStop)),
-            ("New chat", Bound(Id::NewThread)),
-            ("Switch to Agents", Bound(Id::SwitchMode)),
+            ("Explorer", Bound(Id::ToggleIde)),
+            ("Search in files", Bound(Id::ToggleIdeSearch)),
+            ("Source control", Bound(Id::FocusScm)),
+            ("Terminal", Bound(Id::ToggleTerminal)),
+            ("AI side bar", Bound(Id::ToggleAiBar)),
+            (
+                "Add the selection to the chat",
+                Bound(Id::AddSelectionToChat),
+            ),
+            (
+                "Add the selection to a new chat",
+                Bound(Id::AddSelectionToNewChat),
+            ),
         ],
     ),
     (
         "Window",
         &[
+            ("Switch Agents / Editor", Bound(Id::SwitchMode)),
             ("Basecamp", Bound(Id::OpenBasecamp)),
             ("Leave Basecamp", Bound(Id::LeaveBasecamp)),
+            ("Notes", Bound(Id::OpenNotes)),
             ("Study", Bound(Id::OpenStudy)),
             ("Toggle the sidebar", Bound(Id::ToggleSidebar)),
             ("Toggle the tools panel", Bound(Id::ToggleRightPanel)),
             ("Settings", Bound(Id::OpenSettings)),
+            ("Next tab", Bound(Id::NextTab)),
+            ("Previous tab", Bound(Id::PreviousTab)),
             ("Close the file or thread tab in front", Bound(Id::CloseTab)),
+            (
+                "Close the file or thread tab in front, again",
+                Bound(Id::CloseTabCtrlF4),
+            ),
             ("Close a thread window", Bound(Id::CloseWindow)),
             ("Hide Trek", Bound(Id::HideApp)),
             ("Minimize", Bound(Id::Minimize)),
@@ -1330,16 +1585,48 @@ const PAGE: &[(&str, &[(&str, Show)])] = &[
         ],
     ),
     (
+        "Zoom",
+        &[
+            ("Zoom in", Bound(Id::ZoomIn)),
+            ("Zoom in, with Shift", Bound(Id::ZoomInShift)),
+            ("Zoom out", Bound(Id::ZoomOut)),
+            ("Actual size", Bound(Id::ResetZoom)),
+        ],
+    ),
+    (
+        "Notes",
+        &[
+            ("New note", Bound(Id::NewNote)),
+            ("Bold", Bound(Id::NoteBold)),
+            ("Italic", Bound(Id::NoteItalic)),
+            ("Underline", Bound(Id::NoteUnderline)),
+            ("Strikethrough", Bound(Id::NoteStrike)),
+            ("Bulleted list", Bound(Id::NoteBullets)),
+            ("Numbered list", Bound(Id::NoteNumbers)),
+            ("Checklist", Bound(Id::NoteChecklist)),
+            ("Heading", Bound(Id::NoteHeading1)),
+            ("Subheading", Bound(Id::NoteHeading2)),
+            ("Quote", Bound(Id::NoteQuote)),
+            ("Code", Bound(Id::NoteCode)),
+            ("Check or uncheck", Bound(Id::NoteToggleCheck)),
+        ],
+    ),
+    (
         "Diff review",
         &[
-            ("Next line", Show::Either(Id::DiffNextLine, Id::DiffDown)),
+            ("Next line", Bound(Id::DiffNextLine)),
+            ("Next line, with the arrow", Bound(Id::DiffDown)),
+            ("Previous line", Bound(Id::DiffPreviousLine)),
+            ("Previous line, with the arrow", Bound(Id::DiffUp)),
+            ("Select lines down", Bound(Id::DiffExtendDown)),
             (
-                "Previous line",
-                Show::Either(Id::DiffPreviousLine, Id::DiffUp),
+                "Select lines down, with the arrow",
+                Bound(Id::DiffExtendArrowDown),
             ),
+            ("Select lines up", Bound(Id::DiffExtendUp)),
             (
-                "Select lines",
-                Show::Either(Id::DiffExtendDown, Id::DiffExtendUp),
+                "Select lines up, with the arrow",
+                Bound(Id::DiffExtendArrowUp),
             ),
             ("Next hunk", Bound(Id::DiffNextHunk)),
             ("Previous hunk", Bound(Id::DiffPreviousHunk)),
@@ -1354,68 +1641,359 @@ const PAGE: &[(&str, &[(&str, Show)])] = &[
     ),
 ];
 
-/// The Keyboard Shortcuts page: groups of (what it does, its keys). `send_with_secondary_enter`
-/// is the setting that swaps Send and New line. Shortcuts that don't exist on the platform (Hide
-/// on Windows) are left out.
-pub fn shortcut_groups(
+/// A plugin's command, for the page (`plugins::key_commands`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PluginCommand {
+    pub plugin: String,
+    pub plugin_name: String,
+    pub command: String,
+    pub title: String,
+    /// The key its manifest asks for (`cmd-alt-f`).
+    pub key: Option<String>,
+}
+
+/// A shortcut the user can change: one of Trek's, or a plugin's command.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Command {
+    /// What a change is saved under: the id's name, or `plugin:<id>/<command>`.
+    pub name: String,
+    pub title: String,
+    pub section: String,
+    /// Its keys now, as gpui reads them (`None`: it has none).
+    pub keys: Option<String>,
+    /// Trek's (or the plugin manifest's) keys for it on this platform.
+    pub default: Option<String>,
+    /// Where it works (the table's key context; a plugin's are everywhere).
+    pub context: Option<String>,
+    pub plugin: bool,
+    /// Keys on their own (no ⌘, ⌃ or ⌥) are fine for it: its default is one (a diff's letters,
+    /// Escape, ⇧⇥ in the composer).
+    pub plain_ok: bool,
+}
+
+impl Command {
+    pub fn changed(&self) -> bool {
+        self.keys != self.default
+    }
+
+    /// Its keys as caps: `⌘ ⇧ K`, `Ctrl Shift K`.
+    pub fn chips(&self, mac: bool) -> Vec<Chip> {
+        self.keys
+            .as_deref()
+            .map(|k| chips_for(k, mac))
+            .unwrap_or_default()
+    }
+}
+
+/// `keystroke` as the page's key caps.
+pub fn chips_for(keystroke: &str, mac: bool) -> Vec<Chip> {
+    Stroke::parse(keystroke, mac)
+        .map(|s| Chip::keys(s.chips(mac)))
+        .unwrap_or_default()
+}
+
+/// A row of the page.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Row {
+    Command(Command),
+    /// Keys that aren't Trek's to change: the composer's Enter, `/`, the clipboard's paste.
+    Fixed(&'static str, Vec<Chip>),
+}
+
+impl Row {
+    pub fn title(&self) -> &str {
+        match self {
+            Row::Command(c) => &c.title,
+            Row::Fixed(t, _) => t,
+        }
+    }
+}
+
+/// Whether a row has keys on a platform by default (Hide isn't on Windows, Ctrl+F4 not on a Mac).
+fn exists(b: &Binding, mac: bool) -> bool {
+    stroke_of(b, mac).is_some()
+}
+
+fn command_of(title: &str, section: &str, b: &Binding, mac: bool) -> Command {
+    let keys = current_stroke(b, mac).map(|s| match (mac, change_for(&b.id.name(), mac)) {
+        (true, None) => b.mac.unwrap_or_default().to_string(),
+        _ => s.keystroke(),
+    });
+    let default = stroke_of(b, mac).map(|s| {
+        if mac {
+            b.mac.unwrap_or_default().to_string()
+        } else {
+            s.keystroke()
+        }
+    });
+    let plain_ok = stroke_of(b, mac).is_some_and(|s| !s.ctrl && !s.alt && !s.cmd);
+    Command {
+        name: b.id.name(),
+        title: title.to_string(),
+        section: section.to_string(),
+        keys,
+        default,
+        context: b.context.map(str::to_string),
+        plugin: false,
+        plain_ok,
+    }
+}
+
+/// The Keyboard Shortcuts page on a Mac (`mac`) or Windows: its sections and their rows, the
+/// plugins' commands with a key in a section of their own. `send_with_secondary_enter` is the
+/// setting that swaps Send and New line. Shortcuts the platform doesn't have (Hide on Windows) are
+/// left out.
+pub fn page(
     mac: bool,
     send_with_secondary_enter: bool,
-) -> Vec<(&'static str, Vec<(&'static str, Vec<Chip>)>)> {
-    let chips_of = |keystroke: &str| {
-        Stroke::parse(keystroke, mac)
-            .map(|s| Chip::keys(s.chips(mac)))
-            .unwrap_or_default()
-    };
-    PAGE.iter()
-        .map(|(group, rows)| {
+    plugins: &[PluginCommand],
+) -> Vec<(String, Vec<Row>)> {
+    let mut out: Vec<(String, Vec<Row>)> = PAGE
+        .iter()
+        .map(|(section, rows)| {
             let rows = rows
                 .iter()
                 .filter_map(|(name, show)| {
-                    let chips = match (*name, show) {
-                        ("Send", _) => chips_of(if send_with_secondary_enter {
-                            "secondary-enter"
-                        } else {
-                            "enter"
-                        }),
-                        ("New line", _) => chips_of(if send_with_secondary_enter {
-                            "enter"
-                        } else {
-                            "shift-enter"
-                        }),
+                    Some(match (*name, show) {
+                        ("Send", _) => Row::Fixed(
+                            name,
+                            chips_for(
+                                if send_with_secondary_enter {
+                                    "secondary-enter"
+                                } else {
+                                    "enter"
+                                },
+                                mac,
+                            ),
+                        ),
+                        ("New line", _) => Row::Fixed(
+                            name,
+                            chips_for(
+                                if send_with_secondary_enter {
+                                    "enter"
+                                } else {
+                                    "shift-enter"
+                                },
+                                mac,
+                            ),
+                        ),
                         (_, Show::Bound(id)) => {
-                            Chip::keys(stroke_of(row_of(*id)?, mac)?.chips(mac))
+                            let b = row_of(*id)?;
+                            if !exists(b, mac) {
+                                return None;
+                            }
+                            Row::Command(command_of(name, section, b, mac))
                         }
-                        (_, Show::Keys(keystroke)) => chips_of(keystroke),
-                        (_, Show::Either(a, b)) => {
-                            let mut chips = Chip::keys(stroke_of(row_of(*a)?, mac)?.chips(mac));
-                            chips.push(Chip::Word("or"));
-                            chips.extend(Chip::keys(stroke_of(row_of(*b)?, mac)?.chips(mac)));
-                            chips
-                        }
-                        (_, Show::Cap(text)) => vec![Chip::Key((*text).to_string())],
-                        (_, Show::Hunks) if mac => {
-                            let mut chips =
-                                Chip::keys(stroke_of(row_of(Id::NextHunk)?, mac)?.chips(mac));
-                            chips.pop();
-                            chips.push(Chip::Key("↓ ↑".into()));
-                            chips
-                        }
-                        (_, Show::Hunks) => {
-                            let mut chips =
-                                Chip::keys(stroke_of(row_of(Id::NextHunk)?, mac)?.chips(mac));
-                            chips.push(Chip::Word("or"));
-                            chips.extend(Chip::keys(
-                                stroke_of(row_of(Id::PreviousHunk)?, mac)?.chips(mac),
-                            ));
-                            chips
-                        }
-                    };
-                    Some((*name, chips))
+                        (_, Show::Keys(keystroke)) => Row::Fixed(name, chips_for(keystroke, mac)),
+                        (_, Show::Cap(text)) => Row::Fixed(name, vec![Chip::Key((*text).into())]),
+                    })
                 })
                 .collect();
-            (*group, rows)
+            (section.to_string(), rows)
+        })
+        .collect();
+    if !plugins.is_empty() {
+        let rows = plugins
+            .iter()
+            .map(|p| {
+                let default = p.key.as_deref().map(|k| manifest_keystroke(k, mac));
+                Row::Command(Command {
+                    name: plugin_name(&p.plugin, &p.command),
+                    title: p.title.clone(),
+                    section: p.plugin_name.clone(),
+                    keys: plugin_key_for(&p.plugin, &p.command, p.key.as_deref(), mac),
+                    default,
+                    context: None,
+                    plugin: true,
+                    plain_ok: false,
+                })
+            })
+            .collect();
+        out.push(("Plugins".to_string(), rows));
+    }
+    out
+}
+
+/// Every command on the page, in its order.
+pub fn commands(page: &[(String, Vec<Row>)]) -> Vec<&Command> {
+    page.iter()
+        .flat_map(|(_, rows)| rows)
+        .filter_map(|r| match r {
+            Row::Command(c) => Some(c),
+            Row::Fixed(..) => None,
         })
         .collect()
+}
+
+/// The same keys, however they were written (`cmd-shift-k`, `shift-cmd-k`).
+fn same_keys(a: &str, b: &str, mac: bool) -> bool {
+    match (Stroke::parse(a, mac), Stroke::parse(b, mac)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// The commands that already have `keystroke` where `name` would have it: Trek's in the same
+/// context, and a plugin's anywhere (a plugin's key is heard everywhere, and gives way to any of
+/// Trek's).
+pub fn conflicts<'a>(
+    commands: &[&'a Command],
+    name: &str,
+    keystroke: &str,
+    mac: bool,
+) -> Vec<&'a Command> {
+    let Some(me) = commands.iter().find(|c| c.name == name) else {
+        return Vec::new();
+    };
+    commands
+        .iter()
+        .copied()
+        .filter(|c| c.name != name)
+        .filter(|c| {
+            c.keys
+                .as_deref()
+                .is_some_and(|k| same_keys(k, keystroke, mac))
+        })
+        .filter(|c| c.plugin || me.plugin || c.context == me.context)
+        .collect()
+}
+
+/// Why `keystroke` can't be a shortcut on a platform, if it can't: the system keeps it, it's what
+/// text fields and the terminal need, or it's a key on its own where typing needs it (`plain_ok`
+/// lets a command that already has one keep one: a diff's letters).
+pub fn refusal(keystroke: &str, mac: bool, plain_ok: bool) -> Option<&'static str> {
+    let Some(s) = Stroke::parse(keystroke, mac) else {
+        return Some("That isn't a key Trek can use.");
+    };
+    let only = |ctrl: bool, alt: bool, shift: bool, cmd: bool, key: &str| {
+        s.ctrl == ctrl && s.alt == alt && s.shift == shift && s.cmd == cmd && s.key == key
+    };
+    let function_key =
+        s.key.len() > 1 && s.key.starts_with('f') && s.key[1..].parse::<u8>().is_ok();
+    if mac {
+        let system = [
+            (false, false, false, true, "tab"),
+            (false, false, true, true, "tab"),
+            (false, false, false, true, "space"),
+            (false, true, false, true, "space"),
+            (true, false, false, true, "space"),
+            (true, false, false, false, "space"),
+            (false, false, true, true, "3"),
+            (false, false, true, true, "4"),
+            (false, false, true, true, "5"),
+            (false, false, true, true, "6"),
+            (true, false, false, true, "q"),
+            (false, true, false, true, "escape"),
+            (true, false, false, false, "up"),
+            (true, false, false, false, "down"),
+            (true, false, false, false, "left"),
+            (true, false, false, false, "right"),
+        ];
+        if system
+            .iter()
+            .any(|(c, a, sh, m, k)| only(*c, *a, *sh, *m, k))
+        {
+            return Some("macOS keeps those keys for itself.");
+        }
+    } else {
+        if s.cmd {
+            return Some("Windows keeps the Windows key for itself.");
+        }
+        if s.ctrl && s.alt {
+            return Some("Ctrl+Alt is AltGr, which types characters on many keyboards.");
+        }
+        let system = [
+            (false, true, false, false, "tab"),
+            (false, true, true, false, "tab"),
+            (false, true, false, false, "f4"),
+            (false, true, false, false, "space"),
+            (false, true, false, false, "escape"),
+            (true, false, false, false, "escape"),
+            (true, false, true, false, "escape"),
+        ];
+        if system
+            .iter()
+            .any(|(c, a, sh, m, k)| only(*c, *a, *sh, *m, k))
+        {
+            return Some("Windows keeps those keys for itself.");
+        }
+        // The terminal's copy and paste.
+        if (s.ctrl && s.shift && !s.alt && matches!(s.key.as_str(), "c" | "v"))
+            || only(false, false, true, false, "insert")
+        {
+            return Some("The terminal copies and pastes with those keys.");
+        }
+    }
+    // The clipboard's, select all, undo and redo: every text field needs them.
+    let secondary = if mac {
+        s.cmd && !s.ctrl
+    } else {
+        s.ctrl && !s.cmd
+    };
+    if secondary && !s.alt && matches!(s.key.as_str(), "c" | "v" | "x" | "a" | "z") && !s.shift
+        || secondary && !s.alt && s.shift && s.key == "z"
+        || (!mac && only(true, false, false, false, "y"))
+    {
+        return Some("Text fields need those keys: copy, paste, cut, select all, undo and redo.");
+    }
+    if !(s.ctrl || s.alt || s.cmd) && !plain_ok && !function_key {
+        return Some(if mac {
+            "Add ⌘, ⌥ or ⌃: a key on its own is what typing uses."
+        } else {
+            "Add Ctrl or Alt: a key on its own is what typing uses."
+        });
+    }
+    None
+}
+
+/// Save that `command` now has `keys` (`None`: none) on a platform, in `changes`: only as a
+/// difference from its default, so a default changed in a later version still arrives.
+pub fn store(
+    changes: &mut trek_core::settings::Keys,
+    mac: bool,
+    command: &Command,
+    keys: Option<&str>,
+) {
+    let same = match (keys, command.default.as_deref()) {
+        (None, None) => true,
+        (Some(k), Some(d)) => same_keys(k, d, mac),
+        _ => false,
+    };
+    let map = changes.for_platform_mut(mac);
+    if same {
+        map.remove(&command.name);
+    } else {
+        let keys = keys
+            .and_then(|k| Stroke::parse(k, mac))
+            .map(|s| s.keystroke())
+            .unwrap_or_default();
+        map.insert(command.name.clone(), keys);
+    }
+}
+
+/// A key the user pressed, as gpui reads it (`shift-cmd-k`): Shift, Ctrl, Alt and ⌘ (the Windows
+/// key there) with the key. `None` for a modifier on its own.
+pub fn recorded(keystroke: &gpui_kit::Keystroke) -> Option<String> {
+    let key = keystroke.key.to_ascii_lowercase();
+    if key.is_empty()
+        || matches!(
+            key.as_str(),
+            "shift" | "control" | "alt" | "platform" | "function" | "cmd" | "ctrl"
+        )
+    {
+        return None;
+    }
+    let m = keystroke.modifiers;
+    Some(
+        Stroke {
+            ctrl: m.control,
+            alt: m.alt,
+            shift: m.shift,
+            cmd: m.platform,
+            key,
+        }
+        .keystroke(),
+    )
 }
 
 // ───────────────────────────── tests ─────────────────────────────
@@ -1484,8 +2062,8 @@ mod tests {
             .filter_map(|b| resolve(b, true))
             .map(|r| format!("{}|{}", r.keystroke, r.context.unwrap_or_default()))
             .collect();
-        // The 44 in main.rs, the 13 in notes.rs, the 2 in editor.rs, and a diff's 17.
-        assert_eq!(mac.len(), 44 + 13 + 2 + 17);
+        // The 44 in main.rs, the 13 in notes.rs, the 2 in editor.rs, a diff's 17 and zoom's 4.
+        assert_eq!(mac.len(), 44 + 13 + 2 + 17 + 4);
         for (keys, ctx) in [
             ("cmd-q", ""),
             ("alt-cmd-e", ""),
@@ -1814,32 +2392,47 @@ mod tests {
         }
     }
 
+    /// A page's section as `title: keys` lines, the keys as caps joined by spaces.
+    fn flat(page: &[(String, Vec<Row>)], section: &str, mac: bool) -> Vec<String> {
+        let (_, rows) = page
+            .iter()
+            .find(|(s, _)| s == section)
+            .unwrap_or_else(|| panic!("{section}"));
+        rows.iter()
+            .map(|r| {
+                let chips = match r {
+                    Row::Command(c) => c.chips(mac),
+                    Row::Fixed(_, chips) => chips.clone(),
+                };
+                let keys: Vec<&str> = chips
+                    .iter()
+                    .map(|c| match c {
+                        Chip::Key(k) => k.as_str(),
+                        Chip::Word(w) => w,
+                    })
+                    .collect();
+                format!("{}: {}", r.title(), keys.join(" "))
+            })
+            .collect()
+    }
+
     #[test]
     fn the_shortcuts_page_on_a_mac_is_what_it_was() {
-        let page = shortcut_groups(true, false);
-        let flat = |rows: &Vec<(&str, Vec<Chip>)>| -> Vec<String> {
-            rows.iter()
-                .map(|(name, chips)| {
-                    let keys: Vec<&str> = chips
-                        .iter()
-                        .map(|c| {
-                            if let Chip::Key(k) = c {
-                                k.as_str()
-                            } else {
-                                "?"
-                            }
-                        })
-                        .collect();
-                    format!("{name}: {}", keys.join(" "))
-                })
-                .collect()
-        };
+        let page = page(true, false, &[]);
         assert_eq!(
-            page.iter().map(|(g, _)| *g).collect::<Vec<_>>(),
-            ["Threads", "Composer", "Editor", "Window", "Diff review"]
+            page.iter().map(|(g, _)| g.as_str()).collect::<Vec<_>>(),
+            [
+                "Threads",
+                "Composer",
+                "Editor",
+                "Window",
+                "Zoom",
+                "Notes",
+                "Diff review"
+            ]
         );
         assert_eq!(
-            flat(&page[0].1),
+            flat(&page, "Threads", true),
             [
                 "Search threads and commands: ⌘ K",
                 "New thread: ⌘ N",
@@ -1856,7 +2449,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            flat(&page[1].1),
+            flat(&page, "Composer", true),
             [
                 "Send: ↩",
                 "New line: ⇧ ↩",
@@ -1871,61 +2464,77 @@ mod tests {
             ]
         );
         assert_eq!(
-            flat(&page[2].1),
+            flat(&page, "Editor", true)[..8],
             [
                 "Go to file: ⌘ P",
                 "Edit the picked lines: ⌘ K",
+                "Save the file: ⌘ S",
                 "Format the document: ⌥ ⇧ F",
                 "Keep a change: ⌘ Y",
                 "Undo a change: ⌥ ⌘ ⌫",
-                "Next or previous change: ⌥ ⌘ ↓ ↑",
-                "Keep all changes: ⌘ ↩",
-                "Undo all changes (press twice): ⌘ ⇧ ⌫",
-                "New chat: ⌘ N",
-                "Switch to Agents: ⌥ ⌘ E",
+                "Next change: ⌥ ⌘ ↓",
+                "Previous change: ⌥ ⌘ ↑",
             ]
         );
         assert_eq!(
-            flat(&page[3].1),
+            flat(&page, "Zoom", true),
             [
-                "Basecamp: ⌘ ⇧ H",
-                "Leave Basecamp: esc",
-                "Study: ⌘ ⇧ U",
-                "Toggle the sidebar: ⌘ B",
-                "Toggle the tools panel: ⌘ J",
-                "Settings: ⌘ ,",
-                "Close the file or thread tab in front: ⌘ W",
-                "Close a thread window: ⌘ W",
-                "Hide Trek: ⌘ H",
-                "Minimize: ⌘ M",
-                "Quit: ⌘ Q",
+                "Zoom in: ⌘ =",
+                "Zoom in, with Shift: ⌘ +",
+                "Zoom out: ⌘ -",
+                "Actual size: ⌘ 0",
             ]
         );
-        let swapped = shortcut_groups(true, true);
-        assert_eq!(flat(&swapped[1].1)[..2], ["Send: ⌘ ↩", "New line: ↩"]);
+        let window = flat(&page, "Window", true);
+        for line in [
+            "Basecamp: ⌘ ⇧ H",
+            "Leave Basecamp: esc",
+            "Toggle the sidebar: ⌘ B",
+            "Settings: ⌘ ,",
+            "Close the file or thread tab in front: ⌘ W",
+            "Hide Trek: ⌘ H",
+            "Quit: ⌘ Q",
+        ] {
+            assert!(window.contains(&line.to_string()), "{line}: {window:?}");
+        }
+        let swapped = super::page(true, true, &[]);
+        assert_eq!(
+            flat(&swapped, "Composer", true)[..2],
+            ["Send: ⌘ ↩", "New line: ↩"]
+        );
+    }
+
+    /// Every binding Trek makes is on the page once, so every one can be changed; the system's
+    /// (Redo) isn't Trek's to change.
+    #[test]
+    fn every_binding_is_on_the_page_once() {
+        for mac in both() {
+            let page = page(mac, false, &[]);
+            let names: Vec<String> = commands(&page).iter().map(|c| c.name.clone()).collect();
+            let mut unique = names.clone();
+            unique.sort();
+            unique.dedup();
+            assert_eq!(unique.len(), names.len(), "a row is on the page twice");
+            for b in TABLE.iter() {
+                let on = names.contains(&b.id.name());
+                let should = b.build.is_some() && exists(b, mac);
+                assert_eq!(on, should, "{:?} (mac: {mac})", b.id);
+            }
+        }
     }
 
     #[test]
     fn a_diffs_keys_are_on_the_page_and_only_in_the_diff() {
         for (mac, send) in [(true, "⌘"), (false, "Ctrl")] {
-            let page = shortcut_groups(mac, false);
-            let (name, rows) = page.last().unwrap();
-            assert_eq!(*name, "Diff review");
-            let keys = |row: &str| -> Vec<Chip> {
+            let page = page(mac, false, &[]);
+            let rows = flat(&page, "Diff review", mac);
+            assert!(rows.contains(&"Next hunk: N".to_string()), "{rows:?}");
+            assert!(rows.contains(&"Comment on the line: C".to_string()));
+            assert!(rows.contains(&"Next file: ]".to_string()));
+            assert!(
                 rows.iter()
-                    .find(|(n, _)| *n == row)
-                    .unwrap_or_else(|| panic!("{row}"))
-                    .1
-                    .clone()
-            };
-            assert_eq!(keys("Next hunk"), [Chip::Key("N".into())]);
-            assert_eq!(keys("Comment on the line"), [Chip::Key("C".into())]);
-            assert_eq!(keys("Next file"), [Chip::Key("]".into())]);
-            assert_eq!(
-                keys("Send comments to the agent")[0],
-                Chip::Key(send.into())
+                    .any(|r| r.starts_with(&format!("Send comments to the agent: {send}")))
             );
-            assert_eq!(keys("Next line")[1], Chip::Word("or"));
         }
         // Plain letters: they must never be bound outside the diff, or they'd stop reaching text.
         for b in TABLE.iter().filter(|b| b.mac.is_some_and(|m| m.len() == 1)) {
@@ -1940,55 +2549,229 @@ mod tests {
 
     #[test]
     fn the_shortcuts_page_on_windows_has_its_own_keys() {
-        let page = shortcut_groups(false, false);
-        let keys = |group: usize, name: &str| -> Vec<Chip> {
-            page[group]
-                .1
-                .iter()
-                .find(|(n, _)| *n == name)
-                .unwrap_or_else(|| panic!("{name}"))
-                .1
-                .clone()
-        };
-        let k = |s: &[&str]| {
-            s.iter()
-                .map(|s| Chip::Key(s.to_string()))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(keys(0, "Search threads and commands"), k(&["Ctrl", "K"]));
-        assert_eq!(
-            keys(0, "Open the thread in a new window"),
-            k(&["Ctrl", "Shift", "Enter"])
-        );
-        assert_eq!(keys(1, "New line"), k(&["Shift", "Enter"]));
-        assert_eq!(keys(1, "Plan mode"), k(&["Shift", "Tab"]));
-        assert_eq!(keys(2, "Switch to Agents"), k(&["Alt", "Shift", "E"]));
-        assert_eq!(keys(2, "Undo a change"), k(&["Alt", "Shift", "Backspace"]));
-        assert_eq!(
-            keys(2, "Next or previous change"),
-            [
-                Chip::Key("Alt".into()),
-                Chip::Key("F5".into()),
-                Chip::Word("or"),
-                Chip::Key("Alt".into()),
-                Chip::Key("Shift".into()),
-                Chip::Key("F5".into())
-            ]
-        );
-        assert_eq!(keys(2, "Format the document"), k(&["Alt", "Shift", "F"]));
-        assert_eq!(
-            keys(3, "Close the file or thread tab in front"),
-            k(&["Ctrl", "W"])
-        );
-        assert_eq!(keys(3, "Leave Basecamp"), k(&["Esc"]));
-        let window: Vec<&str> = page[3].1.iter().map(|(n, _)| *n).collect();
+        let page = page(false, false, &[]);
+        let all: Vec<String> = page
+            .iter()
+            .flat_map(|(s, _)| flat(&page, s, false))
+            .collect();
+        for line in [
+            "Search threads and commands: Ctrl K",
+            "Search threads and commands, anywhere: Ctrl Shift P",
+            "Open the thread in a new window: Ctrl Shift Enter",
+            "New line: Shift Enter",
+            "Plan mode: Shift Tab",
+            "Switch Agents / Editor: Alt Shift E",
+            "Undo a change: Alt Shift Backspace",
+            "Next change: Alt F5",
+            "Previous change: Alt Shift F5",
+            "Format the document: Alt Shift F",
+            "Close the file or thread tab in front: Ctrl W",
+            "Close the file or thread tab in front, again: Ctrl F4",
+            "Leave Basecamp: Esc",
+            "Zoom in: Ctrl =",
+            "Actual size: Ctrl 0",
+            "Quit: Ctrl Q",
+        ] {
+            assert!(all.contains(&line.to_string()), "{line}");
+        }
         assert!(
-            !window.contains(&"Hide Trek") && !window.contains(&"Minimize"),
-            "{window:?}"
+            !all.iter()
+                .any(|l| l.starts_with("Hide Trek") || l.starts_with("Minimize")),
+            "{all:?}"
         );
-        assert!(window.contains(&"Quit"));
-        let swapped = shortcut_groups(false, true);
-        assert_eq!(swapped[1].1[0].1, k(&["Ctrl", "Enter"]));
+        let swapped = super::page(false, true, &[]);
+        assert_eq!(flat(&swapped, "Composer", false)[0], "Send: Ctrl Enter");
+    }
+
+    fn changes(mac: &[(&str, &str)], windows: &[(&str, &str)]) -> trek_core::settings::Keys {
+        trek_core::settings::Keys {
+            mac: mac
+                .iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect(),
+            windows: windows
+                .iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect(),
+        }
+    }
+
+    fn bound(mac: bool) -> Vec<(String, Option<String>)> {
+        [Group::App, Group::Notes, Group::Editor]
+            .into_iter()
+            .flat_map(|g| bindings_for(g, mac))
+            .map(|b| {
+                (
+                    b.keystrokes()
+                        .iter()
+                        .map(|k| k.inner().unparse())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    b.predicate().map(|p| p.to_string()),
+                )
+            })
+            .collect()
+    }
+
+    /// A change is what's bound, shown and named: the new keys work, the old ones don't, and every
+    /// place that writes the shortcut (hints, sentences, the page) writes the new one.
+    #[test]
+    fn a_changed_shortcut_is_bound_and_shown_everywhere() {
+        let keys = changes(
+            &[("open-settings", "cmd-shift-,"), ("quit", "")],
+            &[("open-settings", "ctrl-shift-,")],
+        );
+        with_changes(keys, || {
+            assert_eq!(hint_for(Id::OpenSettings, true), "⌘⇧,");
+            assert_eq!(hint_for(Id::OpenSettings, false), "Ctrl+Shift+,");
+            assert_eq!(hint_for(Id::Quit, true), "", "taken away");
+            assert_eq!(hint_for(Id::Quit, false), "Ctrl+Q", "Windows keeps its own");
+            assert_eq!(localize_for("Settings (⌘,)", true), "Settings (⌘⇧,)");
+            assert_eq!(
+                localize_for("Settings (⌘,)", false),
+                "Settings (Ctrl+Shift+,)"
+            );
+            assert_eq!(localize_for("Quit (⌘Q)", true), "Quit");
+            // Untouched shortcuts read as they're written, glyph order and all.
+            assert_eq!(localize_for("Redo (⇧⌘Z)", true), "Redo (⇧⌘Z)");
+            assert_eq!(localize_for("Agents (⌥⌘E)", false), "Agents (Alt+Shift+E)");
+            let mac = bound(true);
+            let has = |keys: &str| mac.iter().any(|(k, _)| same_keys(k, keys, true));
+            assert!(has("cmd-shift-,"), "{mac:?}");
+            assert!(!has("cmd-,"), "the old keys are gone");
+            assert!(!has("cmd-q"));
+            let page = page(true, false, &[]);
+            let settings = commands(&page)
+                .into_iter()
+                .find(|c| c.name == "open-settings")
+                .unwrap()
+                .clone();
+            assert!(settings.changed());
+            assert_eq!(settings.default.as_deref(), Some("cmd-,"));
+        });
+    }
+
+    /// The terminal on Windows keeps Ctrl+letter for the shell, whoever chose the letter.
+    #[test]
+    fn a_ctrl_letter_the_user_chose_is_the_shells_in_the_terminal() {
+        with_changes(changes(&[], &[("open-settings", "ctrl-u")]), || {
+            let r = resolve(row_of(Id::OpenSettings).unwrap(), false).unwrap();
+            assert_eq!(r.keystroke, "ctrl-u");
+            assert_eq!(r.context.as_deref(), Some("!Terminal"));
+        });
+    }
+
+    #[test]
+    fn conflicts_are_the_same_keys_in_the_same_place() {
+        let plugins = [PluginCommand {
+            plugin: "marmot".into(),
+            plugin_name: "Marmot".into(),
+            command: "wake".into(),
+            title: "Wake Pip".into(),
+            key: Some("cmd-alt-m".into()),
+        }];
+        let page = page(true, false, &plugins);
+        let all = commands(&page);
+        let names = |found: Vec<&Command>| found.iter().map(|c| c.name.clone()).collect::<Vec<_>>();
+        // ⌘N is New thread's, everywhere: a conflict.
+        assert_eq!(
+            names(conflicts(&all, "open-settings", "cmd-n", true)),
+            ["new-thread"]
+        );
+        // ⌘B is the sidebar's and, in a note, bold's: a different place, so no conflict.
+        assert_eq!(
+            names(conflicts(&all, "open-settings", "cmd-b", true)),
+            ["toggle-sidebar"]
+        );
+        assert!(
+            conflicts(&all, "note-italic", "cmd-b", true)
+                .iter()
+                .any(|c| c.name == "note-bold")
+        );
+        // A plugin's key is heard everywhere: any of Trek's with it is a conflict.
+        assert_eq!(
+            names(conflicts(&all, "note-italic", "cmd-alt-m", true)),
+            ["plugin:marmot/wake"]
+        );
+        assert_eq!(
+            names(conflicts(&all, "plugin:marmot/wake", "cmd-shift-j", true)),
+            ["open-notes"]
+        );
+        assert!(conflicts(&all, "open-settings", "cmd-alt-shift-9", true).is_empty());
+    }
+
+    #[test]
+    fn keys_the_system_and_text_need_are_refused() {
+        for (keys, mac) in [
+            ("cmd-tab", true),
+            ("cmd-space", true),
+            ("cmd-shift-4", true),
+            ("ctrl-up", true),
+            ("cmd-c", true),
+            ("cmd-shift-z", true),
+            ("k", true),
+            ("shift-k", true),
+            ("alt-tab", false),
+            ("alt-f4", false),
+            ("ctrl-alt-k", false),
+            ("cmd-k", false),
+            ("ctrl-shift-v", false),
+            ("ctrl-v", false),
+            ("ctrl-y", false),
+            ("j", false),
+        ] {
+            assert!(refusal(keys, mac, false).is_some(), "{keys} (mac: {mac})");
+        }
+        for (keys, mac) in [
+            ("cmd-shift-k", true),
+            ("alt-cmd-9", true),
+            ("ctrl-shift-k", false),
+            ("alt-shift-k", false),
+            ("f6", true),
+            ("f6", false),
+        ] {
+            assert_eq!(refusal(keys, mac, false), None, "{keys} (mac: {mac})");
+        }
+        // A diff's own letters may stay letters.
+        assert_eq!(refusal("j", true, true), None);
+    }
+
+    #[test]
+    fn only_differences_from_the_defaults_are_saved() {
+        let page = page(true, false, &[]);
+        let all = commands(&page);
+        let settings = all.iter().find(|c| c.name == "open-settings").unwrap();
+        let mut keys = trek_core::settings::Keys::default();
+        store(&mut keys, true, settings, Some("shift-cmd-,"));
+        assert_eq!(keys.mac["open-settings"], "shift-cmd-,");
+        // Back to its default, however written: nothing kept.
+        store(&mut keys, true, settings, Some("cmd-,"));
+        assert!(keys.is_empty(), "{keys:?}");
+        store(&mut keys, true, settings, None);
+        assert_eq!(keys.mac["open-settings"], "");
+        assert!(keys.windows.is_empty(), "the other platform keeps its own");
+        assert_eq!(Id::OpenSettings.name(), "open-settings");
+        assert_eq!(Id::CloseTabCtrlF4.name(), "close-tab-ctrl-f4");
+    }
+
+    #[test]
+    fn a_plugins_key_is_the_users_when_they_change_it() {
+        assert_eq!(
+            plugin_key_for("marmot", "wake", Some("cmd-alt-m"), false).as_deref(),
+            Some("ctrl-alt-m")
+        );
+        with_changes(changes(&[("plugin:marmot/wake", "")], &[]), || {
+            assert_eq!(
+                plugin_key_for("marmot", "wake", Some("cmd-alt-m"), true),
+                None
+            );
+        });
+        with_changes(changes(&[("plugin:marmot/wake", "cmd-alt-p")], &[]), || {
+            assert_eq!(
+                plugin_key_for("marmot", "wake", Some("cmd-alt-m"), true).as_deref(),
+                Some("cmd-alt-p")
+            );
+        });
     }
 
     /// Trek's own tables of bindings are built (and parse) on both platforms.
@@ -2001,7 +2784,7 @@ mod tests {
                 .sum();
             // Windows drops Hide, Minimize and Copy working directory (Ctrl+Shift+C is the
             // terminal's copy there) and adds Ctrl+Shift+P and Ctrl+F4.
-            assert_eq!(n, if mac { 76 } else { 76 - 3 + 2 }, "mac: {mac}");
+            assert_eq!(n, if mac { 80 } else { 80 - 3 + 2 }, "mac: {mac}");
         }
     }
 

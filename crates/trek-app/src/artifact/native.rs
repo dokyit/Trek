@@ -166,10 +166,18 @@ impl Surface for NativeSurface {
         }
         match at {
             Some(p) => {
-                self.clip.place(&p, window.scale_factor());
+                // The window's points (the layout's times the interface zoom) and the display's
+                // own scale: what a native view is placed in.
+                let z = window.ui_zoom();
+                let p = Placement {
+                    body: window.zoom_bounds(p.body),
+                    clip: window.zoom_bounds(p.clip),
+                    round_bottom: p.round_bottom,
+                };
+                let s = window.scale_factor() / z;
+                self.clip.place(&p, s);
                 let inner = p.body.origin - p.clip.origin;
                 let rect = if cfg!(windows) {
-                    let s = window.scale_factor();
                     wry::Rect {
                         position: wry::dpi::Position::Physical(wry::dpi::PhysicalPosition::new(
                             (f32::from(inner.x) * s).round() as i32,
@@ -264,6 +272,12 @@ impl raw_window_handle::HasWindowHandle for Parent {
 
 #[cfg(feature = "shots")]
 pub use platform::{keys_holder, shots_keys};
+
+/// Whether a native view inside `window` (a web page: the Browser's, a card's) has the keys,
+/// rather than Trek's own view.
+pub fn page_has_keys(window: &gpui_kit::Window) -> bool {
+    platform::page_has_keys(window)
+}
 
 #[cfg(target_os = "macos")]
 mod platform {
@@ -398,6 +412,35 @@ mod platform {
         fn drop(&mut self) {
             self.give_back_held_keys();
             self.view.removeFromSuperview();
+        }
+    }
+
+    /// Whether a view inside the window's own has the keys (a web view), not GPUI's view.
+    pub fn page_has_keys(window: &gpui_kit::Window) -> bool {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Ok(handle) = HasWindowHandle::window_handle(window) else {
+            return false;
+        };
+        let RawWindowHandle::AppKit(h) = handle.as_raw() else {
+            return false;
+        };
+        let view: *mut AnyObject = h.ns_view.as_ptr().cast();
+        // SAFETY: GPUI's live view and its window; plain AppKit getters on the main thread.
+        unsafe {
+            let ns_window: *mut AnyObject = msg_send![view, window];
+            if ns_window.is_null() {
+                return false;
+            }
+            let responder: *mut AnyObject = msg_send![ns_window, firstResponder];
+            if responder.is_null() || responder == view {
+                return false;
+            }
+            let is_view: bool = msg_send![responder, isKindOfClass: objc2::class!(NSView)];
+            let content: *mut AnyObject = msg_send![ns_window, contentView];
+            if !is_view || content.is_null() {
+                return false;
+            }
+            msg_send![responder, isDescendantOf: content]
         }
     }
 
@@ -634,6 +677,23 @@ mod platform {
         }
     }
 
+    /// Whether a window inside GPUI's has the keys (a page), not GPUI's own.
+    pub fn page_has_keys(window: &gpui_kit::Window) -> bool {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Ok(handle) = HasWindowHandle::window_handle(window) else {
+            return false;
+        };
+        let RawWindowHandle::Win32(h) = handle.as_raw() else {
+            return false;
+        };
+        let hwnd = h.hwnd.get() as HWND;
+        // SAFETY: queries of the thread's focus and GPUI's own window.
+        unsafe {
+            let focus = GetFocus();
+            !focus.is_null() && focus != hwnd && IsChild(hwnd, focus) != 0
+        }
+    }
+
     /// Who has the keys in `window`: `trek` (GPUI's window), `child` (a window inside it, a
     /// page), `other`, or `nothing`.
     #[cfg(feature = "shots")]
@@ -690,6 +750,10 @@ mod platform {
         pub fn place(&self, _: &Placement, _: f32) {}
         pub fn hide(&self) {}
         pub fn release_keys(&self) {}
+    }
+
+    pub fn page_has_keys(_: &gpui_kit::Window) -> bool {
+        false
     }
 
     #[cfg(feature = "shots")]

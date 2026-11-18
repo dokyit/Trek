@@ -437,17 +437,46 @@ struct Keys {
 
 impl Global for Keys {}
 
-/// A manifest's key (`cmd-alt-f`) as this platform has it: `cmd` is Ctrl off the Mac.
-fn keystroke(key: &str) -> Option<Keystroke> {
-    let key = if crate::keys::is_mac() {
-        key.to_string()
-    } else {
-        key.split('-')
-            .map(|part| if part == "cmd" { "ctrl" } else { part })
-            .collect::<Vec<_>>()
-            .join("-")
-    };
+/// The keys a plugin's command has here: the user's, where they changed them on the Keyboard
+/// Shortcuts page, else its manifest's (`cmd-alt-f`, with Ctrl for `cmd` off the Mac).
+fn command_key(plugin: &str, command: &str, manifest: Option<&str>) -> Option<Keystroke> {
+    let key = crate::keys::plugin_key(plugin, command, manifest)?;
     Keystroke::parse(&key).ok()
+}
+
+/// Trek's keys changed (the user's on the Keyboard Shortcuts page): hear the plugins' again, so
+/// one that Trek's keymap now has gives way, and one it let go of is heard.
+pub fn keys_changed(cx: &mut App) {
+    bind_keys(cx);
+}
+
+/// The running plugins' commands, for the Keyboard Shortcuts page: each can be given keys there.
+pub fn key_commands(cx: &App) -> Vec<crate::keys::PluginCommand> {
+    let Some(p) = cx.try_global::<Plugins>() else {
+        return Vec::new();
+    };
+    p.plugins
+        .iter()
+        .filter(|pl| p.state.running(&pl.manifest))
+        .flat_map(|pl| {
+            pl.manifest
+                .commands
+                .iter()
+                .map(|c| crate::keys::PluginCommand {
+                    plugin: pl.manifest.id.clone(),
+                    plugin_name: pl.manifest.name.clone(),
+                    command: c.id.clone(),
+                    title: c.title.clone(),
+                    key: c.key.clone(),
+                })
+        })
+        .collect()
+}
+
+/// Whether a plugin command's keys are taken by one of Trek's (the user's own choice included),
+/// so it's heard without them.
+pub fn key_taken(plugin: &str, command: &str, manifest: Option<&str>, cx: &App) -> bool {
+    command_key(plugin, command, manifest).is_some_and(|k| trek_has(&k, cx))
 }
 
 /// Whether Trek's own keymap already has `key` (on its own, in any context): a plugin's command
@@ -458,9 +487,15 @@ fn trek_has(key: &Keystroke, cx: &App) -> bool {
     )
 }
 
-/// A plugin command's key, when it's one Trek can give it: well formed, and not one of Trek's.
-pub fn free_key(key: &str, cx: &App) -> Option<Keystroke> {
-    keystroke(key).filter(|k| !trek_has(k, cx))
+/// A plugin command's key as the user has it, when it's one Trek can give it: well formed, and
+/// not one of Trek's.
+pub fn free_key(
+    plugin: &str,
+    command: &str,
+    manifest: Option<&str>,
+    cx: &App,
+) -> Option<Keystroke> {
+    command_key(plugin, command, manifest).filter(|k| !trek_has(k, cx))
 }
 
 /// Hear the keys the running plugins' commands name: nothing is heard while none has a key.
@@ -474,7 +509,7 @@ fn bind_keys(cx: &mut App) {
                 .flat_map(|pl| {
                     pl.manifest.commands.iter().filter_map(|c| {
                         Some((
-                            keystroke(c.key.as_deref()?)?,
+                            command_key(&pl.manifest.id, &c.id, c.key.as_deref())?,
                             pl.manifest.id.clone(),
                             c.id.clone(),
                         ))
@@ -568,7 +603,7 @@ pub fn palette_entries(cx: &App) -> Vec<PaletteEntry> {
                     plugin: m.id.clone(),
                     command: c.id.clone(),
                     title: c.title.clone(),
-                    key: c.key.clone().filter(|k| free_key(k, cx).is_some()),
+                    key: free_key(&m.id, &c.id, c.key.as_deref(), cx).map(|k| k.unparse()),
                 });
             }
             for page in &m.pages {

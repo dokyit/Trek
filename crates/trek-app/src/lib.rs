@@ -96,6 +96,7 @@ pub mod working_bar;
 pub mod workspace;
 pub mod worktree_apps_ui;
 pub mod worktree_ui;
+pub mod zoom;
 
 // The capture build counts renders too, for its live checks (`renders`).
 #[cfg(any(test, feature = "test-support", feature = "shots"))]
@@ -149,7 +150,10 @@ actions!(
         CopyThreadFolder,
         NextNeedsYou,
         BackToLastPrompt,
-        SendFeedback
+        SendFeedback,
+        ZoomIn,
+        ZoomOut,
+        ResetZoom
     ]
 );
 
@@ -255,6 +259,10 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::separator(),
                 MenuItem::action("Toggle Sidebar", ToggleSidebar),
                 MenuItem::action("Toggle Tools Panel", ToggleRightPanel),
+                MenuItem::separator(),
+                MenuItem::action("Zoom In", ZoomIn),
+                MenuItem::action("Zoom Out", ZoomOut),
+                MenuItem::action("Actual Size", ResetZoom),
             ],
             disabled: false,
         },
@@ -277,7 +285,11 @@ pub fn menus() -> Vec<Menu> {
 /// Trek's key bindings: the table in `keys.rs`, which has each platform's keys.
 pub fn key_bindings() -> Vec<KeyBinding> {
     let mut bindings = keys::bindings(keys::Group::App);
-    bindings.extend(artifact::key_bindings());
+    bindings.extend(
+        artifact::key_bindings()
+            .into_iter()
+            .map(|b| b.with_meta(keys::TREK)),
+    );
     bindings
 }
 
@@ -371,9 +383,9 @@ pub fn run() {
         toast::init(cx);
         let _ = ThemeRegistry::global_mut(cx).load_themes_from_str(&assets::theme_json());
 
-        cx.bind_keys(key_bindings());
-        cx.bind_keys(notes::key_bindings());
-        cx.bind_keys(editor::key_bindings());
+        // Trek's defaults; the user's own changes replace them once the settings are read
+        // (`system::sync`, `keys::rebind`).
+        cx.bind_keys(keys::trek_bindings());
         app_actions(cx);
         // macOS has the system's menu bar; Windows has none (its commands are in the palette, the
         // settings, the context menus and the shortcuts), and no Dock to keep the app up with its
@@ -478,6 +490,7 @@ pub fn app_actions(cx: &mut App) {
         in_main(cx, |ws, cx| ws.navigate(workspace::Route::Study, cx))
     });
     cx.on_action(|_: &SendFeedback, cx| feedback::open_in_main(cx));
+    zoom::register(cx);
     cx.on_action(|_: &NextNeedsYou, cx| root::jump_to_needs_you(cx));
     cx.on_action(|_: &BackToLastPrompt, cx| root::jump_to_last_prompt(cx));
     cx.on_action(|_: &SwitchMode, cx| in_main(cx, |ws, cx| ws.toggle_ide(cx)));

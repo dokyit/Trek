@@ -22,6 +22,8 @@
 mod native;
 mod surface;
 
+pub use native::page_has_keys;
+
 use crate::assets::Lucide;
 use crate::scale::{radius, text};
 use crate::visualization::{Look, header, shell, summary_text, title_text};

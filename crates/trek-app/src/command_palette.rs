@@ -114,6 +114,10 @@ enum WindowCommand {
     BackToLastPrompt,
     Minimize,
     Quit,
+    /// The whole interface larger, smaller, or as designed.
+    ZoomIn,
+    ZoomOut,
+    ResetZoom,
 }
 
 /// The editor's commands that are window actions.
@@ -1362,14 +1366,16 @@ impl CommandPalette {
                     plugin,
                     command,
                     title,
-                    ..
+                    key,
                 } => add(
                     Entry::new(
                         c,
                         icon(Icon::new(crate::assets::Lucide::Puzzle)),
                         title,
                         Action::PluginCommand(plugin.clone(), command),
-                    ),
+                    )
+                    // Its keys as the user has them (Settings › Keyboard Shortcuts).
+                    .hint(key.map(|k| keys::label(&k)).unwrap_or_default()),
                     &format!("plugin mod {plugin}"),
                 ),
                 PaletteEntry::Page {
@@ -1563,6 +1569,41 @@ impl CommandPalette {
             .hint(keys::hint(Id::Minimize)),
             "hide taskbar",
         );
+        let zoom = crate::zoom::current(cx);
+        for (glyph, label, command, id, words) in [
+            (
+                crate::assets::Lucide::ZoomIn,
+                "Zoom in",
+                WindowCommand::ZoomIn,
+                Id::ZoomIn,
+                "larger bigger text size font scale",
+            ),
+            (
+                crate::assets::Lucide::Minus,
+                "Zoom out",
+                WindowCommand::ZoomOut,
+                Id::ZoomOut,
+                "smaller text size font scale",
+            ),
+            (
+                crate::assets::Lucide::Type,
+                "Actual size",
+                WindowCommand::ResetZoom,
+                Id::ResetZoom,
+                "zoom reset 100 default text size font scale",
+            ),
+        ] {
+            add(
+                Entry::new(
+                    c,
+                    icon(Icon::new(glyph)),
+                    format!("{label} ({})", trek_core::settings::zoom_percent(zoom)),
+                    Action::Window(command),
+                )
+                .hint(keys::hint(id)),
+                words,
+            );
+        }
         add(
             Entry::new(
                 c,
@@ -1749,6 +1790,9 @@ impl CommandPalette {
                 }
                 WindowCommand::Minimize => window.minimize_window(),
                 WindowCommand::Quit => window.dispatch_action(Box::new(crate::Quit), cx),
+                WindowCommand::ZoomIn => window.dispatch_action(Box::new(crate::ZoomIn), cx),
+                WindowCommand::ZoomOut => window.dispatch_action(Box::new(crate::ZoomOut), cx),
+                WindowCommand::ResetZoom => window.dispatch_action(Box::new(crate::ResetZoom), cx),
             },
         }
     }

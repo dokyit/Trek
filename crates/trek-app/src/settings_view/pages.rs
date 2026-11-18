@@ -71,7 +71,7 @@ fn picker<T: Clone + PartialEq + 'static>(
 }
 
 /// A key cap, e.g. ⌘ or N.
-fn key(label: &str, cx: &App) -> AnyElement {
+pub(super) fn key(label: &str, cx: &App) -> AnyElement {
     let theme = cx.theme();
     div()
         .min_w(px(22.))
@@ -671,12 +671,6 @@ impl SettingsView {
         s: &Settings,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let text_size = match s.appearance.transcript_font_size() {
-            v if v < 14.0 => 0u8,
-            v if v < 15.25 => 1,
-            v if v < 16.75 => 2,
-            _ => 3,
-        };
         let glass = s.appearance.glass;
         let covered = crate::backgrounds::placement(&s.appearance)
             == trek_core::settings::BackgroundPlacement::Everywhere
@@ -751,26 +745,7 @@ impl SettingsView {
                 ),
             ]);
 
-        page.extend([
-            Self::heading("Text size", cx),
-            ui::group(
-                vec![Self::row(
-                    "Conversation text",
-                    "Messages from you and your agents.",
-                    ui::segmented(
-                        "text-size",
-                        vec![(0u8, "Small"), (1, "Default"), (2, "Large"), (3, "Larger")],
-                        text_size,
-                        self.setter(|s, v: u8| {
-                            s.appearance.transcript_font_size = [13.5, 14.5, 16.0, 17.5][v as usize]
-                        }),
-                        cx,
-                    ),
-                    cx,
-                )],
-                cx,
-            ),
-        ]);
+        page.extend(self.text_size_section(s, cx));
         page.extend(self.background_section(s, cx));
         page.extend([
             Self::heading("Motion", cx),
@@ -879,58 +854,6 @@ impl SettingsView {
             ),
         ])
         .collect()
-    }
-
-    pub(super) fn shortcuts_page(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        // The keys come from the table in `keys.rs`, spelled for the platform running.
-        let send_cmd = self.workspace.read(cx).settings.general.send_with_cmd_enter;
-        let muted = cx.theme().muted_foreground;
-        let mut out = vec![];
-        for (gi, (group, items)) in crate::keys::shortcut_groups(crate::keys::is_mac(), send_cmd)
-            .into_iter()
-            .enumerate()
-        {
-            if gi > 0 {
-                out.push(Self::heading(group, cx));
-            } else {
-                out.push(
-                    div()
-                        .pb(px(10.))
-                        .text_size(px(text::BODY))
-                        .font_semibold()
-                        .child(group.to_string())
-                        .into_any_element(),
-                );
-            }
-            let rows = items
-                .into_iter()
-                .map(|(label, chips)| {
-                    h_flex()
-                        .id(SharedString::from(format!("shortcut-{label}")))
-                        .test_support()
-                        .h(px(42.))
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_size(px(text::BODY))
-                                .child(label.to_string()),
-                        )
-                        .child(h_flex().gap(px(4.)).children(chips.into_iter().map(|chip| {
-                            match chip {
-                                crate::keys::Chip::Key(k) => key(&k, cx),
-                                crate::keys::Chip::Word(w) => div()
-                                    .text_size(px(text::LABEL))
-                                    .text_color(muted)
-                                    .child(w)
-                                    .into_any_element(),
-                            }
-                        })))
-                        .into_any_element()
-                })
-                .collect();
-            out.push(ui::group(rows, cx));
-        }
-        out
     }
 
     pub(super) fn api_keys_page(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {

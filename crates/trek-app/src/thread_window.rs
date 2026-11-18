@@ -191,12 +191,14 @@ impl ThreadWindow {
             // Dragged to a display of another scale, it has its own icons cut again, as the main
             // window does (its taskbar button is its own).
             {
-                let mut scale = window.scale_factor();
+                let display_scale = |window: &Window| window.scale_factor() / window.ui_zoom();
+                let mut scale = display_scale(window);
                 cx.observe_window_bounds(window, move |_, window, cx| {
-                    if window.scale_factor() != std::mem::replace(&mut scale, window.scale_factor())
+                    if display_scale(window) != std::mem::replace(&mut scale, display_scale(window))
                     {
                         crate::system::scale_changed(window, cx);
                     }
+                    crate::zoom::fit(window, cx);
                 })
             },
             // With nothing focused, keys reach none of the window's shortcuts (⌘W included): the
@@ -357,6 +359,7 @@ impl ThreadWindow {
 impl Render for ThreadWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::chrome::let_go_of_hover(window, cx);
+        crate::zoom::drawing(window);
         let backdrop = self.workspace.read(cx).backdrop();
         let glass = self.workspace.read(cx).glass();
         crate::ui::apply_glass(
@@ -383,6 +386,15 @@ impl Render for ThreadWindow {
             .text_color(theme.foreground)
             .on_action(cx.listener(|_, _: &CloseWindow, window, _| window.remove_window()))
             .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
+            .on_action(cx.listener(|_, _: &crate::ZoomIn, window, cx| {
+                crate::zoom::key(crate::zoom::Step::In, None, window, cx)
+            }))
+            .on_action(cx.listener(|_, _: &crate::ZoomOut, window, cx| {
+                crate::zoom::key(crate::zoom::Step::Out, None, window, cx)
+            }))
+            .on_action(cx.listener(|_, _: &crate::ResetZoom, window, cx| {
+                crate::zoom::key(crate::zoom::Step::Reset, None, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &ShareThread, window, cx| {
                 crate::share::open(this.workspace.clone(), &this.id, window, cx)
             }))

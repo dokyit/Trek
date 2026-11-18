@@ -43,6 +43,9 @@ pub struct Settings {
     pub terminal: Terminal,
     /// The tools panel's Browser.
     pub browser: Browser,
+    /// Keyboard shortcuts the user changed (Settings › Keyboard Shortcuts).
+    #[serde(skip_serializing_if = "Keys::is_empty")]
+    pub keys: Keys,
     /// What `load` couldn't read, and whether `save` may write the file.
     #[serde(skip)]
     pub guard: SaveGuard,
@@ -756,7 +759,44 @@ impl Default for Settings {
             usage: Usage::default(),
             terminal: Terminal::default(),
             browser: Browser::default(),
+            keys: Keys::default(),
             guard: SaveGuard::default(),
+        }
+    }
+}
+
+/// The keyboard shortcuts the user changed, and only those: a shortcut not named here has Trek's
+/// default, so a default a later version changes still arrives. Each platform has its own (their
+/// defaults differ: ⌘ on a Mac, Ctrl and other keys on Windows), keyed by the command's id
+/// (`new-thread`, `plugin:<plugin>/<command>`) and written as gpui reads a keystroke
+/// (`cmd-shift-k`, `ctrl-alt-k`). An empty value is a shortcut taken away.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Keys {
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub mac: std::collections::BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub windows: std::collections::BTreeMap<String, String>,
+}
+
+impl Keys {
+    pub fn is_empty(&self) -> bool {
+        self.mac.is_empty() && self.windows.is_empty()
+    }
+
+    /// The changes for the Mac (`mac`) or Windows.
+    pub fn for_platform(&self, mac: bool) -> &std::collections::BTreeMap<String, String> {
+        if mac { &self.mac } else { &self.windows }
+    }
+
+    pub fn for_platform_mut(
+        &mut self,
+        mac: bool,
+    ) -> &mut std::collections::BTreeMap<String, String> {
+        if mac {
+            &mut self.mac
+        } else {
+            &mut self.windows
         }
     }
 }
@@ -953,6 +993,9 @@ pub struct Appearance {
     pub ui_font_size: f32,
     /// Message text in the transcript, in points. Read through [`Appearance::transcript_font_size`].
     pub transcript_font_size: f32,
+    /// How far the whole interface is zoomed, as a browser zooms a page (1 = as designed):
+    /// Settings › Appearance › Interface, and ⌘+ / ⌘− / ⌘0. Read through [`Appearance::zoom`].
+    pub zoom: f32,
     pub code_font_size: f32,
     pub reduce_motion: bool,
     /// Scales every animation duration (0 = instant, 1 = designed timing).
@@ -1017,7 +1060,47 @@ pub enum BackgroundPlacement {
 pub const DEFAULT_UI_FONT_SIZE: f32 = 14.0;
 pub const DEFAULT_TRANSCRIPT_FONT_SIZE: f32 = 14.5;
 /// Sizes outside this range are treated as unset (0 = default).
-const FONT_SIZE_RANGE: std::ops::RangeInclusive<f32> = 9.0..=32.0;
+pub const FONT_SIZE_RANGE: std::ops::RangeInclusive<f32> = 9.0..=32.0;
+/// Conversation text's presets in Settings (Small, Default, Large, Larger); anything else in
+/// `FONT_SIZE_RANGE` is Custom.
+pub const TRANSCRIPT_PRESETS: [f32; 4] = [13.5, 14.5, 16.0, 17.5];
+
+/// How far the interface can be zoomed: half size to three times, so text stays readable and a
+/// window still has room for the sidebar and a thread. ⌘0 is 1 again from anywhere in it.
+pub const ZOOM_MIN: f32 = 0.5;
+pub const ZOOM_MAX: f32 = 3.0;
+/// Interface's presets in Settings (Small, Default, Large, Larger); anything else is Custom.
+pub const ZOOM_PRESETS: [f32; 4] = [0.9, 1.0, 1.1, 1.25];
+/// What ⌘+ and ⌘− step through, as browsers do: the presets, and on past them both ways.
+pub const ZOOM_STEPS: [f32; 13] = [
+    0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
+];
+
+/// `zoom`, kept in range: 1 for a value that isn't a zoom.
+pub fn clamp_zoom(zoom: f32) -> f32 {
+    if zoom.is_finite() && zoom > 0.0 {
+        zoom.clamp(ZOOM_MIN, ZOOM_MAX)
+    } else {
+        1.0
+    }
+}
+
+/// The step after `zoom` (`up`) or before it: the next one in `ZOOM_STEPS`, from a custom value
+/// too; at either end it stays.
+pub fn zoom_step(zoom: f32, up: bool) -> f32 {
+    let zoom = clamp_zoom(zoom);
+    let next = if up {
+        ZOOM_STEPS.iter().copied().find(|s| *s > zoom + 0.001)
+    } else {
+        ZOOM_STEPS.iter().rev().copied().find(|s| *s < zoom - 0.001)
+    };
+    next.unwrap_or(zoom)
+}
+
+/// A zoom as Settings and the toast write it: `110%`.
+pub fn zoom_percent(zoom: f32) -> String {
+    format!("{:.0}%", clamp_zoom(zoom) * 100.0)
+}
 
 fn font_size_or(v: f32, default: f32) -> f32 {
     if v.is_finite() && FONT_SIZE_RANGE.contains(&v) {
@@ -1038,6 +1121,12 @@ impl Appearance {
         font_size_or(self.transcript_font_size, DEFAULT_TRANSCRIPT_FONT_SIZE)
     }
 
+    /// The interface zoom to apply: the stored one kept in `ZOOM_MIN..=ZOOM_MAX` (a file that says
+    /// 10 opens at 3, never unusably large), 1 where it isn't a number.
+    pub fn zoom(&self) -> f32 {
+        clamp_zoom(self.zoom)
+    }
+
     /// The glass's tint to draw with, when glass is on: the stored one, kept in its range.
     pub fn glass_tint(&self) -> Option<f32> {
         self.glass.then(|| {
@@ -1056,6 +1145,7 @@ impl Default for Appearance {
             theme: ThemeChoice::System,
             ui_font_size: DEFAULT_UI_FONT_SIZE,
             transcript_font_size: DEFAULT_TRANSCRIPT_FONT_SIZE,
+            zoom: 1.0,
             code_font_size: 12.5,
             reduce_motion: false,
             motion_scale: 1.0,
@@ -2088,6 +2178,68 @@ mod tests {
         s.appearance.ui_font_size = 13.0;
         s.migrate();
         assert_eq!(s.appearance.ui_font_size, 13.0);
+    }
+
+    #[test]
+    fn zoom_is_kept_in_range_and_steps_through_the_presets_and_past_them() {
+        let s: Settings = toml::from_str("").unwrap();
+        assert_eq!(
+            s.appearance.zoom(),
+            1.0,
+            "a file from before zoom opens at 100%"
+        );
+        for (stored, applied) in [
+            (10.0, ZOOM_MAX),
+            (0.1, ZOOM_MIN),
+            (0.0, 1.0),
+            (f32::NAN, 1.0),
+            (1.33, 1.33),
+        ] {
+            let s: Settings =
+                toml::from_str(&format!("[appearance]\nzoom = {stored:?}\n").replace("NaN", "nan"))
+                    .unwrap();
+            assert_eq!(s.appearance.zoom(), applied, "{stored}");
+        }
+        // Every preset is a step, so the keys land on what Settings offers.
+        for preset in ZOOM_PRESETS {
+            assert!(ZOOM_STEPS.contains(&preset), "{preset}");
+        }
+        assert_eq!(zoom_step(1.0, true), 1.1);
+        assert_eq!(zoom_step(1.0, false), 0.9);
+        assert_eq!(zoom_step(1.25, true), 1.5, "past Larger into custom sizes");
+        assert_eq!(
+            zoom_step(1.33, true),
+            1.5,
+            "from a custom size, the next step"
+        );
+        assert_eq!(zoom_step(1.33, false), 1.25);
+        assert_eq!(zoom_step(ZOOM_MAX, true), ZOOM_MAX);
+        assert_eq!(zoom_step(ZOOM_MIN, false), ZOOM_MIN);
+        let mut z = 1.0;
+        let mut n = 0;
+        while z < ZOOM_MAX {
+            z = zoom_step(z, true);
+            n += 1;
+        }
+        assert_eq!(n, 7);
+        assert_eq!(zoom_percent(1.1), "110%");
+        assert_eq!(zoom_percent(0.67), "67%");
+    }
+
+    #[test]
+    fn key_changes_are_saved_per_platform_and_only_when_there_are_some() {
+        let mut s = Settings::default();
+        let text = toml::to_string(&s).unwrap();
+        assert!(!text.contains("[keys"), "{text}");
+        s.keys.mac.insert("new-thread".into(), "cmd-t".into());
+        s.keys.windows.insert("quit".into(), String::new());
+        let text = toml::to_string(&s).unwrap();
+        let back: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(back.keys, s.keys);
+        assert_eq!(back.keys.for_platform(true)["new-thread"], "cmd-t");
+        assert_eq!(back.keys.for_platform(false)["quit"], "");
+        let value: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(value["keys"]["mac"]["new-thread"].as_str(), Some("cmd-t"));
     }
 
     #[test]

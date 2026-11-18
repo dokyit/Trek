@@ -809,7 +809,11 @@ enum Msg {
 struct Tab {
     id: u64,
     view: Entity<WebView>,
+    /// The page's own zoom (the menu's, ⌘+ with the page's keys): 1 is as the site made it.
     zoom: f64,
+    /// What the view was last told: the page's zoom times the interface's (`crate::zoom`), so a
+    /// page grows with the rest of Trek.
+    zoom_applied: f64,
     page: Page,
     /// Where the page is drawn (window points), as last laid out.
     frame: Rc<std::cell::Cell<Bounds<Pixels>>>,
@@ -1964,6 +1968,7 @@ impl BrowserPanel {
             id,
             view,
             zoom: 1.0,
+            zoom_applied: 1.0,
             page: Page::new(url),
             frame: Rc::default(),
             dark: Some(dark),
@@ -2742,10 +2747,43 @@ impl BrowserPanel {
         let id = self.active;
         if let Some(tab) = self.tab_mut(id) {
             tab.zoom = zoom.clamp(ZOOM_STEPS[0], ZOOM_STEPS[ZOOM_STEPS.len() - 1]);
-            let z = tab.zoom;
-            let _ = tab.view.read(cx).raw().zoom(z);
         }
+        self.apply_zoom(cx);
         cx.notify();
+    }
+
+    /// Tell each page's view its zoom: its own times the interface's.
+    fn apply_zoom(&mut self, cx: &mut Context<Self>) {
+        let app = f64::from(crate::zoom::current(cx));
+        for tab in &mut self.tabs {
+            let want = tab.zoom * app;
+            if (tab.zoom_applied - want).abs() > 1e-6 {
+                tab.zoom_applied = want;
+                let _ = tab.view.read(cx).raw().zoom(want);
+            }
+        }
+    }
+
+    /// ⌘+ / ⌘− / ⌘0 while the page has the keys: the page's own zoom, as a browser's are
+    /// (`root`, which asks first). Whether there was a page to zoom.
+    pub fn zoom_page(&mut self, step: crate::zoom::Step, cx: &mut Context<Self>) -> bool {
+        if self
+            .active_tab()
+            .is_none_or(|t| t.page.url.starts_with("trek://"))
+        {
+            return false;
+        }
+        match step {
+            crate::zoom::Step::In => self.step_zoom(true, cx),
+            crate::zoom::Step::Out => self.step_zoom(false, cx),
+            crate::zoom::Step::Reset => self.set_zoom(1.0, cx),
+        }
+        true
+    }
+
+    /// The page in front's own zoom (the panel's menu shows it).
+    pub fn page_zoom(&self) -> Option<f64> {
+        self.active_tab().map(|t| t.zoom)
     }
 
     fn step_zoom(&mut self, up: bool, cx: &mut Context<Self>) {
@@ -3100,12 +3138,15 @@ impl BrowserPanel {
             move |bounds, window, _| {
                 frame.set(bounds);
                 if shown {
+                    // The window's points: the layout's, times the interface zoom (`zoom`),
+                    // snapped to the display's own pixels.
+                    let z = f64::from(window.ui_zoom());
                     let rect = snap_frame(
-                        f64::from(f32::from(bounds.origin.x)),
-                        f64::from(f32::from(bounds.origin.y)),
-                        f64::from(f32::from(bounds.size.width)),
-                        f64::from(f32::from(bounds.size.height)),
-                        f64::from(window.scale_factor()),
+                        f64::from(f32::from(bounds.origin.x)) * z,
+                        f64::from(f32::from(bounds.origin.y)) * z,
+                        f64::from(f32::from(bounds.size.width)) * z,
+                        f64::from(f32::from(bounds.size.height)) * z,
+                        f64::from(window.scale_factor()) / z,
                     );
                     native::place(place.raw(), rect);
                 }
@@ -4175,6 +4216,8 @@ impl Render for BrowserPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_theme(cx);
         self.sync_scheme(cx);
+        // A new tab, or the interface zoomed since: the pages grow with it.
+        self.apply_zoom(cx);
         let theme = cx.theme().clone();
         if self.unavailable && self.tabs.is_empty() {
             // Windows 11 ships the WebView2 runtime, but it can be removed (and older systems lack it).

@@ -18,6 +18,10 @@ struct Applied {
     badge_retry: Option<Task<()>>,
     menu_bar_icon: bool,
     ui_font_size: f32,
+    /// The interface zoom every window was given, and the windows it was given to (one opened or
+    /// busy since gets it at the next sync).
+    zoom: f32,
+    zoom_windows: Vec<AnyWindowHandle>,
     /// `None` until the first sync, so the chosen icon is put up at launch.
     app_icon: Option<AppIcon>,
     /// The windows the icon was last put on (Windows: it belongs to each window, so one opened
@@ -38,6 +42,8 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
         badge_retry: None,
         menu_bar_icon: ws.settings.notifications.menu_bar_icon,
         ui_font_size: 0.,
+        zoom: 1.0,
+        zoom_windows: Vec::new(),
         app_icon: None,
         icon_windows: Vec::new(),
         icon_retry: None,
@@ -163,6 +169,18 @@ fn sync(workspace: &Entity<Workspace>, applied: &mut Applied, cx: &mut App) {
     if ui_font_size != applied.ui_font_size {
         applied.ui_font_size = ui_font_size;
         apply_ui_font_size(ui_font_size, cx);
+    }
+    // The interface's zoom, on every window (`zoom`); a window opened since opens at it already.
+    let zoom = workspace.read(cx).settings.appearance.zoom();
+    let all = cx.windows();
+    if zoom != applied.zoom || all != applied.zoom_windows {
+        applied.zoom = zoom;
+        applied.zoom_windows = all;
+        crate::zoom::apply(zoom, cx);
+    }
+    // The user's shortcuts (Settings › Keyboard Shortcuts) in the keymap and the menus.
+    if crate::keys::set_changes(&workspace.read(cx).settings.keys) {
+        crate::keys::rebind(cx);
     }
     // The Dock tile is the app's, so the icon is put up once per choice; a Windows icon is each
     // window's, so a window that wasn't there when it was chosen needs it put on too.

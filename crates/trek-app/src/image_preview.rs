@@ -808,7 +808,7 @@ impl ImagePreview {
             .w_full()
             .flex_none()
             // Clear of the traffic lights, and of the caption buttons.
-            .pl(px(crate::chrome::LEFT_INSET + 6.))
+            .pl(px(crate::chrome::left_inset() + 6.))
             .pr(px(10. + crate::chrome::RIGHT_RESERVE))
             .gap(px(12.))
             .items_center()

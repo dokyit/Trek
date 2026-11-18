@@ -5,6 +5,7 @@ mod accounts;
 mod backgrounds;
 mod coming_from;
 mod connections;
+mod keyboard;
 mod local_models;
 mod mobile;
 mod pages;
@@ -170,7 +171,7 @@ pub fn page_blurb(p: SettingsPage) -> std::borrow::Cow<'static, str> {
         SettingsPage::Plugins => "Looks, companions, sounds and screens of your own: Trek as you'd have it.".into(),
         SettingsPage::Notifications => "How Trek tells you an agent finished or needs a decision.".into(),
         SettingsPage::Skills => "Instructions your agents can load on demand. Turn a skill off and every agent stops seeing it; turn it on to bring it back.".into(),
-        SettingsPage::Shortcuts => "Every keyboard shortcut in Trek.".into(),
+        SettingsPage::Shortcuts => "Every keyboard shortcut in Trek, each yours to change.".into(),
         SettingsPage::Agents => "Trek runs each vendor's own agent with the login you already have, so your subscriptions just work. Trek never reads or stores those credentials.".into(),
         // Windows has no iOS Simulator, so its blurb doesn't promise one.
         SettingsPage::Tools if crate::words::is_windows() => "Computer use, and the MCP servers, skills and plugins your agents can call.".into(),
@@ -336,6 +337,10 @@ pub struct SettingsView {
     rules: rules::RulesForm,
     /// Appearance › Material: how frosted liquid glass is, 0 (clear) to 100 (frosted).
     pub(super) glass_slider: Entity<gpui_kit::component::slider::SliderState>,
+    /// Appearance › Text size: the Custom sizes' fields.
+    sizes: keyboard::Sizes,
+    /// Keyboard Shortcuts: its search and the shortcut being recorded.
+    keys: keyboard::KeysPage,
     /// What the Tools and Snapshots pages show from the Mac's setup, and whether the project's
     /// image icon is still there, each read off the main thread.
     tools: Probe<ToolsProbe>,
@@ -707,6 +712,10 @@ impl SettingsView {
         let action_command =
             cx.new(|cx| InputState::new(window, cx).placeholder("Command, e.g. cargo test"));
         let frost = frost_of(workspace.read(cx).settings.appearance.glass_tint);
+        let (sizes, size_subs) = keyboard::Sizes::new(window, cx);
+        subs.extend(size_subs);
+        let (keys, keys_sub) = keyboard::KeysPage::new(window, cx);
+        subs.push(keys_sub);
         let glass_slider = cx.new(|_| {
             gpui_kit::component::slider::SliderState::new()
                 .min(0.)
@@ -782,6 +791,8 @@ impl SettingsView {
             left_out_open: HashSet::new(),
             rules: rules::RulesForm::new(window, cx),
             glass_slider,
+            sizes,
+            keys,
             tools: Probe::default(),
             media_revision: 0,
             secret_scan: Probe::default(),
@@ -3115,6 +3126,9 @@ impl Render for SettingsView {
         let page = self.page(cx);
         if page == SettingsPage::Project {
             self.sync_project_name(window, cx);
+        }
+        if page == SettingsPage::Appearance {
+            self.sync_sizes(window, cx);
         }
         // The firewall can have changed since the iPhone page was last open: read it again.
         if page == SettingsPage::Mobile && self.scrolled_page != Some(page) {

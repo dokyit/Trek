@@ -16,12 +16,18 @@ use gpui_kit::*;
 /// faint gradient, which the Mac keeps; Windows' chrome is flat, so it takes the theme's colour.
 pub fn title_bar(transparent: bool, cx: &App) -> gpui_kit::component::TitleBar {
     use gpui_kit::component::{ActiveTheme as _, TitleBar};
-    if transparent {
+    let bar = if transparent {
         TitleBar::new().bg(gpui_kit::transparent_black())
     } else if cfg!(windows) {
         TitleBar::new().bg(cx.theme().title_bar)
     } else {
         TitleBar::new()
+    };
+    // The system's own controls (the traffic lights) don't zoom with the interface: the bar
+    // keeps room for them at any zoom (`left_inset`), and is never shorter than they need.
+    match system_controls_left() {
+        true => bar.pl(px(left_inset())).h(px(title_bar_height())),
+        false => bar,
     }
 }
 
@@ -30,6 +36,32 @@ pub fn title_bar(transparent: bool, cx: &App) -> gpui_kit::component::TitleBar {
 /// same number, for what Trek lines up with the title bar's content (the sidebar's width, Quick
 /// Look's header).
 pub const LEFT_INSET: f32 = if cfg!(target_os = "macos") { 80. } else { 12. };
+
+/// Whether the system draws the window's controls at the title bar's left (macOS's traffic
+/// lights), at a size of its own that the interface's zoom doesn't change.
+fn system_controls_left() -> bool {
+    cfg!(target_os = "macos")
+}
+
+/// `LEFT_INSET` in the zoomed layout's points: the traffic lights take the same room on screen at
+/// any zoom, so at 50% the inset is twice as many of the layout's points, at 200% half.
+pub fn left_inset() -> f32 {
+    if system_controls_left() {
+        LEFT_INSET / crate::zoom::now()
+    } else {
+        LEFT_INSET
+    }
+}
+
+/// How tall the title bar is in the layout's points: `TITLE_BAR_HEIGHT_PX`, or where the zoom is
+/// below 100% on a Mac, enough to hold the traffic lights (30 points on screen).
+pub fn title_bar_height() -> f32 {
+    if system_controls_left() {
+        TITLE_BAR_HEIGHT_PX.max(30. / crate::zoom::now())
+    } else {
+        TITLE_BAR_HEIGHT_PX
+    }
+}
 
 /// How wide the caption buttons are, which `TitleBar` draws as a row of three squares as tall as
 /// the bar (34 px, 102 in all; Windows 11's own are 46 wide): 0 on macOS, where the traffic lights
@@ -219,8 +251,8 @@ pub const CAPTION_DIVIDER_MARGIN: f32 = 8.;
 
 /// Width of the title bar's left cluster (the sidebar toggle and Trek's mark) so that what follows
 /// it starts where the sidebar ends: the sidebar's width less what `TitleBar` leaves before it.
-pub const fn left_cluster(sidebar_width: f32) -> f32 {
-    sidebar_width - LEFT_INSET
+pub fn left_cluster(sidebar_width: f32) -> f32 {
+    (sidebar_width - left_inset()).max(0.)
 }
 
 /// The caption buttons once more, last in the window so they're over everything: the title bar's

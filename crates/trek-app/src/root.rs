@@ -179,12 +179,16 @@ impl TrekWindow {
             cx.notify();
         });
         // The next launch opens the main window where this one is left.
-        let mut scale = window.scale_factor();
+        // The display's own scale (the window's is that times the interface's zoom).
+        let display_scale = |window: &Window| window.scale_factor() / window.ui_zoom();
+        let mut scale = display_scale(window);
         cx.observe_window_bounds(window, move |_, window, cx| {
             crate::window_place::remember(window, cx);
-            if window.scale_factor() != std::mem::replace(&mut scale, window.scale_factor()) {
+            if display_scale(window) != std::mem::replace(&mut scale, display_scale(window)) {
                 crate::system::scale_changed(window, cx);
             }
+            // Resized: the zoom as it fits now (`zoom::fitted`).
+            crate::zoom::fit(window, cx);
         })
         .detach();
         let settings = cx.new(|cx| SettingsView::new(workspace.clone(), window, cx));
@@ -1028,6 +1032,7 @@ impl Render for WindowTitle {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-support", feature = "shots"))]
         crate::test_support::rendered("WindowTitle");
+        crate::zoom::drawing(window);
         if self.workspace.read(cx).ide() {
             return self.render_editor(cx);
         }
@@ -2248,6 +2253,7 @@ impl Render for TrekWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-support", feature = "shots"))]
         crate::test_support::rendered("TrekWindow");
+        crate::zoom::drawing(window);
         crate::perf::frame_begins();
         crate::chrome::let_go_of_hover(window, cx);
         let route = self.workspace.read(cx).route.clone();
@@ -2542,6 +2548,19 @@ impl Render for TrekWindow {
                     ws.check_for_updates(true, cx);
                     ws.navigate(Route::Settings(SettingsPage::Updates), cx);
                 })
+            }))
+            // The interface's zoom, or the Browser's page while it has the keys.
+            .on_action(cx.listener(|this, _: &crate::ZoomIn, window, cx| {
+                let browser = this.right_panel.read(cx).browser();
+                crate::zoom::key(crate::zoom::Step::In, browser, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::ZoomOut, window, cx| {
+                let browser = this.right_panel.read(cx).browser();
+                crate::zoom::key(crate::zoom::Step::Out, browser, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::ResetZoom, window, cx| {
+                let browser = this.right_panel.read(cx).browser();
+                crate::zoom::key(crate::zoom::Step::Reset, browser, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
                 if this.workspace.read(cx).ide() {
