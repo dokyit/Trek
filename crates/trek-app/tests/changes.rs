@@ -617,3 +617,39 @@ fn with_the_recap_off_agents_arent_asked_for_a_recap() {
         assert!(!told.contains(trek_core::changes::RECAP), "{told}");
     });
 }
+
+/// The tools panel's one size button: it fills the window (over the sidebar and the chat) and
+/// goes back to the side at the width it had. There's no in-between step: a width is dragged.
+#[test]
+fn the_tools_panel_fills_the_window_and_goes_back_to_its_width() {
+    run(async |cx| {
+        let trek = open(cx);
+        let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
+        trek.window(cx, |window, cx| {
+            panel.update(cx, |p, cx| {
+                p.open_tool(trek_app::workspace::PanelTool::Git, window, cx)
+            })
+        });
+        trek.render(cx);
+        let side = cx.read(|cx| panel.read(cx).width);
+        assert!(!cx.read(|cx| panel.read(cx).full));
+        assert!(!trek.visible(cx, "tools-overlay"), "docked beside the chat");
+        trek.click(cx, "panel-fill");
+        trek.render(cx);
+        assert!(cx.read(|cx| panel.read(cx).full));
+        let whole = trek.window(cx, |window, _| window.viewport_size().width);
+        let over = trek.bounds(cx, "tools-overlay").expect("over the window");
+        assert!(
+            (over.size.width - whole).abs() < gpui_kit::px(1.),
+            "{over:?} of {whole:?}"
+        );
+        trek.click(cx, "panel-fill");
+        trek.render(cx);
+        assert!(!cx.read(|cx| panel.read(cx).full));
+        assert_eq!(
+            cx.read(|cx| panel.read(cx).width),
+            side,
+            "its width is kept"
+        );
+    });
+}

@@ -95,7 +95,6 @@ pub const MIN_PANEL: f32 = 320.;
 /// rough width: enough to tell whether the labels fit before they're laid out.
 const TAB_CHROME: f32 = 58.;
 const TAB_CHAR: f32 = 7.4;
-pub const WIDE_PANEL: f32 = 720.;
 
 pub struct RightPanel {
     workspace: Entity<Workspace>,
@@ -103,7 +102,7 @@ pub struct RightPanel {
     /// Width in points (persisted in settings.layout); the root clamps it to the window.
     pub width: f32,
     /// The panel fills the window under the title bar, over the sidebar and the chat (the
-    /// header's widen button, a third press). Not kept: Trek opens with the panel at its side.
+    /// header's fill button). Not kept: Trek opens with the panel at its side.
     pub full: bool,
     tabs: Vec<Tab>,
     active: Option<u64>,
@@ -891,12 +890,11 @@ impl Render for RightPanel {
                 ui::menu_surface(cx).w(px(220.)).children(rows)
             });
 
-        // One button, three sizes in turn: its usual width, wide, and the whole window.
+        // One button, two sizes: at the side, as wide as it was dragged, or the whole window.
         let wide = {
-            let wide = self.width >= WIDE_PANEL - 1.;
             let full = self.full;
             ui::icon_button(
-                "panel-wide",
+                "panel-fill",
                 if full {
                     IconName::Minimize
                 } else {
@@ -904,23 +902,14 @@ impl Render for RightPanel {
                 },
                 if full {
                     "Back to the side"
-                } else if wide {
-                    "Fill the window"
                 } else {
-                    "Wider"
+                    "Fill the window"
                 },
             )
             .on_click(cx.listener(move |this, _, _, cx| {
-                if full {
-                    this.full = false;
-                    this.set_width(trek_core::settings::DEFAULT_RIGHT_PANEL_WIDTH, cx);
-                } else if wide {
-                    this.full = true;
-                    cx.notify();
-                } else {
-                    this.set_width(WIDE_PANEL, cx);
-                }
+                this.full = !full;
                 this.sync_native(cx);
+                cx.notify();
             }))
         };
         let row = h_flex()
