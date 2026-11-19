@@ -959,7 +959,13 @@ pub struct General {
     pub prevent_sleep_while_running: bool,
     /// Where closing the main window would end Trek (Windows, with no Dock to keep it up): keep it
     /// running in the tray instead, as a Mac's stays in the Dock (`root::close_main`). Its tray
-    /// icon (`notifications.menu_bar_icon`) brings the window back, so it needs that on.
+    /// icon (`notifications.menu_bar_icon`) brings the window back, so it needs that on. On unless
+    /// turned off: a window that closes is expected to leave the app in the tray, and one that
+    /// quit instead looked like a Trek running somewhere it couldn't be found.
+    ///
+    /// Kept as `keep_in_tray`: it was `stay_in_tray`, off unless turned on, and every settings file
+    /// saved then says `false` whether or not anyone chose it. Under a new name those start on too.
+    #[serde(rename = "keep_in_tray")]
     pub stay_in_tray: bool,
     /// Favorite models as `agent-key/model-id`.
     pub favorite_models: Vec<String>,
@@ -995,7 +1001,7 @@ impl Default for General {
             send_with_cmd_enter: false,
             auto_title: true,
             prevent_sleep_while_running: true,
-            stay_in_tray: false,
+            stay_in_tray: true,
             favorite_models: vec![],
             on_usage_limit: OnUsageLimit::Ask,
             continue_on_other_account: false,
@@ -1799,6 +1805,31 @@ pub mod secrets {
 
 #[cfg(test)]
 mod tests {
+    /// Every settings file saved before the tray was the default says `stay_in_tray = false`,
+    /// chosen or not: Trek is kept in the tray all the same, until it's turned off under its new name.
+    #[test]
+    fn a_file_from_before_the_tray_was_the_default_keeps_trek_in_the_tray() {
+        let old: Settings = toml::from_str(
+            "[general]
+stay_in_tray = false
+",
+        )
+        .unwrap();
+        assert!(old.general.stay_in_tray);
+        let off: Settings = toml::from_str(
+            "[general]
+keep_in_tray = false
+",
+        )
+        .unwrap();
+        assert!(!off.general.stay_in_tray);
+        assert!(
+            toml::to_string(&off)
+                .unwrap()
+                .contains("keep_in_tray = false")
+        );
+    }
+
     #[test]
     fn the_sidebar_stays_in_its_range_and_folds_when_pulled_narrow() {
         use super::*;
