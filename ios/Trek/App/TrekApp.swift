@@ -22,6 +22,16 @@ struct TrekApp: App {
                     model.boot(demo: Launch.demo)
                     // Screenshots: show the confirmation for a link, as if it had been opened.
                     if let s = Launch.link, let link = PairingLink(s) { model.offer(link) }
+                    // Screenshots of the question asked before the first message goes to an agent
+                    // (`-TrekSheet sharing`, with `-TrekOpen <thread>` for that thread's agent):
+                    // the demo never asks by itself, since nothing it's sent leaves the phone.
+                    if Launch.sheet == "sharing" {
+                        for _ in 0..<20 where model.threads.isEmpty { try? await Task.sleep(for: .seconds(0.25)) }
+                        try? await Task.sleep(for: .seconds(0.8))
+                        let tid = Launch.open.map { model.qualified($0) }
+                        model.sharingAsk = SharingAsk(recipient: tid.map { model.sharingRecipient(thread: $0) } ?? SharingRecipient(),
+                                                      machine: tid.flatMap { model.hostName(of: $0) } ?? model.selected?.name ?? "your computer")
+                    }
                     #if DEBUG
                     // Scripted live screenshots only (ios/scripts/live-screenshots.sh): pair
                     // without the sheet. Debug builds, launch arguments: never from a link.
@@ -191,6 +201,9 @@ struct RootView: View {
         .sheet(item: $model.pendingLink) { link in
             PairingConfirmSheet(link: link)
         }
+        // Before the first message goes to an agent (Sharing.swift). Sheets that send have their
+        // own, since this one can't come up over them.
+        .asksBeforeSharing()
         // "Pair again" on a machine that refused this iPhone: its old pairing stays until the new
         // one replaces it.
         .sheet(item: $model.pairingAgain) { machine in

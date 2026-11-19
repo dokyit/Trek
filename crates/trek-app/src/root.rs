@@ -1558,11 +1558,20 @@ pub fn close_main(window: &mut Window, cx: &mut App) {
     // Kept in the tray, its icon there to bring the window back: the windows close and Trek stays
     // up whatever is at work, as a Mac's does in the Dock. The editor goes with the window, so
     // unsaved edits are asked about first.
-    let stays = {
+    let (stay_in_tray, menu_bar_icon) = {
         let settings = &ws.read(cx).settings;
-        settings.general.stay_in_tray && settings.notifications.menu_bar_icon
+        (
+            settings.general.stay_in_tray,
+            settings.notifications.menu_bar_icon,
+        )
     };
-    if stays {
+    let icon_up = stay_in_tray && menu_bar_icon && crate::tray::reachable(cx);
+    if stay_in_tray && menu_bar_icon && !icon_up {
+        tracing::warn!(
+            "close: Keep in the tray is on, but the taskbar has no Trek icon to come back through; the window closes as with it off"
+        );
+    }
+    if stays_in_tray(stay_in_tray, menu_bar_icon, icon_up) {
         // Once the window's own update is over: inside it, the window can't be closed.
         settle_unsaved(window, cx, |cx| cx.defer(|cx| keep_working(STAY, cx)));
         return;
@@ -1609,6 +1618,14 @@ pub fn close_main(window: &mut Window, cx: &mut App) {
         });
     })
     .detach();
+}
+
+/// Whether closing the main window keeps Trek up in the tray (`general.stay_in_tray`): only with
+/// its icon made (`notifications.menu_bar_icon`) and on the taskbar now (`icon_up`,
+/// `tray::reachable`). Without one the window closes as it would with the setting off, rather than
+/// leave a Trek running that nothing on screen can reach or quit.
+pub fn stays_in_tray(stay_in_tray: bool, menu_bar_icon: bool, icon_up: bool) -> bool {
+    stay_in_tray && menu_bar_icon && icon_up
 }
 
 /// The main window's close button. Where the app ends with its main window it's the Quit command
@@ -1773,10 +1790,13 @@ pub fn keep_working(grace: std::time::Duration, cx: &mut App) {
     for window in cx.windows() {
         let _ = window.update(cx, |_, window, _| window.remove_window());
     }
-    // In the tray for good: nothing to watch for.
+    // In the tray for good: nothing to watch for but the icon itself.
     if grace == STAY {
+        tracing::info!("windows closed: Trek stays in the tray until its Quit");
+        watch_tray(this, cx);
         return;
     }
+    tracing::info!("windows closed: Trek works on and quits once nothing is at work");
     cx.spawn(async move |cx| {
         let mut idle_since: Option<std::time::Instant> = None;
         loop {
@@ -1808,6 +1828,61 @@ pub fn keep_working(grace: std::time::Duration, cx: &mut App) {
                 }
                 cx.remove_global::<InBackground>();
                 cx.dispatch_action(&crate::Quit);
+                true
+            });
+            if done {
+                break;
+            }
+        }
+    })
+    .detach();
+}
+
+/// How long Trek kept in the tray goes without its icon on the taskbar before its main window comes
+/// back. Explorer restarting takes a few seconds, and the icon is added again once the taskbar
+/// says it's back (`tray-icon` hears `TaskbarCreated`); one that doesn't come back would leave a
+/// Trek nothing on screen can reach.
+const TRAY_LOST: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// How long the way back to a Trek with its windows closed has been gone.
+#[derive(Default)]
+struct WayBack {
+    gone_since: Option<std::time::Instant>,
+}
+
+impl WayBack {
+    /// Seen `up` (the tray icon there, or a window of Trek's open) or not at `now`: true once it
+    /// has been gone for `TRAY_LOST` without a break.
+    fn gone_too_long(&mut self, up: bool, now: std::time::Instant) -> bool {
+        if up {
+            self.gone_since = None;
+            return false;
+        }
+        now.duration_since(*self.gone_since.get_or_insert(now)) >= TRAY_LOST
+    }
+}
+
+/// While Trek is kept in the tray by the `keep_working` numbered `this`: should the taskbar lose
+/// its icon for good (`WayBack`), the main window comes back.
+fn watch_tray(this: u64, cx: &mut App) {
+    cx.spawn(async move |cx| {
+        let mut way_back = WayBack::default();
+        loop {
+            cx.background_executor().timer(BACKGROUND_TICK).await;
+            let done = cx.update(|cx| {
+                // On screen again, or closed again and watched by a later `keep_working`.
+                if cx.try_global::<InBackground>().map(|b| b.0) != Some(this) {
+                    return true;
+                }
+                let up = !cx.windows().is_empty() || crate::tray::reachable(cx);
+                if !way_back.gone_too_long(up, std::time::Instant::now()) {
+                    return false;
+                }
+                tracing::warn!(
+                    "kept in the tray, but the taskbar has had no Trek icon for {}s: the window comes back",
+                    TRAY_LOST.as_secs()
+                );
+                show_main(crate::workspace::workspace_global(cx), cx);
                 true
             });
             if done {
@@ -2440,9 +2515,9 @@ impl Render for TrekWindow {
             crate::motion::redraw_whole(window);
         }
         self.mode_fading = crossing;
-        let (right_open, wanted_width) = {
+        let (right_open, wanted_width, panel_full) = {
             let p = self.right_panel.read(cx);
-            (p.open, p.width)
+            (p.open, p.width, p.open && p.full && !in_settings)
         };
         // Whatever the stored width, leave the chat column at least MIN_CHAT wide. A window too
         // narrow for both floats the panel over the chat's right side instead (`overlay_panel`).
@@ -2452,13 +2527,20 @@ impl Render for TrekWindow {
             sidebar_width
         };
         let room = window.viewport_size().width.as_f32() - side - 16.;
-        let overlay = overlay_panel(room);
-        let max_width = if overlay {
+        // Filling the window, the panel lies over the sidebar and the chat, as wide as the window.
+        let overlay = panel_full || overlay_panel(room);
+        let max_width = if panel_full {
+            window.viewport_size().width.as_f32()
+        } else if overlay {
             (room - 40.).max(240.)
         } else {
             (room - MIN_CHAT * 0.8).min((room - MIN_CHAT).max(crate::panels::MIN_PANEL))
         };
-        let right_width = wanted_width.clamp(crate::panels::MIN_PANEL.min(max_width), max_width);
+        let right_width = if panel_full {
+            max_width
+        } else {
+            wanted_width.clamp(crate::panels::MIN_PANEL.min(max_width), max_width)
+        };
         let dragging = self.panel_drag.is_some();
         let sidebar_held = self.sidebar_drag.is_some();
         let dock_dragging = self.terminal_dock.read(cx).dragging();
@@ -3331,6 +3413,7 @@ impl TrekWindow {
                             cx.notify();
                         }),
                     );
+                let full = self.right_panel.read(cx).full;
                 let panel = div()
                     .relative()
                     .w(px(right_width))
@@ -3338,7 +3421,9 @@ impl TrekWindow {
                     .h_full()
                     .pr_2()
                     .pb_2()
-                    .child(handle)
+                    // Filling the window it has nothing beside it to be dragged against.
+                    .when(full, |el| el.pl_2())
+                    .when(!full, |el| el.child(handle))
                     .child(
                         div()
                             .size_full()
@@ -3374,5 +3459,38 @@ impl TrekWindow {
                 }
             })
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tray_tests {
+    // Not `super::*`: the gpui glob import brings its own `test` attribute.
+    use super::{TRAY_LOST, WayBack, stays_in_tray};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn closing_keeps_trek_in_the_tray_only_with_its_icon_there() {
+        assert!(stays_in_tray(true, true, true));
+        assert!(
+            !stays_in_tray(true, true, false),
+            "an icon the taskbar never took (or lost) is no way back"
+        );
+        assert!(!stays_in_tray(true, false, false), "the icon turned off");
+        assert!(!stays_in_tray(false, true, true), "the setting off");
+    }
+
+    #[test]
+    fn the_window_comes_back_once_the_icon_has_been_gone_a_while() {
+        let start = Instant::now();
+        let mut way_back = WayBack::default();
+        assert!(!way_back.gone_too_long(true, start));
+        assert!(!way_back.gone_too_long(false, start), "Explorer restarting");
+        assert!(!way_back.gone_too_long(false, start + TRAY_LOST / 2));
+        // Back before the time was up: the count starts again.
+        assert!(!way_back.gone_too_long(true, start + TRAY_LOST / 2));
+        assert!(!way_back.gone_too_long(false, start + TRAY_LOST));
+        assert!(!way_back.gone_too_long(false, start + TRAY_LOST + TRAY_LOST / 2));
+        assert!(way_back.gone_too_long(false, start + TRAY_LOST * 2));
+        assert!(way_back.gone_too_long(false, start + TRAY_LOST * 2 + Duration::from_secs(1)));
     }
 }

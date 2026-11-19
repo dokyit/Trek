@@ -1148,7 +1148,7 @@ impl Render for AiInput {
             .and_then(|id| self.workspace.read(cx).live.get(id))
             .and_then(|l| l.context);
         let hh = self.workspace.read(cx).prefs_in(&self.scope).hand_holding;
-        let model_pill = pickers::model_pill(self, narrow, true, !narrow, true, cx);
+        let model_pill = pickers::model_pill(self, narrow, true, !narrow, true, window, cx);
         let access_pill = pickers::access_pill(self, true, true, cx);
         let mode_pill = self.mode_pill(cx);
         let picker = pickers::picker(self, cx);

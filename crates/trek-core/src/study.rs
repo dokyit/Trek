@@ -1498,7 +1498,7 @@ mod tests {
         }
         // Inside Trek's own card: no box drawn around it again.
         assert!(!card.contains(".card{border"));
-        assert!(card.len() < 16_000, "{} bytes", card.len());
+        assert!(card.len() < 17_000, "{} bytes", card.len());
         // What a model writes by habit (bare keys, trailing commas) still makes a card; a problem
         // has no options; what isn't a question makes none.
         let loose = r#"{ kind: "problem", prompt: "Say \"why\": 2, 0, -1", options: ["x"], targets: ["c2",], }"#;

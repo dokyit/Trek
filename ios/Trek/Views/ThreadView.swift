@@ -217,7 +217,7 @@ private struct ThreadScreen: View {
             .sheet(item: $sideChat) { SideChatSheet(parent: threadID, ask: $0) }
             // One of the agent's own sub-agents, opened from its row or the at-work card.
             .sheet(item: Binding(get: { model.openSubAgent.flatMap { $0.threadId == threadID ? $0 : nil } },
-                                 set: { if $0 == nil { model.openSubAgent = nil } })) { SubAgentView(target: $0) }
+                                 set: { if $0 == nil { model.openSubAgent = nil } })) { SubAgentView(target: $0).asksBeforeSharing() }
             .deleteConfirmation($deleteAsk, model: model) { _ in dismiss() }
             .sheet(item: $newThread) { request in
                 NewThreadSheet(project: request.project, prompt: request.prompt, on: request.link) { model.openRequest = $0 }
@@ -1279,6 +1279,9 @@ private struct ComposerArea: View {
             composer.cleared(after: composer.draft)
             return
         }
+        // The first message from this iPhone (or the first to this agent's provider): say where
+        // it goes and ask. Until there's a yes nothing is sent and the draft stays as it is.
+        guard model.mayShare(with: model.sharingRecipient(thread: threadID), on: link, then: { send() }) else { return }
         felt = Felt(feedback: .impact(weight: .light))
         let uploads = composer.photos.compactMap(\.upload)
         // `/new` and `/clear` open the new-thread sheet: what follows them is its prompt.

@@ -463,6 +463,7 @@ impl NotesView {
     }
 
     fn new_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        crate::privacy::count_action("note-created");
         // An empty note on top is reused rather than stacked.
         if let Some(empty) = self
             .notes

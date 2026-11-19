@@ -5,6 +5,8 @@
 # app in App Store Connect with this bundle id (My Apps › + › New App; any free name, e.g.
 # "Trek Agents"). Then each run uploads a new build; TestFlight keeps it 90 days and offers it
 # to your iPhone in the TestFlight app.
+# Built with AppStore.xcconfig (TREK_APP_STORE): the update flow where a Mac installs the app is
+# compiled out of a store build. The archive is the Trek scheme alone: no Trek Driver in it.
 # Env: TEAM (team id; default: the first paid team Xcode knows), BUNDLE (default dev.trek.TrekMobile),
 #      BUILD (build number; default the date and time, so each upload is newer).
 set -eu
@@ -22,6 +24,7 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 echo "Team $TEAM, bundle $BUNDLE, build $BUILD"
 xcodebuild archive -project Trek.xcodeproj -scheme Trek -configuration Release \
   -destination 'generic/platform=iOS' -archivePath "$OUT/Trek.xcarchive" -allowProvisioningUpdates \
+  -xcconfig AppStore.xcconfig \
   DEVELOPMENT_TEAM="$TEAM" PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE" CODE_SIGN_STYLE=Automatic \
   CURRENT_PROJECT_VERSION="$BUILD" INFOPLIST_KEY_ITSAppUsesNonExemptEncryption=NO -quiet
 cat > "$OUT/ExportOptions.plist" <<PLIST

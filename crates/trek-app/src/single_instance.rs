@@ -32,6 +32,9 @@ const WAIT: Duration = Duration::from_secs(15);
 const REQUEST_WITHIN: Duration = Duration::from_secs(5);
 /// The file in the data folder naming the running Trek's pipe.
 const PIPE_FILE: &str = "trek.pipe";
+/// What a Trek that's quitting answers a later launch (`hear`), which then waits to take the
+/// data folder itself once that Trek is gone (`claim_in`).
+const QUITTING: &str = "Trek is quitting";
 
 /// Arguments another launch handed over, for the main thread; `done` takes the answer back.
 pub struct Forwarded {
@@ -147,6 +150,8 @@ pub fn claim_in(dir: &Path, open: Open, wait: Duration) -> Claim {
     use trek_ipc::instance::ForwardError;
     let deadline = std::time::Instant::now() + wait;
     let mut why = "it hasn't said where it listens".to_string();
+    // The running Trek's process, as its pipe's name says: for the user to find it by.
+    let mut pid = None;
     loop {
         match crate::workspace::lock_folder(dir) {
             Ok(Some(lock)) => return Claim::Primary(listen(dir, lock, open.args)),
@@ -161,6 +166,7 @@ pub fn claim_in(dir: &Path, open: Open, wait: Duration) -> Claim {
             }
         }
         if let Some(address) = published(dir) {
+            pid = trek_ipc::instance::served_by(&address).or(pid);
             if !open.background {
                 allow_foreground(&address);
             }
@@ -178,21 +184,34 @@ pub fn claim_in(dir: &Path, open: Open, wait: Duration) -> Claim {
                 }
                 // Not listening yet (or any more), or a pipe that isn't the running Trek's.
                 Err(ForwardError::Unreachable(e)) => why = e,
+                // On its way out: its window would only have closed again, leaving this launch
+                // with nothing on screen. The folder comes free in a moment, and this launch is
+                // the Trek then.
+                Err(ForwardError::Refused(e)) if e == QUITTING => why = e,
                 Err(e) => {
                     return Claim::Failed(format!(
-                        "Trek is already running with this data folder, but {e}."
+                        "Trek is already running with this data folder{}, but {e}.",
+                        process(pid)
                     ));
                 }
             }
         }
         if std::time::Instant::now() >= deadline {
             return Claim::Failed(format!(
-                "Trek is already running with this data folder ({}), but it isn't answering: {why}.",
-                dir.display()
+                "Trek is already running with this data folder ({}){}, but it isn't answering: {why}.",
+                dir.display(),
+                process(pid)
             ));
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// " (process 1234)", for a running Trek whose process is known: Task Manager's Details tab lists
+/// it by that number.
+#[cfg(windows)]
+fn process(pid: Option<u32>) -> String {
+    pid.map(|p| format!(" (process {p})")).unwrap_or_default()
 }
 
 /// The running Trek's pipe, as it wrote it to the data folder.
@@ -273,11 +292,8 @@ async fn hand_over(tx: async_channel::Sender<Forwarded>, open: Open) -> Result<(
     let (done, answer) = async_channel::bounded(1);
     tx.send(Forwarded { open, done })
         .await
-        .map_err(|_| "Trek is quitting".to_string())?;
-    answer
-        .recv()
-        .await
-        .unwrap_or_else(|_| Err("Trek is quitting".into()))
+        .map_err(|_| QUITTING.to_string())?;
+    answer.recv().await.unwrap_or_else(|_| Err(QUITTING.into()))
 }
 
 /// Write the pipe's name where a second launch looks, whole or not at all.
@@ -309,7 +325,7 @@ pub fn tell(why: &str) {
         let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
         let (text, title) = (
             wide(&format!(
-                "{why}\n\nClose it (from Task Manager if need be) and open Trek again."
+                "{why}\n\nClose it (from Task Manager if need be: it's “Trek”, under Background processes while it has no window, and trek.exe on the Details tab) and open Trek again."
             )),
             wide("Trek"),
         );
@@ -343,12 +359,19 @@ pub fn hear(
     let ws = ws.downgrade();
     cx.spawn(async move |cx| {
         while let Ok(Forwarded { open, done }) = rx.recv().await {
-            let _ = cx.update(|cx| {
-                if let Some(ws) = ws.upgrade() {
+            // Not while quitting: the window would come up only to close with the rest, and the
+            // launch, told it was handed over, would leave the user with no Trek at all.
+            let taken = cx.update(|cx| match ws.upgrade() {
+                Some(ws) if !ws.read(cx).quitting => {
                     take(open, &ws, &links, cx);
+                    true
                 }
+                _ => false,
             });
-            let _ = done.try_send(Ok(()));
+            if !taken {
+                tracing::info!("single instance: another launch came while quitting; it waits");
+            }
+            let _ = done.try_send(if taken { Ok(()) } else { Err(QUITTING.into()) });
         }
     })
     .detach();
@@ -712,6 +735,50 @@ mod tests {
             assert!(p.lock.is_some() && started.elapsed() >= Duration::from_millis(350));
             freed.join().unwrap();
             drop(p);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        /// A Trek that's quitting says so rather than take the arguments (its window would close
+        /// with it): the launch waits, and is the Trek once the folder comes free.
+        #[test]
+        fn a_quitting_trek_is_waited_out_not_handed_to() {
+            let dir = data_dir("quitting");
+            let Claim::Primary(first) = claim_in(&dir, open(&[]), Duration::from_secs(2)) else {
+                panic!("the folder was free")
+            };
+            let (rx, lock) = (first.forwarded.expect("listening"), first.lock);
+            let main = {
+                let rx = rx.clone();
+                std::thread::spawn(move || {
+                    let mut asked = 0;
+                    while let Ok(f) = rx.recv_blocking() {
+                        asked += 1;
+                        f.done.try_send(Err(QUITTING.into())).unwrap();
+                    }
+                    asked
+                })
+            };
+            let gone = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                drop(lock);
+            });
+            let started = Instant::now();
+            let Claim::Primary(second) = claim_in(&dir, open(&[]), Duration::from_secs(10)) else {
+                panic!("should start once the quitting Trek is gone")
+            };
+            assert!(second.lock.is_some());
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "{:?}",
+                started.elapsed()
+            );
+            gone.join().unwrap();
+            rx.close();
+            assert!(
+                main.join().unwrap() >= 1,
+                "it asked the quitting Trek first"
+            );
+            drop(second);
             let _ = std::fs::remove_dir_all(dir);
         }
 

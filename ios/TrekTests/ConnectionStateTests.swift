@@ -36,6 +36,7 @@ struct ConnectionStateTests {
         let link = HostLink(paired: .demo, backend: backend)
         link.connection = .connected
         let model = AppModel()
+        model.allowSharing()   // asked and allowed earlier (SharingTests)
         model.links = [link]
         let composer = ComposerState()
         composer.draft = "Run the tests again"
@@ -61,6 +62,7 @@ struct ConnectionStateTests {
         let backend = DeadBackend()
         let link = HostLink(paired: .demo, backend: backend)
         let model = AppModel()
+        model.allowSharing()   // asked and allowed earlier (SharingTests)
         model.links = [link]
         let composer = ComposerState()
         composer.draft = "Add a test"
@@ -77,6 +79,7 @@ struct ConnectionStateTests {
         let backend = RecordingBackend()
         let link = HostLink(paired: .demo, backend: backend)
         let model = AppModel()
+        model.allowSharing()   // asked and allowed earlier (SharingTests)
         model.links = [link]
         let composer = ComposerState()
         composer.draft = "Looks good"

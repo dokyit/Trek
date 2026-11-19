@@ -404,7 +404,19 @@ pub struct Extras {
     /// composer's) is worth offering. What's heard comes back as `trekdictation` events
     /// (`dictation_event`).
     pub can_dictate: bool,
+    /// A video's page: where its video was (seconds) when its card last had a view, so a view
+    /// made again (the card scrolled away and back) shows the same picture, still, not the
+    /// video's start.
+    pub video_at: Option<f64>,
+    /// `trek.kept`: what the page last handed `trek.keep(text)` (at most `MAX_KEPT_BYTES`), or
+    /// null. A page's view goes when its card scrolls far away or another thread shows, and is
+    /// made again later: a page that keeps what was typed into it this way opens with it still
+    /// there. Kept while Trek runs, by document.
+    pub kept: Option<String>,
 }
+
+/// The most a page may keep with `trek.keep`.
+pub const MAX_KEPT_BYTES: usize = 16 * 1024;
 
 /// The most replies a page is handed (`Extras::replies`).
 pub const MAX_REPLIES: usize = 20;
@@ -429,6 +441,23 @@ pub fn bootstrap_with(nonce: &str, extras: &Extras) -> String {
             "__DICTATE__",
             if extras.can_dictate { "true" } else { "false" },
         )
+        .replace(
+            "__KEPT__",
+            &match extras.kept.as_deref() {
+                Some(k) if k.len() <= MAX_KEPT_BYTES => serde_json::to_string(k)
+                    .unwrap_or_else(|_| "null".into())
+                    .replace("</", "<\\/"),
+                _ => "null".to_string(),
+            },
+        )
+        .replace(
+            "__VIDEO_AT__",
+            &match extras.video_at {
+                Some(t) if t.is_finite() && t > 0. => format!("{t:.3}"),
+                _ => "0".to_string(),
+            },
+        )
+        .replace("__MAX_KEPT__", &(MAX_KEPT_BYTES / 4).to_string())
         .replace("__NONCE__", nonce)
 }
 
@@ -505,7 +534,11 @@ const BOOTSTRAP: &str = r#"(() => {
   // starts (or stops) only just after the user's own click, as a send does.
   const replies = Object.freeze(__REPLIES__);
   const dictate = (on) => { if (!live()) return false; post({ t: 'dictate', on: !!on }); return true; };
-  (__ACTIONS__)(post, live, { replies, canDictate: __DICTATE__, dictate });
+  // `trek.keep(text)`: Trek holds on to `text` for this page and hands it back as `trek.kept`
+  // when the page is drawn again. It changes nothing outside the page, so it needs no click.
+  const kept = __KEPT__;
+  const keep = (text) => { if (typeof text !== 'string' || text.length > __MAX_KEPT__) return false; post({ t: 'keep', text }); return true; };
+  (__ACTIONS__)(post, live, { replies, canDictate: __DICTATE__, dictate, kept, keep });
   let last = -1, queued = false;
   const measure = () => {
     queued = false;
@@ -527,6 +560,29 @@ const BOOTSTRAP: &str = r#"(() => {
   };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', watch); else watch();
   window.addEventListener('load', later);
+  // A video's page (Trek's own player): where it is, as it plays, stops or is moved (`vt`), and
+  // that its picture is on show (`vr`): at once, or first taken back to where it was (`AT`).
+  const AT = __VIDEO_AT__;
+  const video = () => {
+    let v = null;
+    try { v = document.querySelector('body > video'); } catch (_) {}
+    if (!v) return;
+    let told = 0, ready = false;
+    const at = () => { const t = v.currentTime; if (typeof t === 'number' && t >= 0) post({ t: 'vt', v: t }); };
+    const shown = () => { if (!ready) { ready = true; post({ t: 'vr' }); } };
+    v.addEventListener('timeupdate', () => { const n = now(); if (ready && n - told >= 500) { told = n; at(); } });
+    for (const e of ['pause', 'seeked', 'ended']) v.addEventListener(e, () => { if (ready) at(); });
+    const back = () => {
+      if (!(AT > 0)) return shown();
+      v.addEventListener('seeked', shown, { once: true });
+      try { v.currentTime = AT; } catch (_) { shown(); }
+    };
+    const first = () => { if (v.readyState >= 2) back(); else v.addEventListener('loadeddata', back, { once: true }); };
+    if (AT > 0 && v.readyState < 1) v.addEventListener('loadedmetadata', () => { try { v.currentTime = AT; } catch (_) {} first(); }, { once: true });
+    else first();
+    v.addEventListener('error', shown, { once: true });
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', video); else video();
   let focused = false;
   const took = (e) => { if (e.isTrusted && !focused) { focused = true; post({ t: 'focus' }); } };
   window.addEventListener('pointerdown', took, true);
@@ -577,6 +633,12 @@ pub enum Message {
     /// `trek.dictate(on)`: start Trek's dictation into the page (`true`), or end the take
     /// (`false`). What's heard goes back to the page (`dictation_event`).
     Dictate(bool),
+    /// A video's page: where its video is now, in seconds.
+    VideoAt(f64),
+    /// A video's page: its picture is on show (taken back to where it was, if it was anywhere).
+    VideoReady,
+    /// `trek.keep(text)`: hold on to `text` for the page (`Extras::kept`).
+    Keep(String),
 }
 
 /// `body`, a message from the page, if it's one Trek's bootstrap sent with `nonce` and says
@@ -605,6 +667,15 @@ pub fn parse_message(body: &str, nonce: &str) -> Option<Message> {
                 .then_some(Message::Wheel(x as f32, y as f32))
         }
         "dictate" => Some(Message::Dictate(object.get("on")?.as_bool()?)),
+        "vt" => {
+            let t = object.get("v")?.as_f64()?;
+            (t.is_finite() && (0. ..=1_000_000.).contains(&t)).then_some(Message::VideoAt(t))
+        }
+        "vr" => Some(Message::VideoReady),
+        "keep" => {
+            let text = object.get("text")?.as_str()?;
+            (text.len() <= MAX_KEPT_BYTES).then(|| Message::Keep(text.to_string()))
+        }
         _ => None,
     }
 }
@@ -1034,7 +1105,7 @@ mod tests {
             "const live = () => now() - touched < {};",
             GESTURE_WINDOW.as_millis()
         )));
-        assert!(js.contains("(post, live, { replies, canDictate: false, dictate })"));
+        assert!(js.contains("(post, live, { replies, canDictate: false, dictate, kept, keep })"));
         // The clock is the one taken before the page ran, and a message has no prototype.
         assert!(
             !ACTIONS_JS.contains("Date.now()"),
@@ -1156,6 +1227,7 @@ process.stdout.write(JSON.stringify({ sent, out: out === undefined ? null : out 
                 "x".repeat(MAX_ACTION_BYTES + 1),
             ],
             can_dictate: true,
+            ..Default::default()
         };
         let boot = bootstrap_with("c0ffee", &extras);
         assert!(!boot.contains("__REPLIES__") && !boot.contains("__DICTATE__"));

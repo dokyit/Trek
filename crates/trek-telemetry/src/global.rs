@@ -163,6 +163,35 @@ pub fn set_consent(yes: bool) {
     changed();
 }
 
+/// Settings' switch for the usage data alone (`Telemetry::set_shared`).
+pub fn set_shared(yes: bool) {
+    with(|t| t.set_shared(yes, chrono::Utc::now()));
+    wake();
+    changed();
+}
+
+/// The answer about usage totals (`Telemetry::set_totals`).
+pub fn set_totals(yes: bool) {
+    with(|t| t.set_totals(yes));
+    wake();
+    changed();
+}
+
+/// Whether to ask someone who already shares usage data about the totals.
+pub fn should_ask_totals() -> bool {
+    with(|t| t.should_ask_totals()).unwrap_or(false)
+}
+
+/// A turn's tokens for today's totals (`Telemetry::tokens`).
+pub fn tokens(agent: &str, model: &str, used: &crate::state::Tokens, priced: bool) {
+    with(|t| t.tokens(agent, model, used, priced, chrono::Local::now()));
+}
+
+/// The setup as it is now (`Telemetry::set_setup`).
+pub fn set_setup(setup: crate::event::Setup) {
+    with(|t| t.set_setup(setup));
+}
+
 pub fn reset_install_id() {
     with(|t| t.reset_install_id());
     changed();

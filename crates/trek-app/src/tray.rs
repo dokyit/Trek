@@ -130,6 +130,25 @@ fn tray_icon_px() -> u32 {
     TRAY_SIZES[0]
 }
 
+/// What the icon says when the pointer rests on it.
+const TOOLTIP: &str = "Trek";
+
+/// Whether the taskbar has `icon` now. Windows can refuse an icon (no taskbar yet, Explorer
+/// restarting) without `tray-icon` saying so: it keeps the icon's window and adds it again once the
+/// taskbar says it's back (`TaskbarCreated`). A change to an icon the taskbar doesn't have fails,
+/// so setting the tooltip it has again asks. One in the taskbar's overflow (where Windows 11 puts
+/// a new program's icon) counts: it's there behind the ^.
+#[cfg(windows)]
+fn on_taskbar(icon: &TrayIcon) -> bool {
+    icon.set_tooltip(Some(TOOLTIP)).is_ok()
+}
+
+/// The menu bar takes its item when it's made.
+#[cfg(not(windows))]
+fn on_taskbar(_: &TrayIcon) -> bool {
+    true
+}
+
 const SHOW_BEHIND: &str = "Show Background Use";
 const HIDE_BEHIND: &str = "Hide Background Use";
 
@@ -142,6 +161,8 @@ pub struct Tray {
     /// The glyph on screen: the state's, or the other beat of the blink.
     shown: &'static str,
     surface: Surface,
+    /// Whether the taskbar had the icon when last asked (`on_taskbar`): a change is logged.
+    on_taskbar: bool,
     /// While agents work the signpost blinks between filled and outlined boards.
     blink: Option<Task<()>>,
     _subscription: Subscription,
@@ -229,7 +250,7 @@ fn build() -> anyhow::Result<Parts> {
         load_icon(Glyph::Idle.name(), Surface::current())
             .ok_or_else(|| anyhow::anyhow!("tray icon glyph"))?,
     )
-    .with_tooltip("Trek")
+    .with_tooltip(TOOLTIP)
     .with_menu(Box::new(menu))
     // On Windows a left click opens the app, as taskbar programs do there; the menu is on
     // the right button. On macOS either button opens the menu, as menu bar items do.
@@ -327,6 +348,17 @@ impl Tray {
                             this.surface = now;
                             this.show(this.shown);
                         }
+                        // Lost with Explorer, say, and added again once it's back: in the log, so
+                        // a Trek nobody could find in the tray says why.
+                        let up = on_taskbar(&this.icon);
+                        if up != this.on_taskbar {
+                            this.on_taskbar = up;
+                            if up {
+                                tracing::info!("tray icon: on the taskbar again");
+                            } else {
+                                tracing::warn!("tray icon: the taskbar no longer has it");
+                            }
+                        }
                     });
                     if ok.is_err() {
                         break;
@@ -334,8 +366,17 @@ impl Tray {
                 }
             })
         });
+        let up = on_taskbar(&icon);
+        if !up {
+            tracing::warn!(
+                "tray icon: made, but the taskbar didn't take it (it's added once the taskbar says it's there)"
+            );
+        } else if cfg!(windows) {
+            tracing::info!("tray icon: on the taskbar");
+        }
         let mut this = Self {
             icon,
+            on_taskbar: up,
             status,
             behind,
             glyph: Glyph::Idle,
@@ -435,8 +476,21 @@ pub fn open_trek(ws: &Entity<Workspace>, cx: &mut App) {
     }
 }
 
-struct TrayGlobal(#[allow(dead_code)] Entity<Tray>);
+struct TrayGlobal(Entity<Tray>);
 impl Global for TrayGlobal {}
+
+/// Whether the icon is there to bring Trek back: made (`notifications.menu_bar_icon`, and not
+/// refused at the start, which `set_enabled` logs) and on the taskbar now (`on_taskbar`).
+pub fn reachable(cx: &App) -> bool {
+    // A test's app makes no icon (it has no taskbar to put one on): there the setting stands
+    // for it, as it did before the taskbar was asked.
+    #[cfg(any(test, feature = "test-support"))]
+    if !cx.has_global::<TrayGlobal>() {
+        return true;
+    }
+    cx.try_global::<TrayGlobal>()
+        .is_some_and(|tray| on_taskbar(&tray.0.read(cx).icon))
+}
 
 /// The icon as it is, for the capture build's live checks: the state it shows (`idle`, `working`,
 /// `attention`), whether the system has it on screen (`TrayIcon::rect`, the system's own answer:

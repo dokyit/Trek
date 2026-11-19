@@ -15,8 +15,8 @@ use trek_telemetry::{Blocked, Consent};
 /// What was last sent is on show.
 static SHOWING_SENT: AtomicBool = AtomicBool::new(false);
 
-/// docs/PRIVACY.md, where every event and what it carries is listed.
-const DETAILS: &str = "https://github.com/dokyit/Trek/blob/main/docs/PRIVACY.md";
+/// The privacy policy, where every event and what it carries is listed.
+const DETAILS: &str = "https://trekdesktop.com/privacy/";
 
 impl SettingsView {
     pub(super) fn privacy_page(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -41,13 +41,22 @@ impl SettingsView {
             .checked(on && blocked != Some(Blocked::DoNotTrack))
             .disabled(status.is_none() || blocked == Some(Blocked::DoNotTrack))
             .on_click(|yes: &bool, _, cx| {
-                trek_telemetry::set_consent(*yes);
+                trek_telemetry::set_shared(*yes);
+                cx.refresh_windows();
+            });
+        let totals_on = on && status.as_ref().is_some_and(|s| s.totals == Consent::Yes);
+        let totals = Switch::new("privacy-totals")
+            .checked(totals_on && blocked != Some(Blocked::DoNotTrack))
+            .disabled(!on || blocked == Some(Blocked::DoNotTrack))
+            .on_click(|yes: &bool, _, cx| {
+                trek_telemetry::set_totals(*yes);
                 cx.refresh_windows();
             });
         let mut out = vec![ui::group(
             vec![
                 Self::row("Share anonymous usage data", share_line, consent, cx),
                 Self::row("What's shared", crate::privacy::SHARED, div(), cx),
+                Self::row("Share usage totals", crate::privacy::TOTALS, totals, cx),
                 Self::row("What never is", crate::privacy::NEVER, div(), cx),
             ],
             cx,

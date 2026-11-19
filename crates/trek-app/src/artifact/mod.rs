@@ -56,6 +56,14 @@ const SHOT_CAP: usize = 16 << 20;
 /// The card's corner radius, less its 1 px edge: the bottom corners of what's drawn in it.
 // scale: ok, inside the card's 1 px edge
 const RADIUS: f32 = radius::CARD - 1.;
+/// How long a video's page is waited on to say its picture is up, after it loaded, before its
+/// view shows anyway.
+const VIDEO_WAIT: Duration = Duration::from_millis(1500);
+/// How long after a video's page says its frame is ready the view shows: time for the engine to
+/// draw it.
+const VIDEO_DRAWN: Duration = Duration::from_millis(180);
+/// Video cards whose places are kept (`Registry::places`).
+const MAX_PLACES: usize = 512;
 /// How long after a load (or a theme switch) the page is pictured, for its snapshot.
 const SETTLE: Duration = Duration::from_millis(700);
 /// A page that keeps changing its height is let be at this many changes.
@@ -529,7 +537,10 @@ fn card(doc: &Arc<Doc>, key: usize, window: &mut Window, cx: &mut App) -> AnyEle
     );
     let css = theme_css(cx);
     let background = card_rgb(cx);
-    state.update(cx, |s, cx| s.sync_doc(doc, css, background, cx));
+    state.update(cx, |s, cx| {
+        s.slot = key;
+        s.sync_doc(doc, css, background, cx)
+    });
     let look = Look::of(cx);
     let s = state.read(cx);
     let height = s.height;
@@ -931,6 +942,14 @@ pub struct ArtifactState {
     height_changes: u32,
     /// A video's page goes here (seconds) once it has loaded: a frame clicked before it had.
     pending_seek: Option<f64>,
+    /// Which card of the transcript this is (`card`'s key), which a video's place is kept under
+    /// (`Registry::places`); the expanded card has a place of its own.
+    slot: usize,
+    /// A video's page has its picture up, back where the video was (`core::Message::VideoReady`,
+    /// or `VIDEO_WAIT` after the load). Until then the view stays hidden and the snapshot shows:
+    /// a view made again as its card scrolls back is black, then the video's first frame, before
+    /// it is the picture the card had.
+    video_ready: bool,
     /// Dictation the page asked for (`trek.dictate`): the composer's voice mode without its row,
     /// what's heard going to the page instead (`core::dictation_event`).
     voice: crate::composer::voice::Voice,
@@ -981,6 +1000,8 @@ impl ArtifactState {
             sends: core::SendGate::default(),
             height_changes: 0,
             pending_seek: None,
+            slot: usize::MAX,
+            video_ready: false,
             voice: Default::default(),
             dictation: None,
             voice_tasks: Vec::new(),
@@ -1051,6 +1072,7 @@ impl ArtifactState {
         if let Some(surface) = &self.surface {
             if new_doc {
                 self.loaded = false;
+                self.video_ready = false;
                 surface.reload();
             } else if restyle {
                 surface.eval(&core::theme_update_script(&self.css));
@@ -1075,6 +1097,7 @@ impl ArtifactState {
     fn reload(&mut self, cx: &mut Context<Self>) {
         if let Some(surface) = &self.surface {
             self.loaded = false;
+            self.video_ready = false;
             self.height_changes = 0;
             surface.reload();
             cx.notify();
@@ -1086,8 +1109,14 @@ impl ArtifactState {
         let (tx, rx) = async_channel::unbounded();
         // A page in a thread is handed what was sent after it, and Trek's dictation where there
         // is some (a video plays; it has no use for either).
+        self.video_ready = false;
         let extras = if self.doc.is_video() {
-            core::Extras::default()
+            core::Extras {
+                video_at: cx
+                    .try_global::<Registry>()
+                    .and_then(|r| r.places.get(&(self.doc.hash, self.slot)).copied()),
+                ..Default::default()
+            }
         } else {
             core::Extras {
                 replies: cx
@@ -1095,6 +1124,10 @@ impl ArtifactState {
                     .map(|ws| ws.0.read(cx).card_replies(&self.doc.written))
                     .unwrap_or_default(),
                 can_dictate: crate::dictate::available(),
+                video_at: None,
+                kept: cx
+                    .try_global::<Registry>()
+                    .and_then(|r| r.kept.get(&self.doc.hash).cloned()),
             }
         };
         let spec = native::Spec {
@@ -1180,6 +1213,7 @@ impl ArtifactState {
             surface.place(None, window);
             self._events = None;
             self.loaded = false;
+            self.video_ready = false;
             if self.live {
                 self.live = false;
                 cx.notify();
@@ -1196,6 +1230,19 @@ impl ArtifactState {
                 }
                 cx.notify();
                 self.settle_then_snap(cx);
+                if self.doc.is_video() && !self.video_ready {
+                    // A page that never says its picture is up (a file that won't play) shows
+                    // anyway, with the player's own word on why.
+                    cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(VIDEO_WAIT).await;
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            if this.loaded && !this.video_ready {
+                                this.video_shown(window, cx);
+                            }
+                        });
+                    })
+                    .detach();
+                }
             }
             native::Event::Popup(url) => self.open_link(&url, cx),
             native::Event::Message(body) => match core::parse_message(&body, &self.nonce) {
@@ -1219,6 +1266,30 @@ impl ArtifactState {
                 Some(core::Message::Open(url)) => self.open_link(&url, cx),
                 Some(core::Message::Wheel(dx, dy)) => self.scroll_around(dx, dy, window, cx),
                 Some(core::Message::Dictate(on)) => self.dictate(on, window, cx),
+                Some(core::Message::VideoAt(t)) => {
+                    if self.doc.is_video() {
+                        cx.default_global::<Registry>()
+                            .keep_place((self.doc.hash, self.slot), t);
+                    }
+                }
+                Some(core::Message::Keep(text)) => {
+                    cx.default_global::<Registry>()
+                        .keep_text(self.doc.hash, text);
+                }
+                Some(core::Message::VideoReady) => {
+                    if self.doc.is_video() && !self.video_ready {
+                        // The frame is decoded; a moment more and it's drawn.
+                        cx.spawn_in(window, async move |this, cx| {
+                            cx.background_executor().timer(VIDEO_DRAWN).await;
+                            let _ = this.update_in(cx, |this, window, cx| {
+                                if this.loaded && !this.video_ready {
+                                    this.video_shown(window, cx);
+                                }
+                            });
+                        })
+                        .detach();
+                    }
+                }
                 None => match core::parse_action(&body, &self.nonce) {
                     Some(core::Action::Send(text)) => self.send(text, window, cx),
                     Some(core::Action::Copy(text)) => {
@@ -1229,6 +1300,20 @@ impl ArtifactState {
                 },
             },
         }
+    }
+
+    /// A video's picture is up: the view may show, and is pictured once it has.
+    fn video_shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.video_ready = true;
+        cx.notify();
+        // The view is placed as the window's next frame ends (`sync_window`).
+        window.refresh();
+        self.settle_then_snap(cx);
+    }
+
+    /// The view has something to show: a video's, its picture (see `video_ready`).
+    fn ready(&self) -> bool {
+        !self.doc.is_video() || (self.loaded && self.video_ready)
     }
 
     /// `trek.dictate(on)`: start a take (the composer's dictation: permission, then the mic and
@@ -1534,24 +1619,32 @@ impl ArtifactState {
                 Ok(Err(e)) => Err(e),
                 Err(_) => Err("the view went".to_string()),
             };
+            let snap = match shot.and_then(|s| {
+                image::RgbaImage::from_raw(s.width, s.height, s.bgra)
+                    .ok_or_else(|| "a short picture".to_string())
+            }) {
+                Ok(pixels) => Some(Snap {
+                    image: Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])),
+                    size,
+                    css,
+                }),
+                Err(e) => {
+                    tracing::debug!("artifact: no snapshot: {e}");
+                    None
+                }
+            };
+            // Kept for the document whether or not the card is still drawn: one pictured as it
+            // scrolled out of the transcript's rows has gone by now, and the card made in its
+            // place when it scrolls back opens on this picture.
+            if let Some(snap) = &snap {
+                let snap = snap.clone();
+                let _ = cx.update(|cx| cx.default_global::<Registry>().keep_shot(hash, snap));
+            }
             let _ = this.update(cx, |this, cx| {
                 this.snapping = false;
-                match shot.and_then(|s| {
-                    image::RgbaImage::from_raw(s.width, s.height, s.bgra)
-                        .ok_or_else(|| "a short picture".to_string())
-                }) {
-                    Ok(pixels) => {
-                        let snap = Snap {
-                            image: Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])),
-                            size,
-                            css,
-                        };
-                        cx.default_global::<Registry>()
-                            .keep_shot(hash, snap.clone());
-                        this.shot = Some(snap);
-                        cx.notify();
-                    }
-                    Err(e) => tracing::debug!("artifact: no snapshot: {e}"),
+                if let Some(snap) = snap {
+                    this.shot = Some(snap);
+                    cx.notify();
                 }
             });
         })
@@ -1651,13 +1744,26 @@ impl ArtifactState {
         if placement.is_none() && self.has_keys {
             self.release_keys(window, cx);
         }
-        let live = placement.is_some() && self.surface.is_some();
+        // A video's view waits for its picture: until then the snapshot shows, and the view is on
+        // screen as a single pixel of itself. Hidden outright, the engine draws nothing, and the
+        // view's first frames once shown are black.
+        let ready = self.ready();
+        let live = placement.is_some() && self.surface.is_some() && ready;
         if self.live && !live {
             // Pictured as it goes: the snapshot is what stands in for it.
             self.snap(cx);
         }
+        let placed = if ready {
+            placement
+        } else {
+            placement.map(|p| Placement {
+                clip: Bounds::new(p.clip.origin, size(px(1.), px(1.))),
+                round_bottom: false,
+                ..p
+            })
+        };
         if let Some(surface) = self.surface.as_mut() {
-            surface.place(placement, window);
+            surface.place(placed, window);
         }
         if live != self.live {
             self.live = live;
@@ -1829,6 +1935,12 @@ struct Registry {
     shots: crate::budget::ByteLru<u64, Snap>,
     /// Snapshots no longer kept, to take out of the sprite atlas at the next frame.
     retired: Vec<Arc<RenderImage>>,
+    /// Where each video card's video was (seconds), by document and card (`ArtifactState::slot`),
+    /// as its page last said: a view made again for the card starts there (`Extras::video_at`).
+    places: HashMap<(u64, usize), f64>,
+    /// What each page asked to be kept (`trek.keep`), by document: handed back to the page when
+    /// its view is made again (`Extras::kept`).
+    kept: HashMap<u64, String>,
     /// Web views made so far, which the capture build reports (`views_made`): one a frame is a
     /// card made and let go of over and over.
     #[cfg(any(test, feature = "test-support", feature = "shots"))]
@@ -1842,6 +1954,8 @@ impl Default for Registry {
             heights: HashMap::new(),
             shots: crate::budget::ByteLru::new(SHOTS_BUDGET, SHOT_CAP),
             retired: Vec::new(),
+            places: HashMap::new(),
+            kept: HashMap::new(),
             #[cfg(any(test, feature = "test-support", feature = "shots"))]
             made: 0,
         }
@@ -1851,6 +1965,25 @@ impl Default for Registry {
 impl Global for Registry {}
 
 impl Registry {
+    fn keep_place(&mut self, card: (u64, usize), secs: f64) {
+        // A few numbers a card; a long day's worth of cards is still let go of.
+        if self.places.len() >= MAX_PLACES && !self.places.contains_key(&card) {
+            self.places.clear();
+        }
+        self.places.insert(card, secs);
+    }
+
+    fn keep_text(&mut self, doc: u64, text: String) {
+        if text.is_empty() {
+            self.kept.remove(&doc);
+            return;
+        }
+        if self.kept.len() >= MAX_PLACES && !self.kept.contains_key(&doc) {
+            self.kept.clear();
+        }
+        self.kept.insert(doc, text);
+    }
+
     fn keep_shot(&mut self, hash: u64, snap: Snap) {
         let bytes = crate::pictures::weight(&snap.image);
         // Too big to keep: the card that took it has it for as long as it's drawn, and what's

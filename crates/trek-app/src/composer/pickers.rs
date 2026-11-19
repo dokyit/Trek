@@ -65,6 +65,48 @@ pub struct Pickers {
     /// Providers whose model list the open menu already asked for, so a render doesn't ask
     /// again after a fetch that came back empty. Forgotten when the menu closes.
     model_fetches: HashSet<String>,
+    /// Where the model pill is in the window, as the open menu was last placed against it
+    /// (`menu_fit` sizes the menu's panels to the room it leaves).
+    pill_at: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+}
+
+/// The gap the window keeps around a popup (the kit's own), and a little for the pill's.
+const MENU_MARGIN: f32 = 12.;
+/// The tallest a panel beside the model menu gets: the model list at its most, with its header.
+const PANEL_MOST: f32 = 440.;
+/// The least room a panel is worth opening into: its header and a few rows.
+const PANEL_LEAST: f32 = 220.;
+/// A panel's header (where its models come from, the search box) and edges, around its list.
+const PANEL_CHROME: f32 = 78.;
+
+/// Which side of its pill the model menu opens on, and how tall its panels may be there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MenuFit {
+    above: bool,
+    room: f32,
+}
+
+/// The model menu's side and room, from where its pill is (`top` and `bottom`, window px; `None`
+/// before it has been placed once) in a window `viewport` tall. The kit moves a popup to the
+/// pill's other side when it doesn't fit, and the menu grows and shrinks as the pointer crosses
+/// its rows (Effort's panel is short, Model's is the list of every agent's models): sized by its
+/// content alone, in a window without the room it went under the pill for Model and back over it
+/// for Effort, out from under the pointer each time. So the side is chosen from the room alone,
+/// and the panels are kept to it: above unless there's too little there and more below.
+fn menu_fit(pill: Option<(f32, f32)>, viewport: f32) -> MenuFit {
+    let Some((top, bottom)) = pill else {
+        return MenuFit {
+            above: true,
+            room: PANEL_MOST,
+        };
+    };
+    let over = top - MENU_MARGIN;
+    let under = viewport - bottom - MENU_MARGIN;
+    let above = over >= PANEL_LEAST || over >= under;
+    MenuFit {
+        above,
+        room: (if above { over } else { under }).clamp(PANEL_CHROME + 60., PANEL_MOST),
+    }
 }
 
 /// What the model panel says for a local model server with nothing to list: one that's running
@@ -108,6 +150,7 @@ impl Pickers {
             picker_scroll: ScrollHandle::new(),
             swallow_enter: None,
             model_fetches: HashSet::new(),
+            pill_at: Default::default(),
         }
     }
 
@@ -220,6 +263,7 @@ pub fn model_pill<H: PickerHost>(
     compact: bool,
     account_room: bool,
     small: bool,
+    window: &Window,
     cx: &mut Context<H>,
 ) -> AnyElement {
     let ws = host.workspace().read(cx);
@@ -248,8 +292,14 @@ pub fn model_pill<H: PickerHost>(
     let theme = cx.theme().clone();
     let open = host.pickers_ref().model_open;
     let me = cx.entity();
+    let pill_at = host.pickers_ref().pill_at.clone();
+    let seen = pill_at.clone();
     Popover::new("model-menu")
-        .anchor(Anchor::BottomLeft)
+        .anchor(if model_menu_fit(&pill_at, window).above {
+            Anchor::BottomLeft
+        } else {
+            Anchor::TopLeft
+        })
         .appearance(false)
         .open(open)
         .on_open_change(cx.listener(|this: &mut H, open: &bool, _, cx| {
@@ -271,6 +321,14 @@ pub fn model_pill<H: PickerHost>(
                 .flexible()
                 .small(small)
                 .selected(open)
+                // Where the pill is, for the menu's side and room (`menu_fit`).
+                .child(
+                    canvas(move |bounds, _, _| seen.set(Some(bounds)), |_, _, _, _| {})
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                )
                 .child(ui::agent_glyph(&prefs.agent, cx))
                 .child(
                     div()
@@ -323,8 +381,21 @@ pub fn model_pill<H: PickerHost>(
                     )
                 }),
         )
-        .content(move |_, _, cx| me.update(cx, |h, cx| model_menu(h, cx)))
+        .content(move |_, window, cx| {
+            let fit = model_menu_fit(&pill_at, window);
+            me.update(cx, |h, cx| model_menu(h, fit, cx))
+        })
         .into_any_element()
+}
+
+/// `menu_fit` for the pill as it was last placed in `window`.
+fn model_menu_fit(pill_at: &std::cell::Cell<Option<Bounds<Pixels>>>, window: &Window) -> MenuFit {
+    menu_fit(
+        pill_at
+            .get()
+            .map(|b| (f32::from(b.top()), f32::from(b.bottom()))),
+        f32::from(window.viewport_size().height),
+    )
 }
 
 /// Open the model menu (the usage-limit bar's "Switch agent…").
@@ -344,7 +415,7 @@ fn close_model_menu<H: PickerHost>(this: &mut H, cx: &mut Context<H>) {
     cx.notify();
 }
 
-fn model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
+fn model_menu<H: PickerHost>(host: &mut H, fit: MenuFit, cx: &mut Context<H>) -> AnyElement {
     let prefs = shown_prefs(host, cx);
     let ws = host.workspace().read(cx);
     let models = ws.models_for(&prefs.agent);
@@ -473,7 +544,7 @@ fn model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
 
     let panel = match sub {
         Some(Sub::Effort) => Some(effort_panel(&prefs, current_info.as_ref(), cx)),
-        Some(Sub::Model) => Some(model_panel(host, &prefs, current.as_deref(), cx)),
+        Some(Sub::Model) => Some(model_panel(host, &prefs, current.as_deref(), fit.room, cx)),
         Some(Sub::Account) if !choices.is_empty() => {
             Some(account_panel(&prefs, choices, on_thread, cx))
         }
@@ -482,7 +553,14 @@ fn model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
     h_flex()
         .id("model-menu-body")
         .test_support()
-        .items_end()
+        // The menu's own rows stay by the pill, whichever side it opened on.
+        .map(|el| {
+            if fit.above {
+                el.items_end()
+            } else {
+                el.items_start()
+            }
+        })
         .gap(px(6.))
         .child(main)
         .children(panel)
@@ -724,6 +802,7 @@ fn model_panel<H: PickerHost>(
     host: &mut H,
     prefs: &Prefs,
     current: Option<&str>,
+    room: f32,
     cx: &mut Context<H>,
 ) -> AnyElement {
     let Choices { rail, list, custom } = model_choices(host, prefs, cx);
@@ -858,7 +937,12 @@ fn model_panel<H: PickerHost>(
                 cx.notify();
             }))
     };
+    // The rail scrolls within the room too: with many agents set up it is the tallest thing here.
     let mut rail_col = v_flex()
+        .id("model-rail")
+        .flex_none()
+        .max_h(px(room))
+        .overflow_y_scroll()
         .gap(px(2.))
         .p(px(4.))
         .border_r_1()
@@ -1030,7 +1114,7 @@ fn model_panel<H: PickerHost>(
                         v_flex()
                             .id("model-list")
                             .p(px(4.))
-                            .max_h(px(360.))
+                            .max_h(px((room - PANEL_CHROME).min(360.)))
                             .overflow_y_scroll()
                             .children(rows)
                             .when_some(custom_row, |el, row| el.child(row))
@@ -1782,6 +1866,35 @@ mod tests {
     // Not `super::*`: that brings gpui's `test` attribute in over the built-in one.
     use super::{no_local_models, should_fetch_models};
     use std::collections::HashSet;
+
+    #[test]
+    fn the_model_menu_keeps_its_side_and_fits_the_room() {
+        use super::{MenuFit, PANEL_MOST, menu_fit};
+        // Not placed yet: above, as tall as it gets.
+        assert_eq!(
+            menu_fit(None, 800.),
+            MenuFit {
+                above: true,
+                room: PANEL_MOST
+            }
+        );
+        // A thread's composer, at the foot of a tall window: above, with all the room.
+        let fit = menu_fit(Some((900., 928.)), 1000.);
+        assert!(fit.above && fit.room == PANEL_MOST);
+        // A new thread's, mid-window in a small one (his Windows laptop): still above, the
+        // panels kept to the room there, so the Model panel no longer sends it under the pill.
+        let fit = menu_fit(Some((330., 358.)), 620.);
+        assert!(fit.above, "{fit:?}");
+        assert!(fit.room <= 330. - 8. && fit.room >= 220., "{fit:?}");
+        // The side depends on the pill and the window alone, never on which panel is open.
+        assert_eq!(fit, menu_fit(Some((330., 358.)), 620.));
+        // Next to nothing above (a pill near the top): below, where there's more.
+        let fit = menu_fit(Some((120., 148.)), 700.);
+        assert!(!fit.above && fit.room == PANEL_MOST, "{fit:?}");
+        // Little either way: the bigger side, and never less than a header and two rows.
+        let fit = menu_fit(Some((150., 178.)), 300.);
+        assert!(fit.above && fit.room >= 130., "{fit:?}");
+    }
 
     #[test]
     fn a_running_local_server_with_no_models_says_how_to_get_one() {

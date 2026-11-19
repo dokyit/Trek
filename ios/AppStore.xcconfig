@@ -1,0 +1,5 @@
+// Settings for a build that goes to the App Store or TestFlight (ios/README.md, "For the App
+// Store"). TREK_APP_STORE compiles the Mac-installed update flow out (Model/AppSigning.swift,
+// `Distribution`): the store updates such a build.
+//   xcodebuild archive … -xcconfig AppStore.xcconfig      (ios/scripts/testflight.sh does)
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) TREK_APP_STORE

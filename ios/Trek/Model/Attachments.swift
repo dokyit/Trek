@@ -183,6 +183,9 @@ extension AppModel {
     /// time; `change` hears how far each has got and its upload id once it's in. Their upload ids,
     /// in order. Throws the first failure (the Mac's words, or the connection's).
     func upload(_ files: [PickedFile], on link: HostLink, change: @escaping (PickedFile.ID, (inout PickedFile) -> Void) -> Void) async throws -> [String] {
+        // Files are the user's own too: the composers have asked by now (Sharing.swift), and
+        // without a yes nothing goes up.
+        guard Self.staysOnPhone(link) || sharingConsent?.stands == true else { throw UploadError(SharingConsent.notSent) }
         var ids: [String] = []
         for file in files {
             if let sent = file.sent, sent.link == link.id {

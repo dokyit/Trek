@@ -97,7 +97,8 @@ approval's Always allow; `-TrekTab settings -TrekSheet rules`: the permission ru
 `-TrekDemoConnection identity|refused|connecting|offline` (debug builds: the demo Mac's own banner),
 `-TrekDemoEmpty none|quiet` (a Mac with no threads and no notes, or with everything settled),
 `-TrekGallery YES` (debug builds: chips, tables, status pills, the hiker and the effort picker on
-one page), `-TrekExpand YES` (open all tool groups), `-TrekReset YES` (forget
+one page), `-TrekSheet sharing` (the question asked before the first message goes to an agent, for
+`-TrekOpen`'s thread's agent; the demo never asks by itself), `-TrekExpand YES` (open all tool groups), `-TrekReset YES` (forget
 the paired Mac), `-TrekLink '<trek://pair… link>'` (open the pairing confirmation for it).
 `ios/scripts/screenshots.sh` rebuilds and captures the demo set in `ios/screenshots/`;
 `ios/scripts/live-screenshots.sh '<pairing URL>'` pairs with a running demo host (debug-only
@@ -150,6 +151,41 @@ paths:
   com.apple.BiometricKit.enrollmentChanged`), then answer the prompt with `notifyutil -p
   com.apple.BiometricKit_Sim.pearl.match` (or `.nomatch`).
 
+## Privacy and the App Store
+
+- **Before the first message** (`Model/Sharing.swift`, `Views/SharingSheet.swift`): what's typed,
+  dictated or attached goes to the paired computer and on to the thread's agent, usually a cloud AI
+  service. The phone says so and asks first (App Store guideline 5.1.2(i)): Allow, or Not now, which
+  sends nothing and leaves the draft. It asks once, naming the provider when the agent's key says
+  which (Anthropic for Claude Code, OpenAI for Codex, …; "runs on that computer" for Ollama, LM
+  Studio and llama.cpp; general words otherwise), and again the first time a thread's agent is a
+  provider it hasn't named. The yes is kept in UserDefaults with `SharingConsent.currentVersion`:
+  raise that when the sheet's words change in substance and everyone is asked again. Settings ›
+  Privacy and feedback shows the choice and withdraws it. `AppModel.request` holds every message
+  that carries the user's words (`ClientMessage.sharedWith`), so a new way to send is covered
+  unless it bypasses `request`. The demo's Mac runs in the app and is never asked about.
+- **Privacy manifest:** `Trek/PrivacyInfo.xcprivacy` (in the synchronized group, so it's copied
+  into `Trek.app`). No tracking. Required-reason APIs: UserDefaults (`CA92.1`) and file timestamps
+  of the app's own cache files (`C617.1`); nothing reads disk space, boot time or the active
+  keyboards. Collected data: the feedback form alone (message, optional email, versions), to
+  PostHog. A new use of a required-reason API needs its reason there, checked against
+  [Apple's list](https://developer.apple.com/documentation/bundleresources/describing-use-of-required-reason-api).
+  The TrekActivity extension uses none of those APIs and sends nothing, so it has no manifest.
+- **Privacy policy:** Settings and the sheet link to <https://trekdesktop.com/privacy/>.
+- **Export compliance:** `ITSAppUsesNonExemptEncryption` is false in `Trek-Info.plist`: the app's
+  only encryption is the system's (TLS, the Keychain); CryptoKit is used for SHA-256 hashes alone.
+- **A store build has no update-from-the-Mac flow.** "Update now", its card and the "your Mac will
+  install it" lines are for builds a Mac signs and installs (below). `AppStore.xcconfig` sets the
+  `TREK_APP_STORE` compilation condition, which compiles the request out and makes
+  `Distribution.channel` `.store`, so nothing of the flow is offered or heard;
+  `scripts/testflight.sh` builds with it (by hand: `xcodebuild archive … -xcconfig
+  AppStore.xcconfig`). As a backstop, a build on a phone with no `embedded.mobileprovision` in it
+  (the store strips it) counts as a store build even without the flag. Development and simulator
+  builds are unchanged.
+- **Trek Driver is never part of a store archive.** It's a UI-test bundle in a project of its own,
+  which `install-device.sh` builds into the installed development app; archive the `Trek` scheme
+  alone (as `testflight.sh` does), and don't run `build-driver.sh` on an app that goes to the store.
+
 ## Layout
 
 ```
@@ -166,6 +202,8 @@ Trek/Design     Trek palette (the Mac's trek.json and palette.rs), Inter, JetBra
                 (Backgrounds.swift; Backgrounds.xcassets, cut to phone shape by scripts/backgrounds.py)
 Trek/Assets     App icons: Night (with iOS 18 dark and tinted variants), Paper and Glass, rendered from
                 assets/brand/trek-icon-*-ios.svg by scripts/app-icons.sh
+                Sharing (the yes asked for before a message goes to an agent), Distribution (store or
+                development build, in AppSigning.swift)
 Trek/Views      Threads, Thread (transcript grouping, tool rows, request cards, composer, the side
                 chat's sheet, a picture's long-press menu), New thread sheet, Pairing (QR scanner,
                 typed pairing, confirmation sheet), Settings, Search

@@ -46,6 +46,7 @@ struct SideChatSheet: View {
         }
         // What goes wrong here is said here: the app's own toast is under the sheet.
         .overlay(alignment: .top) { ToastOverlay(feels: false).padding(.top, 4) }
+        .asksBeforeSharing()
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
         .sensoryFeedback(.impact(weight: .light), trigger: starting) { _, now in now }
@@ -126,6 +127,8 @@ struct SideChatSheet: View {
             model.show(AppModel.notConnected(model.link(for: parent)), error: true)
             return
         }
+        // Asked before anything goes (Sharing.swift); "Not now" leaves what was typed here.
+        guard model.mayShare(with: model.sharingRecipient(thread: parent), on: model.link(for: parent), then: { start() }) else { return }
         starting = true
         let words = text.isEmpty ? MessageFiles.caption(photos: uploads.count, videos: 0, files: 0) : text
         model.startSideChat(beside: parent, text: words, images: uploads) { result in

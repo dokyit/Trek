@@ -4475,7 +4475,8 @@ impl Render for Composer {
         // The account's name beside the model's takes room of its own: short of it, the pill
         // would cut the model's name to fit it.
         let account_room = self.width.get() >= px(narrow_below + ACCOUNT_ROOM);
-        let model_pill = pickers::model_pill(self, narrow, compact, account_room, false, cx);
+        let model_pill =
+            pickers::model_pill(self, narrow, compact, account_room, false, window, cx);
         let access_pill = pickers::access_pill(self, compact, false, cx);
         let hh = prefs.hand_holding;
 

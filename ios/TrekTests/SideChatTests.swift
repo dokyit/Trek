@@ -111,6 +111,7 @@ struct SideChatTests {
         let backend = RecordingBackend()
         let link = HostLink(paired: .demo, backend: backend)
         let model = AppModel()
+        model.allowSharing()   // asked and allowed earlier (SharingTests)
         model.links = [link]
         var got: Result<String?, SideChatFailure>?
         model.startSideChat(beside: "demo:t", text: "What does retry() do?") { got = $0 }

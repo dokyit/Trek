@@ -3,6 +3,7 @@
 Trek asks once, on the first launch after onboarding (and once for anyone who used an earlier version), whether it may share anonymous usage data. The answer can be changed any time in **Settings › Privacy**, which also shows exactly what was sent last.
 
 - **Shared, with a yes:** anonymous usage counts (how often Trek opens, which agents and tools are used), crash and error reports, the app version, OS and architecture.
+- **Usage totals, with a yes of their own (from 0.4.58):** each day's token counts and their cost at API prices, by agent and model; which of Trek's features are used; how many projects, threads and agents there are, and the theme. The first card's yes covers them, since it lists them. Someone who said yes before 0.4.58 is asked about them once, in a card of its own ("Share usage totals too?"), and shares what they shared before whatever they answer. **Settings › Privacy › Share usage totals** changes it. Nothing counted before the yes is sent.
 - **Never shared:** prompts, code, file names, paths, transcripts, keys or account emails.
 - **With a no:** nothing is sent, ever, except feedback the user sends themselves.
 
@@ -29,7 +30,7 @@ In `telemetry/` in Trek's data folder:
 
 | File | What |
 | --- | --- |
-| `state.json` | The answer, the install id, the day `app_opened` last went, the version that last ran, and today's counts. |
+| `state.json` | The answer, the answer about usage totals, the install id, the days `app_opened` and `setup` last went, the version that last ran, and today's counts and token totals. |
 | `queue.json` | Events waiting to be sent (at most 500; each is dropped after 5 failed tries or a week). |
 | `last-sent.json` | The last request, exactly as it was sent, for Settings › Privacy. |
 | `posthog.toml` | Only if you put one there (see above). |
@@ -60,7 +61,9 @@ Every usage event carries these properties:
 | `install` | The first launch with a yes (once per data folder). | `set_up_before`: Trek was already set up there (an existing user counted for the first time, not a new install). |
 | `app_opened` | A launch, at most once a day (and once more if Trek is still open the next day). | none |
 | `app_updated` | The first launch of a new version. | `from_version`, `to_version` |
-| `feature_used` | The day after: one per thing used that day. | `kind` (`agent` or `tool`), `name`, `count`, `day` (`YYYY-MM-DD`) |
+| `feature_used` | The day after: one per thing used that day. | `kind` (`agent`, `tool`, or with usage totals `action`), `name`, `count`, `day` (`YYYY-MM-DD`) |
+| `tokens_used` | With usage totals, the day after: one per agent and model used that day. | `agent`, `model`, `day`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `api_cost_usd`, `reports`, `unpriced_reports` |
+| `setup` | With usage totals, at most once a day. | `projects`, `threads`, `agents` (counts), `theme` (`system`, `night`, `paper`), `glass`, `phone` (whether each is on) |
 | `$exception` | The launch after a crash (a Rust panic). | `$exception_list` (`type: panic`, the message), `$exception_level: fatal`, `location` (Trek's source file and line), `thread`, `backtrace` (at most 16,000 characters), `crashed_version` |
 | `feedback` | The user sends feedback (no yes needed: sending it is the consent). | See below. |
 
@@ -68,6 +71,9 @@ Every usage event carries these properties:
 
 - agents: `claude-code`, `codex`, `opencode`, `droid`, `acp:<registry id>` (`acp:cursor`), `direct:<provider>` (`direct:anthropic`, `direct:ollama`). An agent the user added as their own command is `acp:other`; a custom endpoint is `direct:other`. One count per message sent to it.
 - tools (the tools panel): `git`, `explorer`, `terminal`, `browser`, `side-chat`, `simulator`, `iphone`. One count per opening.
+- actions (usage totals only): `thread-started`, `sub-agent`, `handoff`, `study-learn`, `study-practice`, `note-created`, `turn-failed`, `turn-stopped`. One count each time.
+
+`tokens_used` adds up what agents report at the end of each turn, on this computer, and sends the day's sums: never a thread, a project, a prompt or an answer. `agent` is named as in `feature_used`. `model` is the provider's own id for a model Trek has a price for (`claude-opus-5-5`), and `other` for anything else: a model the user named, a custom endpoint's, or one running on their computer. `api_cost_usd` is what those tokens would cost at the provider's API prices (the agent's own figure where it gives one, else Trek's price table on that day); it is not what anyone paid, since most people run agents on a subscription. `reports` is how many reports were added up, and `unpriced_reports` how many of them had no price, so their tokens are in the sums and their cost isn't. History imported from an agent's own files, and anything from before the yes, is never counted.
 
 ## Scrubbing
 
@@ -102,6 +108,8 @@ Without a key (or in the verify profile) the form says so, and its button copies
 ### On the iPhone
 
 The iPhone app has the same form in Settings › Send feedback…. It sends the `feedback` event straight to PostHog (`$lib: trek-ios`, a new random id each time) with the project key it was built with: the `TREK_POSTHOG_KEY` and `TREK_POSTHOG_HOST` build settings, which the build's environment sets, become `TrekPostHogKey` and `TrekPostHogHost` in its Info.plist. Its diagnostics are the app's version, the iOS version and the architecture; it has no log to send. Without a key, and in the demo (`-TrekDemo YES`), nothing is sent and the button copies the report. The iPhone app has no usage data or crash reports.
+
+What's typed, dictated or attached on the iPhone goes to the paired computer and from there to the agent chosen on it, so to that agent's provider when it is a cloud one; Trek has no server in that path. The app asks before the first message, and again before the first to a provider it hasn't named (`ios/Trek/Model/Sharing.swift`; the yes is kept with the wording's version, and Settings › Privacy and feedback withdraws it). Its privacy manifest is `ios/Trek/PrivacyInfo.xcprivacy`; `ios/README.md` has the App Store notes.
 
 ## Download counts
 

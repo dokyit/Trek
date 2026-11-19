@@ -205,7 +205,8 @@ fn the_privacy_page_takes_the_answer_the_card_asks_for() {
             ws.navigate(Route::Settings(SettingsPage::Privacy), cx)
         });
         trek.render(cx);
-        for id in ["privacy-consent", "privacy-reset", "privacy-show-sent"] {
+        // (What was sent, further down, is below the fold of the test's window.)
+        for id in ["privacy-consent", "privacy-totals", "privacy-reset"] {
             assert!(trek.visible(cx, id), "{id}");
         }
         // The card, as the verify profile puts it up: an answer, and it's gone.
@@ -223,6 +224,22 @@ fn the_privacy_page_takes_the_answer_the_card_asks_for() {
         trek.click(cx, "privacy-reset");
         let again = trek_telemetry::status().unwrap().install_id.unwrap();
         assert_ne!(id, again);
+        // The card's yes covered the usage totals it lists; their own switch turns them off and
+        // leaves the rest shared.
+        assert_eq!(status.totals, Consent::Yes);
+        trek.click(cx, "privacy-totals");
+        let status = trek_telemetry::status().unwrap();
+        assert_eq!((status.consent, status.totals), (Consent::Yes, Consent::No));
+        // The card for someone who said yes before the totals existed: its yes turns them on.
+        trek.window(cx, |window, cx| {
+            trek_app::privacy::open_totals_card(window, cx)
+        });
+        trek.render(cx);
+        assert!(trek.visible(cx, "totals-card"));
+        trek.click(cx, "totals-yes");
+        trek.render(cx);
+        assert!(!trek.visible(cx, "totals-card"));
+        assert_eq!(trek_telemetry::status().unwrap().totals, Consent::Yes);
         trek.click(cx, "privacy-consent");
         assert_eq!(trek_telemetry::consent(), Some(Consent::No));
     });

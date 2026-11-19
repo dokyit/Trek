@@ -5046,8 +5046,9 @@ fn secret_demo(ws: &Entity<Workspace>, cx: &mut App) -> anyhow::Result<()> {
     })
 }
 
-/// `privacy-demo card|feedback|nokey|failed|sent`: the card asking about usage data, which a
-/// capture run never puts up by itself, or the feedback sheet as a build with a PostHog key draws
+/// `privacy-demo card|totals|feedback|nokey|failed|sent`: the card asking about usage data, which a
+/// capture run never puts up by itself, the one asking someone who already shares it about usage
+/// totals (`totals`), or the feedback sheet as a build with a PostHog key draws
 /// it (`feedback`), one without (`nokey`), after a failed send, or once sent. Nothing is sent: a
 /// capture run is a test profile.
 fn privacy_demo(ws: &Entity<Workspace>, arg: &str, cx: &mut App) -> anyhow::Result<()> {
@@ -5062,6 +5063,10 @@ fn privacy_demo(ws: &Entity<Workspace>, arg: &str, cx: &mut App) -> anyhow::Resu
     main.update(cx, |_, window, cx| match arg.as_str() {
         "" | "card" => {
             crate::privacy::open_card(window, cx);
+            Ok(())
+        }
+        "totals" => {
+            crate::privacy::open_totals_card(window, cx);
             Ok(())
         }
         "feedback" | "nokey" | "failed" | "sent" => {
@@ -5088,7 +5093,7 @@ fn privacy_demo(ws: &Entity<Workspace>, arg: &str, cx: &mut App) -> anyhow::Resu
             Ok(())
         }
         _ => Err(anyhow::anyhow!(
-            "privacy-demo card|feedback|nokey|failed|sent"
+            "privacy-demo card|totals|feedback|nokey|failed|sent"
         )),
     })?
 }

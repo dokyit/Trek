@@ -81,6 +81,18 @@ impl Queue {
         self.items.clear();
     }
 
+    /// Take out the events named in `names`, and those whose property `with.0` is `with.1`.
+    pub fn drop_events(&mut self, names: &[&str], with: Option<(&str, &str)>) {
+        self.items.retain(|q| {
+            let named = q.event["event"]
+                .as_str()
+                .is_some_and(|name| names.contains(&name));
+            let has =
+                with.is_some_and(|(key, value)| q.event["properties"][key].as_str() == Some(value));
+            !named && !has
+        });
+    }
+
     /// Events too old to send go.
     pub fn expire(&mut self, now: i64) -> usize {
         let before = self.items.len();

@@ -46,6 +46,7 @@
       <p>On the first launch after setup, Trek asks whether it may share anonymous usage data. If you used an earlier version, it asks you once too. You can change your answer at any time in <strong>Settings, Privacy</strong>, and that page shows exactly what was sent last.</p>
       <ul>
         <li>With a yes, Trek shares anonymous usage counts (how often Trek opens, which agents and tools are used), crash and error reports, and the app version, operating system and architecture.</li>
+        <li>From version 0.4.58, a yes also covers usage totals: each day's token counts and what they would cost at API prices, by agent and model, which of Trek's features you use, how many projects, threads and agents you have, and your theme. If you said yes before that version, Trek asks you about the totals once, and keeps sharing only what you agreed to if you say no. Usage totals have their own switch in Settings, Privacy.</li>
         <li>Trek never shares prompts, code, file names, paths, transcripts, keys or account emails.</li>
         <li>With a no, nothing is sent, ever, except feedback you send yourself.</li>
       </ul>
@@ -63,7 +64,9 @@
             <tr><th scope="row">Install</th><td>The first launch after a yes, once. It says whether Trek was already set up on this computer.</td></tr>
             <tr><th scope="row">App opened</th><td>A launch, at most once a day.</td></tr>
             <tr><th scope="row">App updated</th><td>The first launch of a new version, with the old and new version numbers.</td></tr>
-            <tr><th scope="row">Feature used</th><td>The day after: one count for each agent you messaged and each tool panel you opened that day. The names are Trek's own words, such as <code>claude-code</code> or <code>terminal</code>, never anything you typed. An agent you added yourself is counted as "other".</td></tr>
+            <tr><th scope="row">Feature used</th><td>The day after: one count for each agent you messaged and each tool panel you opened that day. The names are Trek's own words, such as <code>claude-code</code> or <code>terminal</code>, never anything you typed. An agent you added yourself is counted as "other". With usage totals, it also counts a few things done in Trek, such as starting a thread, a study session or a note, and turns that failed or were stopped.</td></tr>
+            <tr><th scope="row">Tokens used</th><td>Only with usage totals. The day after: for each agent and model, the day's input, output and cache token counts and what they would cost at the provider's API prices. That cost is an estimate from public prices, not what you paid. A model you named yourself, or one running on your computer, is counted as "other". Nothing from before your yes is counted.</td></tr>
+            <tr><th scope="row">Setup</th><td>Only with usage totals, at most once a day: how many projects, threads and agents you have, your theme, and whether glass and the phone server are on.</td></tr>
             <tr><th scope="row">Crash</th><td>The launch after a crash: the error message, where in Trek's own source it happened, and a backtrace.</td></tr>
             <tr><th scope="row">Feedback</th><td>Only when you send feedback. See below.</td></tr>
           </tbody>
@@ -87,10 +90,16 @@
       <p>The form can also open a new issue on GitHub with your message and diagnostics filled in. It never includes your email there, because an issue is public.</p>
 
       <h2>What stays on your computer</h2>
-      <p>In a <code>telemetry</code> folder in Trek's data folder: your answer, the install id, today's counts, events waiting to be sent (at most 500; each is dropped after five failed tries or a week), and a copy of the last request exactly as it was sent. A crash also leaves a report in the data folder. Until you answer the question it waits there; with a yes the next launch sends it, and with a no it is deleted.</p>
+      <p>In a <code>telemetry</code> folder in Trek's data folder: your answers, the install id, today's counts and token totals, events waiting to be sent (at most 500; each is dropped after five failed tries or a week), and a copy of the last request exactly as it was sent. A crash also leaves a report in the data folder. Until you answer the question it waits there; with a yes the next launch sends it, and with a no it is deleted.</p>
 
       <h2>The iPhone app</h2>
-      <p>Trek for iPhone has no usage data and no crash reports. It has the same feedback form, which sends your message and, with diagnostics, the app's version, the iOS version and the architecture.</p>
+      <p>What you type, dictate or attach in the iPhone app goes to your paired computer, over your local network or your own Tailscale network. From there it goes to the agent you chose on that computer. Claude Code sends it to Anthropic and Codex sends it to OpenAI, for example, under the account you use there and that provider's terms. A model server on your own computer keeps it there unless you set it up otherwise. Trek has no servers in between and keeps no copy on servers of its own. The iPhone keeps threads and files you opened on the phone itself, so they open quickly.</p>
+      <p>The app asks before your first message, and again before the first message to a provider it has not named yet. Not now sends nothing. You can withdraw the permission in Settings, Privacy and feedback. That stops further sending. It does not delete what your computer or the provider already has.</p>
+      <p>Dictation turns speech into text on the iPhone when your language allows it. Otherwise your speech goes to Apple to be turned into text.</p>
+      <p>Trek for iPhone sends no usage data and no crash reports. It has the same feedback form. Feedback goes only when you press Send: your message, your email address if you give one, and, unless you turn it off, the app's version, the iOS version and the architecture. It goes to PostHog under a new random id each time and is not used for tracking.</p>
+
+      <h2>Having your data deleted</h2>
+      <p>Saying no in Settings, Privacy stops everything from that moment and drops what was waiting to be sent. To have what was already sent deleted, write to <!--email_off--><a href="mailto:support@trekdesktop.com">support@trekdesktop.com</a><!--/email_off--> with your install id, which that page shows, or the email address you gave with feedback.</p>
 
       <h2>What else Trek connects to</h2>
       <ul>
@@ -109,7 +118,7 @@
       <h2>Other companies' names</h2>
       <p>Trek isn't affiliated with or endorsed by Anthropic, OpenAI, Google, Microsoft or any other maker of the agents it runs. Their names belong to their owners and are used only to say which agents Trek works with.</p>
 
-      <p class="updated">Last updated 15 November 2026.</p>
+      <p class="updated">Last updated 19 November 2026.</p>
     </div>
   </div>
 </main>

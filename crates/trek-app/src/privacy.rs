@@ -14,6 +14,8 @@ const CARD_WIDTH: f32 = 400.;
 
 /// What's shared, as the card and Settings › Privacy say it.
 pub const SHARED: &str = "Anonymous usage counts (how often Trek opens, which agents and tools you use), crash and error reports, the app version, OS and architecture.";
+/// What usage totals add, which have a yes of their own.
+pub const TOTALS: &str = "Each day's token counts and their cost at API prices, by agent and model; which of Trek's features you use; how many projects, threads and agents you have, and your theme.";
 /// What never is.
 pub const NEVER: &str = "Prompts, code, file names, paths, transcripts, keys or account emails.";
 
@@ -34,6 +36,7 @@ pub fn start(ws: &Entity<Workspace>, cx: &mut App) {
         os_version,
         scrubber: scrubber(ws.read(cx)),
     });
+    trek_telemetry::set_setup(setup(ws.read(cx)));
     if let Some(changes) = trek_telemetry::changes() {
         cx.spawn(async move |cx| {
             while changes.recv().await.is_ok() {
@@ -67,6 +70,24 @@ pub fn scrubber(ws: &Workspace) -> trek_telemetry::Scrubber {
     trek_telemetry::Scrubber::here(&folders, crate::share::render::redact_secrets)
 }
 
+/// The setup's few numbers, for the day's `setup` event (with a yes to usage totals).
+fn setup(ws: &Workspace) -> trek_telemetry::Setup {
+    use trek_core::settings::ThemeChoice;
+    trek_telemetry::Setup {
+        projects: ws.projects.len() as u32,
+        threads: ws.threads.len() as u32,
+        agents: ws.picker_agents().len() as u32,
+        look: match ws.settings.appearance.theme {
+            ThemeChoice::System => "system",
+            ThemeChoice::Night => "night",
+            ThemeChoice::Paper => "paper",
+        }
+        .to_string(),
+        glass: ws.settings.appearance.glass,
+        phone: ws.settings.mobile.enabled,
+    }
+}
+
 /// The OS version alone (`26.1`; on Windows `11 (26100)`), off the UI thread.
 fn os_version() -> Option<String> {
     #[cfg(windows)]
@@ -98,7 +119,7 @@ impl Global for Asking {}
 
 /// Put the card up once, as soon as the main window is past onboarding.
 fn ask_when_ready(ws: Entity<Workspace>, cx: &mut App) {
-    if !trek_telemetry::should_ask() || try_ask(&ws, cx) {
+    if !asking() || try_ask(&ws, cx) {
         return;
     }
     let watch = cx.observe(&ws, |ws, cx| {
@@ -113,7 +134,7 @@ fn ask_when_ready(ws: Entity<Workspace>, cx: &mut App) {
 
 /// Whether there's nothing left to wait for: asked now, or no longer to be asked.
 fn try_ask(ws: &Entity<Workspace>, cx: &mut App) -> bool {
-    if !trek_telemetry::should_ask() {
+    if !asking() {
         return true;
     }
     let w = ws.read(cx);
@@ -124,9 +145,103 @@ fn try_ask(ws: &Entity<Workspace>, cx: &mut App) -> bool {
         return false;
     };
     main.update(cx, |_, window, _| {
-        window.on_next_frame(|window, cx| open_card(window, cx))
+        window.on_next_frame(|window, cx| {
+            if trek_telemetry::should_ask() {
+                open_card(window, cx)
+            } else if trek_telemetry::should_ask_totals() {
+                open_totals_card(window, cx)
+            }
+        })
     })
     .is_ok()
+}
+
+/// There's a card to put up: the first one, or the one about usage totals for someone who
+/// said yes before they existed.
+fn asking() -> bool {
+    trek_telemetry::should_ask() || trek_telemetry::should_ask_totals()
+}
+
+/// One of a card's two lines: a label over what it covers.
+fn card_line(label: &'static str, text: &'static str, cx: &App) -> Div {
+    v_flex()
+        .gap(px(2.))
+        .child(div().text_size(px(text::BODY)).font_medium().child(label))
+        .child(
+            div()
+                .text_size(px(text::BODY))
+                .line_height(relative(1.5))
+                .text_color(cx.theme().muted_foreground)
+                .child(text),
+        )
+}
+
+/// The card for someone who already shares usage data: Trek can now add usage totals, which
+/// their yes didn't cover. Either answer leaves what they share today as it is.
+pub fn open_totals_card(window: &mut Window, cx: &mut App) {
+    window.open_dialog(cx, move |dialog, _, cx| {
+        let muted = cx.theme().muted_foreground;
+        dialog
+            .w(px(CARD_WIDTH))
+            .close_button(false)
+            .overlay_closable(false)
+            .keyboard(false)
+            .child(
+                v_flex()
+                    .id("totals-card")
+                    .test_support()
+                    .gap(px(14.))
+                    .child(
+                        v_flex()
+                            .gap(px(4.))
+                            .child(
+                                div()
+                                    .text_size(px(text::HEADING))
+                                    .font_semibold()
+                                    .child("Share usage totals too?"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(text::BODY))
+                                    .line_height(relative(1.5))
+                                    .text_color(muted)
+                                    .child("You already share anonymous usage data. Trek can now add totals that show how much it's used, and for what."),
+                            ),
+                    )
+                    .child(card_line("Added with a yes", TOTALS, cx))
+                    .child(card_line("Never shared", NEVER, cx))
+                    .child(
+                        div()
+                            .text_size(px(text::LABEL))
+                            .text_color(muted)
+                            .child("Nothing from before today is sent. You can change this in Settings › Privacy."),
+                    )
+                    .child(
+                        h_flex()
+                            .pt(px(4.))
+                            .gap(px(8.))
+                            .justify_end()
+                            .child(
+                                Button::new("totals-no")
+                                    .outline()
+                                    .label("No")
+                                    .on_click(|_, window, cx| answer_totals(false, window, cx)),
+                            )
+                            .child(
+                                Button::new("totals-yes")
+                                    .primary()
+                                    .label("Yes")
+                                    .on_click(|_, window, cx| answer_totals(true, window, cx)),
+                            ),
+                    ),
+            )
+    });
+}
+
+fn answer_totals(yes: bool, window: &mut Window, cx: &mut App) {
+    trek_telemetry::set_totals(yes);
+    window.close_dialog(cx);
+    cx.refresh_windows();
 }
 
 /// The card: what's shared and what never is, Yes or No. It takes an answer (no ×, no click
@@ -174,6 +289,7 @@ pub fn open_card(window: &mut Window, cx: &mut App) {
                             ),
                     )
                     .child(line("Shared", SHARED))
+                    .child(line("And usage totals", TOTALS))
                     .child(line("Never shared", NEVER))
                     .child(
                         div()
@@ -256,6 +372,53 @@ pub fn count_agent(ws: &Workspace, thread: &str) {
     }
 }
 
+/// One more of something done in Trek today, by Trek's own name for it (with a yes to usage
+/// totals): `thread-started`, `note-created`…
+pub fn count_action(name: &str) {
+    trek_telemetry::count(trek_telemetry::Feature::Action, name);
+}
+
+/// The name a model's tokens are summed under: the provider's own id for a model Trek has a
+/// price for, else `other` (a model the user named, or one on their own computer, is never sent).
+pub fn model_name(model: Option<&str>, agent: &AgentId) -> String {
+    model
+        .and_then(|m| trek_core::pricing::price(m, agent))
+        .map(|(p, _)| p.model.to_ascii_lowercase())
+        .filter(|m| {
+            m.len() <= 48
+                && m.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "-_.:".contains(c))
+        })
+        .unwrap_or_else(|| "other".into())
+}
+
+/// What a turn used, for the day's totals (with a yes to usage totals): the tokens, and their
+/// cost at API prices where one is known. Never the thread, its project or anything said in it.
+pub fn count_tokens(
+    ws: &Workspace,
+    agent: &AgentId,
+    model: Option<&str>,
+    tokens: &trek_core::TokenUsage,
+    cost: Option<trek_core::UsageCost>,
+) {
+    let used = trek_telemetry::Tokens {
+        input: tokens.input,
+        output: tokens.output,
+        cache_read: tokens.cache_read,
+        cache_write: tokens.cache_write,
+        cost_micros: cost
+            .map(|c| (c.usd.max(0.) * 1_000_000.).round() as u64)
+            .unwrap_or(0),
+        ..Default::default()
+    };
+    trek_telemetry::tokens(
+        &agent_name(agent, ws),
+        &model_name(model, agent),
+        &used,
+        cost.is_some(),
+    );
+}
+
 /// One more opening of `tool` today (with the user's yes).
 pub fn count_tool(tool: crate::workspace::PanelTool) {
     use crate::workspace::PanelTool;
@@ -289,6 +452,9 @@ mod tests {
             "account emails",
         ] {
             assert!(NEVER.contains(never), "{never}");
+        }
+        for totals in ["token counts", "cost at API prices", "features"] {
+            assert!(super::TOTALS.contains(totals), "{totals}");
         }
         for shared in [
             "usage counts",

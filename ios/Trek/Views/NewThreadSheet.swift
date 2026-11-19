@@ -95,6 +95,7 @@ struct NewThreadSheet: View {
                 }
             }
         }
+        .asksBeforeSharing()
         .onAppear {
             projectID = linkProjects.contains(where: { $0.id == projectID }) || isNoProject
                 ? projectID : linkProjects.first?.id ?? noProjectID
@@ -291,6 +292,8 @@ struct NewThreadSheet: View {
 
     private func start() {
         guard cantStart == nil, let pid = project?.id ?? (isNoProject ? noProjectID : nil), let agent else { return }
+        // Asked before anything goes (Sharing.swift); "Not now" leaves the sheet as it is.
+        guard model.mayShare(with: .of(agent.ref), on: link, then: { start() }) else { return }
         let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let images = photos.compactMap(\.upload)
         let begin = { (ids: [String], failed: ((ErrorCode) -> Void)?) in

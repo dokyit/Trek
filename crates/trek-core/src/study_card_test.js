@@ -30,11 +30,12 @@ class El {
   text() { return this.textContent + this.children.map((c) => c.text()).join(''); }
 }
 
-function run(data, replies) {
+function run(data, replies, kept = null) {
   const card = new El('div');
-  const listeners = {}, sent = [], dictated = [];
+  const listeners = {}, sent = [], dictated = [], keeps = [], timers = [];
   const window = {
-    trek: { send: (t) => (sent.push(t), true), copy: () => true, replies, canDictate: true, dictate: (on) => (dictated.push(on), true) },
+    trek: { send: (t) => (sent.push(t), true), copy: () => true, replies, canDictate: true, dictate: (on) => (dictated.push(on), true),
+      kept, keep: (t) => (keeps.push(t), true) },
     addEventListener: (t, f) => { (listeners[t] = listeners[t] || []).push(f); },
   };
   const document = {
@@ -43,10 +44,12 @@ function run(data, replies) {
     getElementById: () => card,
     addEventListener: () => {},
   };
-  vm.runInContext(script.replace('__DATA__', JSON.stringify(data)), vm.createContext({ window, document, navigator: { platform: 'MacIntel' } }));
+  vm.runInContext(script.replace('__DATA__', JSON.stringify(data)), vm.createContext({ window, document, navigator: { platform: 'MacIntel' }, setTimeout: (f) => timers.push(f) }));
   const cls = (c) => (e) => e.classList.contains(c);
   return {
-    card, sent, dictated,
+    card, sent, dictated, keeps,
+    // Run what the card put off (its debounced `trek.keep`).
+    tick: () => { while (timers.length) timers.shift()(); },
     hear: (detail) => (listeners.trekdictation || []).forEach((f) => f({ detail })),
     box: card.all((e) => e.tag === 'textarea')[0],
     mic: card.all(cls('mic'))[0],
@@ -166,4 +169,40 @@ assert.strictEqual(c.note(), 'Sent · keep going');
 c = run(problem, ['Problem [c2]\nStatus: still working\nWorking: abc', "Problem [c2]\nStatus: I think I've solved it\nWorking: got it"]);
 assert.ok(c.card.classList.contains('done'));
 assert.strictEqual(c.box.value, 'got it');
+
+// What's chosen and typed is handed to Trek as it changes, and a card drawn again before it was
+// answered (its page let go while it was scrolled away) opens with it all still there.
+c = run(question, []);
+c.options[1].onclick();
+c.sure[3].onclick();
+c.box.value = 'half a thought, $x^2$';
+c.box.oninput();
+c.tick();
+assert.strictEqual(c.keeps.length, 1, 'one keep for a burst of changes');
+const draft = c.keeps[0];
+assert.deepStrictEqual(JSON.parse(draft), { pick: 1, sure: 3, work: 'half a thought, $x^2$' });
+c = run(question, [], draft);
+assert.ok(!c.card.classList.contains('done'));
+assert.deepStrictEqual(on(c.options), [false, true, false, false]);
+assert.deepStrictEqual(on(c.sure), [false, false, false, true]);
+assert.strictEqual(c.box.value, 'half a thought, $x^2$');
+assert.ok(!c.main.disabled && !c.box.readOnly, 'still theirs to finish');
+// Answered: nothing is kept any longer, and the answer wins over an old draft.
+c.main.onclick();
+assert.strictEqual(c.keeps[c.keeps.length - 1], '');
+c = run(question, [answer], draft);
+assert.deepStrictEqual(on(c.options), [false, false, true, false]);
+assert.strictEqual(c.box.value, "I honestly\ndon't remember");
+// A draft that isn't one (another page's text, a pick out of range) changes nothing.
+c = run(question, [], 'not json');
+assert.strictEqual(c.box.value, '');
+c = run(question, [], JSON.stringify({ pick: 9, sure: 'x', work: 5 }));
+assert.deepStrictEqual(on(c.options), [false, false, false, false]);
+assert.strictEqual(c.box.value, '');
+// A problem's working sent in pieces: the box empties, and so does what's kept.
+c = run(problem, [], JSON.stringify({ pick: null, sure: null, work: 'so far' }));
+assert.strictEqual(c.box.value, 'so far');
+c.card.all((e) => e.tag === 'button' && e.textContent === 'Send working')[0].onclick();
+c.tick();
+assert.strictEqual(c.keeps[c.keeps.length - 1], '');
 process.stdout.write('ok');

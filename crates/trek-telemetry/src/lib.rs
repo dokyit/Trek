@@ -15,15 +15,16 @@ pub mod scrub;
 pub mod state;
 
 pub use config::{Blocked, Config, Key};
-pub use event::{Event, Feature, Platform};
+pub use event::{Event, Feature, Platform, Setup};
 pub use feedback::{Diagnostics, Feedback, Kind, NotSent};
 pub use global::{
     Answer, Start, answered, changes, consent, count, feedback_destination, platform,
-    reset_install_id, send_feedback, set_consent, should_ask, start, status,
+    reset_install_id, send_feedback, set_consent, set_setup, set_shared, set_totals, should_ask,
+    should_ask_totals, start, status, tokens,
 };
 pub use queue::Outcome;
 pub use scrub::Scrubber;
-pub use state::{Consent, Sent};
+pub use state::{Consent, Sent, Tokens};
 
 use chrono::{DateTime, Local, Utc};
 use queue::{Queue, Queued};
@@ -33,6 +34,8 @@ use std::path::{Path, PathBuf};
 
 /// Names counted on one day at most (a runaway caller can't grow the file).
 const MAX_NAMES_A_DAY: usize = 64;
+/// The events that are usage totals alone: a no to the totals takes them out of the queue.
+const TOTALS_EVENTS: &[&str] = &["tokens_used", "setup"];
 
 /// A request to PostHog: the events in it, and where it goes.
 #[derive(Debug, Clone)]
@@ -47,6 +50,8 @@ pub struct Batch {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Status {
     pub consent: Consent,
+    /// The answer about usage totals (`Telemetry::totals_on`).
+    pub totals: Consent,
     pub blocked: Option<Blocked>,
     pub key: Option<Key>,
     pub install_id: Option<String>,
@@ -71,6 +76,8 @@ pub struct Telemetry {
     last_error: Option<String>,
     /// Counts changed since they were last saved.
     dirty: bool,
+    /// The setup as the app last described it, for the day's `setup`.
+    setup: Option<event::Setup>,
 }
 
 impl Telemetry {
@@ -89,6 +96,7 @@ impl Telemetry {
             last_sent,
             last_error: None,
             dirty: false,
+            setup: None,
         }
     }
 
@@ -112,7 +120,22 @@ impl Telemetry {
         self.on() && self.config.key.is_some()
     }
 
+    /// The card's answer, which covers everything it lists: the usage data and the totals.
     pub fn set_consent(&mut self, yes: bool, now: DateTime<Utc>) {
+        self.state.totals = if yes { Consent::Yes } else { Consent::No };
+        self.share(yes, now);
+    }
+
+    /// Settings' first switch: the usage data alone. The totals keep their own answer, and one
+    /// never given becomes a no (the switch under it is there to say yes with).
+    pub fn set_shared(&mut self, yes: bool, now: DateTime<Utc>) {
+        if self.state.totals == Consent::Unasked {
+            self.state.totals = Consent::No;
+        }
+        self.share(yes, now);
+    }
+
+    fn share(&mut self, yes: bool, now: DateTime<Utc>) {
         self.state.consent = if yes { Consent::Yes } else { Consent::No };
         self.state.answered_at = Some(now.timestamp());
         if yes {
@@ -121,9 +144,79 @@ impl Telemetry {
             // A no stops what was waiting too.
             self.queue.clear();
             self.state.counts.clear();
+            self.state.tokens.clear();
             self.files.save_queue(&self.queue);
         }
         self.files.save_state(&self.state);
+    }
+
+    /// The answer about usage totals: tokens and cost by agent and model, features used, the
+    /// setup. A no drops what was counted for them and not yet sent.
+    pub fn set_totals(&mut self, yes: bool) {
+        self.state.totals = if yes { Consent::Yes } else { Consent::No };
+        if !yes {
+            self.state.tokens.clear();
+            for day in self.state.counts.values_mut() {
+                day.retain(|key, _| !key.starts_with("action:"));
+            }
+            self.queue
+                .drop_events(TOTALS_EVENTS, Some(("kind", "action")));
+            self.files.save_queue(&self.queue);
+        }
+        self.files.save_state(&self.state);
+    }
+
+    /// Someone who said yes before the totals existed is asked about them, once: that yes
+    /// was to what the card listed then.
+    pub fn should_ask_totals(&self) -> bool {
+        self.state.consent == Consent::Yes
+            && self.state.totals == Consent::Unasked
+            && self.config.blocked.is_none()
+    }
+
+    /// Usage totals may be counted and sent: a yes to both, a key, nothing blocking.
+    pub fn totals_on(&self) -> bool {
+        self.sending() && self.state.totals == Consent::Yes
+    }
+
+    /// What a turn's report adds to today's totals for `agent` and `model` (Trek's own names,
+    /// `plain_name`): its tokens and, where a price was known, what they cost at API prices.
+    pub fn tokens(
+        &mut self,
+        agent: &str,
+        model: &str,
+        used: &Tokens,
+        priced: bool,
+        now: DateTime<Local>,
+    ) {
+        if !self.totals_on() || !plain_name(agent) || !plain_name(model) {
+            return;
+        }
+        let day = self
+            .state
+            .tokens
+            .entry(now.format("%Y-%m-%d").to_string())
+            .or_default();
+        let key = format!("{agent}|{model}");
+        if day.len() >= MAX_NAMES_A_DAY && !day.contains_key(&key) {
+            return;
+        }
+        let t = day.entry(key).or_default();
+        t.input = t.input.saturating_add(used.input);
+        t.output = t.output.saturating_add(used.output);
+        t.cache_read = t.cache_read.saturating_add(used.cache_read);
+        t.cache_write = t.cache_write.saturating_add(used.cache_write);
+        t.cost_micros = t.cost_micros.saturating_add(used.cost_micros);
+        t.reports = t.reports.saturating_add(1);
+        if !priced {
+            t.unpriced = t.unpriced.saturating_add(1);
+        }
+        self.dirty = true;
+    }
+
+    /// The setup as it is now, for the day's `setup` event.
+    pub fn set_setup(&mut self, setup: event::Setup) {
+        self.setup = Some(setup);
     }
 
     /// A new install id: nothing sent from now on can be tied to what was sent before. What was
@@ -201,6 +294,42 @@ impl Telemetry {
             .filter(|day| **day < today)
             .cloned()
             .collect();
+        let totals = self.totals_on();
+        if totals
+            && self.state.setup_day.as_deref() != Some(today.as_str())
+            && let Some(setup) = self.setup.clone().filter(|s| plain_name(&s.look))
+            && self.enqueue(&Event::Setup(setup), at)
+        {
+            self.state.setup_day = Some(today.clone());
+            self.dirty = true;
+        }
+        let past_tokens: Vec<String> = self
+            .state
+            .tokens
+            .keys()
+            .filter(|day| **day < today)
+            .cloned()
+            .collect();
+        for day in past_tokens {
+            let sums = self.state.tokens.remove(&day).unwrap_or_default();
+            for (key, tokens) in sums {
+                let Some((agent, model)) = key.split_once('|') else {
+                    continue;
+                };
+                if totals {
+                    self.enqueue(
+                        &Event::Tokens {
+                            agent: agent.to_string(),
+                            model: model.to_string(),
+                            day: day.clone(),
+                            tokens,
+                        },
+                        at,
+                    );
+                }
+            }
+            self.dirty = true;
+        }
         for day in past {
             let counts = self.state.counts.remove(&day).unwrap_or_default();
             for (key, count) in counts {
@@ -210,6 +339,9 @@ impl Telemetry {
                 else {
                     continue;
                 };
+                if feature == Feature::Action && !totals {
+                    continue;
+                }
                 self.enqueue(
                     &Event::Used {
                         feature,
@@ -228,6 +360,9 @@ impl Telemetry {
     /// it, never anything the user typed.
     pub fn count(&mut self, feature: Feature, name: &str, now: DateTime<Local>) {
         if !self.sending() || !plain_name(name) {
+            return;
+        }
+        if feature == Feature::Action && !self.totals_on() {
             return;
         }
         let day = self
@@ -297,6 +432,9 @@ impl Telemetry {
         // A no while it was out: what came back stays here.
         if !self.on() {
             self.queue.clear();
+        } else if self.state.totals != Consent::Yes {
+            self.queue
+                .drop_events(TOTALS_EVENTS, Some(("kind", "action")));
         }
         self.files.save_queue(&self.queue);
     }
@@ -350,6 +488,7 @@ impl Telemetry {
     pub fn status(&self) -> Status {
         Status {
             consent: self.state.consent,
+            totals: self.state.totals,
             blocked: self.config.blocked,
             key: self.config.key.clone(),
             install_id: self.state.install_id.clone(),
@@ -721,5 +860,251 @@ mod tests {
         };
         let mut dnt = Telemetry::open(&scratch("fb4"), dnt, platform("0.4.41"));
         assert!(dnt.feedback_request(&feedback, Utc::now()).is_ok());
+    }
+
+    fn used(input: u64, output: u64, micros: u64) -> Tokens {
+        Tokens {
+            input,
+            output,
+            cache_read: 1_000,
+            cache_write: 10,
+            cost_micros: micros,
+            ..Default::default()
+        }
+    }
+
+    fn setup() -> Setup {
+        Setup {
+            projects: 3,
+            threads: 41,
+            agents: 2,
+            look: "night".into(),
+            glass: false,
+            phone: true,
+        }
+    }
+
+    fn events<'a>(t: &'a Telemetry, name: &str) -> Vec<&'a Value> {
+        t.queue
+            .items
+            .iter()
+            .map(|q| &q.event)
+            .filter(|e| e["event"] == name)
+            .collect()
+    }
+
+    #[test]
+    fn a_yes_from_before_the_totals_does_not_cover_them() {
+        // A state file as an earlier Trek wrote it: a yes, and no word about totals.
+        let dir = scratch("old-yes");
+        std::fs::create_dir_all(dir.join("telemetry")).unwrap();
+        std::fs::write(
+            dir.join("telemetry/state.json"),
+            r#"{"consent":"yes","answered_at":1,"install_id":"11111111-1111-4111-8111-111111111111","install_sent":true}"#,
+        )
+        .unwrap();
+        let mut t = Telemetry::open(&dir, keyed(), platform("0.4.58"));
+        assert!(!t.should_ask(), "the first answer stands");
+        assert!(t.should_ask_totals(), "the totals are asked about, once");
+        assert!(!t.totals_on());
+        // Until they answer, a turn's tokens, an action and the setup go nowhere; what they
+        // agreed to before still does.
+        t.set_setup(setup());
+        t.tokens(
+            "claude-code",
+            "claude-opus-5-5",
+            &used(10, 20, 500),
+            true,
+            day(5, 9),
+        );
+        t.count(Feature::Action, "note-created", day(5, 9));
+        t.count(Feature::Agent, "claude-code", day(5, 9));
+        t.daily(day(6, 9));
+        assert!(t.state.tokens.is_empty());
+        assert_eq!(names(&t), ["app_opened", "feature_used"]);
+        assert_eq!(events(&t, "feature_used")[0]["properties"]["kind"], "agent");
+        // A no: not asked again, still nothing of them, the rest as before.
+        t.set_totals(false);
+        assert!(!t.should_ask_totals());
+        assert_eq!(t.consent(), Consent::Yes);
+        t.tokens(
+            "claude-code",
+            "claude-opus-5-5",
+            &used(10, 20, 500),
+            true,
+            day(6, 9),
+        );
+        t.daily(day(7, 9));
+        assert!(events(&t, "tokens_used").is_empty() && events(&t, "setup").is_empty());
+        let t = Telemetry::open(&dir, keyed(), platform("0.4.58"));
+        assert!(!t.should_ask_totals(), "the answer is kept");
+    }
+
+    #[test]
+    fn totals_add_up_by_day_agent_and_model_and_go_out_the_next_day() {
+        let dir = scratch("totals");
+        let mut t = Telemetry::open(&dir, keyed(), platform("0.4.58"));
+        // The first card's yes covers what it lists: the totals too.
+        t.set_consent(true, Utc::now());
+        assert!(t.totals_on() && !t.should_ask_totals());
+        t.set_setup(setup());
+        t.launched(false, &scrubber(), day(5, 9));
+        t.tokens(
+            "claude-code",
+            "claude-opus-5-5",
+            &used(100, 200, 1_500_000),
+            true,
+            day(5, 9),
+        );
+        t.tokens(
+            "claude-code",
+            "claude-opus-5-5",
+            &used(1, 2, 250_000),
+            true,
+            day(5, 10),
+        );
+        // No price known: its tokens count, and it's said that its cost doesn't.
+        t.tokens("direct:ollama", "other", &used(7, 8, 0), false, day(5, 11));
+        // Names that aren't Trek's own words never get in.
+        t.tokens(
+            "claude-code",
+            "My Company Model",
+            &used(1, 1, 1),
+            true,
+            day(5, 11),
+        );
+        t.tokens("/Users/me", "other", &used(1, 1, 1), true, day(5, 11));
+        t.count(Feature::Action, "thread-started", day(5, 11));
+        assert!(
+            events(&t, "tokens_used").is_empty(),
+            "not before the day is over"
+        );
+        // Kept across a restart.
+        t.save_if_changed();
+        let mut t = Telemetry::open(&dir, keyed(), platform("0.4.58"));
+        t.set_setup(setup());
+        t.daily(day(6, 9));
+        let sent = events(&t, "tokens_used");
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        let opus = &sent[0]["properties"];
+        assert_eq!(opus["agent"], "claude-code");
+        assert_eq!(opus["model"], "claude-opus-5-5");
+        assert_eq!(opus["day"], "2026-11-05");
+        assert_eq!(opus["input_tokens"], 101);
+        assert_eq!(opus["output_tokens"], 202);
+        assert_eq!(opus["cache_read_tokens"], 2_000);
+        assert_eq!(opus["cache_write_tokens"], 20);
+        assert_eq!(opus["api_cost_usd"], 1.75);
+        assert_eq!(opus["reports"], 2);
+        assert_eq!(opus["unpriced_reports"], 0);
+        let local = &sent[1]["properties"];
+        assert_eq!(local["model"], "other");
+        assert_eq!(local["unpriced_reports"], 1);
+        // Nothing in them but numbers and Trek's own names.
+        let keys: Vec<&str> = opus
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        for key in &keys {
+            assert!(
+                [
+                    "agent",
+                    "model",
+                    "day",
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_read_tokens",
+                    "cache_write_tokens",
+                    "api_cost_usd",
+                    "reports",
+                    "unpriced_reports",
+                    "$lib",
+                    "$process_person_profile",
+                    "$geoip_disable",
+                    "$app_version",
+                    "channel",
+                    "$os",
+                    "$os_version",
+                    "arch"
+                ]
+                .contains(key),
+                "{key}"
+            );
+        }
+        let action = events(&t, "feature_used");
+        assert_eq!(action.len(), 1);
+        assert_eq!(action[0]["properties"]["kind"], "action");
+        assert_eq!(action[0]["properties"]["name"], "thread-started");
+        // The setup, once a day.
+        let setups = events(&t, "setup");
+        assert_eq!(setups.len(), 2, "the 5th's, from its launch, and the 6th's");
+        t.queue.clear();
+        t.daily(day(6, 15));
+        assert!(
+            events(&t, "setup").is_empty(),
+            "the 6th's went with the first daily"
+        );
+        let mut t2 = Telemetry::open(&scratch("setup"), keyed(), platform("0.4.58"));
+        t2.set_consent(true, Utc::now());
+        t2.set_setup(setup());
+        t2.daily(day(5, 9));
+        let p = &events(&t2, "setup")[0]["properties"];
+        assert_eq!(
+            (
+                &p["projects"],
+                &p["threads"],
+                &p["agents"],
+                &p["theme"],
+                &p["glass"],
+                &p["phone"]
+            ),
+            (
+                &json(3),
+                &json(41),
+                &json(2),
+                &json("night"),
+                &json(false),
+                &json(true)
+            )
+        );
+    }
+
+    fn json(v: impl serde::Serialize) -> Value {
+        serde_json::to_value(v).unwrap()
+    }
+
+    #[test]
+    fn a_no_to_totals_drops_what_was_counted_and_queued_for_them_alone() {
+        let mut t = Telemetry::open(&scratch("totals-no"), keyed(), platform("0.4.58"));
+        t.set_consent(true, Utc::now());
+        t.set_setup(setup());
+        t.tokens("codex", "gpt-6.1", &used(5, 5, 5), true, day(4, 9));
+        t.count(Feature::Action, "sub-agent", day(4, 9));
+        t.count(Feature::Tool, "browser", day(4, 9));
+        t.daily(day(5, 9));
+        t.tokens("codex", "gpt-6.1", &used(5, 5, 5), true, day(5, 9));
+        t.count(Feature::Action, "sub-agent", day(5, 9));
+        assert_eq!(events(&t, "tokens_used").len(), 1);
+        t.set_totals(false);
+        assert!(t.state.tokens.is_empty());
+        assert!(events(&t, "tokens_used").is_empty() && events(&t, "setup").is_empty());
+        let left = events(&t, "feature_used");
+        assert_eq!(left.len(), 1, "the tool count they agreed to stays");
+        assert_eq!(left[0]["properties"]["kind"], "tool");
+        assert!(names(&t).contains(&"app_opened".to_string()));
+        // Settings' first switch, turned on by someone never asked about totals: they stay off,
+        // and no card comes for them.
+        let mut t = Telemetry::open(&scratch("switch"), keyed(), platform("0.4.58"));
+        t.set_shared(true, Utc::now());
+        assert_eq!(t.consent(), Consent::Yes);
+        assert!(!t.totals_on() && !t.should_ask_totals());
+        t.set_totals(true);
+        assert!(t.totals_on());
+        // And a no to everything stops the totals with the rest.
+        t.tokens("codex", "gpt-6.1", &used(5, 5, 5), true, day(5, 9));
+        t.set_shared(false, Utc::now());
+        assert!(t.state.tokens.is_empty() && !t.totals_on());
     }
 }

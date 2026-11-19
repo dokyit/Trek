@@ -485,6 +485,7 @@ impl Workspace {
                 "You're a sub-agent {MAX_DEPTH} levels down, and Trek allows no deeper: do this part yourself."
             ));
         }
+        crate::privacy::count_action("sub-agent");
         let running = self.running_children(caller).len();
         if running >= MAX_RUNNING {
             return Err(format!(

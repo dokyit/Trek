@@ -50,6 +50,9 @@ pub enum Feature {
     Agent,
     /// A tool opened in the tools panel (`browser`, `terminal`, `git`…).
     Tool,
+    /// Something done in Trek, by Trek's own name for it (`thread-started`, `note-created`,
+    /// `dictation`…). Only with a yes to usage totals.
+    Action,
 }
 
 impl Feature {
@@ -57,6 +60,7 @@ impl Feature {
         match self {
             Feature::Agent => "agent",
             Feature::Tool => "tool",
+            Feature::Action => "action",
         }
     }
 
@@ -64,6 +68,7 @@ impl Feature {
         match key {
             "agent" => Some(Feature::Agent),
             "tool" => Some(Feature::Tool),
+            "action" => Some(Feature::Action),
             _ => None,
         }
     }
@@ -88,6 +93,33 @@ pub enum Event {
     },
     /// A panic of an earlier run, with what could name the user already taken out.
     Crash(trek_logging::CrashReport),
+    /// What one agent's model went through on `day`, summed over every turn: counts and a cost
+    /// at API prices, nothing of what was said. `model` is a model Trek has a price for, by the
+    /// provider's own id, or `other`.
+    Tokens {
+        agent: String,
+        model: String,
+        day: String,
+        tokens: crate::state::Tokens,
+    },
+    /// The setup, at most once a day: a few counts and Trek's own names for choices.
+    Setup(Setup),
+}
+
+/// How Trek is set up: counts, and choices by Trek's own names. Nothing the user typed (a
+/// project's or a theme's name is never here).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Setup {
+    pub projects: u32,
+    pub threads: u32,
+    /// Agents ready to run.
+    pub agents: u32,
+    /// The theme: `system`, `night` or `paper`.
+    pub look: String,
+    /// Liquid glass is on.
+    pub glass: bool,
+    /// The phone server is on.
+    pub phone: bool,
 }
 
 /// A backtrace is cut to this many characters.
@@ -102,6 +134,8 @@ impl Event {
             Event::Used { .. } => "feature_used",
             // PostHog's own name for an error, so crashes show in its error tracking.
             Event::Crash(_) => "$exception",
+            Event::Tokens { .. } => "tokens_used",
+            Event::Setup(_) => "setup",
         }
     }
 
@@ -146,6 +180,34 @@ impl Event {
                 p.insert("thread".into(), json!(report.thread));
                 p.insert("backtrace".into(), json!(backtrace));
                 p.insert("crashed_version".into(), json!(report.version));
+            }
+            Event::Tokens {
+                agent,
+                model,
+                day,
+                tokens,
+            } => {
+                p.insert("agent".into(), json!(agent));
+                p.insert("model".into(), json!(model));
+                p.insert("day".into(), json!(day));
+                p.insert("input_tokens".into(), json!(tokens.input));
+                p.insert("output_tokens".into(), json!(tokens.output));
+                p.insert("cache_read_tokens".into(), json!(tokens.cache_read));
+                p.insert("cache_write_tokens".into(), json!(tokens.cache_write));
+                p.insert(
+                    "api_cost_usd".into(),
+                    json!(tokens.cost_micros as f64 / 1_000_000.),
+                );
+                p.insert("reports".into(), json!(tokens.reports));
+                p.insert("unpriced_reports".into(), json!(tokens.unpriced));
+            }
+            Event::Setup(s) => {
+                p.insert("projects".into(), json!(s.projects));
+                p.insert("threads".into(), json!(s.threads));
+                p.insert("agents".into(), json!(s.agents));
+                p.insert("theme".into(), json!(s.look));
+                p.insert("glass".into(), json!(s.glass));
+                p.insert("phone".into(), json!(s.phone));
             }
         }
         p

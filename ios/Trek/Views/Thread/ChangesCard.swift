@@ -39,6 +39,7 @@ struct ChangesCard: View {
         .sheet(item: $diff) { request in
             // In the card's order: going from file to file follows what was just read down.
             DiffSheet(target: .thread(threadID), files: groups.flatMap(\.files), opening: request.path)
+                .asksBeforeSharing()
         }
     }
 

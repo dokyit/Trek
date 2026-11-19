@@ -80,6 +80,10 @@ impl Workspace {
         if text.is_empty() && images.is_empty() && picked.is_empty() {
             return;
         }
+        crate::privacy::count_action(match kind {
+            Kind::Learn => "study-learn",
+            Kind::Practice => "study-practice",
+        });
         let dir = study::dir();
         // What was typed goes back to the composer when the session can't start.
         let back = |cx: &mut Context<Self>, text: &str, images: &[PathBuf], message: String| {

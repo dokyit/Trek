@@ -5316,7 +5316,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<String> {
         match self.make_thread(project, prefs, text, true, shape, cx) {
-            Ok(id) => Some(id),
+            Ok(id) => {
+                crate::privacy::count_action("thread-started");
+                Some(id)
+            }
             Err(e) => {
                 cx.emit(WorkspaceEvent::Toast {
                     message: e.to_string(),
@@ -6861,10 +6864,15 @@ impl Workspace {
         } else if agents_gone {
             self.background_agents_gone(id, cx);
         }
-        if let Some((took, failed)) = stopped
-            && let Err(e) = self.store.record_stop(id, now_ms(), took, failed)
-        {
-            tracing::warn!("record stopped turn: {e:#}");
+        if let Some((took, failed)) = stopped {
+            crate::privacy::count_action(if failed {
+                "turn-failed"
+            } else {
+                "turn-stopped"
+            });
+            if let Err(e) = self.store.record_stop(id, now_ms(), took, failed) {
+                tracing::warn!("record stopped turn: {e:#}");
+            }
         }
         if !used.is_empty() {
             self.record_usage(id, used);
@@ -11834,6 +11842,7 @@ impl Workspace {
             {
                 tracing::warn!("record token usage: {e:#}");
             }
+            crate::privacy::count_tokens(self, &agent, model.as_deref(), &tokens, cost);
             kept.push((model, tokens, cost));
         }
         match self.live.get_mut(id).and_then(|l| l.spend.as_mut()) {

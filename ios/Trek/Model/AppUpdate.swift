@@ -20,8 +20,12 @@ nonisolated enum AppUpdate {
 
     /// The newest Trek among the Macs this iPhone is connected to, when it's newer than this app.
     /// Windows and Linux machines don't install the iPhone app, so they don't count.
-    @MainActor static func available(in links: [HostLink], app: String = ClientMessage.appVersion) -> Available? {
-        newest(links
+    /// Nothing in a build from the App Store or TestFlight (`Distribution`): a Mac can't install
+    /// over one, and the store brings its updates.
+    @MainActor static func available(in links: [HostLink], app: String = ClientMessage.appVersion,
+                                     channel: Distribution.Channel = Distribution.channel) -> Available? {
+        guard channel == .development else { return nil }
+        return newest(links
             .filter { $0.kind == .mac || $0.kind == .unknown }
             .compactMap { link in
                 offered(host: link.host, release: link.release).map {

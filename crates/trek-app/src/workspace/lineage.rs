@@ -397,6 +397,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Result<String, String> {
         let parent = self.may_spawn(caller, "hand off")?;
+        crate::privacy::count_action("handoff");
         let text = |k: &str| {
             params
                 .get(k)

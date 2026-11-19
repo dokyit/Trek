@@ -6,7 +6,9 @@ import SwiftUI
 /// goes to every phone (`phone_update`); installing closes this app, so the one that asked usually
 /// last hears "Installing…".
 extension AppModel {
-    /// A newer Trek than this app, whether or not the user put it off.
+    /// A newer Trek than this app, whether or not the user put it off. Always nil in a build from
+    /// the App Store or TestFlight (`Distribution`): there the store updates the app, and nothing
+    /// of this flow is shown or run.
     var appUpdate: AppUpdate.Available? { AppUpdate.available(in: links) }
 
     /// The offer to show above the threads: one not put off, or any while an update runs.
@@ -28,7 +30,11 @@ extension AppModel {
 
     /// "Update now": the Mac builds the app and installs it on this iPhone.
     func updatePhone(_ update: AppUpdate.Available) {
-        guard let link = link(id: update.hostId), link.serves(.updatePhone) else { return }
+        #if TREK_APP_STORE
+        // A store build has no such request in it at all.
+        return
+        #else
+        guard Distribution.updatesFromMac, let link = link(id: update.hostId), link.serves(.updatePhone) else { return }
         withAnimation(.snappy) { phoneUpdate = PhoneUpdate(state: .asking, version: update.version) }
         link.request(.updatePhone(version: update.version)) { [weak self] reply in
             guard let self else { return }
@@ -42,6 +48,7 @@ extension AppModel {
                 }
             }
         }
+        #endif
     }
 
     /// Done with a finished or failed update's card.
@@ -51,6 +58,9 @@ extension AppModel {
 
     /// A Mac says how an update goes. A state this app doesn't know changes nothing.
     func heard(_ update: PhoneUpdate) {
+        // A Mac may be installing a development build on another of the user's phones: a store
+        // build has no card to show that on.
+        guard Distribution.updatesFromMac else { return }
         guard update.state != .unknown, update.state != .asking else { return }
         withAnimation(.snappy) { phoneUpdate = update }
     }

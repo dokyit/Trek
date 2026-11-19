@@ -24,3 +24,42 @@ nonisolated enum AppSigning {
         return dict?["ExpirationDate"] as? Date
     }
 }
+
+/// How this build reached the phone. A development build is signed for this iPhone by Xcode and
+/// kept current by the paired Mac (`AppUpdate`, `ios/scripts/phone-update.sh`); a build from the
+/// App Store or TestFlight is updated by the store, and the Mac's update flow must not exist in it.
+nonisolated enum Distribution {
+    enum Channel: Equatable, Sendable { case development, store }
+
+    /// Set by the `TREK_APP_STORE` compilation condition, which `ios/AppStore.xcconfig` adds and
+    /// `ios/scripts/testflight.sh` builds with.
+    static let compiledForStore: Bool = {
+        #if TREK_APP_STORE
+        true
+        #else
+        false
+        #endif
+    }()
+
+    /// The flag decides. Without it, a build on a phone with no provisioning profile inside it
+    /// can only have come from the store (which strips the profile; Xcode's and ad hoc installs
+    /// keep theirs), so an archive made without the flag is still treated as the store's.
+    static func channel(compiledForStore: Bool, simulator: Bool, hasProfile: Bool) -> Channel {
+        if compiledForStore { return .store }
+        if simulator { return .development }
+        return hasProfile ? .development : .store
+    }
+
+    static let channel: Channel = {
+        #if targetEnvironment(simulator)
+        let simulator = true
+        #else
+        let simulator = false
+        #endif
+        return channel(compiledForStore: compiledForStore, simulator: simulator,
+                       hasProfile: Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision") != nil)
+    }()
+
+    /// Whether a paired Mac builds and installs this app's updates.
+    static var updatesFromMac: Bool { channel == .development }
+}

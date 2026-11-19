@@ -70,6 +70,13 @@ final class AppModel {
     var phoneUpdate: PhoneUpdate?
     /// "Later" on an update offer.
     var updateDismissal = AppUpdate.Dismissal.load()
+    /// The user's yes to messages going on to an agent (Sharing.swift), and the question while
+    /// it's on screen. `sharingPresenters`: the views that can show it, the topmost last.
+    var sharingConsent = SharingConsent.load()
+    var sharingAsk: SharingAsk?
+    var sharingPresenters: [UUID] = []
+    /// Where the yes is kept (tests keep theirs apart).
+    @ObservationIgnored var sharingDefaults: UserDefaults = .standard
 
     var mode: AppMode = .unpaired
     /// `boot` has run: until it has, `mode` doesn't say yet whether this iPhone is paired, and
@@ -770,6 +777,14 @@ final class AppModel {
         guard let link = explicit ?? route(message) else {
             // No machine to ask: whoever waits for the answer hears so, rather than never.
             then?(.error(re: nil, code: .unknown, message: Self.notConnected))
+            return ""
+        }
+        // The user's own words or files: never before they've been told where those go and said
+        // yes (Sharing.swift). The composers ask before they clear; this holds every other way in.
+        if let recipient = sharingRecipient(of: message, on: link),
+           !mayShare(with: recipient, on: link,
+                     then: { [weak self] in _ = self?.request(message, on: explicit, then: then) },
+                     declined: { then?(.error(re: nil, code: .unknown, message: SharingConsent.notSent)) }) {
             return ""
         }
         return link.request(stripped(message, on: link), then: then)

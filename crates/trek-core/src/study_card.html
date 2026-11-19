@@ -146,7 +146,7 @@ if (choice) {
   });
   card.append(box);
 }
-function choose(i) { if (closed || i < 0 || i >= rows.length) return; pick = i; rows.forEach((x, j) => x.classList.toggle("on", j === i)); sync(); }
+function choose(i) { if (closed || i < 0 || i >= rows.length) return; pick = i; rows.forEach((x, j) => x.classList.toggle("on", j === i)); sync(); keepSoon(); }
 
 const field = el("div"), label = el("div", "label"), wrap = el("div", "box"), work = el("textarea");
 label.append(el("b", null, problem ? "Your working" : DATA.kind === "predict" ? "Your prediction" : "Your thinking"),
@@ -183,6 +183,7 @@ if (T.canDictate && typeof T.dictate === "function") {
       before = null; taking = false;
       mic.classList.remove("on", "wait"); mic.title = "Dictate"; field.classList.remove("listening");
       if (d.error) note.textContent = d.error;
+      keepSoon();
     }
     sync();
   });
@@ -199,7 +200,7 @@ if (!problem) {
   });
   f.append(l, sureRow); card.append(f);
 }
-function setSure(i) { sure = i; [...sureRow.children].forEach((x, j) => x.classList.toggle("on", j === i)); }
+function setSure(i) { sure = i; [...sureRow.children].forEach((x, j) => x.classList.toggle("on", j === i)); keepSoon(); }
 
 const foot = el("div", "foot"), note = el("span", "note");
 foot.append(note); card.append(foot);
@@ -215,6 +216,7 @@ const typeset = n => { if (window.renderMathInElement) renderMathInElement(n, MA
 // wrote is set as it reads (Markdown and maths typeset), no longer a box to type in.
 function close(lines) {
   closed = true; card.classList.add("done"); work.readOnly = true;
+  if (typeof T.keep === "function") T.keep("");
   if (work.value.trim()) { const k = kept(work.value); work.hidden = true; wrap.append(k); typeset(k); }
   else field.hidden = true;
   if (mic) { if (taking) T.dictate(false); mic.disabled = true; }
@@ -228,7 +230,7 @@ function send(lines, done) {
   const text = [HEAD, ...lines, "Working: " + (work.value.trim() || "(none)")].join("\n");
   if (!T.send || !T.send(text)) { note.textContent = "Couldn't send: copy your working into the composer."; return; }
   if (done) { close(lines); return; }
-  sends++; work.value = ""; before = taking ? "" : null;
+  sends++; work.value = ""; before = taking ? "" : null; keepSoon();
   note.textContent = sends === 1 ? "Sent · keep going" : "Sent " + sends + " times · keep going"; sync();
 }
 const sureLine = () => "Confidence: " + (sure === null ? "not given" : SURE[sure][0] + " (" + SURE[sure][1] + "%)");
@@ -245,14 +247,33 @@ if (problem) {
 }
 main.append(el("kbd", null, mac ? "⌘↩" : "Ctrl+Enter"));
 function sync() { if (!closed) main.disabled = choice ? pick === null : !problem && !work.value.trim(); }
-work.oninput = sync; sync();
+// What's chosen and typed so far is handed to Trek as it changes (`trek.keep`), and taken back
+// when the card is drawn again before it was answered (scrolled away and back, another thread
+// looked at): Trek lets a card's page go while it's far off screen.
+let keeping = null;
+const draft = () => JSON.stringify({pick, sure, work: taking && before !== null ? before : work.value});
+const keepNow = () => { keeping = null; if (!closed && typeof T.keep === "function") T.keep(pick === null && sure === null && !work.value ? "" : draft()); };
+const keepSoon = () => { if (keeping === null) keeping = setTimeout(keepNow, 250); };
+work.oninput = () => { sync(); keepSoon(); }; sync();
 
 // Already answered (the card drawn again later): Trek hands the page what the learner sent
 // after it, and the card shows that answer as it was sent.
 (function restore() {
   const sent = (Array.isArray(T.replies) ? T.replies : []).filter(r => typeof r === "string" && r.split("\n")[0] === HEAD);
   const last = sent.find(r => /\nStatus: I think I've solved it\n/.test(r) || /\nAnswer: /.test(r)) || null;
-  if (!last) { if (sent.length) { sends = sent.length; note.textContent = "Sent " + (sends === 1 ? "" : sends + " times ") + "· keep going"; } return; }
+  if (!last) {
+    if (sent.length) { sends = sent.length; note.textContent = "Sent " + (sends === 1 ? "" : sends + " times ") + "· keep going"; }
+    // Not answered yet: what was chosen and typed before the card was let go.
+    let d = null;
+    try { d = typeof T.kept === "string" && T.kept ? JSON.parse(T.kept) : null; } catch (_) {}
+    if (d && typeof d === "object") {
+      if (choice && Number.isInteger(d.pick)) choose(d.pick);
+      if (!problem && Number.isInteger(d.sure) && d.sure >= 0 && d.sure < SURE.length) setSure(d.sure);
+      if (typeof d.work === "string") work.value = d.work;
+      sync();
+    }
+    return;
+  }
   const at = last.indexOf("\nWorking: "), body = at < 0 ? last : last.slice(0, at);
   const said = at < 0 ? "" : last.slice(at + 10);
   const lines = body.split("\n").slice(1);

@@ -289,17 +289,27 @@ struct SettingsView: View {
             NavigationLink(value: SettingsRoute.feedback) {
                 SettingsLabel(title: "Send feedback…", subtitle: "A bug, an idea or anything else, to Trek's developer", symbol: "bubble.left")
             }
-            Link(destination: URL(string: "https://github.com/dokyit/Trek/blob/main/docs/PRIVACY.md")!) {
+            Link(destination: SharingConsent.policy) {
                 HStack {
-                    SettingsLabel(title: "Privacy", subtitle: "What Trek sends, and what it never does", symbol: "hand.raised")
+                    SettingsLabel(title: "Privacy policy", subtitle: "What Trek sends, and what it never does", symbol: "hand.raised")
                     Spacer()
                     Image(systemName: "arrow.up.right").font(.ui(.footnote).weight(.semibold)).foregroundStyle(Trek.muted)
+                }
+            }
+            // The yes asked for before the first message (SharingSheet), and taking it back.
+            SettingsLabel(title: "Messages to AI agents", subtitle: model.sharingLine, symbol: "paperplane")
+            if model.sharingConsent?.stands == true {
+                Button {
+                    model.withdrawSharing()
+                    model.show("Trek will ask before your next message")
+                } label: {
+                    SettingsLabel(title: "Withdraw permission", subtitle: "Nothing more is sent until you allow it again", symbol: "arrow.uturn.backward", tint: Trek.failed)
                 }
             }
         } header: {
             Text("Privacy and feedback")
         } footer: {
-            Text("The iPhone app sends no usage data or crash reports. Feedback goes only when you send it.")
+            Text("What you send goes to your paired computer and on to the agent you chose there, which may be a cloud AI service; Trek has no servers in between. Dictation becomes text on this iPhone when your language allows it, and at Apple when it doesn't. The iPhone app sends no usage data or crash reports. Feedback goes only when you send it.")
                 .font(.ui(.footnote))
         }
     }
@@ -330,6 +340,7 @@ struct SettingsView: View {
             Text("About")
         } footer: {
             VStack(alignment: .leading, spacing: 8) {
+                // Never in a build from the App Store: `model.appUpdate` is nil there (Distribution).
                 if let update, !update.canUpdate {
                     Text("Update available — your Mac will install it over Wi-Fi.").font(.ui(.footnote))
                 }
