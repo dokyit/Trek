@@ -252,7 +252,7 @@ Trek drives each vendor's own CLI, so your subscriptions work as they do in the 
 - A tray icon and taskbar badge instead of the menu bar icon and Dock badge.
 - No menu bar: every command is in the palette (Ctrl+K), Settings or a context menu. Shortcuts use Ctrl where the Mac uses ⌘.
 - Dictation runs on the PC with an on-device speech model (141 MB, downloaded the first time you click the mic); what you say never leaves the PC. Where it can't run, the mic points to Win+H. Snapshots go through Snipping Tool.
-- Closing the window while agents are working asks first: they can carry on with the window closed, and Trek quits once they're done (opening Trek, or its tray icon, brings the window back).
+- Closing the window keeps Trek in the tray, agents still working: its tray icon (behind the ^ arrow if Windows tucked it away) brings the window back, and its menu quits. Settings › General turns that off; then closing quits, asking first while agents are working.
 - The iPhone tool works through Apple Devices (from the Microsoft Store): the phone's apps, files and AssistiveTouch, for you and agents. Its live screen and taps need Trek on a Mac.
 - No iOS Simulator tool.
 - The first time the phone server is on, allow Trek through Windows Firewall on private networks.

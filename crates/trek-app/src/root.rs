@@ -1501,10 +1501,15 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     // starting Trek on it instead (`banner_link`), and the link reveals the thread as this does.
     let ws = workspace.downgrade();
     cx.on_system_notification_response(move |response, cx| {
+        let Some(ws) = ws.upgrade() else { return };
+        // The banner that said Trek went to the tray brings its window back.
+        if response.tag.as_ref() == TRAY_TAG {
+            show_main(ws, cx);
+            return;
+        }
         let Some(thread) = attention_thread(&response.tag) else {
             return;
         };
-        let Some(ws) = ws.upgrade() else { return };
         crate::system::activate(cx);
         // Not deferred: no window is busy here, and nothing would run a deferred call until
         // the next event.
@@ -1573,7 +1578,12 @@ pub fn close_main(window: &mut Window, cx: &mut App) {
     }
     if stays_in_tray(stay_in_tray, menu_bar_icon, icon_up) {
         // Once the window's own update is over: inside it, the window can't be closed.
-        settle_unsaved(window, cx, |cx| cx.defer(|cx| keep_working(STAY, cx)));
+        settle_unsaved(window, cx, |cx| {
+            cx.defer(|cx| {
+                keep_working(STAY, cx);
+                tray_notice(cx);
+            })
+        });
         return;
     }
     let (titles, updating) = {
@@ -2094,6 +2104,44 @@ fn register_toast_identity() {
 }
 
 const ATTENTION_TAG: &str = "trek-attention-";
+const TRAY_TAG: &str = "trek-in-tray";
+
+/// The file in the data folder that says the tray banner has been shown (`tray_notice`).
+const TRAY_NOTICED: &str = "tray-noticed";
+
+/// Whether the tray banner is still to be shown on this computer, noting that it now has been:
+/// true the first time only.
+pub fn tray_notice_due(data_dir: &std::path::Path) -> bool {
+    let marker = data_dir.join(TRAY_NOTICED);
+    if marker.exists() {
+        return false;
+    }
+    let _ = std::fs::create_dir_all(data_dir);
+    std::fs::write(&marker, b"").is_ok()
+}
+
+/// The first time closing the window leaves Trek in the tray, a banner says so: Windows tucks a
+/// new tray icon away behind its ^ arrow, and a Trek that seems gone but is running can't be
+/// found to bring back or to quit. Clicking the banner brings the window back. Not with banners
+/// off, and not from a capture run, which would post it as the user's own Trek.
+fn tray_notice(cx: &mut App) {
+    let ws = crate::workspace::workspace_global(cx);
+    let off = ws.read(cx).settings.notifications.mode == trek_core::settings::NotifyMode::Off;
+    if off || std::env::var_os("TREK_SHOT_DIR").is_some() {
+        return;
+    }
+    if !tray_notice_due(&trek_core::paths::data_dir()) {
+        return;
+    }
+    #[cfg(all(windows, not(any(test, feature = "test-support"))))]
+    register_toast_identity();
+    cx.show_system_notification(SystemNotification {
+        tag: TRAY_TAG.into(),
+        title: "Trek is still running".into(),
+        body: "It's in the tray, behind the ^ arrow if Windows tucked its icon away. Click the icon to bring Trek back, or right-click it to quit. Settings › General changes this.".into(),
+        actions: Vec::new(),
+    });
+}
 
 /// The system notification tag for an alert about `thread`; a newer alert replaces an older one.
 pub(crate) fn attention_tag(thread: &str) -> SharedString {

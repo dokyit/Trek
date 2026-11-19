@@ -512,6 +512,8 @@ mod ends_with_its_main_window {
         run(async |cx| {
             let trek = open(cx);
             let quit = ending_with_main_window(&trek, cx);
+            // Not kept in the tray (it is unless turned off).
+            trek.update(cx, |ws, _| ws.settings.general.stay_in_tray = false);
             // Nothing at work: the close button is the Quit command, with nothing asked.
             trek.window(cx, |window, cx| trek_app::root::close_main(window, cx));
             cx.run_until_parked();
@@ -551,10 +553,19 @@ mod ends_with_its_main_window {
         run(async |cx| {
             let trek = open(cx);
             let quit = ending_with_main_window(&trek, cx);
+            // Kept in the tray as Trek comes, with nothing to turn on; the tray icon is on too, but
+            // not in a test's app, which has none unless asked.
+            assert!(trek.read(cx, |ws, _| ws.settings.general.stay_in_tray));
             trek.update(cx, |ws, _| {
-                ws.settings.general.stay_in_tray = true;
                 ws.settings.notifications.menu_bar_icon = true;
+                ws.settings.notifications.mode = trek_core::settings::NotifyMode::Banner;
             });
+            assert!(
+                trek_core::settings::Settings::default()
+                    .general
+                    .stay_in_tray,
+                "kept in the tray unless turned off"
+            );
             let id = trek.send(cx, "mock:long 2s");
             let tid = id.clone();
             trek.wait(cx, "the turn to start", |ws| ws.turn_running(&tid))
@@ -568,6 +579,10 @@ mod ends_with_its_main_window {
                 .await;
             cx.run_until_parked();
             assert!(!quit.load(Ordering::SeqCst), "it stays in the tray");
+            // The first time, a banner said where Trek went; never again.
+            let data = trek_core::paths::data_dir();
+            assert!(data.join("tray-noticed").exists(), "said once");
+            assert!(!trek_app::root::tray_notice_due(&data), "and not again");
             // Back on screen, the tray icon off: the close button is the Quit command again.
             cx.update(|cx| trek_app::root::show_main(trek.ws.clone(), cx));
             cx.run_until_parked();

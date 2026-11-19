@@ -440,3 +440,54 @@ fn a_new_threads_composer_holds_its_chip_labels_still_in_and_out_of_its_cache() 
         assert_eq!(checked, 40);
     });
 }
+
+/// A new thread's model menu opens over its pill, in the middle of the window, with less room
+/// above it than a thread's has. Pointing at Model opens the model panel beside the menu, which is
+/// taller than that room: the menu has to stay where it is, its panel kept to the room there is.
+/// It used to go to the pill's other side with the panel, out from under the pointer, and come
+/// back when the pointer crossed Effort on its way after it (seen on Windows, 0.4.57).
+#[test]
+fn a_new_threads_model_menu_stays_put_when_its_tall_panel_opens() {
+    run(async |cx| {
+        let trek = open(cx);
+        for height in [560., 640., 720.] {
+            cx.simulate_window_resize(trek.window, size(px(1100.), px(height)));
+            trek.render(cx);
+            trek.click(cx, "model-pill");
+            trek.render(cx);
+            let pill = trek.bounds(cx, "model-pill").expect("the pill");
+            let rows = |trek: &common::Trek, cx: &mut gpui_kit::TestAppContext| {
+                ["mm-effort", "mm-model"].map(|id| trek.bounds(cx, id).map(|b| b.origin))
+            };
+            let before = rows(&trek, cx);
+            assert!(before.iter().all(Option::is_some), "the menu is open");
+            assert!(
+                before[1].unwrap().y < pill.origin.y,
+                "at {height} pt: it opens above its pill"
+            );
+            for row in ["mm-effort", "mm-model", "mm-effort", "mm-model"] {
+                trek.click(cx, row);
+                trek.render(cx);
+                trek.render(cx);
+                // To the pixel: the popup's own height rounds its top by half a point at most.
+                for (now, was) in rows(&trek, cx).iter().zip(&before) {
+                    let (now, was) = (now.expect("still open"), was.unwrap());
+                    assert!(
+                        (now.x - was.x).abs() < px(1.) && (now.y - was.y).abs() < px(1.),
+                        "at {height} pt: a row moved from {was:?} to {now:?} when {row}'s panel opened"
+                    );
+                }
+            }
+            // The panel is there, and inside the window.
+            let list = trek.bounds(cx, "model-source").expect("the model panel");
+            assert!(list.origin.y >= px(0.), "at {height} pt: {list:?}");
+            cx.simulate_keystrokes(trek.window, "escape");
+            trek.render(cx);
+            if trek.visible(cx, "mm-model") {
+                trek.click(cx, "model-pill");
+                trek.render(cx);
+            }
+            assert!(!trek.visible(cx, "mm-model"), "closed for the next size");
+        }
+    });
+}
