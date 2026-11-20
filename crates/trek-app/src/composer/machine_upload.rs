@@ -117,7 +117,7 @@ impl Composer {
         if items.is_empty() {
             return false;
         }
-        let items = match ws.machine_files_plan(&host, &items) {
+        let items = match ws.machine_files_plan(&self.scope, &host, &items) {
             Plan::Ready | Plan::Inline => return false,
             Plan::Refuse(why) => {
                 self.toast(why, cx);

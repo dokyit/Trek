@@ -235,8 +235,18 @@ impl Workspace {
         self.machines.get(&host).map(|m| m.id().to_string())
     }
 
-    /// How `items` go with a message to machine `host`.
-    pub fn machine_files_plan(&self, host: &str, items: &[Outgoing]) -> Plan {
+    /// How `items` go with a message from `scope` to machine `host`. A new thread in a project
+    /// the machine has no copy of is refused here, before anything is sent for it.
+    pub fn machine_files_plan(&self, scope: &Scope, host: &str, items: &[Outgoing]) -> Plan {
+        if self.thread_id_in(scope).is_none()
+            && matches!(scope, Scope::Main)
+            && let crate::workspace::Route::Draft {
+                project: Some(project),
+            } = &self.route
+            && let Some(why) = self.machine_lacks_project(host, project)
+        {
+            return Plan::Refuse(why);
+        }
         let Some(m) = self.machines.get(host) else {
             return Plan::Refuse("That machine isn't paired any more.".into());
         };

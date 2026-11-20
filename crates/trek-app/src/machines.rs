@@ -1877,6 +1877,33 @@ impl Workspace {
         self.start_on_machine(host, project, text, vec![], prefs, false, cx)
     }
 
+    /// `project`'s name here, as the machine's copy would be called.
+    fn project_name(&self, project: &Path) -> String {
+        self.projects
+            .iter()
+            .find(|p| p.path == project)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| {
+                project
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            })
+    }
+
+    /// Why a new thread in `project` can't start on machine `host`: it has no copy of it (`None`:
+    /// it has one, or the machine isn't known).
+    pub fn machine_lacks_project(&self, host: &str, project: &Path) -> Option<String> {
+        let m = self.machines.get(host)?;
+        let name = self.project_name(project);
+        m.project_for(project, &name).is_none().then(|| {
+            format!(
+                "{name} isn't on {} yet. Choose “Add to another machine…” to clone it there.",
+                m.entry.name
+            )
+        })
+    }
+
     /// `machine_start_thread` with `prefs` for the agent, model, effort and access; `give_back`:
     /// a message that couldn't start goes back to the composer (one typed there).
     #[allow(clippy::too_many_arguments)]
@@ -1932,27 +1959,12 @@ impl Workspace {
         let (name, project_id) = match &project {
             None => (String::new(), String::new()),
             Some(project) => {
-                let name = self
-                    .projects
-                    .iter()
-                    .find(|p| &p.path == project)
-                    .map(|p| p.name.clone())
-                    .unwrap_or_else(|| {
-                        project
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_default()
-                    });
+                let name = self.project_name(project);
                 let Some(project_id) = m.project_for(project, &name) else {
-                    return give_back(
-                        self,
-                        format!(
-                            "{name} isn't on {machine} yet. Choose “Add to another machine…” to clone it there."
-                        ),
-                        text,
-                        images,
-                        cx,
-                    );
+                    let why = self
+                        .machine_lacks_project(host, project)
+                        .unwrap_or_default();
+                    return give_back(self, why, text, images, cx);
                 };
                 (name, project_id)
             }
@@ -2158,6 +2170,10 @@ impl Workspace {
             if prefs.machine.as_deref() == Some(host) {
                 prefs.machine = None;
             }
+        }
+        // So does a draft in no project.
+        if self.draft_machine_unfiled.as_deref() == Some(host) {
+            self.draft_machine_unfiled = None;
         }
         self.save_settings(cx);
         self.threads_gen += 1;

@@ -2382,7 +2382,36 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
     // `pair-self`: this Trek pairs with its own phone server on the loopback as another machine
     // would ("machine B", under its own name), and the draft on screen starts its thread there,
     // so what a thread on another machine does can be checked in one isolated app
-    // (`machine-files`). Pairing answers a moment later: wait before what needs it.
+    // (`machine-files`). Pairing answers a moment later: wait before what needs it. `pair-self
+    // leave` undoes it all, as forgetting the machine in Settings does and its revoking this
+    // computer as a device: no machine in Devices, no draft set to start there, no pairing left
+    // on the phone server (the steps after start where these found the app).
+    /// When `pair-self` paired (ms; 0: it isn't), for `leave` to know what it started.
+    static PAIRED_SELF_AT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+    if verb == "pair-self" && arg == "leave" {
+        ws.update(cx, |ws, cx| {
+            let host = crate::remote::host_info().id;
+            // What was started "there" since is this app's own threads: archived, out of the
+            // sidebar (every thread here is the machine's too, so only those).
+            let since = PAIRED_SELF_AT.load(std::sync::atomic::Ordering::Relaxed);
+            let started: Vec<String> = ws
+                .threads
+                .iter()
+                .filter(|t| since > 0 && t.created_at >= since)
+                .map(|t| t.id.clone())
+                .collect();
+            PAIRED_SELF_AT.store(0, std::sync::atomic::Ordering::Relaxed);
+            ws.forget_machine(&host, cx);
+            for id in started {
+                ws.archive(&id, cx);
+            }
+            let me = ws.machines.device_id.clone();
+            ws.revoke_device(&me, cx);
+            ws.cancel_pairing(cx);
+        });
+        cx.refresh_windows();
+        return Ok(());
+    }
     if verb == "pair-self" {
         ws.update(cx, |ws, cx| -> anyhow::Result<()> {
             ws.start_loopback_remote(cx)?;
@@ -2393,6 +2422,10 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                 .and_then(|r| r.offer.clone())
                 .ok_or_else(|| anyhow::anyhow!("pair-self: no pairing code"))?;
             let link = crate::machines::PairLink::parse(&offer.url).map_err(anyhow::Error::msg)?;
+            PAIRED_SELF_AT.store(
+                trek_core::store::now_ms(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
             ws.pair_machine(link, cx);
             Ok(())
         })?;

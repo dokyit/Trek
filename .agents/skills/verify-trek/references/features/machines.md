@@ -49,7 +49,7 @@ With the isolated app as its own machine B, in one go:
 
 ```sh
 $T start
-$T project .
+$T open no-project                              # a new thread in no project
 $T control pair-self                           # pairs with its own phone server (wait for it)
 $T control wait 3000
 $T control machine-draft                       # the draft starts on B (`machine-draft off`: here)
@@ -59,7 +59,10 @@ $T control key enter
 $T control wait 3000
 $T control elements                            # machine-head-<host>, user-file#<n> under the message
 $T control file "uploads/*README.md"           # B's copy, in the data folder's uploads/
+$T control pair-self leave                     # forget B, revoke the pairing, archive what it started
 ```
+
+While the app is paired with itself, Devices lists it as a machine with every thread of the app's own (they're all B's too), which pushes a phone's row down: `pair-self leave` puts it back as it was. A project with no threads yet isn't one B lists, so a new thread in it can't start there ("<project> isn't on <B> yet…", said before anything is sent); `$T open no-project` starts one in no project instead.
 
 ## Code
 
