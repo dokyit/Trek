@@ -196,6 +196,24 @@ pub fn inbox_card(cx: &App) -> Div {
         .bg(theme.foreground.opacity(INBOX_WASH))
 }
 
+/// What a row carries under it while it goes up past others (`FlipRow::surface`): what it sits on,
+/// as one opaque colour, the sidebar's or, in the Inbox, its card over the sidebar. Nothing where
+/// the sidebar is see-through (glass, a picture): the rows it passes aren't painted under it
+/// anyway, and a fill there would be a patch over what shows through.
+pub fn passing_surface(see_through: bool, in_inbox: bool, cx: &App) -> Option<Hsla> {
+    if see_through {
+        return None;
+    }
+    let theme = cx.theme();
+    let ground = theme.background.blend(theme.sidebar);
+    let surface = if in_inbox {
+        ground.blend(theme.foreground.opacity(INBOX_WASH))
+    } else {
+        ground
+    };
+    Some(Hsla { a: 1., ..surface })
+}
+
 /// The Inbox's header: its glyph, "Inbox" and how many it holds, and `action` ("Mark all read")
 /// at the right, where every row's right-hand column is.
 pub fn inbox_header(count: usize, action: Option<AnyElement>, cx: &App) -> Div {

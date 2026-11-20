@@ -3055,6 +3055,15 @@ impl Render for Sidebar {
                 .unwrap_or_else(|| "No project".into())
         };
         let theme = cx.theme().clone();
+        // What a row carries as it goes up past others: the sidebar, or the Inbox's card.
+        let see_through = ws.see_through();
+        let surfaces = [false, true].map(|in_box| look::passing_surface(see_through, in_box, cx));
+        let passing = move |in_box: bool| {
+            (
+                surfaces[usize::from(in_box)],
+                px(fluent::control(look::ROW_RADIUS)),
+            )
+        };
         let cut_off: HashSet<String> = ws.interrupted.keys().cloned().collect();
         // Something to say: it needs the user, it's at work, a quit cut it off. At work, it stays
         // in its project, on show whatever the project's cap.
@@ -3306,9 +3315,20 @@ impl Render for Sidebar {
             let is_project = !in_box && pid != STUDY;
             // Projects are things under one label; the Inbox above them is listed by what it's for.
             if is_project && first_project {
+                // A row of its own, so a thread rising past it to the Inbox isn't painted under it.
+                let label =
+                    look::section_label("Projects", Some(projects_shown).filter(|n| *n > 0), cx);
                 live_groups.push((
                     PROJECTS_LABEL.into(),
-                    look::section_label("Projects", Some(projects_shown).filter(|n| *n > 0), cx)
+                    div()
+                        .w_full()
+                        .child(crate::motion::flip_row(
+                            &flip,
+                            format!("{PROJECTS_LABEL}-row"),
+                            label,
+                            now,
+                            window,
+                        ))
                         .into_any_element(),
                 ));
                 first_project = false;
@@ -3369,13 +3389,11 @@ impl Render for Sidebar {
                     cx,
                 )
             };
-            group = group.child(crate::motion::flip_row(
-                &flip,
-                format!("live-h-{pid}"),
-                head,
-                now,
-                window,
-            ));
+            let (surface, radius) = passing(in_box);
+            group = group.child(
+                crate::motion::flip_row(&flip, format!("live-h-{pid}"), head, now, window)
+                    .surface(surface, radius),
+            );
             // The group's rows top to bottom, with what's fading away where it was.
             let mut seq: Vec<Result<&String, usize>> = g.rows.iter().map(Ok).collect();
             for (gx, ghost) in self.ghosts.iter().enumerate().filter(|(_, x)| x.pid == pid) {
@@ -3399,13 +3417,10 @@ impl Render for Sidebar {
                         } else {
                             self.live_line(t, sel, cx)
                         };
-                        group = group.child(crate::motion::flip_row(
-                            &flip,
-                            id.clone(),
-                            row,
-                            now,
-                            window,
-                        ));
+                        group = group.child(
+                            crate::motion::flip_row(&flip, id.clone(), row, now, window)
+                                .surface(surface, radius),
+                        );
                     }
                     Err(gx) => {
                         let ghost = &self.ghosts[gx];
@@ -3454,13 +3469,16 @@ impl Render for Sidebar {
                     }
                     this.thaw(cx);
                 });
-                group = group.child(crate::motion::flip_row(
-                    &flip,
-                    format!("live-f-{pid}"),
-                    self.show_more(id, label, in_box, cx, toggle),
-                    now,
-                    window,
-                ));
+                group = group.child(
+                    crate::motion::flip_row(
+                        &flip,
+                        format!("live-f-{pid}"),
+                        self.show_more(id, label, in_box, cx, toggle),
+                        now,
+                        window,
+                    )
+                    .surface(surface, radius),
+                );
             }
             live_groups.push((
                 format!("live-g-{pid}").into(),
@@ -3760,13 +3778,17 @@ impl Render for Sidebar {
                                 window,
                             ));
                     for t in items.iter().take(if folded { 0 } else { shown }) {
-                        group = group.child(crate::motion::flip_row(
-                            &flip,
-                            t.id.clone(),
-                            self.line(t, selected.as_deref() == Some(&t.id), cx),
-                            now,
-                            window,
-                        ));
+                        let (surface, radius) = passing(false);
+                        group = group.child(
+                            crate::motion::flip_row(
+                                &flip,
+                                t.id.clone(),
+                                self.line(t, selected.as_deref() == Some(&t.id), cx),
+                                now,
+                                window,
+                            )
+                            .surface(surface, radius),
+                        );
                     }
                     if items.len() > 5 && !searching && !folded {
                         let toggle = cx.listener(move |this, _, _, cx| {

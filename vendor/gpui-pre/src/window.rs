@@ -2786,6 +2786,14 @@ impl Window {
         self.rendered_frame.scene.underlines.clone()
     }
 
+    /// Trek: the one-colour sprites (text's glyphs, icons) in the most recently rendered frame's
+    /// scene, each with the content mask it's clipped to, so tests can tell whose text is
+    /// painted where.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn painted_monochrome_sprites(&self) -> Vec<MonochromeSprite> {
+        self.rendered_frame.scene.monochrome_sprites.clone()
+    }
+
     /// Set the content size of the window.
     pub fn resize(&mut self, size: Size<Pixels>) {
         self.platform_window.resize(size);

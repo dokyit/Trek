@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use trek_app::workspace::{Mode, Route, WorkspaceEvent};
 use trek_core::store::now_ms;
-use trek_core::{Effort, HandHolding};
+use trek_core::{Effort, HandHolding, RunState};
 
 /// Motion on (the harness starts with the system's Reduce motion set).
 fn moving(cx: &mut TestAppContext) {
@@ -440,6 +440,177 @@ fn a_new_row_settles_in_and_an_archived_one_folds_away() {
         frame(&trek, cx, 1_000);
         assert_eq!(offset(&trek, cx, &new), Some(0.));
         assert_eq!(row_y(&trek, cx, &new), Some(before[0]));
+    });
+}
+
+/// A glyph's (or an icon's) box: left, top, width, height.
+type Glyph = (f32, f32, f32, f32);
+
+/// The text painted over `b` in the last frame: each glyph's (or icon's) box, as painted (inside
+/// its mask), against `b`'s top left.
+fn text_over(
+    trek: &Trek,
+    cx: &mut TestAppContext,
+    b: gpui_kit::Bounds<gpui_kit::Pixels>,
+) -> Vec<Glyph> {
+    trek.window(cx, |window, _| {
+        let k = window.scale_factor();
+        let (x0, y0, x1, y1) = (
+            b.left().as_f32(),
+            b.top().as_f32(),
+            b.right().as_f32(),
+            b.bottom().as_f32(),
+        );
+        window
+            .painted_monochrome_sprites()
+            .iter()
+            .filter_map(|s| {
+                let (m, g) = (s.content_mask.bounds, s.bounds);
+                let left = g.origin.x.0.max(m.origin.x.0) / k;
+                let top = g.origin.y.0.max(m.origin.y.0) / k;
+                let right = g.right().0.min(m.right().0) / k;
+                let bottom = g.bottom().0.min(m.bottom().0) / k;
+                // Painted, and over `b` by more than a hair.
+                let over = right.min(x1) - left.max(x0) > 0.5 && bottom.min(y1) - top.max(y0) > 0.5;
+                (right > left && bottom > top && over).then(|| {
+                    (
+                        g.origin.x.0 / k - x0,
+                        g.origin.y.0 / k - y0,
+                        g.size.width.0 / k,
+                        g.size.height.0 / k,
+                    )
+                })
+            })
+            .collect()
+    })
+}
+
+/// `id` asks for an approval, or finished unread.
+fn set_state(trek: &Trek, cx: &mut TestAppContext, id: &str, state: RunState, unread: bool) {
+    trek.update(cx, |ws, cx| {
+        ws.store
+            .update_thread(id, |t| {
+                t.run_state = state;
+                if unread {
+                    t.last_seen_at = t.updated_at - 1;
+                }
+            })
+            .unwrap();
+        ws.reload(cx);
+    });
+}
+
+#[test]
+fn a_thread_rising_to_the_inbox_is_drawn_over_the_rows_it_passes_not_through_them() {
+    run(async |cx| {
+        let trek = open(cx);
+        moving(cx);
+        trek.update(cx, |ws, _| ws.settings.appearance.glass = false);
+        // Three finished in the Inbox; the one at work and two quiet ones in the project.
+        let done: Vec<String> = [
+            "Explain the cart code",
+            "Check the page for typos",
+            "Write a tagline",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, title)| quiet(&trek, cx, title, (i as i64 + 1) * 60_000))
+        .collect();
+        for id in &done {
+            set_state(&trek, cx, id, RunState::Idle, true);
+        }
+        let quiet_ones: Vec<String> = (0..2)
+            .map(|i| quiet(&trek, cx, &format!("Quiet {i}"), (i + 5) * 60_000))
+            .collect();
+        let hero = quiet(&trek, cx, "Fix the checkout total", 4 * 60_000);
+        set_state(&trek, cx, &hero, RunState::Working, false);
+        trek.render(cx);
+        frame(&trek, cx, 1_000);
+        assert!(
+            trek.read(cx, |ws, _| !ws.see_through()),
+            "an opaque sidebar"
+        );
+        assert!(
+            trek.visible(cx, format!("live-line-{hero}")),
+            "at work in its project"
+        );
+        let pid = trek.read(cx, |ws, _| {
+            ws.thread(&hero).unwrap().project_id.clone().unwrap()
+        });
+        let others: Vec<String> = done
+            .iter()
+            .map(|id| format!("inbox-{id}"))
+            .chain(quiet_ones.iter().map(|id| format!("live-line-{id}")))
+            .chain([
+                format!("live-proj-head-{pid}"),
+                "section-projects".to_string(),
+            ])
+            .collect();
+
+        // It asks for an approval: up to the top of the Inbox, past the rows in between.
+        set_state(&trek, cx, &hero, RunState::NeedsYou, false);
+        trek.render(cx);
+        let mut passing: Vec<(gpui_kit::Bounds<gpui_kit::Pixels>, Vec<Glyph>)> = vec![];
+        for _ in 0..40 {
+            frame(&trek, cx, 8);
+            let Some(row) = trek.bounds(cx, format!("inbox-{hero}")) else {
+                continue;
+            };
+            if offset(&trek, cx, &hero) == Some(0.) {
+                break;
+            }
+            // Over another row's place this frame: they'd overprint if both were painted.
+            let over_another = others.iter().any(|o| {
+                trek.bounds(cx, o.clone()).is_some_and(|b| {
+                    b.top() < row.bottom() - gpui_kit::px(2.)
+                        && b.bottom() > row.top() + gpui_kit::px(2.)
+                })
+            });
+            if !over_another {
+                continue;
+            }
+            // It carries the Inbox's surface, opaque, under its own text.
+            let k = trek.window(cx, |w, _| w.scale_factor());
+            let filled = trek.window(cx, |w, _| {
+                w.painted_quads().iter().any(|q| {
+                    q.background.as_solid().is_some_and(|c| c.a >= 0.999)
+                        && (q.bounds.origin.y.0 / k - row.top().as_f32()).abs() < 1.
+                        && (q.bounds.size.height.0 / k - row.size.height.as_f32()).abs() < 1.
+                        && q.bounds.origin.x.0 / k <= row.left().as_f32() + 0.5
+                        && q.bounds.right().0 / k >= row.right().as_f32() - 0.5
+                })
+            });
+            assert!(filled, "an opaque fill under the rising row at {row:?}");
+            passing.push((row, text_over(&trek, cx, row)));
+        }
+        assert!(
+            passing.len() >= 2,
+            "it passed other rows for a few frames: {}",
+            passing.len()
+        );
+
+        // At rest, the text in its box is its own: mid-flight, nothing else was painted there.
+        frame(&trek, cx, 1_000);
+        let rest = trek
+            .bounds(cx, format!("inbox-{hero}"))
+            .expect("at the top of the Inbox");
+        assert!(rest.top() < trek.bounds(cx, format!("inbox-{}", done[0])).unwrap().top());
+        let own = text_over(&trek, cx, rest);
+        assert!(!own.is_empty(), "its title and why are painted");
+        let near = |a: &Glyph, b: &Glyph| {
+            (a.0 - b.0).abs() < 1.
+                && (a.1 - b.1).abs() < 1.
+                && (a.2 - b.2).abs() < 1.
+                && (a.3 - b.3).abs() < 1.
+        };
+        for (row, text) in &passing {
+            for glyph in text {
+                assert!(
+                    own.iter().any(|g| near(g, glyph)),
+                    "another row's text painted inside the rising row at {row:?}: {glyph:?}"
+                );
+            }
+        }
     });
 }
 
