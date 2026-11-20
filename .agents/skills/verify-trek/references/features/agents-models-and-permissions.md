@@ -32,6 +32,8 @@ Open **Settings → Agents & Subscriptions**, **API Keys**, **Local Models**, **
 
 The isolated app exposes only the Mock agent and never reads the Keychain. Test real-agent detection manually in a normal profile; do not put credentials into verification commands or files.
 
+For a recording that needs the agents installed on this Mac side by side, `trek-dev start --real-agents` sets `TREK_REAL_AGENTS=1`, and the `shots` build then calls `paths::allow_real_agents`: detection, ACP probes, Codex's and the API providers' model lists, key checks and sessions run as in the user's own Trek (`paths::real_agents`), with no mock. Warning: turns use the owner's real accounts and agent histories and cost what they cost, and `start`/`status` say `real agents: on, turns will use your accounts`; the data folder, the in-memory Keychain, imports off, notifications off and the signed-out `gh` stay as they are.
+
 ## Code
 
 `crates/trek-app/src/settings_view/pages.rs`, `composer.rs`, `workspace.rs`; rules and requests: `crates/trek-core/src/permission_rules.rs`, `session_secrets.rs`, `crates/trek-agents/src/rules.rs`, `crates/trek-app/src/settings_view/rules.rs`, `workspace/permission_requests.rs`, `thread_view/permission_cards.rs`; detection/catalog/settings in `crates/trek-core/src/`; sessions in `crates/trek-agents/src/`. Accounts: `crates/trek-core/src/accounts.rs`, `crates/trek-app/src/workspace/accounts.rs`, `crates/trek-app/src/settings_view/accounts.rs`.

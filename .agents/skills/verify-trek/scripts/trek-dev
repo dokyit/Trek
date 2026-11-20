@@ -57,6 +57,17 @@ CONTROL_VERBS = {"plugin", "plugin-keys", "browser", "range", "settled", "glass"
 # Values of TREK_TEST_DISPLAY that turn the test display off.
 NO = {"0", "off", "false", "no"}
 
+# What `start --real-agents` turns on, said by `start` and `status`; and the variables that let an
+# isolated Trek reach the user's own agents, which only that flag passes on.
+REAL_AGENTS_ON = "real agents: on, turns will use your accounts"
+REAL_AGENT_VARS = ("TREK_REAL_AGENTS", "TREK_LIVE_AGENT")
+
+
+def agents_env(real_agents: bool) -> dict[str, str]:
+    """The agent variables the isolated app starts with: the mock only, or (`--real-agents`) the
+    agents installed here, found and started as in the user's own Trek."""
+    return {"TREK_REAL_AGENTS": "1"} if real_agents else {"TREK_MOCK_AGENT": "1"}
+
 
 def wants_test_display(off: bool = False) -> bool:
     """Whether the isolated app gets a display of its own, so none of it is on your screens.
@@ -274,6 +285,7 @@ class Driver:
             "data_dir": str(self.data_dir),
             "log": str(self.log_path),
             "started_at": state.get("started_at") if running else None,
+            "agents": (REAL_AGENTS_ON if state.get("mock_only") is False else "mock agent only") if running else None,
             "test_display": self.test_display(state) if running else None,
         }
 
@@ -399,7 +411,7 @@ class Driver:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         (self.data_dir / "settings.toml").write_text(SETTINGS)
         (self.home / "ISOLATED_MOCK_ONLY").write_text(
-            "Created by verify-trek. TREK_SHOT_DIR isolates Keychain/data and only permits the mock agent.\n"
+            "Created by verify-trek. TREK_SHOT_DIR isolates Keychain/data and only permits the mock agent, unless started with --real-agents.\n"
         )
 
     def start(self, *, build: bool, size: str, real_agents: bool = False, test_display: Optional[bool] = None) -> dict[str, Any]:
@@ -420,11 +432,14 @@ class Driver:
         for stale in (self.shot_dir / "cmd", self.shot_dir / "done", self.shot_dir / "display.json", self.shot_dir / "windows.json", self.pending_path):
             stale.unlink(missing_ok=True)
         env = os.environ.copy()
+        # Only --real-agents lets the app reach the user's agents, whatever this shell exports.
+        for name in (*REAL_AGENT_VARS, "TREK_MOCK_AGENT"):
+            env.pop(name, None)
         env.update(
             {
                 "TREK_DATA_DIR": str(self.data_dir),
                 "TREK_SHOT_DIR": str(self.shot_dir),
-                **({} if real_agents else {"TREK_MOCK_AGENT": "1"}),
+                **agents_env(real_agents),
                 "TREK_BACKGROUND": "1",
                 "TREK_FORCE_ACTIVE": "1",
                 # A display of its own (macOS): no window of the run is on your screens.
@@ -475,7 +490,7 @@ class Driver:
             "already_running": False,
             "build": build_result,
             "safety": (
-                "throwaway data folder, notifications off, the installed agents with their real logins: what they do is real"
+                f"throwaway data folder, imports off, notifications off; {REAL_AGENTS_ON}"
                 if real_agents
                 else "throwaway data folder, imports off, notifications off, mock agent only"
             ),
@@ -853,7 +868,7 @@ def parser() -> argparse.ArgumentParser:
     start.add_argument(
         "--real-agents",
         action="store_true",
-        help="Use the installed agents and their real logins instead of the mock (data folder still throwaway). For checking flows like accounts that need a real agent: what the agents do is real, and costs what it costs.",
+        help="Find and run the agents installed here (Claude Code, Codex, OpenCode, local model servers) with your real logins instead of the mock, for recording or for flows that need a real agent. The data folder stays throwaway and imports and notifications stay off, but what the agents do is real, on your accounts, and costs what it costs.",
     )
     start.add_argument(
         "--no-test-display",
@@ -957,7 +972,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 raise CliError("--size must look like 1280x820.")
             on_display = wants_test_display(args.no_test_display)
             where = "on a display of its own (Trek Test Display)" if on_display else "on your screen, behind your windows"
-            data = dry_result(cmd, ["build Trek with the shots feature" if not args.no_build else "reuse the last verified shots binary", f"launch isolated mock-only app at {driver.home}, {where}"]) if args.dry_run else driver.start(build=not args.no_build, size=args.size, real_agents=args.real_agents, test_display=on_display)
+            data = dry_result(cmd, ["build Trek with the shots feature" if not args.no_build else "reuse the last verified shots binary", f"launch isolated app at {driver.home}, {where}, " + (REAL_AGENTS_ON if args.real_agents else "mock agent only")]) if args.dry_run else driver.start(build=not args.no_build, size=args.size, real_agents=args.real_agents, test_display=on_display)
         elif cmd == "open":
             line = route_command(args.route)
             data = dry_result(cmd, [f"send {line!r} to isolated Trek"]) if args.dry_run else (driver.batch([line]) and {"opened": args.route, "command_sent": line})

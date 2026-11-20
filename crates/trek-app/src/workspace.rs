@@ -3080,7 +3080,7 @@ impl Workspace {
             .iter()
             .any(|a| a.agent == AgentId::ClaudeCode && a.availability == Availability::Ready);
         if !ready
-            || trek_core::paths::isolated()
+            || !trek_core::paths::real_agents()
             || self.settings.disabled_agents.contains(&key.0)
             || self.agent_commands.contains_key(&key)
         {
@@ -5050,7 +5050,7 @@ impl Workspace {
     /// spent). The key stays saved either way; the answer is said beside it and, for a refusal,
     /// in a toast.
     fn check_api_key(&mut self, id: &str, key: &str, cx: &mut Context<Self>) {
-        if trek_core::paths::isolated() {
+        if !trek_core::paths::real_agents() {
             return;
         }
         self.key_checks.insert(id.to_string(), None);
@@ -9984,9 +9984,10 @@ impl Workspace {
     // ---------- discovery ----------
 
     /// Look for installed agents, then ask the ones found about their models, logins and usage.
-    /// Not in an isolated (test) process: that would run the user's own CLIs.
+    /// Not in an isolated (test) process: that would run the user's own CLIs. (A capture run asked
+    /// for them, `paths::allow_real_agents`, does.)
     pub fn detect_agents(&mut self, cx: &mut Context<Self>) {
-        if trek_core::paths::isolated() {
+        if !trek_core::paths::real_agents() {
             return;
         }
         if self.detecting {
@@ -10301,7 +10302,7 @@ impl Workspace {
     fn probe_acp(&mut self, only: Option<&str>, cx: &mut Context<Self>) {
         // Probing starts the agent and opens a session in its history: not for agents the user
         // turned off, nor from an isolated (test) process.
-        if trek_core::paths::isolated() {
+        if !trek_core::paths::real_agents() {
             return;
         }
         let ids: Vec<String> = self
@@ -10628,7 +10629,7 @@ impl Workspace {
     }
 
     pub fn fetch_direct_models(&mut self, provider_id: &str, cx: &mut Context<Self>) {
-        if trek_core::paths::isolated() || self.direct_inflight.contains(provider_id) {
+        if !trek_core::paths::real_agents() || self.direct_inflight.contains(provider_id) {
             return;
         }
         self.direct_inflight.insert(provider_id.to_string());
@@ -10661,7 +10662,7 @@ impl Workspace {
     }
 
     fn fetch_codex_models(&mut self, cx: &mut Context<Self>) {
-        if trek_core::paths::isolated() {
+        if !trek_core::paths::real_agents() {
             return;
         }
         let (tx, rx) = async_channel::bounded(1);
@@ -11470,13 +11471,14 @@ fn index_step(store: &Store) -> bool {
 
 /// Start an agent session. In an isolated (test) process only the mock agent runs: any other
 /// would be one of the user's own CLIs, signed in to their account, writing to their history.
-/// Live tests ask for a real one (`TREK_LIVE_AGENT`).
+/// Live tests ask for a real one (`TREK_LIVE_AGENT`), a capture run for the real agents
+/// (`paths::allow_real_agents`) too.
 fn start_session(
     config: SessionConfig,
     account: Option<trek_core::accounts::Account>,
 ) -> trek_agents::SessionHandle {
     let mock = matches!(&config.agent, AgentId::Direct(p) if catalog::is_mock(p));
-    if mock || !trek_core::paths::isolated() || std::env::var_os("TREK_LIVE_AGENT").is_some() {
+    if mock || trek_core::paths::real_agents() || std::env::var_os("TREK_LIVE_AGENT").is_some() {
         return trek_agents::start_on(config, account);
     }
     let (commands, _) = async_channel::unbounded();

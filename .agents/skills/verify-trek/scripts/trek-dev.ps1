@@ -272,7 +272,8 @@ function Start-Trek([bool]$Build, [string]$Size) {
     $psi.WorkingDirectory = $Root
     $psi.UseShellExecute = $true
     $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-    $appEnv = @{ TREK_DATA_DIR = $DataDir; TREK_SHOT_DIR = $ShotDir; TREK_MOCK_AGENT = '1'; TREK_BACKGROUND = '1'; TREK_FORCE_ACTIVE = '1'; TREK_WINDOW_SIZE = $Size; RUST_LOG = 'warn,trek=info' }
+    # The mock only: the variables that would let it reach your own agents go ($null unsets one).
+    $appEnv = @{ TREK_DATA_DIR = $DataDir; TREK_SHOT_DIR = $ShotDir; TREK_MOCK_AGENT = '1'; TREK_REAL_AGENTS = $null; TREK_LIVE_AGENT = $null; TREK_BACKGROUND = '1'; TREK_FORCE_ACTIVE = '1'; TREK_WINDOW_SIZE = $Size; RUST_LOG = 'warn,trek=info' }
     $before = @{}
     foreach ($kv in $appEnv.GetEnumerator()) {
         $before[$kv.Key] = [Environment]::GetEnvironmentVariable($kv.Key)

@@ -38,6 +38,29 @@ pub fn isolated() -> bool {
     isolated_dir().is_some()
 }
 
+static REAL_AGENTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A capture run's opt-in (`trek-dev start --real-agents`): this isolated process still looks for
+/// the agents installed on this computer, asks them about their models, and starts them, signed
+/// in as the user. Everything else stays isolated: the data folder, the Keychain, imports,
+/// notifications.
+pub fn allow_real_agents() {
+    REAL_AGENTS.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether this process may look for, ask and start the user's own agents: always outside an
+/// isolated process, and in one only after [`allow_real_agents`].
+pub fn real_agents() -> bool {
+    reaches_real_agents(
+        isolated(),
+        REAL_AGENTS.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+fn reaches_real_agents(isolated: bool, allowed: bool) -> bool {
+    !isolated || allowed
+}
+
 /// `~/Library/Application Support/Trek` on macOS (platform equivalent elsewhere).
 pub fn data_dir() -> PathBuf {
     if let Some(dir) = isolated_dir() {
@@ -243,6 +266,24 @@ fn move_to_trash(path: &std::path::Path) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_isolated_process_reaches_the_users_agents_only_when_allowed() {
+        assert!(
+            super::reaches_real_agents(false, false),
+            "the user's own Trek"
+        );
+        assert!(
+            !super::reaches_real_agents(true, false),
+            "a test or a capture run"
+        );
+        assert!(
+            super::reaches_real_agents(true, true),
+            "trek-dev start --real-agents"
+        );
+        // These tests run isolated, and nothing here allowed it.
+        assert!(!super::real_agents());
+    }
+
     #[test]
     fn trashing_a_file_or_folder_takes_it_out_of_its_folder() {
         let dir = std::env::temp_dir().join(format!("trek-trash-test-{}", std::process::id()));

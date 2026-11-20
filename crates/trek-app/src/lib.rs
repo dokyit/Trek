@@ -411,6 +411,12 @@ pub fn run() {
                     std::env::temp_dir().join(format!("trek-shots-{}", std::process::id()))
                 });
             trek_core::paths::isolate(dir);
+            // Recording with the agents installed here (`trek-dev start --real-agents`): they're
+            // found and run on the user's accounts; the rest stays isolated.
+            if real_agents_asked(std::env::var_os("TREK_REAL_AGENTS").as_deref()) {
+                trek_core::paths::allow_real_agents();
+                tracing::warn!("isolated run with the real agents: turns use the user's accounts");
+            }
         }
         if let Some(lock) = lock {
             workspace::keep_data_folder_lock(trek_core::paths::data_dir(), lock);
@@ -510,6 +516,12 @@ pub fn app_actions(cx: &mut App) {
     });
 }
 
+/// Whether a capture run's `TREK_REAL_AGENTS` asks for the agents installed here: only "1" does.
+#[cfg(any(test, feature = "shots"))]
+fn real_agents_asked(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|v| v == "1")
+}
+
 /// Act on the workspace, then bring the main window forward (reopening it if it was closed).
 fn in_main(
     cx: &mut App,
@@ -519,4 +531,16 @@ fn in_main(
         f(ws, cx);
         cx.emit(workspace::WorkspaceEvent::ActivateMain);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn only_trek_real_agents_1_asks_a_capture_run_for_the_real_agents() {
+        use std::ffi::OsStr;
+        assert!(super::real_agents_asked(Some(OsStr::new("1"))));
+        for no in [None, Some(""), Some("0"), Some("yes"), Some("true")] {
+            assert!(!super::real_agents_asked(no.map(OsStr::new)), "{no:?}");
+        }
+    }
 }

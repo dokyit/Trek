@@ -12,6 +12,8 @@ Run the CLI from the checkout or worktree being verified. Its state is keyed to 
 
 The driver always launches with `TREK_SHOT_DIR`, a throwaway `TREK_DATA_DIR`, imports and notifications off, and `direct:mock` as the only agent; the app signs itself out of `gh` (an empty `GH_CONFIG_DIR` of its own, no GitHub token variables), so nothing it starts acts as the user on GitHub (`signed-out` checks it). Never replace those safeguards or point the driver at a normal Trek process: imported threads can resume real sessions.
 
+Real agents, for recording only: `start --real-agents` launches the same isolated app with `TREK_REAL_AGENTS=1` in place of the mock, so it finds and runs the agents installed on this Mac (Claude Code, Codex, OpenCode, ACP agents, local model servers) and lists their models, and `start` and `status` say `real agents: on, turns will use your accounts`. Warning: every turn then runs on the owner's real logins and accounts, writes to those agents' own histories and costs what it costs; use it only when the owner asked for real agents on screen, and never for verification. The data folder stays throwaway, imports and notifications stay off and `gh` stays signed out; without the flag the driver strips `TREK_REAL_AGENTS` and `TREK_LIVE_AGENT` from what it passes on. `trek-dev.ps1` has no such flag and strips both too.
+
 On a Mac the isolated app opens on an invisible display of its own, the [Trek Test Display](#test-display-macos): none of its windows is on the owner's screens, and nothing of theirs moves.
 
 ## Workflow

@@ -6,7 +6,7 @@
 
 <p><b>Every agent. One trail.</b></p>
 
-<p>A native desktop app that runs your coding agents from one inbox.<br>
+<p>A free, open-source native desktop app that runs your coding agents from one inbox.<br>
 Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models. On macOS and Windows, with an iPhone companion and a remote for any phone’s browser.</p>
 
 <p>

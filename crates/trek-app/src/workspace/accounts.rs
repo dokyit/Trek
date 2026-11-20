@@ -386,7 +386,7 @@ impl Workspace {
         let fetch: AccountFetch = match &self.accounts.fetch {
             Some(f) => f.clone(),
             // A live test (`TREK_LIVE_AGENT`) asks the real agent, as the app does.
-            None if trek_core::paths::isolated()
+            None if !trek_core::paths::real_agents()
                 && std::env::var_os("TREK_LIVE_AGENT").is_none() =>
             {
                 return;
