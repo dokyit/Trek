@@ -2,7 +2,8 @@
 //! system's speech recognizer, so partial text arrives while the user speaks.
 //!
 //! On macOS the take streams through an `AVAudioEngine` input tap into an
-//! `SFSpeechAudioBufferRecognitionRequest` (on-device where the recognizer supports it). Where
+//! `SFSpeechAudioBufferRecognitionRequest` (on-device where the recognizer supports it); Speech
+//! hears a long take a segment at a time, and `segments` joins them into the take's text. Where
 //! that can't start, the take records to a temp `.caf` with `AVAudioRecorder` and the Speech
 //! framework transcribes the file once it stops. macOS asks for the microphone and Speech
 //! permissions the first time each is needed; a build without the usage descriptions in its
@@ -25,6 +26,7 @@ use std::time::Duration;
 
 #[cfg(feature = "test-support")]
 pub mod fake;
+pub mod segments;
 #[cfg(any(windows, test))]
 #[doc(hidden)]
 pub mod windows;
@@ -312,9 +314,10 @@ impl Dictation {
 /// What a take says to the composer.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Heard {
-    /// The best text for the whole take so far (live takes only); later ones revise it.
+    /// The best text for the whole take so far (live takes only); later ones revise it. A
+    /// backend whose recognizer hears a take in segments joins them first (`segments`).
     Partial(String),
-    /// The recognizer is done: the take's text.
+    /// The recognizer is done: the whole take's text, from the mic to ✓.
     Final(String),
     /// Why it stopped.
     Failed(String),
@@ -356,6 +359,7 @@ pub fn loudness(samples: &[f32]) -> f32 {
 #[cfg_attr(feature = "test-support", allow(dead_code))]
 mod imp {
     use super::*;
+    use crate::segments::{Kind, Segments};
     use block2::RcBlock;
     use objc2::AllocAnyThread as _;
     use objc2::rc::Retained;
@@ -373,7 +377,8 @@ mod imp {
     use std::path::PathBuf;
     use std::ptr::NonNull;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     /// Whether the mic button shows at all: both privacy keys must be in the bundle's
     /// Info.plist, or macOS ends the process when recording is asked for. `TREK_DICTATE=1`
     /// shows it anyway in unbundled builds (the button says so when it's tapped).
@@ -526,18 +531,74 @@ mod imp {
     /// task that turns it into text.
     pub struct Dictation {
         source: Source,
-        /// The Speech task; keeping it alive keeps the results coming.
-        task: Option<Retained<SFSpeechRecognitionTask>>,
-        /// Where results go (the file path hands it to its task once the recording stops).
+        speech: Arc<Speech>,
+    }
+
+    /// What a take's Speech tasks share with it (and, live, with the engine's input tap): the
+    /// segments heard so far, which every result adds to (`crate::segments`: Speech starts a
+    /// new segment after each pause, and its results hold only that segment's words), the task
+    /// hearing it now, and for a live take the request the mic feeds.
+    struct Speech {
+        segments: Mutex<Segments>,
         heard: Sender<Heard>,
+        /// The Speech task; keeping it alive keeps the results coming. The file path hands it
+        /// one once the recording stops.
+        task: Mutex<Option<Retained<SFSpeechRecognitionTask>>>,
+        /// A live take's recognizer, and the request the tap feeds: a request Speech ends while
+        /// the mic is still open (a server recognizer's limit of about a minute) is replaced by
+        /// a new one, and the take carries on.
+        live: Option<(
+            Retained<SFSpeechRecognizer>,
+            Mutex<Retained<SFSpeechAudioBufferRecognitionRequest>>,
+        )>,
+        /// ✓ hasn't been pressed: a request that ends now isn't the take ending.
+        listening: AtomicBool,
+    }
+
+    impl Speech {
+        // The Speech objects in it are used on the main queue (results, a request replaced,
+        // ✓) and the audio thread (the tap appends buffers, which the buffer request is made
+        // for); the mutexes keep a request's swap and the tap's append apart.
+        #[allow(clippy::arc_with_non_send_sync)]
+        fn new(
+            heard: Sender<Heard>,
+            live: Option<(
+                Retained<SFSpeechRecognizer>,
+                Retained<SFSpeechAudioBufferRecognitionRequest>,
+            )>,
+        ) -> Arc<Speech> {
+            Arc::new(Speech {
+                segments: Mutex::new(Segments::default()),
+                heard,
+                task: Mutex::new(None),
+                listening: AtomicBool::new(live.is_some()),
+                live: live.map(|(recognizer, request)| (recognizer, Mutex::new(request))),
+            })
+        }
+
+        fn keep(&self, task: Retained<SFSpeechRecognitionTask>) {
+            if let Ok(mut slot) = self.task.lock() {
+                *slot = Some(task);
+            }
+        }
+
+        /// ✓: the mic is off, so the request's last result is the take's text.
+        fn end_audio(&self) {
+            self.listening.store(false, Ordering::Relaxed);
+            if let Some((_, request)) = &self.live
+                && let Ok(request) = request.lock()
+            {
+                unsafe { request.endAudio() };
+            }
+        }
     }
 
     enum Source {
-        /// The engine's input tap feeds `request`; `level` is the loudest since last read, as
-        /// f32 bits (non-negative floats order as their bits do, so `fetch_max` works).
+        /// The engine's input tap feeds the take's request; `level` is the loudest since last
+        /// read, as f32 bits (non-negative floats order as their bits do, so `fetch_max`
+        /// works).
         Live {
             engine: Retained<AVAudioEngine>,
-            request: Retained<SFSpeechAudioBufferRecognitionRequest>,
             level: Arc<AtomicU32>,
             open: bool,
         },
@@ -580,18 +641,13 @@ mod imp {
         /// Stop the mic; the take's text follows as [`Heard::Final`] (or `Failed`).
         pub fn finish(&mut self) {
             match &mut self.source {
-                Source::Live {
-                    engine,
-                    request,
-                    open,
-                    ..
-                } => {
+                Source::Live { engine, open, .. } => {
                     if std::mem::take(open) {
                         unsafe {
                             engine.inputNode().removeTapOnBus(0);
                             engine.stop();
-                            request.endAudio();
                         }
+                        self.speech.end_audio();
                     }
                 }
                 Source::File { recorder, file, .. } => {
@@ -599,10 +655,10 @@ mod imp {
                         return;
                     };
                     unsafe { recorder.stop() };
-                    match transcribe_task(file, self.heard.clone()) {
-                        Ok(task) => self.task = Some(task),
+                    match transcribe_task(file, &self.speech) {
+                        Ok(task) => self.speech.keep(task),
                         Err(e) => {
-                            let _ = self.heard.try_send(Heard::Failed(e));
+                            let _ = self.speech.heard.try_send(Heard::Failed(e));
                         }
                     }
                 }
@@ -614,22 +670,18 @@ mod imp {
     /// leaves nothing in tmp.
     impl Drop for Dictation {
         fn drop(&mut self) {
-            if let Some(task) = self.task.take() {
+            // Taken out, so the task's handler (which holds `speech`) is all that's left of it.
+            if let Some(task) = self.speech.task.lock().ok().and_then(|mut t| t.take()) {
                 unsafe { task.cancel() };
             }
             match &mut self.source {
-                Source::Live {
-                    engine,
-                    request,
-                    open,
-                    ..
-                } => {
+                Source::Live { engine, open, .. } => {
                     if std::mem::take(open) {
                         unsafe {
                             engine.inputNode().removeTapOnBus(0);
                             engine.stop();
-                            request.endAudio();
                         }
+                        self.speech.end_audio();
                     }
                 }
                 Source::File {
@@ -653,15 +705,16 @@ mod imp {
     /// clickable permission dialog.
     #[cfg(feature = "shots")]
     pub fn transcribe_file(file: PathBuf, heard: Sender<Heard>) -> Result<Dictation, String> {
-        let task = transcribe_task(&file, heard.clone())?;
+        let speech = Speech::new(heard, None);
+        let task = transcribe_task(&file, &speech)?;
+        speech.keep(task);
         Ok(Dictation {
             source: Source::File {
                 recorder: None,
                 file,
                 ours: false,
             },
-            task: Some(task),
-            heard,
+            speech,
         })
     }
 
@@ -684,25 +737,46 @@ mod imp {
         }
     }
 
-    /// Start `request` on `recognizer`; every result and the failure go to `heard`.
+    /// Start `request` on `recognizer`; every result adds to the take's segments, and the whole
+    /// take so far goes to its `heard` (or the failure does).
     fn recognize(
         recognizer: &SFSpeechRecognizer,
         request: &SFSpeechRecognitionRequest,
-        heard: Sender<Heard>,
+        speech: &Arc<Speech>,
     ) -> Retained<SFSpeechRecognitionTask> {
+        let speech = speech.clone();
         unsafe {
             request.setAddsPunctuation(true);
             let block = RcBlock::new(
                 move |result: *mut SFSpeechRecognitionResult, error: *mut NSError| {
                     if !result.is_null() {
-                        let text = (*result).bestTranscription().formattedString().to_string();
-                        let _ = heard.try_send(if (*result).isFinal() {
-                            Heard::Final(text)
+                        let result = &*result;
+                        let text = result.bestTranscription().formattedString().to_string();
+                        // A pause closes a segment with a result that carries its metadata; the
+                        // request's last result is final.
+                        let kind = if result.isFinal() {
+                            Kind::Done
+                        } else if result.speechRecognitionMetadata().is_some() {
+                            Kind::Segment
                         } else {
-                            Heard::Partial(text)
-                        });
+                            Kind::Partial
+                        };
+                        let listening =
+                            speech.live.is_some() && speech.listening.load(Ordering::Relaxed);
+                        let Ok(next) = speech
+                            .segments
+                            .lock()
+                            .map(|mut s| s.result(kind, &text, listening))
+                        else {
+                            return;
+                        };
+                        if next.restart {
+                            listen_again(&speech);
+                        }
+                        let _ = speech.heard.try_send(next.heard);
                     } else if !error.is_null() {
-                        let _ = heard
+                        let _ = speech
+                            .heard
                             .try_send(Heard::Failed((*error).localizedDescription().to_string()));
                     }
                 },
@@ -711,10 +785,38 @@ mod imp {
         }
     }
 
-    /// Speech over `file`: `heard` gets the transcription, or why it failed.
+    /// Speech ended a live take's request while the mic is still open: a new request takes
+    /// the tap's buffers from here, and its words follow the ones already heard.
+    fn listen_again(speech: &Arc<Speech>) {
+        let Some((recognizer, request)) = &speech.live else {
+            return;
+        };
+        let fresh = live_request(recognizer);
+        if let Ok(mut request) = request.lock() {
+            *request = fresh.clone();
+        }
+        let task = recognize(recognizer, &fresh, speech);
+        speech.keep(task);
+    }
+
+    /// A request for the mic's buffers, with partial results, on this Mac where it can be.
+    fn live_request(
+        recognizer: &SFSpeechRecognizer,
+    ) -> Retained<SFSpeechAudioBufferRecognitionRequest> {
+        unsafe {
+            let request = SFSpeechAudioBufferRecognitionRequest::new();
+            request.setShouldReportPartialResults(true);
+            if recognizer.supportsOnDeviceRecognition() {
+                request.setRequiresOnDeviceRecognition(true);
+            }
+            request
+        }
+    }
+
+    /// Speech over `file`: the take's `heard` gets the transcription, or why it failed.
     fn transcribe_task(
         file: &std::path::Path,
-        heard: Sender<Heard>,
+        speech: &Arc<Speech>,
     ) -> Result<Retained<SFSpeechRecognitionTask>, String> {
         let recognizer = recognizer()?;
         unsafe {
@@ -724,7 +826,7 @@ mod imp {
                 &url,
             );
             request.setShouldReportPartialResults(false);
-            Ok(recognize(&recognizer, &request, heard))
+            Ok(recognize(&recognizer, &request, speech))
         }
     }
 
@@ -732,7 +834,7 @@ mod imp {
     /// Both permissions must be granted first — see [`ensure_permission`].
     pub fn start(heard: Sender<Heard>) -> Result<Dictation, String> {
         let recognizer = recognizer()?;
-        match start_live(&recognizer, heard.clone()) {
+        match start_live(recognizer, heard.clone()) {
             Some(take) => Ok(take),
             None => start_file(heard),
         }
@@ -741,29 +843,34 @@ mod imp {
     /// The live take: an input tap on the engine streams buffers into the recognizer and
     /// meters them. `None` when the machine can't (no buffer request, no input, the engine
     /// won't start), so the file path takes over.
-    fn start_live(recognizer: &SFSpeechRecognizer, heard: Sender<Heard>) -> Option<Dictation> {
+    fn start_live(
+        recognizer: Retained<SFSpeechRecognizer>,
+        heard: Sender<Heard>,
+    ) -> Option<Dictation> {
         objc2::runtime::AnyClass::get(c"SFSpeechAudioBufferRecognitionRequest")?;
         objc2::runtime::AnyClass::get(c"AVAudioEngine")?;
         unsafe {
-            let request = SFSpeechAudioBufferRecognitionRequest::new();
-            request.setShouldReportPartialResults(true);
-            if recognizer.supportsOnDeviceRecognition() {
-                request.setRequiresOnDeviceRecognition(true);
-            }
+            let request = live_request(&recognizer);
             let engine = AVAudioEngine::new();
             let input = engine.inputNode();
             let format = input.outputFormatForBus(0);
             if format.sampleRate() <= 0. || format.channelCount() == 0 {
                 return None;
             }
+            let speech = Speech::new(heard, Some((recognizer.clone(), request.clone())));
             let level = Arc::new(AtomicU32::new(0));
             let tap = {
-                let request = request.clone();
+                let speech = speech.clone();
                 let level = level.clone();
                 RcBlock::new(
                     move |buffer: NonNull<AVAudioPCMBuffer>, _: NonNull<AVAudioTime>| {
                         let buffer = buffer.as_ref();
-                        request.appendAudioPCMBuffer(buffer);
+                        // The request now: Speech may have replaced the one the take began with.
+                        if let Some((_, request)) = &speech.live
+                            && let Ok(request) = request.lock()
+                        {
+                            request.appendAudioPCMBuffer(buffer);
+                        }
                         let channels = buffer.floatChannelData();
                         if !channels.is_null() {
                             let frames = buffer.frameLength() as usize;
@@ -797,16 +904,14 @@ mod imp {
                 input.removeTapOnBus(0);
                 return None;
             }
-            let task = recognize(recognizer, &request, heard.clone());
+            speech.keep(recognize(&recognizer, &request, &speech));
             Some(Dictation {
                 source: Source::Live {
                     engine,
-                    request,
                     level,
                     open: true,
                 },
-                task: Some(task),
-                heard,
+                speech,
             })
         }
     }
@@ -839,9 +944,91 @@ mod imp {
                     file,
                     ours: true,
                 },
-                task: None,
-                heard,
+                speech: Speech::new(heard, None),
             })
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use objc2_avf_audio::AVAudioFile;
+        use objc2_foundation::NSOperationQueue;
+
+        /// A live take against Speech itself, no mic: the recording in `TREK_DICTATE_FILE` (a
+        /// take with pauses: `say -o take.aiff "The first sentence. [[slnc 3000]] The second
+        /// one. [[slnc 3000]] And the third."`) goes to the take's request in real time, as the
+        /// tap would hand it over, then ✓. The take's text has every word in
+        /// `TREK_DICTATE_EXPECT` (default: first, second, third), in order. Ignored: it needs
+        /// Speech already allowed for whatever runs it (it never asks), and a binary that
+        /// declares it (an Info.plist linked into its `__TEXT,__info_plist`).
+        #[test]
+        #[ignore]
+        fn a_take_with_pauses_keeps_every_segment() {
+            let Some(path) = std::env::var_os("TREK_DICTATE_FILE") else {
+                return;
+            };
+            let expect = std::env::var("TREK_DICTATE_EXPECT")
+                .unwrap_or_else(|_| "first,second,third".into());
+            assert_eq!(
+                unsafe { SFSpeechRecognizer::authorizationStatus() },
+                SFSpeechRecognizerAuthorizationStatus::Authorized,
+                "Speech isn't allowed for this process"
+            );
+            let recognizer = recognizer().expect("a recognizer");
+            // Results on a queue of their own: nothing runs the main queue under the harness.
+            unsafe { recognizer.setQueue(&NSOperationQueue::new()) };
+            let request = live_request(&recognizer);
+            let (heard, results) = async_channel::unbounded();
+            let speech = Speech::new(heard, Some((recognizer.clone(), request.clone())));
+            speech.keep(recognize(&recognizer, &request, &speech));
+            unsafe {
+                let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+                let file = AVAudioFile::initForReading_error(AVAudioFile::alloc(), &url)
+                    .expect("the recording");
+                let format = file.processingFormat();
+                loop {
+                    let buffer = AVAudioPCMBuffer::initWithPCMFormat_frameCapacity(
+                        AVAudioPCMBuffer::alloc(),
+                        &format,
+                        1024,
+                    )
+                    .expect("a buffer");
+                    if file.readIntoBuffer_frameCount_error(&buffer, 1024).is_err()
+                        || buffer.frameLength() == 0
+                    {
+                        break;
+                    }
+                    if let Some((_, request)) = &speech.live
+                        && let Ok(request) = request.lock()
+                    {
+                        request.appendAudioPCMBuffer(&buffer);
+                    }
+                    std::thread::sleep(Duration::from_secs_f64(
+                        buffer.frameLength() as f64 / format.sampleRate(),
+                    ));
+                }
+            }
+            speech.end_audio();
+            let until = std::time::Instant::now() + Duration::from_secs(20);
+            let text = loop {
+                match results.try_recv() {
+                    Ok(Heard::Partial(t)) => eprintln!("partial: {t}"),
+                    Ok(Heard::Final(t)) => break t,
+                    Ok(Heard::Failed(why)) => panic!("the take failed: {why}"),
+                    Err(_) if std::time::Instant::now() > until => panic!("no final text"),
+                    Err(_) => std::thread::sleep(Duration::from_millis(20)),
+                }
+            };
+            eprintln!("final: {text}");
+            let lower = text.to_lowercase();
+            let mut from = 0;
+            for word in expect.split(',') {
+                let at = lower[from..]
+                    .find(&word.to_lowercase())
+                    .unwrap_or_else(|| panic!("{word:?} missing from {text:?}"));
+                from += at + word.len();
+            }
         }
     }
 }

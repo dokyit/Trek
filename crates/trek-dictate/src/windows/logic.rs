@@ -25,7 +25,7 @@ pub mod status {
 /// One take's words as Windows reports them in a continuous session: the phrase being spoken is
 /// a hypothesis, revised as it goes (`HypothesisGenerated`), until it settles as a result
 /// (`ResultGenerated`) and the next phrase starts. What the composer hears is always the whole
-/// take so far, as the Mac's recognizer reports it.
+/// take so far, as it is from the Mac's (`crate::segments`).
 #[derive(Debug, Default)]
 pub struct Phrases {
     /// The phrases Windows settled, in order.
@@ -122,17 +122,8 @@ impl Phrases {
 }
 
 /// Written without spaces between words or sentences (Chinese and Japanese): phrases in it
-/// follow one another directly.
-pub(crate) fn unspaced(c: char) -> bool {
-    matches!(
-        c as u32,
-        0x3000..=0x30FF // CJK punctuation, hiragana, katakana
-            | 0x3400..=0x4DBF // CJK extension A
-            | 0x4E00..=0x9FFF // CJK ideographs
-            | 0xF900..=0xFAFF // CJK compatibility ideographs
-            | 0xFF00..=0xFFEF // full-width forms
-    )
-}
+/// follow one another directly. The Mac's segments join the same way.
+pub(crate) use crate::segments::unspaced;
 
 /// A peak meter reads about this much above the RMS level the Mac's waveform is drawn from.
 const CREST_DB: f32 = 10.;

@@ -1123,6 +1123,64 @@ fn the_mic_opens_a_take_and_puts_in_what_it_heard() {
     });
 }
 
+/// A long take with pauses, as macOS's Speech reports it (each pause closes a segment and the
+/// results after it hold only the new one's words; the last result only the last segment),
+/// through the Mac backend's segments: what shows is every sentence so far, and ✓ puts all three
+/// in after what was typed. ✕ on a second take like it drops the whole take.
+#[test]
+fn a_long_take_keeps_every_sentence_across_pauses() {
+    use trek_app::dictate::segments::{Kind, Segments};
+    use trek_app::dictate::{Heard, fake};
+    let speech = [
+        (Kind::Partial, "The first thing"),
+        (Kind::Partial, "The first thing I want is a button"),
+        (Kind::Segment, "The first thing I want is a button."),
+        (Kind::Partial, "Then the second"),
+        (Kind::Segment, "Then the second part lists the files."),
+        (Kind::Partial, "And finally"),
+        (Kind::Partial, "And finally a summary"),
+    ];
+    let all = "The first thing I want is a button. Then the second part lists the files. And \
+               finally, a summary at the end.";
+    run(async |cx| {
+        let dictation = fake::install();
+        let trek = open(cx);
+        trek.type_text(cx, "Note:");
+        trek.click(cx, "dictate");
+        let mut take = Segments::default();
+        for (kind, text) in speech {
+            dictation.hear(take.result(kind, text, true).heard);
+        }
+        trek.render(cx);
+        assert_eq!(
+            voice_preview(&trek, cx).0,
+            "Note: The first thing I want is a button. Then the second part lists the files. And \
+             finally a summary"
+        );
+        trek.click(cx, "voice-confirm");
+        let last = take.result(Kind::Done, "And finally, a summary at the end.", false);
+        assert_eq!(last.heard, Heard::Final(all.into()));
+        dictation.hear(last.heard);
+        trek.render(cx);
+        assert_eq!(trek.composer_text(cx), format!("Note: {all}"));
+
+        trek.click(cx, "dictate");
+        let mut take = Segments::default();
+        for (kind, text) in speech {
+            dictation.hear(take.result(kind, text, true).heard);
+        }
+        trek.render(cx);
+        trek.click(cx, "voice-cancel");
+        trek.render(cx);
+        assert_eq!(
+            trek.composer_text(cx),
+            format!("Note: {all}"),
+            "✕ drops the whole take"
+        );
+        assert!(!dictation.mic_open());
+    });
+}
+
 /// Asking that's turned down says why and opens nothing: the toolbar stays, and the message is
 /// as it was. A take that fails to start says why too, and lets go of what the ask opened.
 #[test]
