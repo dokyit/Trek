@@ -13,6 +13,7 @@
 //! Nothing of theirs is ever written to the local store; the machine owns the thread.
 
 pub mod clone;
+pub mod files;
 pub mod sheets;
 
 use crate::workspace::{PendingPermission, Route, Scope, Workspace, WorkspaceEvent};
@@ -241,6 +242,10 @@ pub struct MachineEntry {
     /// This Mac's project folders and the project each was cloned to there (its id there).
     #[serde(default)]
     pub projects: BTreeMap<String, String>,
+    /// Which file here each copy this computer sent it is, newest last (`files::SENT_KEPT`): the
+    /// transcript shows the file here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sent: Vec<files::SentCopy>,
 }
 
 impl MachineEntry {
@@ -353,6 +358,8 @@ pub struct Machine {
     /// The rows as Trek's threads, under local ids (`local_id`).
     pub threads: Vec<Thread>,
     followed: HashMap<String, Followed>,
+    /// Files sent ahead of the message being sent now, by their path here (`files`).
+    pending: HashMap<PathBuf, files::Sent>,
     _pump: Option<Task<()>>,
 }
 
@@ -749,6 +756,12 @@ pub fn settle_running_tools(rows: &mut [(String, Item)]) {
 /// The machine's items as Trek's. What they can't carry is left out (a turn's changed files, the
 /// images a message had) or said in a notice (another thread it links to, a handoff).
 pub fn map_items(items: &[tr::Item]) -> Mapped {
+    map_items_with(items, &[])
+}
+
+/// `map_items`, with what this computer sent the machine shown as the files here (`sent`): a
+/// message mentions them by their paths here, and the pictures it sent are its images again.
+pub fn map_items_with(items: &[tr::Item], sent: &[files::SentCopy]) -> Mapped {
     let mut out = Mapped {
         rows: Vec::with_capacity(items.len()),
         requests: vec![],
@@ -760,16 +773,22 @@ pub fn map_items(items: &[tr::Item]) -> Mapped {
                 text,
                 images,
                 aside,
+                image_paths,
                 ..
             } => {
-                let text = match images {
-                    0 => text.clone(),
+                let here: Vec<String> = image_paths
+                    .iter()
+                    .filter_map(|p| files::here_of(p, sent))
+                    .collect();
+                let text = files::shown_here(text, sent);
+                let text = match images.saturating_sub(here.len() as u32) {
+                    0 => text,
                     1 => format!("{text}\n\n(1 image)"),
                     n => format!("{text}\n\n({n} images)"),
                 };
                 Item::User {
                     text,
-                    images: vec![],
+                    images: here,
                     at: it.at,
                     resume: None,
                     aside: *aside,
@@ -1208,6 +1227,7 @@ impl Workspace {
             rows: vec![],
             threads: vec![],
             followed: HashMap::new(),
+            pending: HashMap::new(),
             _pump: None,
         };
         match made {
@@ -1425,7 +1445,7 @@ impl Workspace {
         let context = row
             .and_then(|r| r.context.as_ref())
             .map(|c| (c.used, c.window));
-        let mut mapped = map_items(&f.items);
+        let mut mapped = map_items_with(&f.items, &m.entry.sent);
         if offline {
             settle_running_tools(&mut mapped.rows);
         }
@@ -1608,7 +1628,10 @@ impl Workspace {
             trek_core::settings::FollowUp::Steer => tr::SendMode::Steer,
             trek_core::settings::FollowUp::Queue => tr::SendMode::Queue,
         });
-        let (images, left_out) = uploads(&images);
+        // Files and pictures sent ahead (`files`): named by their copies there.
+        let host = split_id(id).map_or_else(String::new, |(host, _)| host.to_string());
+        let (text, files, inline) = self.machine_shaped(&host, &text, &images);
+        let (images, left_out) = uploads(&inline);
         if !left_out.is_empty() {
             let machine = split_id(id)
                 .and_then(|(host, _)| self.machines.get(host))
@@ -1628,7 +1651,7 @@ impl Workspace {
                     mode,
                     images,
                     consult: None,
-                    files: vec![],
+                    files,
                 })
             },
             cx,
@@ -1787,14 +1810,7 @@ impl Workspace {
     /// The name of the machine a message sent from `scope` goes to, when it isn't this Mac's: the
     /// thread's own machine, or the one the main window's draft starts on.
     pub fn machine_named_for_send(&self, scope: &Scope) -> Option<String> {
-        let host = match self.thread_id_in(scope) {
-            Some(id) => split_id(id).map(|(host, _)| host.to_string()),
-            None if matches!(scope, Scope::Main) => match &self.route {
-                Route::Draft { project } => self.draft_machine(project.as_deref()),
-                _ => None,
-            },
-            None => None,
-        }?;
+        let host = self.machine_host_for_send(scope)?;
         self.machines.get(&host).map(|m| m.entry.name.clone())
     }
 
@@ -1964,19 +1980,22 @@ impl Workspace {
                 .unwrap_or_else(|| prefs.agent.display_name()),
             agent.and_then(|a| a.logo.as_deref()),
         );
-        let (uploaded, left_out) = uploads(&images);
+        // Files and pictures sent ahead (`files`): named by their copies there. What goes back to
+        // the composer, if it doesn't start, is the message as written here.
+        let (sent_text, files, inline) = self.machine_shaped(host, &text, &images);
+        let (uploaded, left_out) = uploads(&inline);
         let req = tr::NewThreadRequest {
             project_id: project_id.clone(),
             agent: agent_key,
             model: model.clone(),
-            text: text.clone(),
+            text: sent_text,
             // A thread in no project has no repository to make a worktree of.
             worktree: prefs.worktree && project.is_some(),
             effort: Some(prefs.effort.as_str().to_string()),
             access: Some(access_of(prefs.hand_holding)),
             plan: prefs.plan,
             images: uploaded,
-            files: vec![],
+            files,
         };
         if !left_out.is_empty() {
             cx.emit(WorkspaceEvent::Toast {
@@ -2095,7 +2114,8 @@ impl Workspace {
                         let name = paired.host.name.clone();
                         // A machine paired again keeps the projects it was known to have.
                         let projects = ws.machines.get(&paired.host.id).map(|m| m.entry.projects.clone()).unwrap_or_default();
-                        let entry = MachineEntry { paired, name: name.clone(), last_seen: Some(now_ms()), projects };
+                        let sent = ws.machines.get(&paired.host.id).map(|m| m.entry.sent.clone()).unwrap_or_default();
+                        let entry = MachineEntry { paired, name: name.clone(), last_seen: Some(now_ms()), projects, sent };
                         ws.add_machine(entry, Some((client, events)), cx);
                         ws.machines.save();
                         ws.machines.pairing = Some(Pairing::Done(name.clone()));

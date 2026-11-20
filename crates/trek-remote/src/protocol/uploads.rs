@@ -3,6 +3,12 @@
 //! `upload_progress`), in order, then `send.files` / `new_thread.files` name it by the id the
 //! phone chose, and the Mac mentions it in the message as its own composer mentions a file
 //! (`@path`).
+//!
+//! Another Trek sends its composer's attachments the same way (feature `machine_files`): each
+//! piece says who it's `from` (the kept name starts with that, not `iPhone`) and whether it's an
+//! `image`; the last piece's `upload_progress` says where the file was kept (`path`), so the
+//! sender can mention it in place in what was typed, and an image named in `files` goes with the
+//! message as an image the model sees rather than as a mention.
 
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +45,15 @@ pub struct UploadPart {
     pub offset: u64,
     /// Base64 of the piece: [`MAX_UPLOAD_PART`] bytes at most, empty only for an empty file.
     pub data: String,
+    /// Who sends it, for the name it's kept under (feature `machine_files`): another machine's
+    /// name. `None` (a phone's): `iPhone`. Every piece names the same one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// A picture that goes with the message as an image (feature `machine_files`): named in
+    /// `send.files` / `new_thread.files`, it's attached as the composer's photos are instead of
+    /// mentioned. One that isn't a PNG, JPEG, GIF or WebP is mentioned all the same.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub image: bool,
 }
 
 /// An [`UploadPart`], checked and decoded: what the host writes.
@@ -51,6 +66,9 @@ pub struct UploadPiece {
     pub total: u64,
     pub offset: u64,
     pub bytes: Vec<u8>,
+    /// As [`upload_sender_name`] makes it.
+    pub from: String,
+    pub image: bool,
 }
 
 /// The reply to `upload_part`: how much of the file the Mac has.
@@ -63,9 +81,36 @@ pub struct UploadProgress {
     /// The whole file is in: its id may go in `send.files` or `new_thread.files`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub done: bool,
+    /// Once `done`: where the file is kept, absolute, as the Mac writes paths (feature
+    /// `machine_files`). Another Trek mentions it by this in the message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 impl UploadPart {
+    /// The piece `bytes` at `offset` of a file of `total` bytes named `name`, as another machine
+    /// sends it.
+    pub fn piece(
+        upload_id: &str,
+        name: &str,
+        total: u64,
+        offset: u64,
+        bytes: &[u8],
+        from: Option<&str>,
+        image: bool,
+    ) -> Self {
+        use base64::Engine as _;
+        Self {
+            upload_id: upload_id.to_string(),
+            name: name.to_string(),
+            total,
+            offset,
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            from: from.map(str::to_string),
+            image,
+        }
+    }
+
     /// What can be told without decoding the piece: the id is a UUID, the name is usable, the
     /// file isn't over [`MAX_UPLOAD`], the piece starts inside it and isn't over
     /// [`MAX_UPLOAD_PART`] by its base64's length.
@@ -129,8 +174,60 @@ impl UploadPart {
             total: self.total,
             offset: self.offset,
             bytes,
+            from: upload_sender_name(self.from.as_deref()),
+            image: self.image,
         })
     }
+}
+
+/// A new upload id: a random UUID (version 4), lower case.
+pub fn new_upload_id() -> String {
+    let mut b: [u8; 16] = rand::random();
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    )
+}
+
+/// The longest sender's name a kept file starts with (in bytes).
+pub const MAX_UPLOAD_FROM: usize = 40;
+
+/// Who a kept file's name says sent it: the machine's name made safe as [`upload_file_name`]
+/// makes a name, cut to [`MAX_UPLOAD_FROM`] bytes; `iPhone` when it says nothing (a phone) or
+/// nothing of it is left.
+pub fn upload_sender_name(from: Option<&str>) -> String {
+    let Some(name) = from.and_then(upload_file_name) else {
+        return "iPhone".into();
+    };
+    let mut end = name.len().min(MAX_UPLOAD_FROM);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    match name[..end].trim_end() {
+        "" => "iPhone".into(),
+        cut => cut.to_string(),
+    }
+}
+
+/// Whether `bytes` start as a picture agents take: PNG, JPEG, GIF or WebP.
+pub fn is_image_bytes(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0x89, b'P', b'N', b'G'])
+        || bytes.starts_with(&[0xFF, 0xD8, 0xFF])
+        || bytes.starts_with(b"GIF87a")
+        || bytes.starts_with(b"GIF89a")
+        || (bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP")
+}
+
+/// `bytes` in words, as a refusal states a limit: "4 MB", "2 GB".
+pub fn upload_size_words(bytes: u64) -> String {
+    size_words(bytes)
 }
 
 /// A UUID as text: 32 hex digits in groups of 8, 4, 4, 4 and 12, joined by `-` (either case).
@@ -227,6 +324,87 @@ mod tests {
             kept.len() <= MAX_UPLOAD_NAME && kept.ends_with("é.mov"),
             "{kept}"
         );
+    }
+
+    #[test]
+    fn new_upload_ids_are_uuids_and_differ() {
+        let (a, b) = (new_upload_id(), new_upload_id());
+        assert!(valid_upload_id(&a) && valid_upload_id(&b), "{a} {b}");
+        assert_ne!(a, b);
+        assert_eq!(a, a.to_ascii_lowercase());
+    }
+
+    #[test]
+    fn a_sender_name_is_made_safe_and_a_phone_is_an_iphone() {
+        for (from, kept) in [
+            (None, "iPhone"),
+            (Some("T-Book"), "T-Book"),
+            (Some("Tobias's MacBook Pro"), "Tobias's MacBook Pro"),
+            (Some("../../evil"), "evil"),
+            (Some("C:\\x\\PC"), "PC"),
+            (Some(".."), "iPhone"),
+            (Some(""), "iPhone"),
+            (Some("a:b"), "a-b"),
+        ] {
+            assert_eq!(upload_sender_name(from), kept, "{from:?}");
+        }
+        let long = upload_sender_name(Some(&"é".repeat(60)));
+        assert!(
+            long.len() <= MAX_UPLOAD_FROM && !long.contains('/'),
+            "{long}"
+        );
+    }
+
+    #[test]
+    fn pictures_are_told_by_their_bytes() {
+        assert!(is_image_bytes(b"\x89PNG\r\n\x1a\n...."));
+        assert!(is_image_bytes(&[0xFF, 0xD8, 0xFF, 0xE0]));
+        assert!(is_image_bytes(b"GIF89a..."));
+        assert!(is_image_bytes(b"RIFF\0\0\0\0WEBPVP8 "));
+        assert!(!is_image_bytes(b"\0\0\0\x14ftypqt  "), "a .mov");
+        assert!(!is_image_bytes(b"%PDF-1.4"));
+        assert!(!is_image_bytes(b""));
+    }
+
+    /// The iPhone app in the field sends pieces without `from` or `image`, and reads a reply that
+    /// now has `path`: both still work, and a piece another machine sends says both.
+    #[test]
+    fn a_phones_piece_and_a_machines_piece_both_read() {
+        let phone = r#"{"upload_id":"3f2504e0-4f89-11d3-9a0c-0305e82c3301","name":"IMG_1.MOV","total":3,"offset":0,"data":"YWJj"}"#;
+        let part: UploadPart = serde_json::from_str(phone).unwrap();
+        assert_eq!((part.from.as_deref(), part.image), (None, false));
+        let piece = part.decode().unwrap();
+        assert_eq!((piece.from.as_str(), piece.image), ("iPhone", false));
+        // What a phone's piece says is unchanged when written again: no new keys.
+        assert_eq!(serde_json::to_string(&part).unwrap(), phone);
+
+        let id = new_upload_id();
+        let machine = UploadPart::piece(&id, "shot.png", 4, 0, b"\x89PNG", Some("T-Book"), true);
+        let json = serde_json::to_string(&machine).unwrap();
+        assert!(
+            json.contains(r#""from":"T-Book""#) && json.contains(r#""image":true"#),
+            "{json}"
+        );
+        let back: UploadPart = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, machine);
+        let piece = back.decode().unwrap();
+        assert_eq!((piece.from.as_str(), piece.image), ("T-Book", true));
+        assert_eq!(piece.bytes, b"\x89PNG");
+
+        // The reply: without `path` as before, and with it once done for a machine.
+        let old: UploadProgress =
+            serde_json::from_str(r#"{"upload_id":"x","received":3,"total":3,"done":true}"#)
+                .unwrap();
+        assert_eq!(old.path, None);
+        let new = UploadProgress {
+            upload_id: "x".into(),
+            received: 3,
+            total: 3,
+            done: true,
+            path: Some("C:\\Users\\me\\AppData\\Roaming\\Trek\\uploads\\T-Book clip.mov".into()),
+        };
+        let json = serde_json::to_string(&new).unwrap();
+        assert_eq!(serde_json::from_str::<UploadProgress>(&json).unwrap(), new);
     }
 
     #[test]

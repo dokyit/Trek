@@ -185,6 +185,7 @@ fn body(item: &Item, cwd: Option<&std::path::Path>) -> Option<tr::ItemBody> {
             images: 0,
             aside: false,
             videos: vec![],
+            image_paths: vec![],
         },
         Item::Assistant { text } => tr::ItemBody::Assistant {
             text: clip_text(text),

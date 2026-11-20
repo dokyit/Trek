@@ -465,6 +465,71 @@ impl Client {
         Ok(())
     }
 
+    /// Send the file at `path` to the machine to go with a message (feature `machine_files`), in
+    /// pieces of [`crate::protocol::MAX_UPLOAD_PART`], one after another, each read from disk as it
+    /// goes (run it where a blocking read is fine). `progress` hears the bytes in after each piece.
+    /// Returns the upload's id (for `send.files`) and where the machine kept the file. A file over
+    /// [`crate::protocol::MAX_UPLOAD`] isn't sent ([`ClientError::TooLarge`]); one that changes
+    /// size while it goes stops with [`ClientError::Invalid`].
+    pub async fn upload_file(
+        &self,
+        path: &std::path::Path,
+        from: &str,
+        image: bool,
+        mut progress: impl FnMut(u64, u64),
+    ) -> Result<Uploaded, ClientError> {
+        use crate::protocol::{MAX_UPLOAD, MAX_UPLOAD_PART, UploadPart, new_upload_id};
+        use std::io::Read as _;
+        let unreadable = |e: std::io::Error| {
+            ClientError::Invalid(format!("{} couldn't be read: {e}", path.display()))
+        };
+        let mut file = std::fs::File::open(path).map_err(unreadable)?;
+        let total = file.metadata().map_err(unreadable)?.len();
+        if total > MAX_UPLOAD {
+            return Err(ClientError::TooLarge(total as usize));
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".into());
+        let id = new_upload_id();
+        let mut offset = 0u64;
+        let mut buf = vec![0u8; MAX_UPLOAD_PART.min(total.max(1)) as usize];
+        loop {
+            let want = (total - offset).min(MAX_UPLOAD_PART) as usize;
+            file.read_exact(&mut buf[..want]).map_err(|e| {
+                ClientError::Invalid(format!(
+                    "{} changed while it was being sent: {e}",
+                    path.display()
+                ))
+            })?;
+            let part =
+                UploadPart::piece(&id, &name, total, offset, &buf[..want], Some(from), image);
+            let reply = self.request(ClientMessage::UploadPart(part)).await?;
+            let ServerMessage::UploadProgress(p) = reply else {
+                return Err(unexpected(&reply));
+            };
+            offset = p.received;
+            progress(offset, total);
+            if p.done {
+                return match p.path {
+                    Some(path) => Ok(Uploaded {
+                        upload_id: id,
+                        path,
+                    }),
+                    None => Err(ClientError::Unexpected(
+                        "the machine kept the file but didn't say where".into(),
+                    )),
+                };
+            }
+            if offset >= total {
+                return Err(ClientError::Unexpected(
+                    "the machine has every byte but didn't say the file is in".into(),
+                ));
+            }
+        }
+    }
+
     async fn put_batch(&self, project_id: &str, files: Vec<PutFile>) -> Result<(), ClientError> {
         match self
             .request(ClientMessage::PutFiles(PutFilesRequest {
@@ -477,6 +542,15 @@ impl Client {
             other => Err(unexpected(&other)),
         }
     }
+}
+
+/// A file [`Client::upload_file`] sent whole.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Uploaded {
+    /// Its id, for `send.files` / `new_thread.files`.
+    pub upload_id: String,
+    /// Where the machine keeps it, as that machine writes paths.
+    pub path: String,
 }
 
 fn unexpected(msg: &ServerMessage) -> ClientError {

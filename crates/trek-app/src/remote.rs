@@ -1316,8 +1316,9 @@ impl Workspace {
             ));
         }
         // Files sent up first: mentioned after what was typed, as the Mac's composer mentions
-        // them (after what a command becomes, for a command).
-        let files = uploads::finished(&req.files)?;
+        // them (after what a command becomes, for a command). Pictures another Trek sent as
+        // images go as images.
+        let (files, sent_images) = uploads::finished(&req.files)?;
         let command = req.text.trim_start().starts_with('/');
         let typed = match command {
             true => req.text.clone(),
@@ -1336,7 +1337,8 @@ impl Workspace {
             Some(consult) => self.consulted(&t.id, &t.agent, &text, consult)?,
             None => text,
         };
-        let images = save_uploads(&req.images)?;
+        let mut images = save_uploads(&req.images)?;
+        images.extend(sent_images);
         // An explicit choice from the phone wins over the setting, for this message only.
         let follow = req.mode.map(|mode| match mode {
             tr::SendMode::Steer => trek_core::settings::FollowUp::Steer,
@@ -1451,8 +1453,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> tr::HostResult<String> {
         let agent = AgentId::from_key(&req.agent);
-        // Files sent up first, mentioned as in `remote_send`.
-        let files = uploads::finished(&req.files)?;
+        // Files sent up first, mentioned (or attached) as in `remote_send`.
+        let (files, sent_images) = uploads::finished(&req.files)?;
         let text = match req.text.trim_start().starts_with('/') {
             true => uploads::mentioning(
                 &self.phone_first_message(&agent, req.model.as_deref(), &req.text)?,
@@ -1479,7 +1481,8 @@ impl Workspace {
                 crate::words::words().this_computer
             )));
         }
-        let images = save_uploads(&req.images)?;
+        let mut images = save_uploads(&req.images)?;
+        images.extend(sent_images);
         let hand_holding = req
             .access
             .map(|a| hand_holding(a, &self.settings))
@@ -3024,6 +3027,8 @@ fn item_body(
             } else {
                 vec![]
             },
+            // Where they are here: another Trek that sent them shows its own copies.
+            image_paths: images.clone(),
         },
         Item::Assistant { text } => tr::ItemBody::Assistant {
             text: clip_text(text),

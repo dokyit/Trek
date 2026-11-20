@@ -2379,6 +2379,44 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
     // platform, and stays connected. An isolated run starts no phone server, so one starts on the
     // loopback alone (`Workspace::start_loopback_remote`). `pair-phone [name]`; `pair-phone leave`
     // disconnects it (the sidebar then says when it was last seen).
+    // `pair-self`: this Trek pairs with its own phone server on the loopback as another machine
+    // would ("machine B", under its own name), and the draft on screen starts its thread there,
+    // so what a thread on another machine does can be checked in one isolated app
+    // (`machine-files`). Pairing answers a moment later: wait before what needs it.
+    if verb == "pair-self" {
+        ws.update(cx, |ws, cx| -> anyhow::Result<()> {
+            ws.start_loopback_remote(cx)?;
+            ws.offer_pairing(cx);
+            let offer = ws
+                .remote
+                .as_ref()
+                .and_then(|r| r.offer.clone())
+                .ok_or_else(|| anyhow::anyhow!("pair-self: no pairing code"))?;
+            let link = crate::machines::PairLink::parse(&offer.url).map_err(anyhow::Error::msg)?;
+            ws.pair_machine(link, cx);
+            Ok(())
+        })?;
+        return Ok(());
+    }
+    // `machine-draft`: the draft on screen starts its thread on the machine `pair-self` made
+    // (`machine-draft off`: on this computer again).
+    if verb == "machine-draft" {
+        ws.update(cx, |ws, cx| -> anyhow::Result<()> {
+            let host = crate::remote::host_info().id;
+            anyhow::ensure!(
+                arg == "off" || ws.machines.get(&host).is_some_and(|m| m.reachable()),
+                "machine-draft: pair-self first, and wait for it"
+            );
+            let crate::workspace::Route::Draft { project } = ws.route.clone() else {
+                anyhow::bail!("machine-draft: open a draft first");
+            };
+            let host = (arg != "off").then_some(host);
+            ws.set_draft_machine(project.as_deref(), host, cx);
+            Ok(())
+        })?;
+        cx.refresh_windows();
+        return Ok(());
+    }
     if verb == "pair-phone" {
         static STAND_IN: std::sync::Mutex<Option<Arc<trek_remote::client::Client>>> =
             std::sync::Mutex::new(None);
@@ -2408,6 +2446,8 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                     use base64::Engine as _;
                     base64::engine::general_purpose::STANDARD.encode(&bytes)
                 },
+                from: None,
+                image: false,
             };
             trek_core::runtime().spawn(async move {
                 let answer = phone

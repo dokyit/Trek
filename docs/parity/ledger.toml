@@ -1062,6 +1062,18 @@ note = "A PC as the target answers the other computer as a Mac does, tested on b
 code = ["crates/trek-app/src/machines.rs", "crates/trek-app/src/machines/clone.rs"]
 tests = ["crates/trek-app/tests/remote.rs", "crates/trek-app/src/machines/clone.rs"]
 
+[[feature]]
+id = "machine-files"
+area = "Machines"
+what = "Files and pictures attached here go with a thread on another machine"
+macos = "yes"
+windows = "yes"
+live = ["route project:{project}", "pair-self", "wait 4000", "machine-draft", "attach {project}{/}README.md", "type What does the README say?", "key enter", "wait 4000", "file uploads{/}*README.md contains Live project", "count user-file* 1"]
+how = { macos = "The other machine keeps them in its data folder's uploads/ and the message names its path to each: a Mac's or a PC's, as that machine writes it.", windows = "The same code: a PC sends its own paths' files and is given the other machine's paths (backslashes on a PC, slashes on a Mac), and takes files into %APPDATA%'s uploads/ as a Mac does." }
+note = "Shared code on both platforms, tested on both CIs against a loopback machine (tests/machines.rs, tests/remote.rs, trek-remote's client tests). No run between two real computers has sent files yet, a PC on either end least of all (docs/MULTI-MACHINE.md). A folder can't go yet (it would need packing up), nor a file over 2 GB; a machine before Trek 0.4.61 takes pictures alone, inline."
+code = ["crates/trek-app/src/machines/files.rs", "crates/trek-app/src/composer/machine_upload.rs", "crates/trek-app/src/remote/uploads.rs", "crates/trek-remote/src/protocol/uploads.rs", "crates/trek-remote/src/client.rs"]
+tests = ["crates/trek-app/tests/machines.rs", "crates/trek-app/tests/remote.rs", "crates/trek-app/src/machines/files.rs", "crates/trek-remote/tests/client.rs", "crates/trek-remote/src/protocol/uploads.rs"]
+
 # ---------- The rest of the census (November 2026 audit): at parity, Windows-only, and polish ----------
 
 [[feature]]

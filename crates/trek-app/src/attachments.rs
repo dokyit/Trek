@@ -854,13 +854,41 @@ pub fn strip(
     on_remove: impl Fn(&Path, &mut Window, &mut App) + Clone + 'static,
     cx: &App,
 ) -> AnyElement {
+    strip_sending(paths, files, size, busy, &[], on_remove, cx)
+}
+
+/// `strip`, with how far each of `sending` is on its way to another machine (0 to 1): a bar
+/// along the foot of its thumbnail or tile fills as it goes (`machines::files`).
+pub fn strip_sending(
+    paths: &[PathBuf],
+    files: &[PathBuf],
+    size: Pixels,
+    busy: bool,
+    sending: &[(PathBuf, f32)],
+    on_remove: impl Fn(&Path, &mut Window, &mut App) + Clone + 'static,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme().clone();
     let radius = px(fluent::control(radius::BUTTON));
     let all: std::rc::Rc<[PathBuf]> = paths.into();
+    let sent = |p: &Path| sending.iter().find(|(s, _)| s == p).map(|(_, f)| *f);
     let tiles: Vec<AnyElement> = files
         .iter()
         .enumerate()
-        .map(|(i, f)| file_tile(i, f, size, on_remove.clone(), cx))
+        .map(|(i, f)| {
+            let tile = file_tile(i, f, size, on_remove.clone(), cx);
+            match sent(f) {
+                Some(done) => div()
+                    .relative()
+                    .flex_none()
+                    .rounded(radius)
+                    .overflow_hidden()
+                    .child(tile)
+                    .child(sending_bar(("attachment-file-sending", i), done, cx))
+                    .into_any_element(),
+                None => tile,
+            }
+        })
         .collect();
     h_flex()
         .gap_2()
@@ -887,6 +915,9 @@ pub fn strip(
                         .object_fit(ObjectFit::Cover),
                 )
                 .child(crate::image_preview::thumb(p.clone()))
+                .when_some(sent(p), |el, done| {
+                    el.child(sending_bar(("attachment-sending", i), done, cx))
+                })
                 // A faint lift under the pointer: it opens.
                 .child(
                     div()
@@ -950,6 +981,28 @@ pub fn strip(
                     .child(Spinner::new().small().color(theme.muted_foreground)),
             )
         })
+        .into_any_element()
+}
+
+/// The bar along the foot of a thumbnail or tile on its way to another machine: `done` (0 to 1)
+/// of it filled in the accent, over a faint track.
+fn sending_bar(id: impl Into<ElementId>, done: f32, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    div()
+        .id(id)
+        .test_support()
+        .absolute()
+        .bottom_0()
+        .left_0()
+        .w_full()
+        .h(px(3.))
+        .bg(gpui_kit::black().opacity(0.35))
+        .child(
+            div()
+                .h_full()
+                .w(relative(done.clamp(0., 1.)))
+                .bg(theme.primary),
+        )
         .into_any_element()
 }
 

@@ -2,7 +2,8 @@
 //! video from its photo library, or any file from the Files app, sent in pieces before the message
 //! that takes it. Each piece is written after the one before it, off the main thread, into
 //! `<upload id>.part` in the data folder's `uploads/`; the last one renames it
-//! `iPhone <date> at <time> <name>`. A message names its files by upload id (`send.files`,
+//! `iPhone <date> at <time> <name>` (`<machine> <date> at <time> <name>` for another Trek's, feature
+//! `machine_files`), and says where (`upload_progress.path`). A message names its files by upload id (`send.files`,
 //! `new_thread.files`) and goes with an `@path` mention of each after its text, as the Mac's
 //! composer mentions a file it doesn't attach: the agent reads it from there, and a video plays
 //! under the message (`media::mentioned_videos`) on the Mac and the phone alike.
@@ -10,6 +11,14 @@
 //! What's part-way up is dropped once no piece came for an hour (the phone went), and `.part` files
 //! a day old (a Trek that quit mid-upload) when the phone server starts. Finished files stay, as
 //! the phone's photos do (`snapshots/`): a message names them.
+//!
+//! Another Trek sends its composer's files this way too, and mentions each in place in what was
+//! typed by the path the last piece's reply gave; a picture it sends as an `image` and names in
+//! `files` goes with the message as an image (when its bytes are one: else it's mentioned).
+//! Whoever sends, a file is only ever written into `uploads/` (its name made safe by
+//! `upload_file_name`, never over another file), only for a paired device's connection (the
+//! server refuses `upload_part` before `hello`), and never past `MAX_UPLOAD` (`UploadPart::check`
+//! and `decode` on every piece).
 
 use crate::workspace::Workspace;
 use gpui_kit::Context;
@@ -37,6 +46,9 @@ const HEADROOM: u64 = 1 << 30;
 
 struct Partial {
     name: String,
+    /// Who sent it, as its kept name starts (`iPhone`, or a machine's name).
+    from: String,
+    image: bool,
     total: u64,
     received: u64,
     part: PathBuf,
@@ -47,6 +59,8 @@ struct Partial {
 
 struct Finished {
     path: PathBuf,
+    /// Sent as a picture, and its bytes are one: it goes with the message as an image.
+    image: bool,
     at: Instant,
 }
 
@@ -172,6 +186,8 @@ fn take(dir: &Path, piece: tr::UploadPiece) -> tr::HostResult<tr::UploadProgress
                     id.clone(),
                     Partial {
                         name: piece.name.clone(),
+                        from: piece.from.clone(),
+                        image: piece.image,
                         total: piece.total,
                         received: 0,
                         part: part.clone(),
@@ -200,17 +216,20 @@ fn take(dir: &Path, piece: tr::UploadPiece) -> tr::HostResult<tr::UploadProgress
             received,
             total,
             done: false,
+            path: None,
         });
     }
     let p = t.partial.remove(&id).expect("just found");
-    let path = keep(dir, &p.part, &p.name).map_err(|e| {
+    let image = p.image && starts_as_image(&p.part);
+    let path = keep(dir, &p.part, &p.from, &p.name).map_err(|e| {
         let _ = std::fs::remove_file(&p.part);
         tr::HostError::other(format!("Couldn't keep that file: {e}"))
     })?;
     t.finished.insert(
         id.clone(),
         Finished {
-            path,
+            path: path.clone(),
+            image,
             at: Instant::now(),
         },
     );
@@ -219,6 +238,7 @@ fn take(dir: &Path, piece: tr::UploadPiece) -> tr::HostResult<tr::UploadProgress
         received,
         total,
         done: true,
+        path: Some(path.display().to_string()),
     })
 }
 
@@ -236,10 +256,22 @@ fn write_at(part: &Path, fresh: bool, offset: u64, bytes: &[u8]) -> std::io::Res
     f.set_len(offset + bytes.len() as u64)
 }
 
-/// The whole file, from its `.part`, kept as `iPhone <date> at <time> <name>` (as the phone's
-/// photos are, `save_uploads`), with ` 2`, ` 3`… before the extension when that's taken. Called
-/// with the table held: no other upload takes the name meanwhile.
-fn keep(dir: &Path, part: &Path, name: &str) -> std::io::Result<PathBuf> {
+/// Whether the file at `path` starts as a PNG, JPEG, GIF or WebP.
+fn starts_as_image(path: &Path) -> bool {
+    use std::io::Read as _;
+    let mut head = [0u8; 16];
+    let n = std::fs::File::open(path)
+        .and_then(|mut f| f.read(&mut head))
+        .unwrap_or(0);
+    tr::is_image_bytes(&head[..n])
+}
+
+/// The whole file, from its `.part`, kept as `<from> <date> at <time> <name>` (`iPhone …` as the
+/// phone's photos are, `save_uploads`; a machine's name for another Trek's), with ` 2`, ` 3`…
+/// before the extension when that's taken. Called with the table held: no other upload takes the
+/// name meanwhile. `from` and `name` are made safe (`upload_sender_name`, `upload_file_name`):
+/// the file is in `dir`, and nothing there is written over.
+fn keep(dir: &Path, part: &Path, from: &str, name: &str) -> std::io::Result<PathBuf> {
     let stamp = chrono::Local::now().format("%Y-%m-%d at %H.%M.%S");
     let (stem, ext) = match name.rfind('.') {
         Some(dot) if dot > 0 => name.split_at(dot),
@@ -247,9 +279,9 @@ fn keep(dir: &Path, part: &Path, name: &str) -> std::io::Result<PathBuf> {
     };
     for n in 1u32.. {
         let file = if n == 1 {
-            format!("iPhone {stamp} {name}")
+            format!("{from} {stamp} {name}")
         } else {
-            format!("iPhone {stamp} {stem} {n}{ext}")
+            format!("{from} {stamp} {stem} {n}{ext}")
         };
         let path = dir.join(file);
         if std::fs::symlink_metadata(&path).is_err() {
@@ -327,14 +359,16 @@ fn size_words(bytes: u64) -> String {
     }
 }
 
-/// The files `ids` name (each once, in order): every one sent whole and still on disk. Anything
-/// else is a `bad_request` saying what, so nothing is sent without its files.
-pub(super) fn finished(ids: &[String]) -> tr::HostResult<Vec<PathBuf>> {
+/// The files `ids` name, to mention, and the pictures among them sent as images (feature
+/// `machine_files`), to attach: each once, in order, every one sent whole and still on disk.
+/// Anything else is a `bad_request` saying what, so nothing is sent without its files.
+pub(super) fn finished(ids: &[String]) -> tr::HostResult<(Vec<PathBuf>, Vec<PathBuf>)> {
     if ids.is_empty() {
-        return Ok(vec![]);
+        return Ok((vec![], vec![]));
     }
     let t = table();
     let mut out: Vec<PathBuf> = Vec::with_capacity(ids.len());
+    let mut images: Vec<PathBuf> = vec![];
     for id in ids {
         if !tr::valid_upload_id(id) {
             return Err(tr::HostError::bad_request(format!(
@@ -342,8 +376,8 @@ pub(super) fn finished(ids: &[String]) -> tr::HostResult<Vec<PathBuf>> {
             )));
         }
         let key = id.to_ascii_lowercase();
-        let path = match t.finished.get(&key) {
-            Some(f) if f.path.is_file() => f.path.clone(),
+        let (path, image) = match t.finished.get(&key) {
+            Some(f) if f.path.is_file() => (f.path.clone(), f.image),
             Some(_) => {
                 return Err(tr::HostError::bad_request(
                     "A file sent with this message isn't on the Mac any more: attach it again",
@@ -360,11 +394,12 @@ pub(super) fn finished(ids: &[String]) -> tr::HostResult<Vec<PathBuf>> {
                 )));
             }
         };
-        if !out.contains(&path) {
-            out.push(path);
+        let list = if image { &mut images } else { &mut out };
+        if !list.contains(&path) {
+            list.push(path);
         }
     }
-    Ok(out)
+    Ok((out, images))
 }
 
 /// `text` with an `@path` mention of each of `files` after it, a space between, as the Mac's

@@ -12,9 +12,14 @@ use trek_remote::client::{
 };
 use trek_remote::*;
 
+/// A file sent with `upload_part`, put together: its bytes, name, sender and whether it's an image.
+type Kept = (Vec<u8>, String, String, bool);
+
 #[derive(Default)]
 struct Host {
     calls: Mutex<Vec<String>>,
+    /// Files sent with `upload_part`, put together, by upload id.
+    uploads: Mutex<std::collections::HashMap<String, Kept>>,
 }
 
 impl Host {
@@ -120,6 +125,29 @@ impl RemoteHost for Host {
             ));
         }
         Ok(())
+    }
+    /// Puts the pieces together in order, as Trek's own host does; a piece out of order is
+    /// refused.
+    async fn upload_part(&self, req: UploadPart) -> HostResult<UploadProgress> {
+        let piece = req.decode().map_err(HostError::bad_request)?;
+        self.record(format!("upload_part {} {}", piece.name, piece.offset));
+        let mut uploads = self.uploads.lock().unwrap();
+        let (bytes, ..) = uploads
+            .entry(piece.upload_id.clone())
+            .or_insert_with(|| (vec![], piece.name.clone(), piece.from.clone(), piece.image));
+        if bytes.len() as u64 != piece.offset {
+            return Err(HostError::bad_request("out of order"));
+        }
+        bytes.extend_from_slice(&piece.bytes);
+        let received = bytes.len() as u64;
+        let done = received == piece.total;
+        Ok(UploadProgress {
+            upload_id: piece.upload_id,
+            received,
+            total: piece.total,
+            done,
+            path: done.then(|| format!("/kept/{} {}", piece.from, piece.name)),
+        })
     }
 }
 
@@ -339,6 +367,90 @@ async fn a_request_gets_its_typed_reply() {
     let (a, b) = tokio::join!(client.machine_info(), client.request(ClientMessage::Ping));
     assert_eq!(a.unwrap().name, "Studio");
     assert_eq!(b.unwrap(), ServerMessage::Pong);
+}
+
+/// A file goes up in pieces of at most `MAX_UPLOAD_PART`, in order, and comes out whole on the
+/// machine; the reply names where it was kept. An empty file is one empty piece, and one over
+/// `MAX_UPLOAD` isn't read at all.
+#[tokio::test]
+async fn a_file_goes_up_in_pieces_and_comes_out_whole() {
+    let m = machine().await;
+    let (client, _events, _) = paired_client(&m, "machine-a").await;
+    let dir = m.dir.join("files");
+    std::fs::create_dir_all(&dir).unwrap();
+    // Two whole pieces and a bit: three `upload_part`s.
+    let bytes: Vec<u8> = (0..(2 * MAX_UPLOAD_PART as usize + 12_345))
+        .map(|i| (i * 31 % 251) as u8)
+        .collect();
+    let path = dir.join("clip.mov");
+    std::fs::write(&path, &bytes).unwrap();
+    let mut heard = vec![];
+    let up = client
+        .upload_file(&path, "T-Book", false, |done, total| {
+            heard.push((done, total))
+        })
+        .await
+        .unwrap();
+    assert!(valid_upload_id(&up.upload_id));
+    assert_eq!(up.path, "/kept/T-Book clip.mov");
+    let total = bytes.len() as u64;
+    assert_eq!(
+        heard,
+        [
+            (MAX_UPLOAD_PART, total),
+            (2 * MAX_UPLOAD_PART, total),
+            (total, total)
+        ]
+    );
+    let pieces: Vec<String> = m
+        .host
+        .calls()
+        .into_iter()
+        .filter(|c| c.starts_with("upload_part"))
+        .collect();
+    assert_eq!(
+        pieces,
+        [
+            "upload_part clip.mov 0".to_string(),
+            format!("upload_part clip.mov {MAX_UPLOAD_PART}"),
+            format!("upload_part clip.mov {}", 2 * MAX_UPLOAD_PART),
+        ]
+    );
+    {
+        let uploads = m.host.uploads.lock().unwrap();
+        let (kept, name, from, image) = &uploads[&up.upload_id];
+        assert!(kept == &bytes, "the bytes came out as they went in");
+        assert_eq!(
+            (name.as_str(), from.as_str(), *image),
+            ("clip.mov", "T-Book", false)
+        );
+    }
+
+    // A picture says so; an empty file is one empty piece.
+    let png = dir.join("shot.png");
+    std::fs::write(&png, b"\x89PNG\r\n\x1a\nrest").unwrap();
+    let up = client
+        .upload_file(&png, "T-Book", true, |_, _| {})
+        .await
+        .unwrap();
+    assert!(m.host.uploads.lock().unwrap()[&up.upload_id].3);
+    let empty = dir.join("empty.txt");
+    std::fs::write(&empty, b"").unwrap();
+    let up = client
+        .upload_file(&empty, "T-Book", false, |_, _| {})
+        .await
+        .unwrap();
+    assert!(m.host.uploads.lock().unwrap()[&up.upload_id].0.is_empty());
+
+    // A file that isn't there is said to be unreadable, before anything is sent.
+    let gone = client
+        .upload_file(&dir.join("gone.mov"), "T-Book", false, |_, _| {})
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(gone, ClientError::Invalid(ref why) if why.contains("couldn't be read")),
+        "{gone:?}"
+    );
 }
 
 #[tokio::test]

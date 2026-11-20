@@ -487,6 +487,7 @@ impl DemoHost {
                         images: 0,
                         aside: false,
                         videos: vec![],
+                        image_paths: vec![],
                     },
                 );
             }
@@ -686,6 +687,7 @@ impl RemoteHost for DemoHost {
                             images: 0,
                             aside: false,
                             videos: vec![],
+                            image_paths: vec![],
                         },
                     );
                     let reply = match cmd {
@@ -710,6 +712,7 @@ impl RemoteHost for DemoHost {
                 images: 0,
                 aside: false,
                 videos: vec![],
+                image_paths: vec![],
             },
         );
         self.update(&req.thread_id, |t| t.unseen = false);
@@ -800,6 +803,7 @@ impl RemoteHost for DemoHost {
                 images: 0,
                 aside: false,
                 videos: vec![],
+                image_paths: vec![],
             },
         );
         tokio::spawn(self.clone().echo_turn(id.clone(), req.text));
@@ -930,6 +934,7 @@ impl RemoteHost for DemoHost {
                     images: 0,
                     aside: false,
                     videos: vec![],
+                    image_paths: vec![],
                 },
             );
             tokio::spawn(self.clone().echo_turn(req.thread_id, text));
@@ -1057,6 +1062,7 @@ impl RemoteHost for DemoHost {
                             images: 0,
                             aside: false,
                             videos: vec![],
+                            image_paths: vec![],
                         },
                     );
                 }
@@ -1923,6 +1929,7 @@ fn user(text: &str) -> ItemBody {
         images: 0,
         aside: false,
         videos: vec![],
+        image_paths: vec![],
     }
 }
 

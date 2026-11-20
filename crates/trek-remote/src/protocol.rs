@@ -733,6 +733,11 @@ pub mod feature {
     /// `web_push`: notifications to the web remote through its browser's push service
     /// (`crate::webpush`). Served over WebTransport alone.
     pub const WEB_PUSH: &str = "web_push";
+    /// Another Trek's composer attachments (Trek 0.4.61): `upload_part.from` and `.image`,
+    /// `upload_progress.path`, an `image` upload named in `send.files` / `new_thread.files` going
+    /// as an image, and user items' `image_paths` (`uploads.rs`). A machine without it can't be
+    /// sent files: the sender says which Trek it needs ([`super::MACHINE_FILES_SINCE`]).
+    pub const MACHINE_FILES: &str = "machine_files";
 
     /// Every feature above, for a Mac that serves them all.
     pub const ALL: &[&str] = &[
@@ -768,8 +773,12 @@ pub mod feature {
         COMPACT_OFFER,
         SWITCH_PREVIEW,
         DIFF_VIEWED,
+        MACHINE_FILES,
     ];
 }
+
+/// The first Trek whose machines take files from another Trek (`feature::MACHINE_FILES`).
+pub const MACHINE_FILES_SINCE: &str = "0.4.61";
 
 /// The most one `note_file` piece carries (a mebibyte: well under a frame once in base64).
 pub const MAX_NOTE_FILE_CHUNK: u64 = 1 << 20;
@@ -1718,6 +1727,10 @@ pub enum ItemBody {
         /// The videos it attaches (`@path`), on the Mac, absolute: played with `media`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         videos: Vec<String>,
+        /// The images it attaches, on the Mac, absolute (feature `machine_files`): another Trek
+        /// shows its own copy of each one it sent.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        image_paths: Vec<String>,
     },
     Assistant {
         text: String,

@@ -505,6 +505,7 @@ impl RemoteHost for FakeHost {
             received,
             total: piece.total,
             done: received == piece.total,
+            path: None,
         })
     }
 }

@@ -524,6 +524,7 @@ fn every_item_state_round_trips() {
         images: 2,
         aside: false,
         videos: vec![],
+        image_paths: vec![],
     });
     bodies.push(ItemBody::Assistant {
         text: "a".into(),
@@ -1481,7 +1482,7 @@ fn parity_requests_and_replies() {
         r#"{"type":"background_output","re":"5","thread_id":"t","task_id":"b1"}"#,
         r#"{"type":"icon","re":"7","agent":"acp:mistral-vibe","hash":"0f3a","png":"iVBORw0K","template":true}"#,
         r#"{"type":"ack","re":"2","text":"and open a PR"}"#,
-        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines","note_files","card_actions","update_phone","media","limit_actions","context_card","turn_preview","consult","resume_interrupted","uploads","side_chat","sub_agent_view","failed_checks","rules","continue_on_account","compact_offer","switch_preview","diff_viewed"]}"#,
+        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines","note_files","card_actions","update_phone","media","limit_actions","context_card","turn_preview","consult","resume_interrupted","uploads","side_chat","sub_agent_view","failed_checks","rules","continue_on_account","compact_offer","switch_preview","diff_viewed","machine_files"]}"#,
         r#"{"type":"usage","re":"9","providers":[{"agent":{"key":"codex","name":"Codex","logo":"codex"},"plan":"ChatGPT Pro","limits":[],
             "resets":[{"id":"rc-1","title":"Full reset (Weekly + 5 hr)","expires_at":1791030000000}]},
             {"agent":{"key":"acp:devin","name":"Devin"},"limits":[],"no_limits":true,"as_of":1791020000000,"today":"Today in Trek: 12K tokens"}],"picked":true}"#,
@@ -2069,6 +2070,8 @@ fn pieces_that_cannot_be_kept_are_refused() {
         total,
         offset,
         data: data.into(),
+        from: None,
+        image: false,
     };
     let id = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
     assert!(part(id, "a.txt", 3, 0, "AAEC").decode().is_ok());

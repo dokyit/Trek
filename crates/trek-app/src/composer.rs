@@ -35,6 +35,7 @@ mod compact_chip;
 pub(crate) mod look;
 mod machine_chip;
 pub use machine_chip::reach_dot;
+mod machine_upload;
 pub mod pickers;
 mod queue;
 mod switch_bar;
@@ -127,6 +128,8 @@ pub struct Composer {
     /// What was typed for the threads and drafts not on screen, by `draft_key`. A split's two
     /// composers share theirs: a thread's message is there for whichever pane it next opens in.
     drafts: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, Draft>>>,
+    /// The attachments of a message to another machine, on their way there ahead of it.
+    machine_upload: Option<machine_upload::MachineUpload>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -453,6 +456,7 @@ impl Composer {
             draft_key: String::new(),
             placeholder: placeholder(None, Prompt::Plain),
             drafts: Default::default(),
+            machine_upload: None,
             _subscriptions: subscriptions,
         };
         this.draft_key = this.target(cx);
@@ -538,18 +542,11 @@ impl Composer {
                 return;
             }
         }
-        // A file's path is this Mac's: another machine can't open it, so the message doesn't go
-        // with it. The message stays as it is.
-        if !self.outbox.files.is_empty()
-            && let Some(machine) = self.workspace.read(cx).machine_named_for_send(&self.scope)
-        {
-            self.toast(
-                format!(
-                    "Files can't go to {machine} yet. Take them off, or start the thread on {}.",
-                    crate::words::words().this_computer
-                ),
-                cx,
-            );
+        // A file's path is this computer's: to a thread on another machine, the attachments go
+        // there first, and the message waits for them as it is (`machine_upload`).
+        let typed = state.read(cx).value().to_string();
+        if self.machine_files_first(&typed, follow, window, cx) {
+            cx.notify();
             return;
         }
         // Files on the strip go as `@path` mentions after what's typed, as agents read them.
@@ -847,6 +844,14 @@ impl Composer {
         // A take in progress ends unconfirmed: its words don't follow into a draft put away.
         if self.voice.phase != voice::Phase::Idle {
             self.voice_step(voice::Event::Cancel, window, cx);
+        }
+        // So do attachments on their way to another machine: they were for the draft put away.
+        if self
+            .machine_upload
+            .as_ref()
+            .is_some_and(|u| u.target != key)
+        {
+            self.cancel_machine_upload(cx);
         }
         let cursor = self.input.read(cx).cursor();
         let (text, images) = self.take_written(cx);
@@ -2503,6 +2508,14 @@ impl Composer {
         cx.notify();
     }
 
+    /// Take `path` off the strip, as its ×: what's on its way to another machine for the message
+    /// stops.
+    pub fn remove_attachment(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        self.outbox.remove(path);
+        self.cancel_machine_upload(cx);
+        cx.notify();
+    }
+
     /// What's in the prompt as it's kept or sent: what's typed, with the strip's files mentioned
     /// after it, as agents, the transcript, the queue and drafts have them.
     fn written(&self, cx: &App) -> String {
@@ -2829,16 +2842,23 @@ impl Composer {
     }
 
     fn attachment_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.outbox.is_empty() && !self.snapshotting && self.outbox.saving == 0 {
+        if self.outbox.is_empty()
+            && !self.snapshotting
+            && self.outbox.saving == 0
+            && self.machine_upload.is_none()
+        {
             return None;
         }
         let me = cx.entity().downgrade();
         let remove = move |path: &std::path::Path, _: &mut Window, cx: &mut App| {
-            let _ = me.update(cx, |this, cx| {
-                this.outbox.remove(path);
-                cx.notify();
-            });
+            let _ = me.update(cx, |this, cx| this.remove_attachment(path, cx));
         };
+        let progress = self
+            .machine_upload
+            .as_ref()
+            .map(|u| u.progress())
+            .unwrap_or_default();
+        let uploading = self.machine_upload_line(cx);
         let waiting = self.screenclip.is_some().then(|| {
             div()
                 .id("snapshot-wait")
@@ -2852,14 +2872,16 @@ impl Composer {
             div()
                 .px(px(14.))
                 .pt(px(12.))
-                .child(attachments::strip(
+                .child(attachments::strip_sending(
                     &self.outbox.paths,
                     &self.outbox.files,
                     px(56.),
                     self.snapshotting || self.outbox.saving > 0,
+                    &progress,
                     remove,
                     cx,
                 ))
+                .children(uploading)
                 .children(waiting)
                 .into_any_element(),
         )

@@ -50,6 +50,30 @@ advertised on Wi-Fi with only an `id` in the TXT record.
    A keeps nothing in its store: B owns the thread; A holds what the snapshot and subscription gave it
    and re-fetches on reconnect. The right panel's Git and Changes read B's repo through `git_*`.
 
+## Files and pictures attached here (0.4.61)
+
+Until 0.4.60 a message to a thread on B with a file attached was refused ("Files can't go to B
+yet"): the message would have named a path on A that B can't open. Now what's attached on A (the +
+menu, a drop, a paste, a screenshot or photo, and A's files typed as `@/path` or `@~/path`) goes to
+B ahead of the message, over B's own authenticated connection and the route the phone already uses
+for its videos (`upload_part` in pieces of 4 MiB, `MAX_UPLOAD` 2 GiB a file, `docs/MOBILE.md`
+`uploads` and `machine_files`). B keeps each in its data folder's `uploads/` as `<A's name> <date>
+at <time> <name>` (name made safe, never over another file, free space checked, a quiet upload
+dropped after an hour) and says where in the last piece's reply. The message then goes as a local
+send would be shaped on B: each mention of A's file becomes a mention of B's copy, in place (B's
+path as B writes it, a Windows B's with backslashes), and each picture goes by its upload id in
+`files`, which B attaches as an image the model sees. A remembers which copy on B is which file on
+A (`machines.json`, the last 500 a machine), so its transcript shows A's own files: a video plays
+from A's copy, a picture shows.
+
+The composer sends them when send is pressed and holds the draft meanwhile: a bar fills along each
+tile, a line says how far ("Sending 2 files to T-Book · 1.2 MB of 2.6 MB") with Cancel. A failure
+(B refused it, the connection dropped, a file changed while it went), Cancel, taking a file off or
+moving to another thread stops them and leaves the draft and its attachments as they were, the
+failure said in a toast. Still refused, with why: a folder (it would need packing up), a file over
+2 GB, and a B on a Trek before 0.4.61, which doesn't list `machine_files` ("T-Book needs Trek
+0.4.61 or later to receive files"; pictures alone still go to it inline, as before).
+
 ## Protocol additions (v1, additive)
 
 - `machine_info` → `{name, platform, trek_version, home}`: so A can name B and default the folder.

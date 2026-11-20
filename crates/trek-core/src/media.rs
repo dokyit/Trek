@@ -198,6 +198,52 @@ fn mention_words(text: &str) -> Vec<&str> {
     out
 }
 
+/// `text` with each `@path` mention `swap` gives another path for written as a mention of that
+/// one (`mention_of`, so quoted when it has whitespace), in its place; the rest as it was. `swap`
+/// sees the mention as written (without its quotes), and, when that gives nothing, without the
+/// punctuation a sentence puts after it (`@a.mov,`), which then stays after the new mention.
+pub fn rewrite_mentions(text: &str, mut swap: impl FnMut(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    let mut copied = 0;
+    while let Some(i) = text[at..].find('@') {
+        let start = at + i;
+        let word_start = text[..start]
+            .chars()
+            .next_back()
+            .is_none_or(char::is_whitespace);
+        let rest = &text[start + 1..];
+        let (word, used, quoted) = match rest.strip_prefix('"').filter(|_| word_start) {
+            Some(q) => match q.find('"') {
+                Some(end) => (&q[..end], end + 2, true),
+                None => ("", q.len() + 1, true),
+            },
+            None => {
+                let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+                (&rest[..end], end, false)
+            }
+        };
+        let end = start + 1 + used;
+        if word_start && !word.is_empty() {
+            let trimmed = word.trim_end_matches([',', '.', ';', ':', ')', '!', '?']);
+            let swapped = swap(word).map(|p| (p, "")).or_else(|| {
+                (!quoted && trimmed.len() < word.len() && !trimmed.is_empty())
+                    .then(|| swap(trimmed).map(|p| (p, &word[trimmed.len()..])))
+                    .flatten()
+            });
+            if let Some((path, after)) = swapped {
+                out.push_str(&text[copied..start]);
+                out.push_str(&mention_of(&path));
+                out.push_str(after);
+                copied = end;
+            }
+        }
+        at = end.min(text.len()).max(start + 1);
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
 /// The video files a message names as `@path` (how a file attached to a message is sent), on disk:
 /// absolute, `~/`, or relative to `cwd`. In order, each once.
 pub fn mentioned_videos(text: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
@@ -307,6 +353,39 @@ pub fn clock(secs: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mentions of this Mac's files become mentions of the other machine's copies, in place; a
+    /// Windows path with spaces is quoted, punctuation after a mention stays, `me@host` and
+    /// mentions it has nothing for are left as they are.
+    #[test]
+    fn mentions_are_rewritten_in_place() {
+        let swap = |w: &str| match w {
+            "/Users/me/clip.mov" => {
+                Some(r"C:\Users\T\AppData\Roaming\Trek\uploads\Mac 2026 clip.mov".to_string())
+            }
+            "/Users/me/My Notes.txt" => Some("/Users/t/uploads/Mac notes.txt".to_string()),
+            "~/a.pdf" => Some("/home/t/a.pdf".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            rewrite_mentions(
+                "see @/Users/me/clip.mov, and @\"/Users/me/My Notes.txt\" then @~/a.pdf. mail me@/Users/me/clip.mov or @src/main.rs @/elsewhere",
+                swap
+            ),
+            "see @\"C:\\Users\\T\\AppData\\Roaming\\Trek\\uploads\\Mac 2026 clip.mov\", and @\"/Users/t/uploads/Mac notes.txt\" then @/home/t/a.pdf. mail me@/Users/me/clip.mov or @src/main.rs @/elsewhere"
+        );
+        // Nothing to swap: the text as it was, to the byte.
+        for text in ["", "@", "@\"unclosed", "plain words", "a @ b @@x"] {
+            assert_eq!(rewrite_mentions(text, |_| None), text);
+        }
+        // And back: the other machine's path, quoted, to this Mac's.
+        let there = r"C:\Users\T\AppData\Roaming\Trek\uploads\Mac 2026 clip.mov";
+        let sent = format!("what's in this? {}", mention_of(there));
+        assert_eq!(
+            rewrite_mentions(&sent, |w| (w == there).then(|| "/Users/me/clip.mov".into())),
+            "what's in this? @/Users/me/clip.mov"
+        );
+    }
 
     #[test]
     fn files_sent_with_a_message_are_the_mentions_at_its_end() {

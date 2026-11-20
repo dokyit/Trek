@@ -269,6 +269,7 @@ listed, so an older Mac (no list) simply doesn't show them. The protocol version
 | `consult` | `send.consult`: a message sent with consultants |
 | `resume_interrupted` | a row's `cut_short`, and `thread_action` `resume_interrupted`, `dismiss_interrupted` |
 | `uploads` | `upload_part` (answered with `upload_progress`), and `send.files` / `new_thread.files`: videos and files sent with a message |
+| `machine_files` | `upload_part.from` and `.image`, `upload_progress.path`, image uploads attached as images, user items' `image_paths`: another Trek's attachments (0.4.61) |
 | `side_chat` | `side_chat`: a thread's side chat found, or one started beside it (the phone's `/side`) |
 | `sub_agent_view` | tool items' `sub_agent`, at-work rows' `call_id`, and `sub_agent` / `sub_agent_action`: a sub-agent opened from its row, stopped and sent a message |
 
@@ -1049,6 +1050,27 @@ again after a refusal finds them); `.part` files a day old go when the phone ser
 The message the agent gets: `What breaks at 0:03? @"/Users/me/Library/Application Support/dev.trek.Trek/uploads/iPhone 2026-11-08 at 10.15.30 IMG_0042.MOV"`.
 The phone's bubble shows mentions of absolute paths at the end of a message as chips by name (a
 video the row's `videos` lists plays instead).
+
+**`machine_files`** (Trek 0.4.61): another Trek sends its composer's attachments the same way, all
+of it optional so the phone's messages read as before. Each `upload_part` says who it's `from` (the
+file is kept as `<from> <date> at <time> <name>`, `from` made safe as a name is and cut to 40 bytes;
+none is `iPhone`) and, for a picture, `image: true`. The last piece's `upload_progress` carries
+`path`, where the file was kept, as that machine writes paths: the sender mentions it in place in
+what was typed (`@"C:\Users\…\uploads\Mac 2026-11-20 at 10.00.00 clip.mov"`) rather than naming it
+in `files`. A picture sent as an `image` and named in `files` goes with the message as an image the
+model sees (the composer's photos' way), not as a mention, when its bytes are a PNG, JPEG, GIF or
+WebP (else it's mentioned). User items carry `image_paths`, the paths of the images they attach on
+the Mac, so a Trek that sent them shows its own copies. A sender doesn't send files to a Trek that
+doesn't list `machine_files` (it says which Trek is needed); pictures alone go to one inline in
+`images`, as before.
+
+```json
+{"type":"upload_part","id":"30","upload_id":"9b1c…","name":"724640981761510973.mov","total":2600000,"offset":0,"data":"AAAAFGZ0…","from":"Tobias's MacBook Pro"}
+  → {"type":"upload_progress","re":"30","upload_id":"9b1c…","received":2600000,"total":2600000,"done":true,"path":"/Users/t/Library/Application Support/dev.trek.Trek/uploads/Tobias's MacBook Pro 2026-11-20 at 10.15.30 724640981761510973.mov"}
+{"type":"upload_part","id":"31","upload_id":"4e0f…","name":"shot.png","total":48211,"offset":0,"data":"iVBORw0K…","from":"Tobias's MacBook Pro","image":true}
+  → {"type":"upload_progress","re":"31","upload_id":"4e0f…","received":48211,"total":48211,"done":true,"path":"…/uploads/Tobias's MacBook Pro 2026-11-20 at 10.15.31 shot.png"}
+{"type":"new_thread","id":"32","project_id":"p","agent":"claude-code","text":"what happens in this clip? @\"/Users/t/Library/Application Support/dev.trek.Trek/uploads/Tobias's MacBook Pro 2026-11-20 at 10.15.30 724640981761510973.mov\"","files":["4e0f…"]}   → ack
+```
 
 **`side_chat`**: the Mac's Side Chat from the phone, a quick question beside a thread in a session
 of its own, which the thread's agent doesn't hear (the phone's `/side`, a sheet over the thread). A

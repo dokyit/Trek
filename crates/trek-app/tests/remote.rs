@@ -5300,6 +5300,8 @@ async fn upload_piece(
         total,
         offset,
         data: tr::base64(bytes),
+        from: None,
+        image: false,
     };
     ask_later(trek, cx, move |reply| tr::HostRequest::UploadPart {
         req,
@@ -5448,6 +5450,100 @@ fn a_phone_s_file_comes_in_pieces_and_goes_with_the_message_as_a_mention() {
             trek_core::media::mentioned_files(&last_message(&trek, cx, &id), None),
             vec![path]
         );
+    });
+}
+
+async fn machine_piece(
+    trek: &common::Trek,
+    cx: &mut gpui_kit::TestAppContext,
+    req: tr::UploadPart,
+) -> tr::HostResult<tr::UploadProgress> {
+    ask_later(trek, cx, move |reply| tr::HostRequest::UploadPart {
+        req,
+        reply,
+    })
+    .await
+}
+
+/// Another Trek's file (feature `machine_files`): kept under the machine's name, made safe, in
+/// `uploads/`; the last piece's reply says where; a picture it sends as an image goes with the
+/// message as one, and something sent as an image that isn't one is mentioned instead.
+#[test]
+fn another_machines_files_are_kept_under_its_name_and_its_pictures_go_as_images() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let dir = trek_app::remote::uploads::uploads_dir();
+        let piece = |name: &str, from: &str, image: bool, bytes: &[u8]| {
+            tr::UploadPart::piece(
+                &tr::new_upload_id(),
+                name,
+                bytes.len() as u64,
+                0,
+                bytes,
+                Some(from),
+                image,
+            )
+        };
+        // A name that tries to climb out, from a machine whose name does too.
+        let clip = piece(
+            "../../../../etc/724640981761510973.mov",
+            "../T-Book",
+            false,
+            b"movie",
+        );
+        let clip_id = clip.upload_id.clone();
+        let got = machine_piece(&trek, cx, clip).await.unwrap();
+        assert!(got.done);
+        let kept = std::path::PathBuf::from(got.path.expect("where it's kept"));
+        assert_eq!(kept.parent(), Some(dir.as_path()));
+        let name = kept.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            name.starts_with("T-Book ") && name.ends_with(" 724640981761510973.mov"),
+            "{name}"
+        );
+        assert_eq!(std::fs::read(&kept).unwrap(), b"movie");
+
+        let mut png = vec![];
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            3,
+            2,
+            image::Rgba([1, 2, 3, 255]),
+        ))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+        let shot = piece("shot.png", "T-Book", true, &png);
+        let shot_id = shot.upload_id.clone();
+        let shot_at =
+            std::path::PathBuf::from(machine_piece(&trek, cx, shot).await.unwrap().path.unwrap());
+        // Says it's a picture, isn't one: mentioned like any file.
+        let fake = piece("fake.png", "T-Book", true, b"not a picture");
+        let fake_id = fake.upload_id.clone();
+        let fake_at =
+            std::path::PathBuf::from(machine_piece(&trek, cx, fake).await.unwrap().path.unwrap());
+
+        ask(
+            &trek,
+            cx,
+            send_with_files(&id, "look", vec![clip_id, shot_id, fake_id]),
+        )
+        .unwrap();
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let (text, images) = trek
+            .items(cx, &id)
+            .into_iter()
+            .rev()
+            .find_map(|i| match i {
+                trek_core::store::Item::User { text, images, .. } => Some((text, images)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            trek_core::media::mentioned_files(&text, None),
+            vec![kept, fake_at]
+        );
+        assert_eq!(images, [shot_at.display().to_string()]);
     });
 }
 

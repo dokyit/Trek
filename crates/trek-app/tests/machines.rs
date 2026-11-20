@@ -222,10 +222,226 @@ fn a_new_thread_in_no_project_starts_on_a_paired_machine() {
     });
 }
 
-/// A file's path is this Mac's: a message to another machine doesn't go with one. It stays in the
-/// composer with its tile, and a toast says why.
+/// A folder of this computer's files, for what a test attaches (out of every data folder).
+fn attachments_dir(name: &str) -> std::path::PathBuf {
+    let dir =
+        std::env::temp_dir().join(format!("trek-machine-files-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Bytes that look like a QuickTime movie (`ftypqt`) and are `len` long, none alike for long.
+fn movie_bytes(len: usize) -> Vec<u8> {
+    let mut bytes = b"\0\0\0\x14ftypqt  \0\0\0\0qt  ".to_vec();
+    bytes.extend((bytes.len()..len).map(|i| (i * 7919 % 251) as u8));
+    bytes
+}
+
+/// A small real PNG.
+fn png_at(path: &std::path::Path) {
+    image::RgbaImage::from_pixel(6, 4, image::Rgba([20, 120, 220, 255]))
+        .save_with_format(path, image::ImageFormat::Png)
+        .unwrap();
+}
+
+/// Where machine B keeps what it's sent: its data folder's `uploads/` (B is this very workspace).
+fn kept_on_b() -> std::path::PathBuf {
+    trek_core::paths::data_dir().join("uploads")
+}
+
+/// B's user message in its own thread `theirs` that `has` picks.
+fn b_message(
+    ws: &trek_app::workspace::Workspace,
+    theirs: &str,
+    has: impl Fn(&str) -> bool,
+) -> Option<(String, Vec<String>)> {
+    ws.live.get(theirs)?.items.iter().find_map(|i| match i {
+        Item::User { text, images, .. } if has(text) => Some((text.clone(), images.clone())),
+        _ => None,
+    })
+}
+
+/// His case (0.4.60 refused it): a 2.6 MB .mov from this Mac and a picture, attached to a new
+/// thread set to run on the paired machine. Both go there first, in the tile's progress, and the
+/// thread starts on B with B's own copies: the video mentioned by B's path to it, the picture
+/// attached as an image. The bytes there are the bytes here, under B's `uploads/`, named for this
+/// computer. Here, the transcript shows this computer's files (the video plays from the copy here,
+/// the picture shows).
 #[test]
-fn a_file_tile_keeps_the_message_from_going_to_another_machine() {
+fn a_video_and_a_picture_go_with_a_new_thread_on_a_paired_machine() {
+    run(async |cx| {
+        let trek = open(cx);
+        let link = serve_as_machine_b(&trek, cx);
+        pair(&trek, cx, link).await;
+        assert!(trek.read(cx, |ws, _| {
+            ws.machines
+                .get("machine-b")
+                .is_some_and(|m| m.entry.paired.serves(tr::feature::MACHINE_FILES))
+        }));
+        let project = trek.project.clone();
+        trek.update(cx, |ws, cx| {
+            ws.navigate(
+                Route::Draft {
+                    project: Some(project.clone()),
+                },
+                cx,
+            );
+            ws.set_draft_machine(Some(&project), Some("machine-b".into()), cx);
+        });
+        trek.render(cx);
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.machine_named_for_send(&Scope::Main))
+                .as_deref(),
+            Some("Machine B")
+        );
+        let (heard, _sub) = listen(&trek, cx);
+        let dir = attachments_dir("his-case");
+        let mov = dir.join("724640981761510973.mov");
+        let movie = movie_bytes(2_600_000);
+        std::fs::write(&mov, &movie).unwrap();
+        let png = dir.join("Screenshot 2026-11-20 at 09.12.44.png");
+        png_at(&png);
+        let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+        composer.update(cx, |c, cx| {
+            c.add_files(std::slice::from_ref(&mov), cx);
+            c.attach_image(png.clone(), cx);
+        });
+        trek.type_text(cx, "what happens in this clip?");
+        trek.press(cx, "enter");
+        trek.render(cx);
+        // On its way: the draft stays as it is while the files go.
+        assert!(trek.read(cx, |ws, _| matches!(ws.route, Route::Draft { .. })));
+        assert_eq!(trek.composer_text(cx), "what happens in this clip?");
+        trek.wait_explained(
+            cx,
+            "the thread on B to open",
+            REAL_TIME_LIMIT,
+            |ws| matches!(&ws.route, Route::Thread(id) if is_remote(id)),
+            |ws| {
+                format!(
+                    "route {:?}, toasts {:?}",
+                    ws.route,
+                    heard.lock().unwrap().toasts
+                )
+            },
+        )
+        .await;
+        let id = trek.thread_id(cx);
+        let (_, theirs) = machines::split_id(&id).unwrap();
+        let theirs = theirs.to_string();
+        trek.wait(cx, "B's thread to have the message", |ws| {
+            b_message(ws, &theirs, |t| t.starts_with("what happens in this clip?")).is_some()
+        })
+        .await;
+        let (text, images) = trek.read(cx, |ws, _| {
+            b_message(ws, &theirs, |t| t.starts_with("what happens in this clip?")).unwrap()
+        });
+        // B's message names B's copy of the video, and attaches B's copy of the picture.
+        let named = trek_core::media::mentioned_files(&text, None);
+        assert_eq!(named.len(), 1, "{text}");
+        let kept = &named[0];
+        assert_eq!(kept.parent(), Some(kept_on_b().as_path()), "{text}");
+        let kept_name = kept.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            kept_name.ends_with(" 724640981761510973.mov") && !kept_name.starts_with("iPhone"),
+            "{kept_name}"
+        );
+        assert!(
+            std::fs::read(kept).unwrap() == movie,
+            "the video's bytes, intact"
+        );
+        assert!(!text.contains(&mov.display().to_string()), "{text}");
+        assert_eq!(images.len(), 1, "{images:?}");
+        let kept_png = std::path::Path::new(&images[0]);
+        assert_eq!(kept_png.parent(), Some(kept_on_b().as_path()));
+        assert_eq!(
+            std::fs::read(kept_png).unwrap(),
+            std::fs::read(&png).unwrap()
+        );
+        // Here: this computer's own files.
+        trek.wait(cx, "the message here, with the files here", |ws| {
+            ws.live.get(&id).is_some_and(|l| {
+                l.items.iter().any(|i| {
+                    matches!(i, Item::User { text, images, .. }
+                        if text.contains(&*mov.display().to_string())
+                            && images == &[png.display().to_string()])
+                })
+            })
+        })
+        .await;
+        assert!(trek.read(cx, |ws, _| {
+            ws.machines.get("machine-b").is_some_and(|m| {
+                m.entry
+                    .sent
+                    .iter()
+                    .any(|c| c.here == mov.display().to_string())
+            })
+        }));
+        // The strip let go of them once the message went.
+        assert!(cx.read(|cx| composer.read(cx).attached_files()).is_empty());
+        assert!(
+            heard.lock().unwrap().toasts.is_empty(),
+            "{:?}",
+            heard.lock().unwrap().toasts
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
+/// A follow-up in a thread already on B takes files too: one on the strip big enough to go in
+/// three pieces, and one only typed as `@/path`, mentioned in place by B's path to it.
+#[test]
+fn a_follow_up_on_a_machine_takes_a_big_file_in_pieces_and_a_typed_mention() {
+    run(async |cx| {
+        let trek = open(cx);
+        let link = serve_as_machine_b(&trek, cx);
+        pair(&trek, cx, link).await;
+        let (_id, theirs) = start_on_b(&trek, cx, "hello there").await;
+        let dir = attachments_dir("follow-up");
+        let big = dir.join("capture.bin");
+        let bytes: Vec<u8> = (0..(2 * tr::MAX_UPLOAD_PART as usize + 1234))
+            .map(|i| (i * 31 % 253) as u8)
+            .collect();
+        std::fs::write(&big, &bytes).unwrap();
+        let notes = dir.join("notes.txt");
+        std::fs::write(&notes, "the notes").unwrap();
+        let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+        composer.update(cx, |c, cx| c.add_files(std::slice::from_ref(&big), cx));
+        trek.type_text(cx, &format!("compare @{} with this", notes.display()));
+        trek.press(cx, "enter");
+        trek.wait(cx, "B's thread to have the follow-up", |ws| {
+            b_message(ws, &theirs, |t| t.starts_with("compare @")).is_some()
+        })
+        .await;
+        let (text, _) = trek.read(cx, |ws, _| {
+            b_message(ws, &theirs, |t| t.starts_with("compare @")).unwrap()
+        });
+        let named = trek_core::media::mentioned_files(&text, None);
+        assert_eq!(named.len(), 2, "{text}");
+        // The typed one where it was typed, the strip's after the words.
+        assert!(named[0].to_string_lossy().ends_with(" notes.txt"), "{text}");
+        assert!(text.contains(" with this"), "{text}");
+        assert_eq!(std::fs::read_to_string(&named[0]).unwrap(), "the notes");
+        assert!(
+            named[1].to_string_lossy().ends_with(" capture.bin"),
+            "{text}"
+        );
+        assert!(
+            std::fs::read(&named[1]).unwrap() == bytes,
+            "three pieces, put together"
+        );
+        for p in &named {
+            assert_eq!(p.parent(), Some(kept_on_b().as_path()));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
+/// What can't go says why and leaves the draft as it was: a machine on an older Trek (no
+/// `machine_files`), a folder. Cancel stops files on their way, and nothing is sent.
+#[test]
+fn an_older_trek_a_folder_and_cancel_leave_the_draft_as_it_was() {
     run(async |cx| {
         let trek = open(cx);
         let link = serve_as_machine_b(&trek, cx);
@@ -235,37 +451,100 @@ fn a_file_tile_keeps_the_message_from_going_to_another_machine() {
         trek.update(cx, |ws, cx| {
             ws.set_draft_machine(None, Some("machine-b".into()), cx)
         });
-        assert_eq!(
-            trek.read(cx, |ws, _| ws.machine_named_for_send(&Scope::Main))
-                .as_deref(),
-            Some("Machine B")
-        );
         let (heard, _sub) = listen(&trek, cx);
         let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
-        let pdf = std::env::temp_dir().join(format!("trek-tile-{}.pdf", std::process::id()));
+        let dir = attachments_dir("refused");
+        let pdf = dir.join("report.pdf");
         std::fs::write(&pdf, b"%PDF-1.4").unwrap();
         trek.type_text(cx, "please read this");
         composer.update(cx, |c, cx| c.add_files(std::slice::from_ref(&pdf), cx));
+
+        // B as an older Trek: it doesn't say it takes files.
+        let features = trek.update(cx, |ws, _| {
+            let m = ws
+                .machines
+                .list
+                .iter_mut()
+                .find(|m| m.id() == "machine-b")
+                .unwrap();
+            let all = m.entry.paired.features.clone();
+            m.entry
+                .paired
+                .features
+                .retain(|f| f != tr::feature::MACHINE_FILES);
+            all
+        });
         trek.press(cx, "enter");
         trek.render(cx);
-        assert!(trek.read(cx, |ws, _| matches!(ws.route, Route::Draft { .. })));
-        assert_eq!(trek.composer_text(cx), "please read this");
-        assert_eq!(
-            cx.read(|cx| composer.read(cx).attached_files()),
-            [pdf.clone()]
-        );
-        {
-            let heard = heard.lock().unwrap();
+        let still = |trek: &Trek, cx: &mut TestAppContext| {
+            assert!(trek.read(cx, |ws, _| matches!(ws.route, Route::Draft { .. })));
+            assert_eq!(trek.composer_text(cx), "please read this");
             assert!(
-                heard
-                    .toasts
-                    .iter()
-                    .any(|t| t.contains("Files can't go to Machine B")),
-                "{:?}",
-                heard.toasts
+                cx.read(|cx| composer.read(cx).attached_files())
+                    .contains(&pdf)
             );
+        };
+        still(&trek, cx);
+        assert!(
+            heard
+                .lock()
+                .unwrap()
+                .toasts
+                .iter()
+                .any(|t| t.starts_with("Machine B needs Trek 0.4.61 or later to receive files.")),
+            "{:?}",
+            heard.lock().unwrap().toasts
+        );
+        trek.update(cx, |ws, _| {
+            let m = ws
+                .machines
+                .list
+                .iter_mut()
+                .find(|m| m.id() == "machine-b")
+                .unwrap();
+            m.entry.paired.features = features;
+        });
+
+        // A folder can't go yet.
+        composer.update(cx, |c, cx| c.add_files(std::slice::from_ref(&dir), cx));
+        trek.press(cx, "enter");
+        trek.render(cx);
+        still(&trek, cx);
+        assert!(
+            heard
+                .lock()
+                .unwrap()
+                .toasts
+                .iter()
+                .any(|t| t.starts_with("Folders can't go to Machine B yet.")),
+            "{:?}",
+            heard.lock().unwrap().toasts
+        );
+        // Taken off, as its tile's × does.
+        composer.update(cx, |c, cx| c.remove_attachment(&dir, cx));
+
+        // On its way (a file big enough to take a while), then Cancel: nothing went, and the
+        // draft is as it was.
+        let big = dir.join("big.mov");
+        std::fs::write(&big, movie_bytes(48 << 20)).unwrap();
+        composer.update(cx, |c, cx| c.add_files(std::slice::from_ref(&big), cx));
+        trek.press(cx, "enter");
+        trek.render(cx);
+        assert!(
+            trek.visible(cx, "machine-upload"),
+            "the line saying how far"
+        );
+        trek.click(cx, "machine-upload-cancel");
+        trek.render(cx);
+        assert!(!trek.visible(cx, "machine-upload"));
+        for _ in 0..20 {
+            cx.run_until_parked();
+            cx.background_executor
+                .timer(Duration::from_millis(10))
+                .await;
         }
-        let _ = std::fs::remove_file(&pdf);
+        still(&trek, cx);
+        let _ = std::fs::remove_dir_all(&dir);
     });
 }
 
@@ -363,6 +642,7 @@ fn machines_json_keeps_what_reconnecting_needs_and_survives_a_bad_entry() {
             name: format!("Machine {id}"),
             last_seen: Some(5),
             projects: [("/Users/me/trek".to_string(), "p1".to_string())].into(),
+            sent: vec![],
         };
         machines::save("this-mac", &[entry("a"), entry("b")]).unwrap();
         let (device, read) = machines::load();
@@ -399,6 +679,7 @@ fn a_machines_items_become_the_thread_views_and_requests_its_cards() {
                 images: 1,
                 aside: false,
                 videos: vec![],
+                image_paths: vec![],
             },
         ),
         item(
@@ -836,6 +1117,7 @@ fn scripted_machine(asked: Arc<Mutex<Asked>>) -> PairLink {
                             images: 0,
                             aside: false,
                             videos: vec![],
+                            image_paths: vec![],
                         },
                     };
                     let _ = reply.send(Ok(tr::Transcript {
