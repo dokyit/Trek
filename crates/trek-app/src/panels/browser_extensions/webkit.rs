@@ -10,7 +10,7 @@
 //! extension's id. Everything here is the main thread's: WebKit calls the delegate there, and the
 //! state is a thread local that no WebKit call is made while borrowing (a call can come back in).
 
-use super::{Extension, extensions_dir, manifest, registry};
+use super::{Extension, compat, extensions_dir, manifest, registry};
 use block2::{DynBlock, RcBlock};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
@@ -64,6 +64,8 @@ struct State {
     prompts: Vec<Pending>,
     /// The popup last shown, for the shots driver to read.
     popup: Option<Retained<WKWebView>>,
+    /// Unseen pages of extensions' own, for the shots driver to ask their APIs from.
+    probes: HashMap<String, Retained<WKWebView>>,
     /// When each extension was last unloaded, and those waiting to load again (`load_when_free`).
     unloaded: HashMap<String, Instant>,
     reloads: Vec<registry::Installed>,
@@ -121,6 +123,14 @@ pub fn ensure() -> bool {
         // SAFETY: main thread; plain object creation and a delegate WebKit holds weakly (kept in
         // the state for as long as the controller).
         unsafe {
+            // Chrome's `<all_urls>` and match patterns take WebSocket addresses too (Privacy
+            // Badger watches `ws://*/*`); WebKit's take only the schemes registered with it.
+            for scheme in ["ws", "wss"] {
+                WKWebExtensionMatchPattern::registerCustomURLScheme(
+                    &NSString::from_str(scheme),
+                    mtm,
+                );
+            }
             let config = if trek_core::paths::isolated() {
                 // A test profile keeps its extensions' storage apart from the user's.
                 let id = NSUUID::from_bytes(uuid_bytes(&trek_core::paths::data_dir()));
@@ -128,6 +138,14 @@ pub fn ensure() -> bool {
             } else {
                 WKWebExtensionControllerConfiguration::defaultConfiguration(mtm)
             };
+            // Extensions' own pages and backgrounds name the browser as the Browser's tabs do
+            // (Safari's agent): without it WebKit's bare agent names none, and an extension that
+            // tells browsers apart by it (Bitwarden) finds no browser and stops.
+            let pages = config.webViewConfiguration();
+            pages.setApplicationNameForUserAgent(Some(&NSString::from_str(
+                &crate::panels::browser::safari_application_name(),
+            )));
+            config.setWebViewConfiguration(Some(&pages));
             let controller = WKWebExtensionController::initWithConfiguration(
                 WKWebExtensionController::alloc(mtm),
                 &config,
@@ -148,6 +166,7 @@ pub fn ensure() -> bool {
                 pages: vec![],
                 prompts: vec![],
                 popup: None,
+                probes: HashMap::new(),
                 unloaded: HashMap::new(),
                 reloads: vec![],
                 next_prompt: 1,
@@ -212,6 +231,13 @@ fn load(entry: registry::Installed) {
         return;
     };
     let folder = entry.folder_in(&extensions_dir());
+    // The Chrome APIs WebKit lacks that can be made from what it has, before its background
+    // (one Trek unpacked; a folder of the user's stays as it is).
+    if entry.folder.is_none()
+        && let Err(e) = compat::patch(&folder)
+    {
+        tracing::warn!("browser extensions: {}: no compat shim: {e}", entry.id);
+    }
     // WebKit takes an absolute file URL (and stops the app on any other).
     let Ok(folder) = folder.canonicalize() else {
         with(|s| {
@@ -310,7 +336,10 @@ fn unload(id: &str) {
     };
     // SAFETY: main thread, no state borrowed.
     let _ = unsafe { controller.unloadExtensionContext_error(&ctx) };
-    with(|s| s.unloaded.insert(id.to_string(), Instant::now()));
+    with(|s| {
+        s.unloaded.insert(id.to_string(), Instant::now());
+        s.probes.remove(id);
+    });
     changed();
 }
 
@@ -700,11 +729,78 @@ fn present_popup(action: &WKWebExtensionAction) -> Result<(), String> {
 
 /// Run `js` in the popup last shown (the shots driver's `ext-popup`): its answer, as text.
 pub fn popup_eval(js: &str) -> async_channel::Receiver<Result<String, String>> {
-    let (tx, rx) = async_channel::bounded(1);
     let Some(page) = with(|s| s.popup.clone()).flatten() else {
+        let (tx, rx) = async_channel::bounded(1);
         let _ = tx.try_send(Err("No popup has been shown.".to_string()));
         return rx;
     };
+    eval_in(&page, js)
+}
+
+/// A page of extension `id`'s own, unseen, for the shots driver to ask its APIs from
+/// (`ext-eval`): its options page, else its popup, else its manifest. Made once; whether it has
+/// loaded.
+pub fn probe(id: &str) -> Result<bool, String> {
+    if let Some(view) = with(|s| s.probes.get(id).cloned()).flatten() {
+        // SAFETY: main thread, a live view.
+        return Ok(!unsafe { view.isLoading() });
+    }
+    let mtm = MainThreadMarker::new().ok_or("Not on the main thread.")?;
+    let ctx = with(|s| s.contexts.get(id).cloned())
+        .flatten()
+        .ok_or_else(|| format!("{id} isn't running."))?;
+    // SAFETY: main thread, a live context; a new view kept in the state.
+    unsafe {
+        let config = ctx
+            .webViewConfiguration()
+            .ok_or("It has no pages of its own.")?;
+        let popup = registry::load(&extensions_dir())
+            .into_iter()
+            .find(|e| e.id == id)
+            .and_then(|e| {
+                std::fs::read_to_string(e.folder_in(&extensions_dir()).join("manifest.json")).ok()
+            })
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|m| {
+                let action = if m["action"].is_object() {
+                    &m["action"]
+                } else {
+                    &m["browser_action"]
+                };
+                action["default_popup"]
+                    .as_str()
+                    .map(|p| p.trim_start_matches('/').to_string())
+            })
+            .unwrap_or_else(|| "manifest.json".to_string());
+        let url = ctx
+            .optionsPageURL()
+            .or_else(|| {
+                NSURL::URLWithString_relativeToURL(
+                    &NSString::from_str(&popup),
+                    Some(&ctx.baseURL()),
+                )
+            })
+            .unwrap_or_else(|| ctx.baseURL());
+        let rect = NSRect::new(NSPoint::new(0., 0.), NSSize::new(400., 300.));
+        let view = WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), rect, &config);
+        view.loadRequest(&NSURLRequest::requestWithURL(&url));
+        with(|s| s.probes.insert(id.to_string(), view));
+    }
+    Ok(false)
+}
+
+/// Run `js` in extension `id`'s unseen page (`probe`, loaded): its answer, as text.
+pub fn probe_eval(id: &str, js: &str) -> async_channel::Receiver<Result<String, String>> {
+    let Some(page) = with(|s| s.probes.get(id).cloned()).flatten() else {
+        let (tx, rx) = async_channel::bounded(1);
+        let _ = tx.try_send(Err("No page of it is open.".to_string()));
+        return rx;
+    };
+    eval_in(&page, js)
+}
+
+fn eval_in(page: &WKWebView, js: &str) -> async_channel::Receiver<Result<String, String>> {
+    let (tx, rx) = async_channel::bounded(1);
     let done = RcBlock::new(
         move |value: *mut objc2::runtime::AnyObject, error: *mut NSError| {
             // SAFETY: WebKit hands a valid value or nil, and an error or nil, on the main thread.

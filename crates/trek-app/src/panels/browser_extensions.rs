@@ -16,6 +16,8 @@
 //! Before anything installs, the page shows what it may do (`manifest`), and waits for Install.
 
 pub mod catalog;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // Only WebKit's extensions need it.
+pub mod compat;
 pub mod manifest;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // WebView2 keeps its own list.
 pub mod registry;
@@ -495,6 +497,22 @@ pub fn settings_summary() -> String {
     what.to_string()
 }
 
+/// Whether the Browser's menu should offer to block ads (macOS: no ad blocker installed and on;
+/// WebView2 lists its extensions only from a view, so there the Extensions page offers it).
+pub fn offers_ad_blocking() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        webkit::supported()
+            && catalog::ad_offer(
+                registry::load(&extensions_dir())
+                    .iter()
+                    .map(|e| (e.id.as_str(), e.enabled)),
+            ) != catalog::AdOffer::Blocking
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
 /// Whether extensions run here now: WebKit's need macOS 15.4.
 fn supported() -> bool {
     #[cfg(target_os = "macos")]
@@ -869,6 +887,21 @@ pub async fn change_for_driver(
     reply.recv().await.map_err(|e| e.to_string())?
 }
 
+/// The id of installed extension `spec` (its id, or the first whose name has it), for the driver.
+#[cfg(target_os = "macos")]
+pub fn id_for_driver(spec: &str) -> Result<String, String> {
+    let needle = spec.to_lowercase();
+    let list = webkit::list();
+    list.iter()
+        .find(|e| e.id == spec)
+        .or_else(|| {
+            list.iter()
+                .find(|e| e.name.to_lowercase().contains(&needle))
+        })
+        .map(|e| e.id.clone())
+        .ok_or_else(|| format!("No extension {spec:?} is installed."))
+}
+
 /// Open the extension pages of extension `spec` (its options), for the driver.
 #[cfg(target_os = "macos")]
 pub fn options_for_driver(spec: &str) -> Result<(), String> {
@@ -935,6 +968,8 @@ pub struct ExtensionsPage {
     pending: Option<Pending>,
     /// The installed extension whose permissions are shown.
     expanded: Option<String>,
+    /// Block ads (`block_ads`) once the installed list is in.
+    ads_when_listed: bool,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -981,6 +1016,7 @@ impl ExtensionsPage {
             error: None,
             pending: None,
             expanded: None,
+            ads_when_listed: false,
             _tasks: vec![],
             _subscriptions: subscriptions,
         };
@@ -1013,7 +1049,10 @@ impl ExtensionsPage {
                 this.busy = None;
                 match answer {
                     Ok(value) => done(this, value, cx),
-                    Err(e) => this.error = Some(e),
+                    Err(e) => {
+                        tracing::warn!("browser extensions: {what} failed: {e}");
+                        this.error = Some(e)
+                    }
                 }
                 cx.notify();
             });
@@ -1029,9 +1068,12 @@ impl ExtensionsPage {
             self.seen = webkit::generation();
         }
         let reply = backend::list(self.raw(cx));
-        self.run("Loading…", reply, cx, |this, items, _| {
+        self.run("Loading…", reply, cx, |this, items, cx| {
             this.items = items;
             this.loaded = true;
+            if std::mem::take(&mut this.ads_when_listed) {
+                this.block_ads(cx);
+            }
         });
     }
 
@@ -1047,6 +1089,93 @@ impl ExtensionsPage {
         {
             self.install_from_store(Store::Chrome, only.id.to_string(), cx);
         }
+    }
+
+    /// Block ads: the ad blocker installed already but off goes on; else uBlock Origin Lite is
+    /// downloaded and waits behind its Install card (the one confirmation).
+    pub fn block_ads(&mut self, cx: &mut Context<Self>) {
+        match self.ad_offer() {
+            Some(catalog::AdOffer::TurnOn(id)) => self.change(id, Some(true), cx),
+            Some(catalog::AdOffer::Blocking) => {}
+            Some(catalog::AdOffer::Install) => {
+                self.install_from_store(Store::Chrome, catalog::AD_BLOCKER.to_string(), cx)
+            }
+            // Once the page has listed what's installed.
+            None => self.ads_when_listed = true,
+        }
+    }
+
+    /// What the page offers about ads, once it has listed what's installed.
+    fn ad_offer(&self) -> Option<catalog::AdOffer> {
+        self.loaded
+            .then(|| catalog::ad_offer(self.items.iter().map(|e| (e.id.as_str(), e.enabled))))
+    }
+
+    /// The page's first suggestion while no ad blocker is on: one click to block ads.
+    fn ad_card(&self, offer: &catalog::AdOffer, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = cx.theme().clone();
+        let (title, body, label) = match offer {
+            catalog::AdOffer::Blocking => return None,
+            catalog::AdOffer::Install => (
+                "Block ads on every site",
+                "uBlock Origin Lite blocks ads and trackers, YouTube's ads too, in its \
+                 recommended mode on every site. It comes from the Chrome Web Store; you'll see \
+                 what it may do before it installs.",
+                "Block ads",
+            ),
+            catalog::AdOffer::TurnOn(_) => (
+                "Ads aren't blocked",
+                "Your ad blocker is installed but off.",
+                "Turn it on",
+            ),
+        };
+        let busy = self.busy.is_some();
+        Some(
+            h_flex()
+                .id("browser-extensions-ads")
+                .p(px(12.))
+                .gap(px(10.))
+                .rounded(px(radius::BUTTON))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.secondary)
+                .child(
+                    Icon::new(crate::assets::Lucide::Shield)
+                        .small()
+                        .text_color(crate::palette::emerald(cx)),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(to_rems(text::LABEL))
+                                .font_medium()
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_size(to_rems(text::META))
+                                .text_color(theme.muted_foreground)
+                                .child(body),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("browser-extensions-block-ads")
+                        .test_support()
+                        .child(
+                            Button::new("browser-extensions-block-ads-button")
+                                .small()
+                                .primary()
+                                .label(label)
+                                .disabled(busy)
+                                .on_click(cx.listener(|this, _, _, cx| this.block_ads(cx))),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     fn install_from_store(&mut self, store: Store, id: String, cx: &mut Context<Self>) {
@@ -1408,6 +1537,10 @@ impl ExtensionsPage {
         let m = &p.manifest;
         let asks = manifest::describe(m);
         let fit = p.fit.map(|f| Self::fit_label(f, cx));
+        let ad_blocker = p
+            .folder
+            .file_name()
+            .is_some_and(|n| n == catalog::AD_BLOCKER);
         v_flex()
             .id("browser-extension-review")
             .p(px(12.))
@@ -1458,6 +1591,23 @@ impl ExtensionsPage {
                             .child(format!("• {a}"))
                     })),
             )
+            .when(ad_blocker, |el| {
+                el.child(
+                    div()
+                        .text_size(to_rems(text::META))
+                        .text_color(theme.muted_foreground)
+                        .child(if cfg!(windows) {
+                            "That reach is what lets it hide ads inside pages, not only stop \
+                             them loading. It blocks in its recommended mode (Optimal) on every \
+                             site from the next page you open."
+                        } else {
+                            "That reach is what lets it hide ads inside pages, not only stop \
+                             them loading. It blocks in its recommended mode (Optimal) on every \
+                             site from the next page you open; its button beside the address \
+                             changes the mode for a site."
+                        }),
+                )
+            })
             .when_some(
                 fit.and_then(|(c, v, why)| why.map(|w| (c, v, w))),
                 |el, (color, verdict, why)| {
@@ -1528,6 +1678,11 @@ impl Render for ExtensionsPage {
                     cx,
                 )
             });
+        // Blocking ads first, while none is on and its own Install card isn't up.
+        let ads = self
+            .ad_offer()
+            .filter(|_| supported() && self.pending.is_none())
+            .and_then(|offer| self.ad_card(&offer, cx));
         let query = self.query.trim().to_string();
         let searching_name = !query.is_empty() && store_id(&query).is_none();
         let heading = |text: &'static str| {
@@ -1592,6 +1747,7 @@ impl Render for ExtensionsPage {
                         .child(why),
                 )
             })
+            .children(ads)
             .when(supported(), |el| {
                 el.child(
                     h_flex()

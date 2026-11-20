@@ -1413,6 +1413,61 @@ async fn browser(
             std::fs::write(dir.join("browser-popup.txt"), text)?;
             Ok(())
         }
+        // `ext-eval <id or name> <js>`: an expression (a promise is awaited) in a page of the
+        // extension's own, where its APIs are (`chrome.declarativeNetRequest`, `runtime`…); the
+        // answer as JSON in `browser-ext-eval.txt`.
+        #[cfg(target_os = "macos")]
+        "ext-eval" => {
+            use crate::panels::browser_extensions as ext;
+            let (spec, js) = rest.split_once(' ').ok_or_else(|| {
+                anyhow::anyhow!("browser ext-eval needs an extension and a script")
+            })?;
+            let id = cx
+                .update(|_| ext::id_for_driver(spec))
+                .map_err(|e| anyhow::anyhow!("browser ext-eval: {e}"))?;
+            let mut loaded = false;
+            for _ in 0..50 {
+                loaded = cx
+                    .update(|_| ext::webkit::probe(&id))
+                    .map_err(|e| anyhow::anyhow!("browser ext-eval: {e}"))?;
+                if loaded {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(200))
+                    .await;
+            }
+            anyhow::ensure!(loaded, "browser ext-eval: its page didn't load");
+            let start = format!(
+                "window.__trekProbe = undefined; Promise.resolve().then(async () => ({js})).then(\
+                 v => window.__trekProbe = JSON.stringify({{ ok: v === undefined ? null : v }}), \
+                 e => window.__trekProbe = JSON.stringify({{ error: String(e && e.stack || e) }})); true"
+            );
+            cx.update(|_| ext::webkit::probe_eval(&id, &start))
+                .recv()
+                .await
+                .map_err(|_| anyhow::anyhow!("browser ext-eval: the page closed"))?
+                .map_err(|e| anyhow::anyhow!("browser ext-eval: {e}"))?;
+            let mut answer = String::new();
+            for _ in 0..150 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(200))
+                    .await;
+                let got = cx
+                    .update(|_| ext::webkit::probe_eval(&id, "window.__trekProbe ?? ''"))
+                    .recv()
+                    .await
+                    .map_err(|_| anyhow::anyhow!("browser ext-eval: the page closed"))?
+                    .map_err(|e| anyhow::anyhow!("browser ext-eval: {e}"))?;
+                if !got.is_empty() {
+                    answer = got;
+                    break;
+                }
+            }
+            anyhow::ensure!(!answer.is_empty(), "browser ext-eval: no answer in 30 s");
+            std::fs::write(dir.join("browser-ext-eval.txt"), answer)?;
+            Ok(())
+        }
         #[cfg(target_os = "macos")]
         "ext-options" => {
             crate::panels::browser_extensions::options_for_driver(rest)

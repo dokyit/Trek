@@ -248,17 +248,30 @@ fn plist_version(xml: &str, key: &str) -> Option<String> {
     (!v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.')).then(|| v.to_string())
 }
 
+/// The version of the Safari installed (the one the Browser says it is).
+#[cfg(target_os = "macos")]
+fn safari_version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| {
+        std::fs::read_to_string("/Applications/Safari.app/Contents/Info.plist")
+            .ok()
+            .and_then(|xml| plist_version(&xml, "CFBundleShortVersionString"))
+            .unwrap_or_else(|| SAFARI_FALLBACK.to_string())
+    })
+}
+
 /// The user agent the Browser's views send: Safari's, at the version installed.
 #[cfg(target_os = "macos")]
 fn user_agent() -> &'static str {
     static UA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    UA.get_or_init(|| {
-        let version = std::fs::read_to_string("/Applications/Safari.app/Contents/Info.plist")
-            .ok()
-            .and_then(|xml| plist_version(&xml, "CFBundleShortVersionString"))
-            .unwrap_or_else(|| SAFARI_FALLBACK.to_string());
-        safari_user_agent(&version)
-    })
+    UA.get_or_init(|| safari_user_agent(safari_version()))
+}
+
+/// What WebKit appends to its own agent to make the Browser's (`user_agent`): for views WebKit
+/// makes itself, such as extensions' pages and backgrounds.
+#[cfg(target_os = "macos")]
+pub fn safari_application_name() -> String {
+    format!("Version/{} Safari/605.1.15", safari_version())
 }
 
 /// A rectangle (window points) moved onto whole device pixels: each edge goes to the nearest
@@ -3196,6 +3209,23 @@ impl BrowserPanel {
                 }))
                 .into_any_element()
         };
+        // No ad blocker on: block ads with uBlock Origin Lite, on the Extensions page.
+        if !(imported.is_some() && on) && browser_extensions::offers_ad_blocking() {
+            rows.push(
+                ui::menu_row("browser-block-ads", false, cx)
+                    .test_support()
+                    .child(Icon::new(Lucide::Shield).small().text_color(muted))
+                    .child(div().flex_1().child("Block ads on every site…"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.set_menu_open(false, cx);
+                        this.set_extensions_open(true, window, cx);
+                        if let Some((page, _)) = &this.extensions {
+                            page.update(cx, |page, cx| page.block_ads(cx));
+                        }
+                    }))
+                    .into_any_element(),
+            );
+        }
         match &imported {
             None if cfg!(windows) || busy.is_none() => {
                 rows.push(import_row("Import uBlock Origin…", cx));
@@ -3420,9 +3450,10 @@ impl BrowserPanel {
         #[cfg(any(target_os = "macos", windows))]
         let block_row = {
             let blocking = self.workspace.read(cx).settings.browser.block_trackers;
-            // The Mac's list takes in ad networks too; Edge's tracking prevention, trackers.
+            // The Mac's list takes in ad networks too; Edge's tracking prevention, trackers. Not
+            // "ads": a site's own ads (YouTube's) aren't on it; that's the ad blocker's.
             let label = if cfg!(target_os = "macos") {
-                "Block ads and trackers"
+                "Block ad and tracker networks"
             } else {
                 "Block trackers"
             };

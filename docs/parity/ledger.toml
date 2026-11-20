@@ -671,7 +671,7 @@ what = "Block trackers"
 macos = "yes"
 windows = "yes"
 live = ["route project:{project}", "tools browser", "wait 600", "click browser-more-button", "wait 300", "count browser-block-trackers 1", "key escape"]
-how = { macos = "Block ads and trackers: the big ad and tracker networks, as WebKit content rules.", windows = "Block trackers: Edge's Strict tracking prevention, the WebView2 profile's level (ads are the imported ad blocker's)." }
+how = { macos = "Block ad and tracker networks: the big ad and tracker networks, as WebKit content rules (a site's own ads, YouTube's, are the ad blocker's: browser-extensions).", windows = "Block trackers: Edge's Strict tracking prevention, the WebView2 profile's level (ads are the imported ad blocker's)." }
 code = ["crates/trek-app/src/panels/browser.rs"]
 
 [[feature]]
@@ -692,8 +692,9 @@ what = "Browser extensions with their button, popup and options"
 macos = "yes"
 windows = "partial"
 live = ["route project:{project}", "tools browser", "wait 600", "click browser-more-button", "wait 300", "count browser-extensions-open 1", "key escape"]
-note = "WebView2 runs unpacked extensions' content scripts only: no toolbar button, popup or options page. Those pages hosted in a Trek-made view would close it. The starters say so on Windows (catalog.rs's webview2 fit): Bitwarden and 1Password can't work (the vault is the popup), Grammarly, Dark Reader and uBlock Origin Lite partly."
-code = ["crates/trek-app/src/panels/browser_extensions.rs", "crates/trek-app/src/panels/browser_extensions/catalog.rs"]
+how = { macos = "WebKit's WKWebExtension, with Trek's shim for APIs it lacks (compat.rs). Block ads on every site: the Extensions page's first card (and the ⋯ menu) installs uBlock Origin Lite with one confirmation, at its Optimal mode everywhere; YouTube's search ads, pre-roll and feed tiles go (checked 2026-11-20). Dark Reader and Vimium work too; Grammarly needs a sign-in; React Developer Tools partly; Bitwarden, 1Password, Privacy Badger don't (chrome.notifications, webRequest header options).", windows = "WebView2's profile extensions: the same page and Block ads card, content scripts and rules only." }
+note = "WebView2 runs unpacked extensions' content scripts only: no toolbar button, popup or options page. Those pages hosted in a Trek-made view would close it. The starters say so on Windows (catalog.rs's webview2 fit): Bitwarden and 1Password can't work (the vault is the popup), Grammarly, Dark Reader and uBlock Origin Lite partly. The ⋯ menu's Block ads row is the Mac's alone (WebView2 lists its extensions only from a view); the page's card is on both."
+code = ["crates/trek-app/src/panels/browser_extensions.rs", "crates/trek-app/src/panels/browser_extensions/catalog.rs", "crates/trek-app/src/panels/browser_extensions/compat.rs"]
 
 [[feature]]
 id = "terminal-previews"
