@@ -1,6 +1,6 @@
 # trekdesktop.com
 
-Trek's website: one page, a privacy page and a not-found page. Plain HTML, CSS and a little
+Trek's website: one page, a privacy page, a short terms page and a not-found page. Plain HTML, CSS and a little
 JavaScript. There is no framework and no build step; the folder is served as it is.
 
 ```
@@ -9,6 +9,7 @@ site/
                         signpost and the line, the app's window, the features (each shown by the
                         app doing it, three with a line drawing), the iPhone, the download list
   privacy/index.html    docs/PRIVACY.md in plain words, and what this site itself does
+  terms/index.html      the licence and terms of use in plain words (what Apache-2.0 already says)
   remote/               the web remote: Trek's remote for a phone's browser (an Android phone first of
                         all), which pairs from Trek's QR code and talks to Trek on the user's computer
                         over WebTransport. A web app of its own; docs/MOBILE.md, "The web remote"
@@ -175,5 +176,6 @@ run `script/site/stamp.py`, which gives its links a new address.
 ## Rules for the words
 
 Every claim on the home page is true today and stays within what this repository's `README.md`
-says. The privacy page follows `docs/PRIVACY.md`. No testimonials, no logos of other companies, no
-competitors' names, and nothing that isn't shipped.
+says. The privacy page follows `docs/PRIVACY.md`. No testimonials, no logos of other companies on the home page (the web remote shows the agents'
+own marks, as the app does, with the trademark note in `NOTICE`), no competitors' names, and
+nothing that isn't shipped.

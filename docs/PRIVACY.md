@@ -7,9 +7,9 @@ Trek asks once, on the first launch after onboarding (and once for anyone who us
 - **Never shared:** prompts, code, file names, paths, transcripts, keys or account emails.
 - **With a no:** nothing is sent, ever, except feedback the user sends themselves.
 
-Everything goes to [PostHog](https://posthog.com) (US cloud, `us.i.posthog.com`), through its capture API, from `crates/trek-telemetry`.
+Everything goes to [PostHog](https://posthog.com) (US cloud, `us.i.posthog.com`), through its capture API, from `crates/trek-telemetry`. There is no PostHog SDK in the app, the iPhone app or the site, so there is no autocapture, session replay, page view or heatmap: only the events listed below are sent. Every request Trek itself makes names the app and its version in its User-Agent (`Trek/<version>`).
 
-Dictation is apart from all of this. On Windows the composer's mic turns speech into text on the PC itself, with Whisper (whisper.cpp running OpenAI's multilingual base model): what the mic hears never leaves the PC, and Trek sends it nowhere. The first time the mic is clicked, the speech model (141 MB) downloads from Hugging Face (`huggingface.co`, a fixed revision of `ggerganov/whisper.cpp`, checked against its SHA-256 before it's used). That download is the only request dictation makes, and nothing downloads before that click. The model is kept in `%LOCALAPPDATA%\trek\Trek\data\dictation` (the local data folder, which a roaming profile doesn't copy between PCs), and **Settings › General › Dictation** removes it. Agents' `watch_video` uses the same model to transcribe a video's audio on the PC when whisper isn't installed; it never downloads the model itself, and the audio stays on the PC too. A Trek installed as a Windows package would use Windows' online speech recognition instead, and then what the mic hears goes to Microsoft's speech service, as it does for Windows' own voice typing.
+Dictation is apart from all of this. On a Mac the mic uses Apple's speech recognition (`SFSpeechRecognizer`): on the Mac itself where the system can, and on Apple's servers where it can't; `watch_video`'s audio on a Mac goes the same way. On Windows the composer's mic turns speech into text on the PC itself, with Whisper (whisper.cpp running OpenAI's multilingual base model): what the mic hears never leaves the PC, and Trek sends it nowhere. The first time the mic is clicked, the speech model (141 MB) downloads from Hugging Face (`huggingface.co`, a fixed revision of `ggerganov/whisper.cpp`, checked against its SHA-256 before it's used). That download is the only request dictation makes, and nothing downloads before that click. The model is kept in `%LOCALAPPDATA%\trek\Trek\data\dictation` (the local data folder, which a roaming profile doesn't copy between PCs), and **Settings › General › Dictation** removes it. Agents' `watch_video` uses the same model to transcribe a video's audio on the PC when whisper isn't installed; it never downloads the model itself, and the audio stays on the PC too. A Trek installed as a Windows package would use Windows' online speech recognition instead, and then what the mic hears goes to Microsoft's speech service, as it does for Windows' own voice typing.
 
 ## When nothing is sent
 
@@ -70,7 +70,7 @@ Every usage event carries these properties:
 `feature_used` names are Trek's own words, never anything typed:
 
 - agents: `claude-code`, `codex`, `opencode`, `droid`, `acp:<registry id>` (`acp:cursor`), `direct:<provider>` (`direct:anthropic`, `direct:ollama`). An agent the user added as their own command is `acp:other`; a custom endpoint is `direct:other`. One count per message sent to it.
-- tools (the tools panel): `git`, `explorer`, `terminal`, `browser`, `side-chat`, `simulator`, `iphone`. One count per opening.
+- tools (the tools panel): `git`, `explorer`, `terminal`, `browser`, `side-chat`, `simulator`, `iphone`, `plugin`. One count per opening.
 - actions (usage totals only): `thread-started`, `sub-agent`, `handoff`, `study-learn`, `study-practice`, `note-created`, `turn-failed`, `turn-stopped`. One count each time.
 
 `tokens_used` adds up what agents report at the end of each turn, on this computer, and sends the day's sums: never a thread, a project, a prompt or an answer. `agent` is named as in `feature_used`. `model` is the provider's own id for a model Trek has a price for (`claude-opus-5-5`), and `other` for anything else: a model the user named, a custom endpoint's, or one running on their computer. `api_cost_usd` is what those tokens would cost at the provider's API prices (the agent's own figure where it gives one, else Trek's price table on that day); it is not what anyone paid, since most people run agents on a subscription. `reports` is how many reports were added up, and `unpriced_reports` how many of them had no price, so their tokens are in the sums and their cost isn't. History imported from an agent's own files, and anything from before the yes, is never counted.
@@ -99,7 +99,7 @@ The `feedback` event:
 | `email` | Only if they gave one. |
 | `diagnostics` | Whether diagnostics are included. |
 | `recent_errors` | With diagnostics: up to 20 warning and error lines from the last two days' logs, scrubbed. |
-| `log_tail` | With diagnostics: the last 200 lines of Trek's log, scrubbed. |
+| `log_tail` | With diagnostics: the last 200 lines of Trek's log, scrubbed, each cut to 400 characters. |
 
 With diagnostics it also carries the version, OS and architecture properties above; without, none of them. With a yes to telemetry the `distinct_id` is the install id; otherwise it's a new random id each time, so feedback can't be tied to anything.
 
@@ -110,6 +110,32 @@ Without a key (or in the verify profile) the form says so, and its button copies
 The iPhone app has the same form in Settings › Send feedback…. It sends the `feedback` event straight to PostHog (`$lib: trek-ios`, a new random id each time) with the project key it was built with: the `TREK_POSTHOG_KEY` and `TREK_POSTHOG_HOST` build settings, which the build's environment sets, become `TrekPostHogKey` and `TrekPostHogHost` in its Info.plist. Its diagnostics are the app's version, the iOS version and the architecture; it has no log to send. Without a key, and in the demo (`-TrekDemo YES`), nothing is sent and the button copies the report. The iPhone app has no usage data or crash reports.
 
 What's typed, dictated or attached on the iPhone goes to the paired computer and from there to the agent chosen on it, so to that agent's provider when it is a cloud one; Trek has no server in that path. The app asks before the first message, and again before the first to a provider it hasn't named (`ios/Trek/Model/Sharing.swift`; the yes is kept with the wording's version, and Settings › Privacy and feedback withdraws it). Its privacy manifest is `ios/Trek/PrivacyInfo.xcprivacy`; `ios/README.md` has the App Store notes.
+
+## Other hosts the app talks to
+
+Apart from PostHog, and apart from the agents' and model providers' own servers (which receive what the user sends them, as in a terminal), Trek makes these requests. The privacy page on the site lists them in plain words; keep the two in step.
+
+| Host | When |
+| --- | --- |
+| `github.com/dokyit/Trek/releases` (the update feed, `stable.json` or the channel's) and `api.github.com` (What's new) | Update check, every hour, on by default (Settings › Updates › Check automatically); the update is fetched in the background (Download automatically, on by default). |
+| `registry.npmjs.org`, `formulae.brew.sh`, `raw.githubusercontent.com`, `api.github.com`, `community.chocolatey.org`, `downloads.claude.ai`, `x.ai`, `static.devin.ai`, `cursor.com`, `app.factory.ai` | Version checks for the agents' CLIs, at launch and every 12 hours, on by default (Settings › Updates); the hosts asked follow from the agents found. |
+| `cdn.agentclientprotocol.com` and the binary URLs it names | The registry's list when Add agent opens (cached); a download when an agent is installed from it. |
+| `nodejs.org`, `ffmpeg.martin-riedl.de`, `github.com/GyanD`, GitHub releases for yt-dlp | When the user sets up Node.js, ffmpeg or yt-dlp. yt-dlp then reaches the video's own site when an agent watches a YouTube or X link. |
+| `huggingface.co` | The Windows dictation model, on the first click of the mic. |
+| `clients2.google.com`, `edge.microsoft.com` | A browser extension's download, when the user installs one. |
+| `www.google.com` | The built-in Browser's start page asks for six sites' icons (`/s2/favicons`) when it opens; its address bar searches Google for text that isn't an address. |
+| `cdn.jsdelivr.net` | Study question cards load KaTeX (`study_card.html`) every time one is drawn. |
+| Any `https` host | A note's remote images (fetched by the Mac, and by the iPhone itself); a `trek-html` artifact's own scripts, styles and fonts, which its card names. |
+| `ntfy.sh` or the user's own server | Phone notifications, off by default. A note says the kind of news and carries a `trek://` link; it names the thread and project only when the `push_names` setting is on (off by default). ntfy reads whatever is sent through it. |
+| The browser's push service (`fcm.googleapis.com`, `web.push.apple.com`, `updates.push.services.mozilla.com`) | Web Push to the web remote, when the user turns its notifications on. Encrypted. |
+
+The web remote (`site/remote`) loads nothing from another host. Its dictation uses the browser's own `SpeechRecognition`, which in Chrome and on Android is the browser maker's cloud service.
+
+## Known gaps
+
+- `log_tail` and `recent_errors` are scrubbed of paths, emails and key-shaped strings, not of web addresses: Trek's own browser logs the addresses it opens (`panels/browser.rs`), so a feedback report with diagnostics can carry them. The form shows everything before it goes, and the privacy page says so.
+- Study cards fetch KaTeX from `cdn.jsdelivr.net` instead of bundling it.
+- The 1-year retention and the discarding of client IPs are settings of the PostHog project, not of the code (see "The install id"); the privacy page says only what the code guarantees about the address, and a year for retention.
 
 ## Download counts
 
