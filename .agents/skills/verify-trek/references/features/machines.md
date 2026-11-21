@@ -64,9 +64,29 @@ $T control pair-self leave                     # forget B, revoke the pairing, a
 
 While the app is paired with itself, Devices lists it as a machine with every thread of the app's own (they're all B's too), which pushes a phone's row down: `pair-self leave` puts it back as it was. A project with no threads yet isn't one B lists, so a new thread in it can't start there ("<project> isn't on <B> yet…", said before anything is sent); `$T open no-project` starts one in no project instead.
 
+### Sub-agents and background work of a thread on B
+
+A thread on B shows what it has out beyond its turn as the same thread does at home (Trek 0.4.64; until then only the sidebar's badge did): a row per sub-agent in the turn that started it (`subagent#<n>`, its label, status line and steps, running/done/failed, its clock; opened, its latest calls), with Stop (`subagent-stop#<n>`) and, where its agent takes one, a message (`subagent-message#<n>`), both going to B; Trek's own (`delegate_task`) opens its thread on B (`subagent-open#<n>`; the thread comes as B's `unlisted` row and is never in the sidebar's list), whose own sub-agents show the same way. The working bar says "Waiting on 2 sub-agents" (`waiting-on`, its list `sub-agents-at-work`), the hub has "Sub-agents · 2" (`hub-subagents`), and the strip above the composer lists B's background commands (`background-strip`, `bg-task#<n>`; output read from B, Stop goes to B; no "Full output", B's file can't open here). The sidebar's badge, the working bar and the rows read one list, so they agree.
+
+```sh
+$T open no-project
+$T control pair-self
+$T control wait 3000
+$T control machine-draft
+$T control type "Scout the code with subagents 240s"   # the mock's two background scouts (`mock:delegate subagents 60s` for Trek's own with its own)
+$T control key enter
+$T control wait 4000
+$T control elements                                     # subagent#2, subagent#3, waiting-on, hub-subagents
+$T control click "subagent#2"                           # after the first step (a third of the time): its calls
+$T screenshot machine-sub-agents
+$T control pair-self leave
+```
+
+A B before 0.4.64 sends no `activity` (an opened row lists no calls) and no `continued` (no onward arrow for a sub-agent woken again); a B before `sub_agent_view` sends no links (rows read from the call alone, no Stop for the agent's own).
+
 ## Code
 
-`crates/trek-app/src/machines.rs` (registry, `machines.json`, the client per machine, mapping B's rows and items to `Thread`/`Item`/`PendingPermission`, the actions), `machines/clone.rs` (origin URL, ignored files, uploads), `machines/files.rs` (what goes with a message, why it can't, the message shaped for B, B's copies shown as the files here), `machines/sheets.rs` (Add a machine…, Add to another machine…), `composer/machine_chip.rs`, `composer/machine_upload.rs` (the attachments on their way, progress, Cancel), the Machines group in `settings_view/mobile.rs`, the machine groups in `sidebar.rs`, the `machines::is_remote` guards in `workspace.rs`. Client: `crates/trek-remote/src/client.rs` (`Client::upload_file`); host side: `remote.rs`, `remote/machines.rs`, `remote/uploads.rs`. Design: `docs/MULTI-MACHINE.md`; wire: `docs/MOBILE.md` (`uploads`, `machine_files`). Tests: `crates/trek-app/tests/machines.rs` (`cargo test -p trek-app --test machines`), `machines/files.rs`'s own, `crates/trek-remote/tests/client.rs` (`a_file_goes_up_in_pieces_and_comes_out_whole`), `crates/trek-app/tests/remote.rs` (`another_machines_files_…`).
+`crates/trek-app/src/machines.rs` (registry, `machines.json`, the client per machine, mapping B's rows and items to `Thread`/`Item`/`PendingPermission`, the actions), `machines/clone.rs` (origin URL, ignored files, uploads), `machines/files.rs` (what goes with a message, why it can't, the message shaped for B, B's copies shown as the files here), `machines/sheets.rs` (Add a machine…, Add to another machine…), `machines/sub_agents.rs` (steering B's sub-agents and background commands; the rows are `SubAgentRow::of_machine` in `thread_view.rs`, the list `Workspace::machine_sub_agents` in `workspace/sub_agents.rs`), `composer/machine_chip.rs`, `composer/machine_upload.rs` (the attachments on their way, progress, Cancel), the Machines group in `settings_view/mobile.rs`, the machine groups in `sidebar.rs`, the `machines::is_remote` guards in `workspace.rs`. Client: `crates/trek-remote/src/client.rs` (`Client::upload_file`); host side: `remote.rs`, `remote/machines.rs`, `remote/uploads.rs`. Design: `docs/MULTI-MACHINE.md`; wire: `docs/MOBILE.md` (`uploads`, `machine_files`). Tests: `crates/trek-app/tests/machines.rs` (`cargo test -p trek-app --test machines`), `machines/files.rs`'s own, `crates/trek-remote/tests/client.rs` (`a_file_goes_up_in_pieces_and_comes_out_whole`), `crates/trek-app/tests/remote.rs` (`another_machines_files_…`); B's sub-agents and background work: `tests/machines.rs` (`a_thread_on_another_machine_shows_its_agents_sub_agents_at_work_as_it_does_at_home`, `trek_s_own_sub_agent_on_another_machine_opens_here_with_its_own_and_stops_from_here`, `background_work_of_a_thread_on_another_machine_shows_reads_and_stops_from_here`) and `crates/trek-remote/tests/protocol.rs` (`a_sub_agent_link_carries_its_steps_and_where_it_went_and_older_links_still_read`).
 
 ## Verify
 

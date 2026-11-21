@@ -2039,3 +2039,341 @@ fn a_machine_in_devices_shows_three_quiet_threads_and_the_rest_behind_show_more(
         assert!(trek.visible(cx, "machine-more-machine-c"));
     });
 }
+
+// ---- A thread on another machine at work beyond its own turn ----
+//
+// Trek paired with itself: each thread here is also one of machine B's, under its own id
+// (`local_id("machine-b", …)`). The same thread is read at home and from "this" machine, and
+// both must show the same sub-agents, the same working bar and the same background work.
+
+/// The transcript's sub-agent rows on screen, as text ("subagent: Map the routes (Running)").
+fn sub_rows(trek: &Trek, cx: &TestAppContext) -> Vec<String> {
+    trek.rows(cx)
+        .into_iter()
+        .filter(|r| r.starts_with("subagent: "))
+        .collect()
+}
+
+/// The sub-agents the transcript on screen shows at work, by the row each stands for.
+fn working_rows(trek: &Trek, cx: &TestAppContext) -> Vec<String> {
+    let view = trek.thread_view(cx);
+    let mut rows = cx.read(|cx| view.read(cx).working_sub_agent_rows(cx));
+    rows.sort();
+    rows
+}
+
+/// The one list of `id`'s sub-agents at work (working bar, hub, phone), by row.
+fn at_work(trek: &Trek, cx: &TestAppContext, id: &str) -> Vec<String> {
+    let mut rows: Vec<String> = trek.read(cx, |ws, _| {
+        ws.sub_agents_at_work(id)
+            .into_iter()
+            .map(|a| a.row)
+            .collect()
+    });
+    rows.sort();
+    rows
+}
+
+/// How many sub-agents `id`'s sidebar row counts.
+fn badge(trek: &Trek, cx: &TestAppContext, id: &str) -> usize {
+    let t = trek
+        .read(cx, |ws, _| ws.thread(id).cloned())
+        .expect("the thread");
+    cx.read(|cx| trek.root.read(cx).sidebar.read(cx).at_work(&t, cx).0.len())
+}
+
+/// The working bar's words before its clock ("Waiting on 2 sub-agents").
+fn bar_words(trek: &Trek, cx: &TestAppContext) -> Option<String> {
+    trek.working_bar(cx)
+        .map(|l| l.split(" · ").next().unwrap_or_default().to_string())
+}
+
+/// Wait (in real time) until the sub-agent rows on screen satisfy `until`.
+async fn wait_rows(
+    trek: &Trek,
+    cx: &mut TestAppContext,
+    what: &str,
+    until: impl Fn(&[String]) -> bool,
+) {
+    let deadline = std::time::Instant::now() + REAL_TIME_LIMIT;
+    loop {
+        trek.render(cx);
+        let rows = sub_rows(trek, cx);
+        if until(&rows) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}: {:#?}",
+            trek.rows(cx)
+        );
+        cx.background_executor
+            .timer(Duration::from_millis(20))
+            .await;
+    }
+}
+
+fn show(trek: &Trek, cx: &mut TestAppContext, id: &str) {
+    let route = Route::Thread(id.to_string());
+    trek.update(cx, |ws, cx| ws.navigate(route, cx));
+    trek.render(cx);
+}
+
+/// The owner's case: a thread on another machine whose agent sent its own sub-agents out (Claude
+/// Code's Agent tool) and ended its turn. The sidebar here counted them, but the thread showed no
+/// row for any of them, no "Waiting on 2 sub-agents" and nothing to open: a row per sub-agent in
+/// the turn that started it now says where it stands as at home, steps and all as they come, the
+/// working bar waits on them, the badge and the rows agree, and it all clears when they report.
+#[test]
+fn a_thread_on_another_machine_shows_its_agents_sub_agents_at_work_as_it_does_at_home() {
+    run(async |cx| {
+        let trek = open(cx);
+        let link = serve_as_machine_b(&trek, cx);
+        pair(&trek, cx, link).await;
+        let home = trek.send(cx, "subagents 9s");
+        let h = home.clone();
+        trek.wait(cx, "two sub-agents out, its turn over", move |ws| {
+            ws.live.get(&h).is_some_and(|l| l.turn_started.is_none())
+                && ws.sub_agents_at_work(&h).len() == 2
+        })
+        .await;
+        trek.render(cx);
+        let rows_home = sub_rows(&trek, cx);
+        let bar_home = bar_words(&trek, cx);
+        assert_eq!(rows_home.len(), 2, "{:#?}", trek.rows(cx));
+        assert_eq!(bar_home.as_deref(), Some("Waiting on 2 sub-agents"));
+        let calls = working_rows(&trek, cx);
+
+        // The same thread from the other machine.
+        let id = local_id("machine-b", &home);
+        show(&trek, cx, &id);
+        let r = id.clone();
+        trek.wait(cx, "its sub-agents at work, here", move |ws| {
+            ws.thread(&r).is_some() && ws.sub_agents_at_work(&r).len() == 2
+        })
+        .await;
+        wait_rows(&trek, cx, "a row per sub-agent, as at home", |rows| {
+            rows == rows_home.as_slice()
+        })
+        .await;
+        assert_eq!(
+            working_rows(&trek, cx),
+            calls,
+            "each at work, on its call's row"
+        );
+        assert_eq!(at_work(&trek, cx, &id), calls, "the one list agrees");
+        assert_eq!(badge(&trek, cx, &id), 2, "and so does the sidebar's badge");
+        assert_eq!(
+            bar_words(&trek, cx),
+            bar_home,
+            "the working bar waits on them"
+        );
+        assert!(trek.read(cx, |ws, _| ws.waiting(&id)));
+
+        // A step each reports shows here as it comes: its row's status line and, opened, the call.
+        wait_rows(&trek, cx, "the first scout's step", |rows| {
+            rows.iter()
+                .any(|r| r.contains("Map the HTTP routes (Reading src/routes.rs · 2 steps)"))
+        })
+        .await;
+        let first = trek.item_ix(
+            cx,
+            &id,
+            |i| matches!(i, Item::Tool { detail, .. } if detail == "Map the HTTP routes"),
+        );
+        trek.click(cx, ("subagent", first));
+        let opened = trek.rows(cx);
+        assert!(
+            opened.iter().any(|r| r == "  Read src/routes.rs"),
+            "opened, it lists its call: {opened:#?}"
+        );
+
+        // They report: nothing at work, nothing waited on, each row done, in step with home.
+        let (r, h) = (id.clone(), home.clone());
+        trek.wait_up_to(
+            cx,
+            "the scouts to report",
+            Duration::from_secs(40),
+            move |ws| {
+                ws.sub_agents_at_work(&h).is_empty()
+                    && ws.live.get(&h).is_some_and(|l| l.turn_started.is_none())
+                    && ws.sub_agents_at_work(&r).is_empty()
+                    && !ws.waiting(&r)
+                    && ws.thread(&r).is_some_and(|t| t.run_state == RunState::Idle)
+            },
+        )
+        .await;
+        wait_rows(&trek, cx, "both rows done", |rows| {
+            rows.len() == 2 && rows.iter().all(|r| r.contains("(Done"))
+        })
+        .await;
+        assert!(working_rows(&trek, cx).is_empty());
+        assert_eq!(badge(&trek, cx, &id), 0);
+        assert_eq!(trek.working_bar(cx), None);
+        let rows = sub_rows(&trek, cx);
+        assert_eq!(rows.len(), 2, "{rows:#?}");
+        assert!(rows.iter().all(|r| r.contains("(Done")), "{rows:#?}");
+    });
+}
+
+/// One of Trek's own sub-agents (`delegate_task`) of a thread on another machine, itself with
+/// two of its agent's own out: the parent's row for it says where it stands and the working bar
+/// waits on it, its thread opens here (not listed in the sidebar, as at home) with its own
+/// sub-agents' rows and bar, and its Stop stops it there.
+#[test]
+fn trek_s_own_sub_agent_on_another_machine_opens_here_with_its_own_and_stops_from_here() {
+    run(async |cx| {
+        let trek = open(cx);
+        let link = serve_as_machine_b(&trek, cx);
+        pair(&trek, cx, link).await;
+        let home = trek.send(cx, "mock:delegate subagents 60s");
+        let h = home.clone();
+        trek.wait(cx, "the sub-agent with two of its own out", move |ws| {
+            ws.children(&h)
+                .first()
+                .and_then(|c| ws.live.get(&c.id))
+                .is_some_and(|l| l.turn_started.is_none() && l.background_agents().count() == 2)
+                && ws.live.get(&h).is_some_and(|l| l.turn_started.is_none())
+        })
+        .await;
+        let child = trek.read(cx, |ws, _| ws.children(&home)[0].id.clone());
+        let row = trek_core::orchestrate::task_row(&child);
+        trek.render(cx);
+        let rows_home = sub_rows(&trek, cx);
+        let bar_home = bar_words(&trek, cx);
+        assert_eq!(rows_home.len(), 1, "{:#?}", trek.rows(cx));
+
+        let id = local_id("machine-b", &home);
+        show(&trek, cx, &id);
+        let (r, k) = (id.clone(), row.clone());
+        trek.wait(cx, "the sub-agent at work, here", move |ws| {
+            ws.thread(&r).is_some() && ws.sub_agents_at_work(&r).iter().any(|a| a.row == k)
+        })
+        .await;
+        wait_rows(&trek, cx, "its row, as at home", |rows| {
+            rows == rows_home.as_slice()
+        })
+        .await;
+        assert_eq!(working_rows(&trek, cx), [row.clone()]);
+        assert_eq!(at_work(&trek, cx, &id), [row.clone()]);
+        assert_eq!(badge(&trek, cx, &id), 1);
+        assert_eq!(bar_words(&trek, cx), bar_home);
+        assert!(bar_home.is_some_and(|b| b.starts_with("Waiting on ")));
+
+        // Its thread is the machine's, here: opened from its row, never in the sidebar's list.
+        let kid = local_id("machine-b", &child);
+        assert!(trek.read(cx, |ws, _| ws.thread(&kid).is_some()));
+        assert!(trek.read(cx, |ws, _| {
+            ws.machines
+                .get("machine-b")
+                .is_some_and(|m| m.listed().iter().all(|t| t.id != kid))
+        }));
+        let ix = trek.item_ix(
+            cx,
+            &id,
+            |i| matches!(i, Item::Tool { id, .. } if *id == row),
+        );
+        assert!(trek.visible(cx, ("subagent-open", ix)), "it opens");
+        assert!(trek.visible(cx, ("subagent-stop", ix)), "it stops");
+        // Sub-agents of the sub-agent: shown in its thread, as at home.
+        show(&trek, cx, &child);
+        let nested_home = sub_rows(&trek, cx);
+        assert_eq!(nested_home.len(), 2, "{:#?}", trek.rows(cx));
+        show(&trek, cx, &kid);
+        let k = kid.clone();
+        trek.wait(cx, "its own sub-agents at work, here", move |ws| {
+            ws.sub_agents_at_work(&k).len() == 2
+        })
+        .await;
+        wait_rows(&trek, cx, "its own sub-agents' rows, as at home", |rows| {
+            rows == nested_home.as_slice()
+        })
+        .await;
+        assert_eq!(
+            bar_words(&trek, cx).as_deref(),
+            Some("Waiting on 2 sub-agents")
+        );
+
+        // Stopped from its row on the parent here: stopped there, and nothing at work here.
+        show(&trek, cx, &id);
+        trek.click(cx, ("subagent-stop", ix));
+        let (r, c) = (id.clone(), child.clone());
+        trek.wait_up_to(
+            cx,
+            "the sub-agent stopped",
+            Duration::from_secs(30),
+            move |ws| !ws.task_state(&c).live() && ws.sub_agents_at_work(&r).is_empty(),
+        )
+        .await;
+        trek.render(cx);
+        assert!(working_rows(&trek, cx).is_empty());
+        assert_eq!(badge(&trek, cx, &id), 0);
+    });
+}
+
+/// A dev server a thread on another machine left running: the strip above the composer lists it
+/// here with its last line, as at home; its output is read from the machine, and Stop stops it
+/// there.
+#[test]
+fn background_work_of_a_thread_on_another_machine_shows_reads_and_stops_from_here() {
+    run(async |cx| {
+        let trek = open(cx);
+        let link = serve_as_machine_b(&trek, cx);
+        pair(&trek, cx, link).await;
+        let home = trek.send(cx, "mock:server 60s");
+        trek.wait_done(cx, &home, RunState::Idle).await;
+        let h = home.clone();
+        trek.wait(cx, "the server's output", move |ws| {
+            ws.live[&h]
+                .background
+                .iter()
+                .any(|b| b.last_line().is_some_and(|l| l.contains("localhost")))
+        })
+        .await;
+        trek.render(cx);
+        let strip = |trek: &Trek, cx: &TestAppContext| -> Vec<String> {
+            cx.read(|cx| trek.root.read(cx).background_strip.read(cx).rows())
+        };
+        let at_home = strip(&trek, cx);
+        assert_eq!(at_home.len(), 1);
+
+        let id = local_id("machine-b", &home);
+        show(&trek, cx, &id);
+        let r = id.clone();
+        trek.wait(cx, "the server, here", move |ws| {
+            ws.live.get(&r).is_some_and(|l| {
+                l.background
+                    .iter()
+                    .any(|b| b.last_line().is_some_and(|l| l.contains("localhost")))
+            })
+        })
+        .await;
+        trek.render(cx);
+        assert!(trek.visible(cx, "background-strip"));
+        assert_eq!(strip(&trek, cx), at_home);
+        // Its output, read from the machine.
+        trek.click(cx, ("bg-task", 0usize));
+        let r = id.clone();
+        trek.wait(cx, "its output from the machine", move |ws| {
+            ws.live
+                .get(&r)
+                .is_some_and(|l| l.background.iter().any(|b| b.output_rev > 0))
+        })
+        .await;
+        trek.render(cx);
+        assert!(trek.visible(cx, "bg-output-text"));
+        assert!(
+            !trek.visible(cx, "bg-output-full"),
+            "the machine's file can't be opened here"
+        );
+        trek.click(cx, "bg-output-stop");
+        let (h, r) = (home.clone(), id.clone());
+        trek.wait(cx, "the server stopped there and here", move |ws| {
+            ws.live[&h].background.is_empty()
+                && ws.live.get(&r).is_some_and(|l| l.background.is_empty())
+        })
+        .await;
+        trek.render(cx);
+        assert!(!trek.visible(cx, "background-strip"));
+    });
+}

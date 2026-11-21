@@ -59,6 +59,9 @@ pub(super) fn link(
         since,
         took_secs,
         thread_id: sub.child,
+        // What its row lists opened, for another Trek following the thread.
+        activity: sub.activity.as_ref().map(crate::working_bar::Group::wire),
+        continued: sub.continued,
     })
 }
 

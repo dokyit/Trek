@@ -1079,6 +1079,18 @@ note = "Shared code on both platforms, tested on both CIs against a loopback mac
 code = ["crates/trek-app/src/machines/files.rs", "crates/trek-app/src/composer/machine_upload.rs", "crates/trek-app/src/remote/uploads.rs", "crates/trek-remote/src/protocol/uploads.rs", "crates/trek-remote/src/client.rs"]
 tests = ["crates/trek-app/tests/machines.rs", "crates/trek-app/tests/remote.rs", "crates/trek-app/src/machines/files.rs", "crates/trek-remote/tests/client.rs", "crates/trek-remote/src/protocol/uploads.rs"]
 
+[[feature]]
+id = "machine-sub-agents"
+area = "Machines"
+what = "A thread on another machine shows its sub-agents' rows, the working bar waiting on them, and its background commands, as at home"
+macos = "yes"
+windows = "yes"
+live = ["route no-project", "pair-self", "wait 4000", "machine-draft", "type Scout with subagents 60s", "key enter", "wait 4000", "count subagent#* 2", "count waiting-on 1", "pair-self leave", "wait 800", "count machine-head* 0"]
+how = { macos = "The same code on both: rows from the machine's `sub_agent` links, the bar and hub from its row's `sub_agents`, the strip from `background_tasks`; Stop and messages go to the machine.", windows = "The same code: a PC viewing a Mac's thread (the owner's case, 0.4.63) draws what the Mac sends as a Mac viewing it does." }
+note = "Shared code, tested on both CIs against a loopback machine (tests/machines.rs: an agent's own sub-agents, Trek's own with its own nested, background commands). Not yet seen between two real computers. A machine before 0.4.64 sends no `activity` (an opened row lists no calls there) and no `continued`."
+code = ["crates/trek-app/src/machines.rs", "crates/trek-app/src/machines/sub_agents.rs", "crates/trek-app/src/workspace/sub_agents.rs", "crates/trek-app/src/remote/sub_agent_view.rs", "crates/trek-remote/src/protocol/sub_agent_view.rs"]
+tests = ["crates/trek-app/tests/machines.rs", "crates/trek-remote/tests/protocol.rs"]
+
 # ---------- The rest of the census (November 2026 audit): at parity, Windows-only, and polish ----------
 
 [[feature]]

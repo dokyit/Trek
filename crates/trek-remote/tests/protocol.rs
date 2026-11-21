@@ -2194,6 +2194,83 @@ fn a_sub_agent_row_says_which_it_is_and_opens_and_steers_it() {
     assert!(feature::ALL.contains(&feature::SUB_AGENT_VIEW));
 }
 
+/// Another Trek following a thread draws a sub-agent's row from its link as the Mac draws it:
+/// since 0.4.64 the link also carries the calls its row lists opened (`activity`) and, for an
+/// earlier run of one woken again, the row it works on now (`continued`). A link from an older
+/// Mac has neither and still reads; one with them reads on a Trek that knows them and is the
+/// same old link to one that doesn't (anything unknown is skipped, as the phone's decoder does).
+#[test]
+fn a_sub_agent_link_carries_its_steps_and_where_it_went_and_older_links_still_read() {
+    // As a 0.4.63 Mac sends it.
+    let old = item_round_trip(
+        r#"{"id":"i4","seq":4,"at":null,"kind":"tool","call_id":"toolu_a","tool":"agent","title":"Agent","detail":"Survey the tests","status":"running","output":"","added":null,"removed":null,"sub_agent":{"agent":{"key":"claude-code","name":"Claude Code"},"label":"Survey the tests","detail":"Running","state":"running","since":1791000000000}}"#,
+    );
+    let ItemBody::Tool {
+        sub_agent: Some(link),
+        ..
+    } = old.body
+    else {
+        panic!()
+    };
+    assert_eq!((link.activity, link.continued), (None, None));
+
+    // As a newer one sends it: the latest calls, worded as the Mac's row lists them.
+    let new = item_round_trip(
+        r#"{"id":"i4","seq":5,"at":null,"kind":"tool","call_id":"toolu_a","tool":"agent","title":"Agent","detail":"Survey the tests","status":"running","output":"","added":null,"removed":null,"sub_agent":{"agent":{"key":"claude-code","name":"Claude Code"},"label":"Survey the tests","detail":"Reading tests/a.rs · 4 steps","state":"running","since":1791000000000,"activity":{"summary":"Read 3 files and ran 1 search","phrase":"Reading tests/a.rs","kind":"read","earlier":2,"steps":[{"verb":"Find","text":"fn test_"},{"verb":"Read","text":"tests/a.rs","file":"tests/a.rs","running":true}]}}}"#,
+    );
+    let ItemBody::Tool {
+        sub_agent: Some(link),
+        ..
+    } = new.body
+    else {
+        panic!()
+    };
+    let activity = link.activity.expect("its steps");
+    assert_eq!((activity.kind, activity.earlier), (ToolKind::Read, 2));
+    assert_eq!(activity.steps.len(), 2);
+    assert!(activity.steps[1].running && !activity.steps[0].running);
+    assert_eq!(activity.steps[1].file.as_deref(), Some("tests/a.rs"));
+
+    // An earlier run woken again since: where it works now.
+    let woken: SubAgentLink = serde_json::from_value(json!({
+        "agent": {"key": "claude-code", "name": "Claude Code"},
+        "label": "Survey the tests",
+        "detail": "Working again further down",
+        "state": "running",
+        "continued": "toolu_b"
+    }))
+    .unwrap();
+    assert_eq!(woken.continued.as_deref(), Some("toolu_b"));
+
+    // A link from a Trek newer still: what this one doesn't know is skipped.
+    let newer: SubAgentLink = serde_json::from_value(json!({
+        "agent": {"key": "claude-code", "name": "Claude Code"},
+        "label": "Survey the tests",
+        "state": "done",
+        "took_secs": 12,
+        "activity": {"summary": "Ran 1 command", "steps": [{"verb": "", "text": "cargo test", "lines": 4}], "tint": "sky"},
+        "cost": "$0.02"
+    }))
+    .unwrap();
+    assert_eq!(newer.state, SubAgentState::Done);
+    assert_eq!(newer.activity.unwrap().steps[0].text, "cargo test");
+
+    // Nothing extra on the wire for a row without them.
+    let plain = serde_json::to_value(SubAgentLink {
+        agent: AgentRef::default(),
+        label: "x".into(),
+        detail: String::new(),
+        state: SubAgentState::Running,
+        since: None,
+        took_secs: None,
+        thread_id: None,
+        activity: None,
+        continued: None,
+    })
+    .unwrap();
+    assert!(plain.get("activity").is_none() && plain.get("continued").is_none());
+}
+
 /// A row as docs/MOBILE.md writes one, with `extra` fields after its own.
 fn row_with(extra: &str) -> ThreadSummary {
     let row = format!(

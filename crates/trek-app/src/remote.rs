@@ -198,6 +198,10 @@ pub struct Watched {
     /// back (`STREAM_STEP`): it goes on a later tick, whether or not more of it comes.
     stream_sent: Option<std::time::Instant>,
     held: bool,
+    /// It had sub-agents at work at the last tick: their rows change while nothing else in the
+    /// transcript does (one of Trek's works in a thread of its own), so they're looked at every
+    /// tick meanwhile, and once more after the last is done.
+    subs_live: bool,
 }
 
 /// An answer still streaming is sent whole each time it grows: every tick while it's shorter
@@ -237,6 +241,7 @@ impl Watched {
             recount: false,
             stream_sent: None,
             held: false,
+            subs_live: false,
         }
     }
 
@@ -2257,6 +2262,9 @@ impl Workspace {
     ) -> Vec<tr::HostEvent> {
         let cwd = self.thread(id).and_then(|t| t.cwd.clone());
         let probe = self.thread(id).and_then(|t| self.verify_probe(t));
+        let at_work = !self.sub_agents_at_work(id).is_empty();
+        let subs = at_work || w.subs_live;
+        w.subs_live = at_work;
         let Some(live) = self.live.get_mut(id) else {
             return vec![];
         };
@@ -2277,6 +2285,7 @@ impl Workspace {
             && cwd == w.cwd
             && !w.recount
             && !w.held
+            && !subs
         {
             return vec![];
         }
@@ -2339,6 +2348,34 @@ impl Workspace {
                 item_time(&live.items[ix]),
                 body,
             ));
+        }
+        // Sub-agents' rows above what was just looked at: where each stands now (its status
+        // line, its steps, its state) when that changed with no change to the item itself.
+        if subs {
+            for ix in w.from..floor.max(w.from).min(len) {
+                if !matches!(&live.items[ix], Item::Tool { id, title, .. }
+                    if title == "Subagent" || trek_core::orchestrate::task_of_row(id).is_some())
+                {
+                    continue;
+                }
+                let body = item_body(self, id, live, cwd.as_deref(), probe.as_ref(), ix);
+                let h = hash(&body);
+                if w.items[ix].hash == Some(h) {
+                    continue;
+                }
+                w.seq += 1;
+                w.items[ix] = Sent {
+                    seq: w.seq,
+                    hash: Some(h),
+                };
+                out.push(item_event(
+                    id,
+                    format!("i{ix}"),
+                    w.seq,
+                    item_time(&live.items[ix]),
+                    body,
+                ));
+            }
         }
         if asks {
             // Requests: new or changed ones as they are, answered ones as resolved.

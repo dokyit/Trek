@@ -320,6 +320,9 @@ pub struct LiveThread {
     /// and its own sub-agents. They outlive the turn that started them; the session ending ends
     /// them.
     pub background: Vec<Background>,
+    /// For a thread on another machine (`machines`): its sub-agents' rows as that machine reads
+    /// them, by the row each stands for (`SubAgentRow::read` takes them from here).
+    pub machine_subs: HashMap<String, trek_remote::SubAgentLink>,
     /// When the user last stopped its agent's own sub-agents between turns. Claude Code takes a
     /// turn of its own to say they were stopped; that turn is no news (`quiet_turn`).
     stopped_out: Option<Instant>,
@@ -3464,7 +3467,11 @@ impl Workspace {
 
     /// Ask `thread`'s agent for the end of background task `task`'s output (it arrives as a
     /// `WorkspaceEvent::Background`). Nothing happens when its session is gone.
-    pub fn read_background(&mut self, thread: &str, task: &str) {
+    pub fn read_background(&mut self, thread: &str, task: &str, cx: &mut Context<Self>) {
+        // On another machine: asked of it (`background_output`).
+        if crate::machines::is_remote(thread) {
+            return self.machine_read_background(thread, task, cx);
+        }
         let Some(live) = self.live.get(thread) else {
             return;
         };
@@ -3500,6 +3507,11 @@ impl Workspace {
             let _ = tx.try_send(Command::StopTask {
                 id: task.to_string(),
             });
+        }
+        // On another machine: stopped there (its row says "Stopping…" meanwhile).
+        if crate::machines::is_remote(thread) {
+            let task = task.to_string();
+            self.machine_stop_background(thread, task, cx);
         }
         let (id, task) = (thread.to_string(), task.to_string());
         let again = cx.spawn(async move |this, cx| {
