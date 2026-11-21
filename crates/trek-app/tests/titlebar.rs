@@ -39,11 +39,8 @@ fn the_title_bar_clears_the_window_controls_on_each_platform() {
         assert_eq!(px(LEFT_INSET), x(&trek, cx, "toggle-sidebar"));
         // Right: macOS's controls are on the left; Windows's caption buttons are drawn at the right
         // end, and Trek's buttons sit just left of them, the same 8 px from the edge as on macOS.
-        let reserve = if cfg!(target_os = "macos") {
-            0.
-        } else {
-            3. * 34.
-        };
+        // Linux's are the window manager's, in its frame round the window.
+        let reserve = if cfg!(windows) { 3. * 34. } else { 0. };
         assert_eq!(RIGHT_RESERVE, reserve);
         // On Windows a line sets them apart from the caption buttons, the row's 5 px gap before it.
         let line = if cfg!(windows) {
@@ -335,6 +332,9 @@ fn the_empty_strip_of_the_title_bar_is_still_the_windows_handle() {
     });
 }
 
+// Not on Linux: there the title bar's double click maximises the window itself (`zoom_window`),
+// which GPUI's test window doesn't do.
+#[cfg(not(target_os = "linux"))]
 #[test]
 fn a_press_on_the_handle_is_never_swallowed_so_the_window_can_move_and_maximise() {
     use gpui_kit::{Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, PlatformInput, point};

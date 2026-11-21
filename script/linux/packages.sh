@@ -7,6 +7,8 @@
 #                     the tools that look at the screen.
 #   --with-packaging  what script/bundle-linux.sh needs besides its pinned downloads (the .deb's
 #                     tools, the desktop file's check, the icons' renderer).
+#   --with-test-fonts what trek-app's text tests lay out besides Latin, as a desktop has fonts for
+#                     it: a CJK font and an emoji font, which a runner's bare system lacks.
 #
 # Fedora 40+ (dnf) names: gcc gcc-c++ clang cmake pkgconf-pkg-config libxkbcommon-x11-devel
 # wayland-devel libxcb-devel fontconfig-devel freetype-devel vulkan-loader-devel gtk3-devel
@@ -25,15 +27,18 @@ build="build-essential pkg-config cmake clang libclang-dev git curl ca-certifica
 
 run="xvfb xauth x11-utils x11-xserver-utils xdotool imagemagick weston mesa-vulkan-drivers
   vulkan-tools libgl1-mesa-dri dbus dbus-x11 gnome-keyring libsecret-tools xdg-utils
-  fonts-dejavu-core fonts-noto-color-emoji python3 procps psmisc zsh"
+  fonts-dejavu-core fonts-noto-color-emoji fonts-wqy-microhei python3 procps psmisc zsh"
 
 packaging="desktop-file-utils dpkg-dev librsvg2-bin"
+
+test_fonts="fonts-wqy-microhei fonts-noto-color-emoji"
 
 extra=""
 for arg in "$@"; do
   case "$arg" in
     --with-run-tools) extra="$extra $run" ;;
     --with-packaging) extra="$extra $packaging" ;;
+    --with-test-fonts) extra="$extra $test_fonts" ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done

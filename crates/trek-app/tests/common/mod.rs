@@ -217,10 +217,13 @@ pub fn mock() -> AgentId {
     AgentId::Direct(trek_core::catalog::MOCK_PROVIDER.into())
 }
 
-/// What the updater says when the install goes ahead and can't: no app bundle runs here (macOS), or
-/// the staged update the tests name isn't there (Windows checks that before anything else).
+/// What the updater says when the install goes ahead and can't: no app bundle runs here (macOS), the
+/// staged update the tests name isn't there (Windows checks that before anything else), or this
+/// isn't the AppImage (Linux, where only that replaces itself).
 pub const INSTALL_BLOCKED: &str = if cfg!(windows) {
     "the downloaded update is gone"
+} else if cfg!(target_os = "linux") {
+    "only the AppImage updates itself"
 } else {
     "not running from an app bundle"
 };

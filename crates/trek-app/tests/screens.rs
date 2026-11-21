@@ -335,7 +335,9 @@ fn every_screen_renders_in_both_themes() {
             t.id
         });
         let pages: Vec<SettingsPage> = trek_app::settings_view::pages().collect();
-        assert_eq!(pages.len(), 18, "every page is listed");
+        // Linux has no App Snapshots page (no capture tool Trek drives there).
+        let all = if trek_app::words::is_linux() { 17 } else { 18 };
+        assert_eq!(pages.len(), all, "every page is listed");
         for choice in [ThemeChoice::Paper, ThemeChoice::Night] {
             theme(cx, choice);
             assert_eq!(

@@ -886,6 +886,14 @@ impl SettingsView {
                     trek_core::keychain::SERVICE
                 )
                 .into(),
+                // The Secret Service keeps it under the attributes the keyring crate gives it:
+                // what Passwords and Keys (Seahorse) or `secret-tool search service …` find.
+                (SavedKey::Saved, _) if cfg!(target_os = "linux") => format!(
+                    "Saved in {} (service {}, account {id})",
+                    crate::words::words().your_credential_store,
+                    trek_core::keychain::SERVICE
+                )
+                .into(),
                 (SavedKey::Saved, _) => {
                     format!("Saved in {}", crate::words::words().your_credential_store).into()
                 }

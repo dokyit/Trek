@@ -129,7 +129,7 @@ fn the_phone_step_offers_a_phones_browser_and_never_a_repo_path() {
             trek.visible(cx, ("ob-pair-for", 0usize)),
             "iPhone or a phone's browser"
         );
-        if !cfg!(windows) {
+        if cfg!(target_os = "macos") {
             assert!(
                 !trek.visible(cx, "ob-pair-web-link"),
                 "the iPhone's code first on a Mac"
