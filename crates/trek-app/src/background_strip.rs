@@ -203,9 +203,9 @@ impl BackgroundStrip {
             cx.notify();
         }
         if !new.is_empty() {
-            self.workspace.update(cx, |ws, _| {
+            self.workspace.update(cx, |ws, cx| {
                 for (thread, task) in new {
-                    ws.read_background(&thread, &task);
+                    ws.read_background(&thread, &task, cx);
                 }
             });
         }
@@ -250,9 +250,9 @@ impl BackgroundStrip {
                 .map(|r| r.id.clone())
                 .collect(),
         );
-        self.workspace.update(cx, |ws, _| {
+        self.workspace.update(cx, |ws, cx| {
             for task in tasks {
-                ws.read_background(&thread, &task);
+                ws.read_background(&thread, &task, cx);
             }
         });
     }

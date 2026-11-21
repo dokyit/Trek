@@ -1709,6 +1709,9 @@ impl Workspace {
     /// `Task`, run in the foreground).
     /// Empty when it waits on nothing, or on the user.
     pub fn waiting_on(&self, id: &str) -> Vec<Waited> {
+        if crate::machines::is_remote(id) {
+            return self.machine_waiting_on(id);
+        }
         let Some(live) = self.live.get(id) else {
             return vec![];
         };
@@ -1765,6 +1768,12 @@ impl Workspace {
     /// (the Working group, the working header), not as a thread that's done. Reports on their
     /// way to it count too.
     pub fn waiting(&self, id: &str) -> bool {
+        // A thread on another machine waits as its row there says (`busy_in_background`; a
+        // machine too old to say, while it has sub-agents out).
+        if crate::machines::is_remote(id) {
+            return self.machines.waiting_one(id)
+                && self.live.get(id).is_none_or(|l| l.permissions.is_empty());
+        }
         let free = self
             .live
             .get(id)
@@ -1939,6 +1948,9 @@ impl Workspace {
         row: &str,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        if crate::machines::is_remote(thread) {
+            return self.machine_stop_sub_agent(thread, row, cx);
+        }
         if let Some(child) = orch::task_of_row(row) {
             if self
                 .thread(child)
@@ -1991,6 +2003,9 @@ impl Workspace {
         let text = text.trim();
         if text.is_empty() {
             return Err("Write something to send.".into());
+        }
+        if crate::machines::is_remote(thread) {
+            return self.machine_message_sub_agent(thread, row, text, cx);
         }
         let agent = self
             .thread(thread)

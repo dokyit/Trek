@@ -73,7 +73,7 @@ impl Workspace {
             return;
         };
         if readable {
-            self.read_background(&thread_id, &task_id);
+            self.read_background(&thread_id, &task_id, cx);
         }
         cx.spawn(async move |this, cx| {
             let started = std::time::Instant::now();
