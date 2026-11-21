@@ -50,6 +50,28 @@ advertised on Wi-Fi with only an `id` in the TXT record.
    A keeps nothing in its store: B owns the thread; A holds what the snapshot and subscription gave it
    and re-fetches on reconnect. The right panel's Git and Changes read B's repo through `git_*`.
 
+5. **Work out beyond the turn shows inside the thread too** (0.4.64). Until 0.4.63 the sidebar's
+   badge counted B's sub-agents but the thread view showed none of them: A dropped the `sub_agent`
+   link on each tool item, so the agent's own sub-agents (Claude Code's Agent tool) folded into
+   "Used 2 tools", Trek's own (`delegate_task`) read as gone, the working bar never said "Waiting
+   on 2 sub-agents" (it asked for a local session), the hub had no sub-agents line, and the
+   `background_tasks` on the row were never drawn. Now A draws each sub-agent's row from its link
+   as B words it (label, status line, steps, running/done/failed, its clock), its row opened lists
+   its latest calls (`activity`, new in 0.4.64), the working bar and hub read B's row `sub_agents`
+   (the list the badge reads, so they agree), and the strip above the composer lists B's background
+   commands with their last line. Opening Trek's own sub-agent opens its thread on B (its row comes
+   `unlisted`, as phones get it; never in A's sidebar list), where its own sub-agents show the same
+   way. Stop on a sub-agent goes to B (`interrupt` its thread for Trek's own, `sub_agent_action`
+   for the agent's own; message too, where the agent takes one), and Stop and the output of a
+   background command go as `stop_background` and `background_output`. B also re-sends a
+   sub-agent's row whenever where it stands changed with nothing else in the transcript changing
+   (Trek's own works in a thread of its own), which phones gain from as well.
+   Mixed versions: a 0.4.63 B already sends the links, unlisted rows and background tasks, so a
+   newer A shows the rows, the bar, the strip and opening; the opened row's call list and the
+   onward arrow of a sub-agent woken again need B on 0.4.64. A B before `sub_agent_view` (no links)
+   gives rows read from the call alone. An older A ignores the new fields. Stop and message on the
+   agent's own need B to list `sub_agent_view`; without it the buttons don't show.
+
 ## Files and pictures attached here (0.4.61)
 
 Until 0.4.60 a message to a thread on B with a file attached was refused ("Files can't go to B

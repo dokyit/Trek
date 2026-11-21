@@ -358,6 +358,35 @@ fn model(ws: &Workspace, scope: &Scope) -> Option<Model> {
     let agents = thread
         .as_ref()
         .map(|t| {
+            // On another machine: its sub-agents' rows as the machine reads them, in order.
+            if let Some((host, _)) = crate::machines::split_id(&t.id)
+                && crate::machines::is_remote(&t.id)
+            {
+                let rows: Vec<&Item> = live.map(|l| l.items.iter().collect()).unwrap_or_default();
+                return rows
+                    .into_iter()
+                    .filter_map(|i| match i {
+                        Item::Tool { id, .. } => Some((id, live?.machine_subs.get(id)?)),
+                        _ => None,
+                    })
+                    .filter(|(_, s)| s.continued.is_none())
+                    .map(|(row, s)| HubAgent {
+                        thread: s
+                            .thread_id
+                            .as_deref()
+                            .map(|c| crate::machines::local_id(host, c)),
+                        row: row.clone(),
+                        title: s.label.clone(),
+                        state: match s.state {
+                            trek_remote::SubAgentState::Running => TaskState::Running,
+                            trek_remote::SubAgentState::NeedsYou => TaskState::NeedsYou,
+                            trek_remote::SubAgentState::Done => TaskState::Done,
+                            trek_remote::SubAgentState::Failed => TaskState::Failed,
+                            trek_remote::SubAgentState::Stopped => TaskState::Cancelled,
+                        },
+                    })
+                    .collect();
+            }
             let mut out: Vec<HubAgent> = ws
                 .children(&t.id)
                 .into_iter()

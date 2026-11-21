@@ -3469,10 +3469,18 @@ impl ThreadView {
                 // Steering it from here: Stop while it works (Trek's own, or the agent's where its
                 // agent lets Trek), and a message for the agent's own where its agent takes one.
                 let control = trek_agents::SubAgentControl::of(&at.agent);
-                let session = ws
-                    .live
-                    .get(&at.thread)
-                    .is_some_and(|l| l.commands.is_some());
+                // On another machine, its session is there: steered through it, where it serves
+                // that (`sub_agent_view`) and can be reached.
+                let session = if crate::machines::is_remote(&at.thread) {
+                    ws.machines.reachable_row(&at.thread).is_some()
+                        && ws
+                            .machines
+                            .serves(&at.thread, trek_remote::feature::SUB_AGENT_VIEW)
+                } else {
+                    ws.live
+                        .get(&at.thread)
+                        .is_some_and(|l| l.commands.is_some())
+                };
                 let in_background = ws.live.get(&at.thread).is_some_and(|l| {
                     l.background_agents().any(|b| {
                         b.task.call.as_deref() == Some(row_id.as_str()) && b.task.stoppable
@@ -5385,6 +5393,35 @@ impl SubAgentRow {
             }
             _ => state.label().to_string(),
         };
+        // A thread on another machine: the row as that machine reads it.
+        if let Some((host, _)) = crate::machines::split_id(thread)
+            && crate::machines::is_remote(thread)
+        {
+            if let Some(link) = ws.live.get(thread).and_then(|l| l.machine_subs.get(row_id)) {
+                return SubAgentRow::of_machine(host, link);
+            }
+            // A machine too old to say more than the call: what the row has.
+            let child = orch::task_of_row(row_id)
+                .map(|c| crate::machines::local_id(host, c))
+                .filter(|c| ws.thread(c).is_some());
+            return SubAgentRow {
+                agent: child
+                    .as_ref()
+                    .and_then(|c| ws.thread(c))
+                    .map(|t| t.agent.clone()),
+                label: if detail.trim().is_empty() {
+                    "Sub-agent".into()
+                } else {
+                    detail.to_string()
+                },
+                detail: with_error(by_status),
+                state: by_status,
+                elapsed: None,
+                child,
+                activity: None,
+                continued: None,
+            };
+        }
         if let Some(child) = orch::task_of_row(row_id) {
             let Some(t) = ws.thread(child) else {
                 // Its thread is gone (deleted, or archived on its own): what the row kept.
@@ -5535,6 +5572,49 @@ impl SubAgentRow {
                 )
             }),
             continued: None,
+        }
+    }
+}
+
+impl SubAgentRow {
+    /// The row of a sub-agent of a thread on machine `host`, from what the machine says of it
+    /// (`trek_remote::SubAgentLink`, worded there as `read` words it).
+    fn of_machine(host: &str, link: &trek_remote::SubAgentLink) -> SubAgentRow {
+        use trek_remote::SubAgentState as S;
+        let state = match link.state {
+            S::Running => TaskState::Running,
+            S::NeedsYou => TaskState::NeedsYou,
+            S::Done => TaskState::Done,
+            S::Failed => TaskState::Failed,
+            S::Stopped => TaskState::Cancelled,
+        };
+        let elapsed = match (link.since, link.took_secs) {
+            (Some(since), _) if state.live() => Some(std::time::Duration::from_millis(
+                (trek_core::store::now_ms() - since).max(0) as u64,
+            )),
+            (_, Some(secs)) => Some(std::time::Duration::from_secs(secs.into())),
+            _ => None,
+        };
+        SubAgentRow {
+            agent: Some(trek_core::AgentId::from_key(&link.agent.key)),
+            label: link.label.clone(),
+            detail: if link.detail.is_empty() {
+                state.label().to_string()
+            } else {
+                link.detail.clone()
+            },
+            state,
+            elapsed,
+            child: link
+                .thread_id
+                .as_deref()
+                .map(|c| crate::machines::local_id(host, c)),
+            activity: link
+                .activity
+                .as_ref()
+                .filter(|_| state.live())
+                .map(crate::working_bar::Group::from_wire),
+            continued: link.continued.clone(),
         }
     }
 }

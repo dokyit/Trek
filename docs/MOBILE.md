@@ -1109,6 +1109,12 @@ the Mac has none of its steps (it ran before the Mac kept them with its thread, 
 restarted since), and its row's `answer` is all there is. The Mac keeps the steps with the thread,
 so a restart doesn't lose them.
 An at-work row's `sub_agents` entry for one of the agent's own carries its `call_id`.
+Since Trek 0.4.64 the link may also carry `activity` while it works: the calls its row lists opened
+on the Mac (`summary`, `phrase`, the latest call's `kind`, `earlier`, and `steps` of `verb`, `text`,
+`file`, `running`, `failed`), and `continued`, for an earlier run of one of the agent's own woken
+again since: the call it works under now. Another Trek following the thread draws the row from them;
+a phone may ignore both. The Mac also re-sends a sub-agent's item whenever where it stands changes
+(a step, its status line) with nothing else in the transcript changing.
 
 ```json
 {"type":"sub_agent","id":"40","thread_id":"t","call_id":"toolu_a"}
