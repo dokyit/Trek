@@ -67,9 +67,13 @@ use trek_core::detect::Availability;
 use trek_core::import::{ImportedThread, Skip};
 use trek_core::settings::{Settings, secrets};
 
-/// What the iOS Simulator section says where Windows has nothing to show.
-const SIMULATOR_NEEDS_A_MAC: &str =
-    "The iOS Simulator needs macOS, so Trek doesn't offer it on Windows.";
+/// What the iOS Simulator section says where there's no Mac: Windows, Linux.
+fn simulator_needs_a_mac() -> String {
+    format!(
+        "The iOS Simulator needs macOS, so Trek doesn't offer it on {}.",
+        crate::words::words().os_name
+    )
+}
 
 pub fn page_icon(p: SettingsPage) -> Icon {
     match p {
@@ -2389,7 +2393,7 @@ impl SettingsView {
         out.push(Self::heading("iOS Simulator", cx));
         if !crate::words::is_mac() {
             // Xcode's tools are all it has to run on: nothing to switch, install or allow.
-            out.push(Self::note(SIMULATOR_NEEDS_A_MAC, cx));
+            out.push(Self::note(&simulator_needs_a_mac(), cx));
         } else {
             let axe_control: AnyElement = match probe.as_ref().map(|p| p.axe) {
                 None => checking("install-axe"),
