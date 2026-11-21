@@ -4,7 +4,7 @@
 // comma, `! Name` taking one away), so the security policy a page meets here is the one it meets
 // at trekdesktop.com. For the web remote while it's worked on or checked:
 //
-//   node script/site/serve.mjs [port]           # http://localhost:8080/remote/
+//   node script/site/serve.mjs [port] [root]    # http://localhost:8080/remote/ (root: another copy of site/)
 //   TREK_WEB_REMOTE_PAGE=http://localhost:8080/remote/ <Trek>   # Trek lets that page in
 //
 // `headersFor` is exported for the tests (script/site/test/).
@@ -30,6 +30,8 @@ const TYPES = {
   '.ico': 'image/x-icon',
   '.webp': 'image/webp',
   '.jpg': 'image/jpeg',
+  '.avif': 'image/avif',
+  '.mp4': 'video/mp4',
   '.woff2': 'font/woff2',
   '.txt': 'text/plain; charset=utf-8',
   '.md': 'text/markdown; charset=utf-8',
@@ -132,6 +134,8 @@ export function serve(port = 8080, root = ROOT) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  // An optional second argument serves another copy of the site, such as a design variant.
   const port = Number(process.argv[2] || process.env.PORT || 8080);
-  serve(port).then(() => console.log(`site/ at http://localhost:${port}/ (the web remote: http://localhost:${port}/remote/)`));
+  const root = process.argv[3] ? resolve(process.argv[3]) : ROOT;
+  serve(port, root).then(() => console.log(`${root} at http://localhost:${port}/ (the web remote: http://localhost:${port}/remote/)`));
 }
