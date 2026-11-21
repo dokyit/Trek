@@ -7,7 +7,9 @@ name: Release
 # Windows build runs alongside it (release.ps1 -BuildOnly: its own version bump, cargo build, zip,
 # Inno installer, minisig); only the publish half needs the Mac's release, so a short publish job
 # does the manifest merge and upload once both are done (release.ps1 -PublishOnly -Publish). The
-# Intel Mac build runs alongside them too and joins the release last (jobs intel, publish-intel).
+# Intel Mac build runs alongside them too and joins the release after Windows (jobs intel,
+# publish-intel), and the Linux builds (x86_64 and Arm, on runners of each) join it last (jobs
+# linux, publish-linux: script/release-linux.sh).
 #
 #   gh workflow run release.yml -f version=0.4.1-beta.4 -f channel=beta
 #   gh workflow run release.yml -f version=0.4.1-beta.4 -f channel=beta -f dry_run=true
@@ -49,7 +51,7 @@ on:
           - beta
           - nightly
       notes:
-        description: 'Release notes (Markdown); empty: the commit subjects since the last release. The install block (the Mac and Windows downloads) is added to the GitHub release body for you, unless the notes already have one'
+        description: 'Release notes (Markdown); empty: the commit subjects since the last release. The install block (the Mac, Windows and Linux downloads) is added to the GitHub release body for you, unless the notes already have one'
         required: false
         type: string
         default: ''
@@ -139,7 +141,7 @@ jobs:
             verdict "CI hasn't passed on $GITHUB_SHA's parent $parent either (this commit is only the version bump). Release a commit CI passed on, or run again with skip_ci_check for an emergency fix."
           fi
           echo "Not only the v${VERSION#v} bump, so its parent's CI doesn't count: $why"
-          verdict "CI hasn't passed on $GITHUB_SHA (macOS and Windows). Release a commit it passed on, or run again with skip_ci_check for an emergency fix."
+          verdict "CI hasn't passed on $GITHUB_SHA (macOS, Windows and Linux). Release a commit it passed on, or run again with skip_ci_check for an emergency fix."
 
   macos:
     name: macOS app
@@ -791,6 +793,78 @@ jobs:
           path: dist/release/
           if-no-files-found: error
 
+  # Linux, alongside the others: an AppImage, a .deb and a tarball per architecture, each built on
+  # a runner of its own architecture (Ubuntu 22.04: the oldest glibc Trek's Linux builds support),
+  # the AppImage minisigned with the same key (script/release-linux.sh --build-only). Only the
+  # manifest merge needs the Mac's release, so the upload waits for publish-linux.
+  linux:
+    name: Linux build (${{ matrix.arch }})
+    needs: ci-passed
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    steps:
+      # The commit this run started from, as the Windows build: the version tag doesn't exist yet.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: System packages
+        run: sudo sh script/linux/packages.sh --with-packaging
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
+        with:
+          toolchain: '1.99.0'
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: release-linux-${{ matrix.arch }}
+          save-if: false
+
+      # Pinned by hash, as on Windows: this binary signs every update.
+      - name: Install minisign
+        run: |
+          set -euo pipefail
+          tgz="$RUNNER_TEMP/minisign-0.12-linux.tar.gz"
+          curl -fsSL -o "$tgz" https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
+          echo "9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73  $tgz" | sha256sum -c
+          tar -xzf "$tgz" -C "$RUNNER_TEMP"
+          echo "TREK_MINISIGN=$RUNNER_TEMP/minisign-linux/${{ matrix.arch }}/minisign" >> "$GITHUB_ENV"
+
+      # The secret is the key file's whole contents (it is all ASCII).
+      - name: minisign secret key
+        env:
+          TREK_MINISIGN_KEY_FILE: ${{ secrets.TREK_MINISIGN_KEY }}
+        run: |
+          if [ -z "$TREK_MINISIGN_KEY_FILE" ]; then
+            echo "::error::the TREK_MINISIGN_KEY secret is not set (docs/RELEASING.md)"
+            exit 1
+          fi
+          key="$RUNNER_TEMP/minisign.key"
+          printf '%s' "$TREK_MINISIGN_KEY_FILE" > "$key"
+          chmod 600 "$key"
+          echo "TREK_MINISIGN_KEY=$key" >> "$GITHUB_ENV"
+
+      # --skip-tests: ci.yml runs the whole suite (Linux included) on every push.
+      - name: Build, sign and package
+        env:
+          TREK_MINISIGN_PASSWORD: ${{ secrets.TREK_MINISIGN_PASSWORD }}
+          TREK_VERSION: ${{ inputs.version }}
+          TREK_CHANNEL: ${{ inputs.channel }}
+        run: script/release-linux.sh "$TREK_VERSION" --channel "$TREK_CHANNEL" --build-only --skip-tests
+
+      - name: Linux build artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-build-${{ matrix.arch }}
+          path: dist/release/
+          if-no-files-found: error
+
   # Only the manifest merge needs the macOS release to exist (release.ps1 -PublishOnly downloads
   # the <channel>.json release.sh wrote), so this is a short tail after both builds.
   publish:
@@ -916,12 +990,66 @@ jobs:
           gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "$out/Trek-$version-darwin-x86_64.app.tar.gz" "$out/Trek-$version-darwin-x86_64.app.tar.gz.minisig" "$out/Trek-$version-darwin-x86_64.dmg"
           gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "$RUNNER_TEMP/$CHANNEL.json"
 
+  # Linux joins the release last, after the Intel build however that ended: two merges of one
+  # manifest at once would lose one of them. Both architectures' downloads and entries in one go.
+  # Safe to re-run: it replaces its own assets and its own entries.
+  publish-linux:
+    name: Linux publish
+    needs: [macos, linux, publish-intel]
+    if: ${{ !cancelled() && needs.macos.result == 'success' && needs.linux.result == 'success' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      # script/release-linux.sh and script/lib/merge-manifest.py.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Linux build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: linux-build-*
+          path: dist/release
+          merge-multiple: true
+
+      # A dry run's stand-in for the release's <channel>.json, as the macOS job left it.
+      - name: Manifest from the macOS dry run
+        if: inputs.dry_run == true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mac-manifest
+          path: ${{ runner.temp }}/mac-manifest
+
+      - name: Merge manifest (dry run)
+        if: inputs.dry_run == true
+        env:
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          mac="$RUNNER_TEMP/mac-manifest/$CHANNEL.json"
+          more=()
+          [[ -f $mac ]] && more=(--existing-manifest "$mac")
+          script/release-linux.sh "$VERSION" --channel "$CHANNEL" --publish-only "${more[@]}"
+          {
+            echo "### Manifest with the Linux builds (dry run: nothing uploaded)"
+            echo
+            echo '```json'
+            cat "dist/release/${VERSION#v}/$CHANNEL.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Merge manifest and attach
+        if: inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+        run: script/release-linux.sh "$VERSION" --channel "$CHANNEL" --publish-only --publish
+
   # Every platform's downloads are on the release, and in its manifest: v0.4.6, v0.4.9 and v0.4.10
   # went out without their Windows ones. Run whatever became of the publish jobs, so a release left
   # without a platform says which, in red, rather than looking whole.
   complete:
     name: Every platform released
-    needs: [publish, publish-intel]
+    needs: [publish, publish-intel, publish-linux]
     if: ${{ !cancelled() && inputs.dry_run != true }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -948,10 +1076,16 @@ jobs:
             "Trek-$version-darwin-x86_64.app.tar.gz" "Trek-$version-darwin-x86_64.app.tar.gz.minisig" "Trek-$version-darwin-x86_64.dmg"
             "Trek-$version-windows-x86_64.zip" "Trek-$version-windows-x86_64.zip.minisig" "Trek-Setup-x86_64.exe"
           )
+          # Debian orders 0.4.1~beta.2 before 0.4.1: the .deb's version (script/bundle-linux.sh).
+          deb=${version/-/\~}
+          for arch in x86_64 aarch64; do
+            debarch=amd64; [[ $arch == aarch64 ]] && debarch=arm64
+            wanted+=("Trek-$version-linux-$arch.AppImage" "Trek-$version-linux-$arch.AppImage.minisig" "Trek-$version-linux-$arch.tar.gz" "trek_${deb}_$debarch.deb")
+          done
           for want in "${wanted[@]}"; do
             grep -qxF "$want" <<< "$assets" || missing+=("$want")
           done
-          for platform in darwin-aarch64 darwin-x86_64 windows-x86_64; do
+          for platform in darwin-aarch64 darwin-x86_64 windows-x86_64 linux-x86_64 linux-aarch64; do
             jq -e --arg p "$platform" --arg v "$version" '.version == $v and (.platforms[$p] != null)' "$RUNNER_TEMP/release.json" > /dev/null ||
               missing+=("$platform in $CHANNEL.json")
           done

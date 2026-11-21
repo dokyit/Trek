@@ -91,3 +91,38 @@ jobs:
       - name: cargo build --release
         if: steps.cache.outputs.cache-hit != 'true'
         run: cargo build --release --locked -p trek-app -p trek-mcp -p trek-update --lib --bin trek-mcp --bin trek-update
+
+  linux:
+    name: Release deps (Linux, ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
+        with:
+          toolchain: '1.99.0'
+
+      # One key per architecture: release.yml's linux job restores its own.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        id: cache
+        with:
+          shared-key: release-linux-${{ matrix.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: System packages
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: sudo sh script/linux/packages.sh
+
+      # What script/release-linux.sh builds for a release, short of trek's link.
+      - name: cargo build --release
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: cargo build --release --locked -p trek-app -p trek-mcp --lib --bin trek-mcp
