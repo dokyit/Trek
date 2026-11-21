@@ -47,7 +47,7 @@ fn tray_size(want: u32) -> u32 {
 
 /// The embedded PNG for glyph `name`. macOS has one template (the menu bar tints it). Windows
 /// doesn't tint, so there is a set per taskbar theme: `light` is a light taskbar, which takes the
-/// dark glyph.
+/// dark glyph. Linux's tray doesn't tint either and takes Windows' set (`windows` true).
 fn glyph_asset(name: &str, windows: bool, light: bool, px: u32) -> String {
     if windows {
         format!(
@@ -125,7 +125,14 @@ fn tray_icon_px() -> u32 {
     u32::try_from(crate::winsys::icon_edges(crate::winsys::taskbar_dpi()).0).unwrap_or(16)
 }
 
-#[cfg(not(windows))]
+/// Linux: an AppIndicator is drawn at 22 px in GNOME's top bar and KDE's panel (24 in some
+/// themes): the 24 px glyph, scaled down a little where it's smaller.
+#[cfg(target_os = "linux")]
+fn tray_icon_px() -> u32 {
+    22
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn tray_icon_px() -> u32 {
     TRAY_SIZES[0]
 }
@@ -143,8 +150,35 @@ fn on_taskbar(icon: &TrayIcon) -> bool {
     icon.set_tooltip(Some(TOOLTIP)).is_ok()
 }
 
+/// Linux: the icon is an AppIndicator (a StatusNotifierItem), which shows only where something
+/// hosts them: KDE's panel, Ubuntu's GNOME (its AppIndicator extension), most other desktops.
+/// GNOME as it comes elsewhere (Fedora Workstation) has none, and the icon goes nowhere. The host
+/// is `org.kde.StatusNotifierWatcher` on the session bus.
+#[cfg(target_os = "linux")]
+fn on_taskbar(_: &TrayIcon) -> bool {
+    use gtk::gio;
+    use gtk::glib::ToVariant as _;
+    let Ok(bus) = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) else {
+        return false;
+    };
+    bus.call_sync(
+        Some("org.freedesktop.DBus"),
+        "/org/freedesktop/DBus",
+        "org.freedesktop.DBus",
+        "NameHasOwner",
+        Some(&("org.kde.StatusNotifierWatcher",).to_variant()),
+        None,
+        gio::DBusCallFlags::NONE,
+        500,
+        gio::Cancellable::NONE,
+    )
+    .ok()
+    .and_then(|reply| reply.get::<(bool,)>())
+    .is_some_and(|(owned,)| owned)
+}
+
 /// The menu bar takes its item when it's made.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn on_taskbar(_: &TrayIcon) -> bool {
     true
 }
@@ -173,8 +207,9 @@ pub struct Tray {
 }
 
 fn load_icon(name: &str, surface: Surface) -> Option<Icon> {
+    let untinted = !cfg!(target_os = "macos");
     let bytes =
-        crate::assets::brand_bytes(&glyph_asset(name, cfg!(windows), surface.light, surface.px))?;
+        crate::assets::brand_bytes(&glyph_asset(name, untinted, surface.light, surface.px))?;
     let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     let mut reader = decoder.read_info().ok()?;
     let mut buf = vec![0; reader.output_buffer_size()?];
@@ -226,14 +261,14 @@ fn build() -> anyhow::Result<Parts> {
     let settings = MenuItem::new("Settings…", true, None);
     let quit = MenuItem::new(crate::words::words().quit_app, true, None);
     let menu = Menu::new();
-    // Background use is a Mac thing: Windows' computer use works in front, so there is never
-    // a picture to show or hide.
+    // Background use is a Mac thing: Windows' computer use works in front, and Linux has none, so
+    // there is never a picture to show or hide.
     let (first, second) = (
         PredefinedMenuItem::separator(),
         PredefinedMenuItem::separator(),
     );
     let mut items: Vec<&dyn tray_icon::menu::IsMenuItem> = vec![&status];
-    if !crate::words::is_windows() {
+    if crate::words::is_mac() {
         items.push(&behind);
     }
     items.extend([
@@ -471,7 +506,7 @@ impl Tray {
 /// itself.
 pub fn open_trek(ws: &Entity<Workspace>, cx: &mut App) {
     crate::system::activate(cx);
-    if cfg!(windows) || ws.read(cx).main_window.is_none() {
+    if !cfg!(target_os = "macos") || ws.read(cx).main_window.is_none() {
         crate::root::show_main(ws.clone(), cx);
     }
 }
@@ -514,6 +549,12 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
 /// Add or remove the menu bar item (`notifications.menu_bar_icon`). Dropping the tray entity
 /// drops its `TrayIcon`, which removes the status item.
 pub fn set_enabled(workspace: Entity<Workspace>, on: bool, cx: &mut App) {
+    // Linux: the icon is an AppIndicator, whose menu is GTK's.
+    #[cfg(target_os = "linux")]
+    if on && !crate::linux_gtk::ready(cx) {
+        tracing::warn!("menu bar icon unavailable: GTK couldn't start");
+        return;
+    }
     match (on, cx.has_global::<TrayGlobal>()) {
         (true, false) => match build() {
             Ok(parts) => {

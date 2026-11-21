@@ -2650,7 +2650,17 @@ impl Composer {
 
     /// Take a screenshot with macOS's own picker and attach it. `mode`: "window", "area" or "screen".
     /// The snapshot ⌘⇧S takes (Settings → App Snapshots).
+    /// Whether this platform takes snapshots: macOS (`screencapture`) and Windows (Snipping Tool).
+    /// Linux has no capture tool Trek drives (the desktop portal's Screenshot would bring one), so
+    /// the + menu, the shortcut and Settings offer none there.
+    pub fn snapshots_offered() -> bool {
+        !crate::words::is_linux()
+    }
+
     pub fn snapshot_default(&mut self, cx: &mut Context<Self>) {
+        if !Self::snapshots_offered() {
+            return;
+        }
         let mode = match self.workspace.read(cx).settings.snapshots.default_mode {
             trek_core::settings::SnapshotMode::Window => "window",
             trek_core::settings::SnapshotMode::Area => "area",
@@ -2991,9 +3001,17 @@ impl Composer {
                         },
                     ));
                 }
-                let menu = menu.separator();
+                // No snapshot rows (Linux): no line of their own either.
+                let menu = if Self::snapshots_offered() {
+                    menu.separator()
+                } else {
+                    menu
+                };
                 // Snipping Tool has the window, area and screen choice in its own toolbar.
-                let menu = if cfg!(windows) {
+                let menu = if !Self::snapshots_offered() {
+                    let _ = (b, c, d);
+                    menu
+                } else if cfg!(windows) {
                     menu.item(
                         PopupMenuItem::new("Take a snapshot")
                             .icon(crate::assets::Lucide::Camera)

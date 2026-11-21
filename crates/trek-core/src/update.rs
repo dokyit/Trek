@@ -18,6 +18,9 @@
 //! version a channel doesn't carry (by its pre-release, `changelog::channel_of`) is never offered
 //! on it, whichever feed has it.
 //!
+//! Linux (`linux::`): the artifact (`linux-x86_64`, `linux-aarch64`) is the AppImage itself, which
+//! replaces itself; a `.deb` or the tarball doesn't update itself, and says so.
+//!
 //! Windows: the artifact (`windows-x86_64`) is a flat zip of `TREK_FILES`, and Trek is installed
 //! as the folder holding them. Trek can't replace the folder it runs from, so `install` only gets
 //! the staged copy ready and `trek-update.exe` (crates/trek-update) swaps it in once Trek has quit.
@@ -158,6 +161,11 @@ pub enum Blocker {
     /// access) guards. Defender lets only programs it trusts write there and judges each one on
     /// its own, so the `trek-update.exe` an update brings is turned away even when Trek isn't.
     GuardedFolder(KnownFolder),
+    /// Linux: a package manager installed Trek (the `.deb`), and Trek never writes over what it
+    /// installed: the next version is the next package.
+    Packaged,
+    /// Linux: the tarball, which nothing updates; the AppImage updates itself.
+    NotAppImage,
 }
 
 impl Blocker {
@@ -170,6 +178,8 @@ impl Blocker {
             Blocker::SharedFolder => "Trek's folder has other files in it, and an update replaces the whole folder, so Trek can't update itself there. Put Trek's three files in a folder of their own to get updates.".into(),
             Blocker::LinkedFolder => "Trek is running from a link to its folder, so it can't update itself. Start Trek from the folder itself to get updates.".into(),
             Blocker::GuardedFolder(folder) => guarded_message(folder, std::env::var_os("USERPROFILE").map(PathBuf::from).filter(|p| p.is_absolute()).as_deref()),
+            Blocker::Packaged => "Trek was installed from a .deb package, so it doesn't update itself. Download the new .deb from trekdesktop.com and install it to update.".into(),
+            Blocker::NotAppImage => "This copy of Trek doesn't update itself. Download the new version from trekdesktop.com, or use the AppImage, which updates itself.".into(),
         }
     }
 
@@ -271,10 +281,14 @@ const RELEASE_KEY: &str = "TrekRelease";
 /// Lets a bundle built locally update itself anyway (testing the updater).
 pub const LOCAL_UPDATES_ENV: &str = "TREK_UPDATE_LOCAL_BUNDLE";
 
+// Linux returns before the macOS half, which still compiles there (as Windows' halves do).
+#[cfg_attr(target_os = "linux", allow(unreachable_code))]
 pub fn blocker() -> Option<Blocker> {
     if cfg!(windows) {
         return windows_blocker(false);
     }
+    #[cfg(target_os = "linux")]
+    return linux::blocker();
     static RELEASE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let Some(bundle) = running_bundle() else {
         return Some(Blocker::DevBuild);
@@ -393,6 +407,8 @@ pub fn running_bundle() -> Option<PathBuf> {
 }
 
 pub mod closed;
+#[cfg(target_os = "linux")]
+pub mod linux;
 pub mod relocate;
 
 // ---------- a bundle replaced under a running Trek ----------
@@ -476,7 +492,12 @@ pub fn restart(foreground: bool) -> Result<()> {
     )
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+pub fn restart(foreground: bool) -> Result<()> {
+    linux::restart(foreground, &crate::paths::updates_dir())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn restart(_foreground: bool) -> Result<()> {
     bail!("only a Mac Trek starts itself again")
 }
@@ -1199,10 +1220,13 @@ pub async fn download(
     Ok(dest)
 }
 
-/// What the download is saved as: the macOS app is a `.tar.gz`, the Windows folder a `.zip`.
+/// What the download is saved as: the macOS app is a `.tar.gz`, the Windows folder a `.zip`,
+/// and on Linux it's the AppImage itself.
 fn archive_name(version: &semver::Version) -> String {
     if cfg!(windows) {
         format!("Trek-{version}.zip")
+    } else if cfg!(target_os = "linux") {
+        format!("Trek-{version}.AppImage")
     } else {
         format!("Trek-{version}.tar.gz")
     }
@@ -1283,10 +1307,15 @@ pub fn discard(staged: &Path) {
 /// Unpack a verified archive next to itself and inspect the bundle inside: the same app, exactly
 /// `expected`, newer than this one, intact code signature, no quarantine. Returns the staged
 /// `.app`; the archive is removed, and on failure the whole download folder. Blocking.
+// Linux returns before the macOS half, which still compiles there (as Windows' halves do).
+#[cfg_attr(target_os = "linux", allow(unreachable_code))]
 pub fn stage(archive: &Path, expected: &semver::Version, cancel: &AtomicBool) -> Result<PathBuf> {
     if cfg!(windows) {
         return stage_zip(archive, expected, &current_version(), cancel, exe_version);
     }
+    // The signature `download` checked names `expected`: the AppImage is that version.
+    #[cfg(target_os = "linux")]
+    return linux::stage(archive);
     stage_for(
         archive,
         expected,
@@ -1575,11 +1604,15 @@ pub struct Installed {
 /// Swap the staged bundle in for the running one and keep the old one as the single backup.
 /// If anything fails before the swap, nothing has changed.
 /// On Windows nothing moves yet: see `prepare_swap`.
+// Linux returns before the macOS half, which still compiles there (as Windows' halves do).
+#[cfg_attr(target_os = "linux", allow(unreachable_code))]
 pub fn install(staged: &Path) -> Result<Installed> {
     if cfg!(windows) {
         let root = install_root().context("Trek can't tell which folder it runs from")?;
         return prepare_swap(staged, &root, &crate::paths::updates_dir(), exe_version);
     }
+    #[cfg(target_os = "linux")]
+    return linux::install(staged, &crate::paths::updates_dir());
     let bundle = running_bundle().context("not running from an app bundle (dev build)")?;
     let backup = install_into(staged, &bundle, &crate::paths::updates_dir())?;
     Ok(Installed {
@@ -1935,11 +1968,15 @@ fn relaunch_command(
 /// Start the installed bundle once this process has exited. If it can't be opened, the version
 /// it replaced goes back in its place and that is opened instead; a bundle this update didn't
 /// replace is never rolled back. The caller quits right after.
+// Linux returns before the macOS half, which still compiles there (as Windows' halves do).
+#[cfg_attr(target_os = "linux", allow(unreachable_code))]
 pub fn relaunch(installed: &Installed, foreground: bool) -> Result<()> {
     if cfg!(windows) {
         // Windows swaps the folder only now, once this process has exited (`hand_over`).
         return hand_over(installed, Some(foreground));
     }
+    #[cfg(target_os = "linux")]
+    return linux::relaunch(installed, foreground, &crate::paths::updates_dir());
     let mut open_args: Vec<String> = vec!["-n".into()];
     if !foreground {
         open_args.push("-g".into());
@@ -2005,7 +2042,8 @@ fn relaunch_env_from(
 /// Clear what interrupted updates left behind (download folders of processes that are gone) and
 /// report the version this launch replaced, once, if it just updated. Only for a bundled Trek:
 /// a dev build sharing the data folder must not take another copy's update or its message.
-/// On Windows, also the folders an update left next to the install (`clean_old_installs`).
+/// On Windows, also the folders an update left next to the install (`clean_old_installs`); on
+/// Linux, the AppImage's desktop entry (`linux::integrate_desktop`).
 pub fn after_launch() -> Option<String> {
     note_running_exe();
     if cfg!(windows)
@@ -2017,6 +2055,9 @@ pub fn after_launch() -> Option<String> {
     if let Some(bundle) = running_bundle() {
         remove_old_bundle_links(&bundle);
     }
+    // The AppImage's desktop entry and `trek://` handler, where it is now.
+    #[cfg(target_os = "linux")]
+    linux::integrate_desktop();
     after_launch_in(&crate::paths::updates_dir())
 }
 
@@ -2079,7 +2120,7 @@ fn started_after(started: i64, made: i64) -> bool {
     started > made + 1
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn process_alive(pid: u32) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
@@ -2111,7 +2152,7 @@ fn process_alive(pid: u32) -> bool {
     }
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(unix, windows)))]
 fn process_alive(_: u32) -> bool {
     true
 }
@@ -2247,7 +2288,13 @@ mod tests {
         };
         let mut m = manifest("0.3.0");
         m.platforms.clear();
-        for key in ["darwin-aarch64", "darwin-x86_64", "windows-x86_64"] {
+        for key in [
+            "darwin-aarch64",
+            "darwin-x86_64",
+            "windows-x86_64",
+            "linux-x86_64",
+            "linux-aarch64",
+        ] {
             m.platforms.insert(key.into(), artifact(key));
         }
         let Found::Update(u) = newer_than(m, &current).unwrap() else {

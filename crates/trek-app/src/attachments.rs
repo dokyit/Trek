@@ -1354,7 +1354,50 @@ fn make_poster(video: &Path, png: &Path) -> Result<()> {
     made
 }
 
-#[cfg(any(test, feature = "test-support", not(any(target_os = "macos", windows))))]
+/// Linux: a frame a second in, by ffmpeg where it's installed (Linux has no thumbnailer every
+/// desktop shares), as big as the Mac's. Without ffmpeg the tile has no poster.
+#[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
+fn make_poster(video: &Path, png: &Path) -> Result<()> {
+    if png.is_file() {
+        return Ok(());
+    }
+    let Some(ffmpeg) = trek_core::detect::which("ffmpeg") else {
+        bail!("no ffmpeg to take a frame of {}", video.display());
+    };
+    if let Some(dir) = png.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let work = png.with_extension("making.png");
+    let made = std::process::Command::new(ffmpeg)
+        .args(["-nostdin", "-loglevel", "error", "-y", "-ss", "1", "-i"])
+        .arg(video)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale='min(256,iw)':'min(256,ih)':force_original_aspect_ratio=decrease",
+        ])
+        .arg(&work)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match made {
+        Ok(status) if status.success() && work.is_file() => {
+            std::fs::rename(&work, png).map_err(anyhow::Error::from)
+        }
+        _ => {
+            let _ = std::fs::remove_file(&work);
+            bail!("ffmpeg made no frame of {}", video.display())
+        }
+    }
+}
+
+#[cfg(any(
+    test,
+    feature = "test-support",
+    not(any(target_os = "macos", target_os = "linux", windows))
+))]
 fn make_poster(video: &Path, _png: &Path) -> Result<()> {
     bail!("no poster frame for {} here", video.display())
 }

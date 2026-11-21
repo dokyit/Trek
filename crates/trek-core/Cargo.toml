@@ -33,15 +33,21 @@ zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 # The Recycle Bin on Windows, the Trash on macOS, the XDG trash on Linux.
 trash = "5"
 
-[target.'cfg(target_os = "macos")'.dependencies]
-# renamex_np(RENAME_SWAP): swap the app bundle for its update in one step.
+[target.'cfg(unix)'.dependencies]
+# renamex_np(RENAME_SWAP): swap the app bundle for its update in one step (macOS); whether a
+# folder is writable and a process alive (macOS and Linux).
 libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
 # The login keychain read without prompting (`keychain`): keyring can't turn interaction off.
 security-framework = "3"
 
-# Credential Manager on Windows, the secret service on Linux (`keychain`; macOS has its own).
+# Credential Manager on Windows, the secret service on Linux (`keychain`; macOS has its own). On
+# Linux, `linux-native-sync-persistent` keeps each secret in the Secret Service (GNOME Keyring,
+# KWallet), which outlasts a reboot, with the kernel keyring as its cache: `linux-native` alone
+# is the kernel keyring only, which forgets everything at logout.
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-keyring = { version = "3", features = ["windows-native", "linux-native"] }
+keyring = { version = "3", features = ["windows-native", "linux-native-sync-persistent", "crypto-rust"] }
 
 [target.'cfg(windows)'.dependencies]
 # Process ids, start times and trees, for `procs`; an update's version from trek.exe's version

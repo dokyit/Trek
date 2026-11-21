@@ -1,4 +1,4 @@
-//! Trek runs on macOS and Windows from one tree, and a feature or a fix made on one of them can
+//! Trek runs on macOS, Windows and Linux from one tree, and a feature or a fix made on one of them can
 //! quietly skip the other: its other side is a `cfg` branch nobody ran. This crate makes each such
 //! difference a decision someone wrote down, checked by `cargo test` on every platform's CI:
 //!
@@ -332,6 +332,7 @@ pub struct Feature {
     pub what: String,
     pub macos: Support,
     pub windows: Support,
+    pub linux: Support,
     /// How each platform does it, where they differ.
     #[serde(default)]
     pub how: Option<How>,
@@ -358,6 +359,8 @@ pub struct Feature {
     pub live_macos: Option<Vec<String>>,
     #[serde(default)]
     pub live_windows: Option<Vec<String>>,
+    #[serde(default)]
+    pub live_linux: Option<Vec<String>>,
     /// Why a platform it's on has no live steps: what an isolated run can't show (a real
     /// phone, a release, another app), and what checks it instead.
     #[serde(default)]
@@ -379,6 +382,7 @@ impl Feature {
         match platform {
             Platform::Macos => self.macos,
             Platform::Windows => self.windows,
+            Platform::Linux => self.linux,
         }
     }
 
@@ -387,6 +391,7 @@ impl Feature {
         let own = match platform {
             Platform::Macos => &self.live_macos,
             Platform::Windows => &self.live_windows,
+            Platform::Linux => &self.live_linux,
         };
         own.as_deref().unwrap_or(&self.live)
     }
@@ -428,10 +433,12 @@ fn live_problems(f: &Feature) -> Vec<String> {
         .iter()
         .any(|s| s.as_deref().is_some_and(|s| !s.trim().is_empty()));
     let mut without = 0;
-    for platform in [Platform::Macos, Platform::Windows] {
+    let mut on = 0;
+    for platform in Platform::ALL {
         if !matches!(f.support(platform), Support::Yes | Support::Partial) {
             continue;
         }
+        on += 1;
         let steps = f.live_on(platform);
         if steps.is_empty() {
             without += 1;
@@ -448,7 +455,7 @@ fn live_problems(f: &Feature) -> Vec<String> {
             ));
         }
     }
-    if f.live_ci.is_some() && without == 2 {
+    if f.live_ci.is_some() && on > 0 && without == on {
         problems.push(format!(
             "{id}: `live_ci` says why its live steps run on CI only, but it has none"
         ));
@@ -477,6 +484,8 @@ pub struct Promise {
     #[serde(default)]
     pub windows: Option<String>,
     #[serde(default)]
+    pub linux: Option<String>,
+    #[serde(default)]
     pub untested: Option<Untested>,
 }
 
@@ -488,20 +497,27 @@ pub struct Untested {
     pub macos: Option<String>,
     #[serde(default)]
     pub windows: Option<String>,
+    #[serde(default)]
+    pub linux: Option<String>,
 }
 
-/// The two platforms, as the ledger names them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The platforms, as the ledger names them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Platform {
     Macos,
     Windows,
+    Linux,
 }
 
 impl Platform {
-    /// The platform this was built for (a Mac, unless it's Windows).
+    pub const ALL: [Platform; 3] = [Platform::Macos, Platform::Windows, Platform::Linux];
+
+    /// The platform this was built for.
     pub fn here() -> Platform {
         if cfg!(windows) {
             Platform::Windows
+        } else if cfg!(target_os = "linux") {
+            Platform::Linux
         } else {
             Platform::Macos
         }
@@ -511,14 +527,79 @@ impl Platform {
         match self {
             Platform::Macos => "macOS",
             Platform::Windows => "Windows",
+            Platform::Linux => "Linux",
+        }
+    }
+
+    /// Whether a `cfg` predicate that names a platform holds here (`None`: it names none, as
+    /// `test` or a feature, which a test run may have either way).
+    fn satisfies(self, predicate: &str) -> Option<bool> {
+        let os = match self {
+            Platform::Macos => "macos",
+            Platform::Windows => "windows",
+            Platform::Linux => "linux",
+        };
+        let family = if self == Platform::Windows {
+            "windows"
+        } else {
+            "unix"
+        };
+        match predicate {
+            "windows" | "unix" => Some(predicate == family),
+            _ => {
+                let (key, value) = predicate.split_once('=')?;
+                let value = value.trim_matches('"');
+                match key {
+                    "target_os" => Some(value == os),
+                    "target_family" => Some(value == family),
+                    "target_vendor" => Some((value == "apple") == (self == Platform::Macos)),
+                    _ => None,
+                }
+            }
         }
     }
 }
 
-/// Where `fn name` is in `source`, and the one platform its attributes keep it to, if they do
-/// (`cfg(windows)`; `cfg(target_os = "macos")`, `cfg(unix)` or `cfg(not(windows))`). `None` when
-/// there's no such `fn`. A gate on the module the file is (in its parent) isn't seen.
-pub fn test_runs_on(source: &str, name: &str) -> Option<Option<Platform>> {
+/// Whether a `cfg` condition (without spaces: `all(unix,not(target_os="macos"))`) can hold on
+/// `platform`. A predicate that names no platform (`test`, `feature="x"`) counts as holding: a
+/// test run can have it, and not have it.
+fn cfg_holds(condition: &str, platform: Platform) -> bool {
+    fn eval(s: &str, platform: Platform) -> (Option<bool>, &str) {
+        for (op, combine) in [("all(", 0), ("any(", 1), ("not(", 2)] {
+            if let Some(mut rest) = s.strip_prefix(op) {
+                let mut values = vec![];
+                loop {
+                    if let Some(r) = rest.strip_prefix(')') {
+                        rest = r;
+                        break;
+                    }
+                    if rest.is_empty() {
+                        break;
+                    }
+                    let (v, r) = eval(rest, platform);
+                    values.push(v);
+                    rest = r.strip_prefix(',').unwrap_or(r);
+                }
+                // An unknown predicate may hold or not, and so may its `not`.
+                let known: Vec<bool> = values.iter().flatten().copied().collect();
+                let v = match combine {
+                    0 => Some(known.iter().all(|b| *b)),
+                    1 => Some(known.iter().any(|b| *b) || known.len() < values.len()),
+                    _ => values.first().copied().flatten().map(|b| !b),
+                };
+                return (v, rest);
+            }
+        }
+        let end = s.find([',', ')']).unwrap_or(s.len());
+        (platform.satisfies(&s[..end]), &s[end..])
+    }
+    eval(condition, platform).0.unwrap_or(true)
+}
+
+/// Where `fn name` is in `source`, and the platforms its attributes keep it to, if they keep it
+/// off any (`cfg(windows)`; `cfg(target_os = "macos")`; `cfg(unix)`, which is macOS and Linux).
+/// `None` when there's no such `fn`. A gate on the module the file is (in its parent) isn't seen.
+pub fn test_runs_on(source: &str, name: &str) -> Option<Option<Vec<Platform>>> {
     let lines: Vec<&str> = source.lines().collect();
     let at = lines.iter().position(|l| {
         let l = l.trim_start();
@@ -527,7 +608,7 @@ pub fn test_runs_on(source: &str, name: &str) -> Option<Option<Platform>> {
             .and_then(|rest| rest.strip_prefix(name))
             .is_some_and(|rest| rest.starts_with('(') || rest.starts_with('<'))
     })?;
-    let mut only = None;
+    let mut on = Platform::ALL.to_vec();
     for line in lines[..at].iter().rev() {
         let l = line.trim();
         if l.is_empty() || l.starts_with("//") {
@@ -537,16 +618,14 @@ pub fn test_runs_on(source: &str, name: &str) -> Option<Option<Platform>> {
             break;
         }
         let squeezed: String = l.chars().filter(|c| !c.is_whitespace()).collect();
-        if squeezed.contains("cfg(windows)") || squeezed.contains("target_os=\"windows\"") {
-            only = Some(Platform::Windows);
-        } else if squeezed.contains("target_os=\"macos\"")
-            || squeezed.contains("cfg(unix)")
-            || squeezed.contains("cfg(not(windows))")
+        if let Some(condition) = squeezed
+            .strip_prefix("#[cfg(")
+            .and_then(|c| c.strip_suffix(")]"))
         {
-            only = Some(Platform::Macos);
+            on.retain(|p| cfg_holds(condition, *p));
         }
     }
-    Some(only)
+    Some((on.len() < Platform::ALL.len()).then_some(on))
 }
 
 /// What's wrong with `feature`'s promises, read against the tree at `root`.
@@ -563,6 +642,7 @@ fn promise_problems(f: &Feature, root: &Path) -> Vec<String> {
         for (platform, support, test, why) in [
             (Platform::Macos, f.macos, &p.macos, &untested.macos),
             (Platform::Windows, f.windows, &p.windows, &untested.windows),
+            (Platform::Linux, f.linux, &p.linux, &untested.linux),
         ] {
             let on = matches!(support, Support::Yes | Support::Partial);
             let said = why.as_deref().is_some_and(|w| !w.trim().is_empty());
@@ -598,9 +678,9 @@ fn promise_problems(f: &Feature, root: &Path) -> Vec<String> {
             };
             match test_runs_on(&source, name) {
                 None => problems.push(format!("{id}: \"{what}\": {path} has no `fn {name}`")),
-                Some(Some(only)) if only != platform => problems.push(format!(
+                Some(Some(only)) if !only.contains(&platform) => problems.push(format!(
                     "{id}: \"{what}\": `{name}` runs on {} only, so it holds {platform_name} to nothing",
-                    only.name()
+                    only.iter().map(|p| p.name()).collect::<Vec<_>>().join(" and ")
                 )),
                 Some(_) => {}
             }
@@ -614,6 +694,9 @@ fn promise_problems(f: &Feature, root: &Path) -> Vec<String> {
 pub struct How {
     pub macos: String,
     pub windows: String,
+    /// How Linux does it, where that isn't what the other two say.
+    #[serde(default)]
+    pub linux: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -641,7 +724,7 @@ pub fn ledger_problems(ledger: &Ledger, root: &Path) -> Vec<String> {
         if f.area.trim().is_empty() || f.what.trim().is_empty() {
             problems.push(format!("{id}: says nothing of where it is or what it does"));
         }
-        let lacking = [f.macos, f.windows]
+        let lacking = [f.macos, f.windows, f.linux]
             .iter()
             .any(|s| matches!(s, Support::Partial | Support::No));
         let noted = f.note.as_deref().is_some_and(|n| !n.trim().is_empty());
@@ -650,7 +733,10 @@ pub fn ledger_problems(ledger: &Ledger, root: &Path) -> Vec<String> {
                 "{id}: partial or missing on a platform without a note saying why, and what would bring it"
             ));
         }
-        if f.macos == Support::NotApplicable && f.windows == Support::NotApplicable {
+        if [f.macos, f.windows, f.linux]
+            .iter()
+            .all(|s| *s == Support::NotApplicable)
+        {
             problems.push(format!("{id}: applies to no platform"));
         }
         for (kind, paths) in [("code", &f.code), ("tests", &f.tests)] {
@@ -680,23 +766,27 @@ pub fn render_table(ledger: &Ledger) -> String {
          ledger, not this file. Why it exists and how it's kept true: `docs/CROSS_PLATFORM.md`.\n\n\
          Each feature seen working on a platform, by the ledger's `live` steps: `docs/parity/live-<platform>.md`,\n\
          written by `cargo run -p trek-parity --bin parity-live` against the capture build.\n\n\
-         | Area | Feature | macOS | Windows | Notes |\n|---|---|---|---|---|\n",
+         | Area | Feature | macOS | Windows | Linux | Notes |\n|---|---|---|---|---|---|\n",
     );
     for f in features_in_order(ledger) {
         let mut notes = vec![];
         if let Some(how) = &f.how {
             notes.push(format!("macOS: {} Windows: {}", how.macos, how.windows));
+            if let Some(linux) = &how.linux {
+                notes.push(format!("Linux: {linux}"));
+            }
         }
         if let Some(note) = &f.note {
             notes.push(note.clone());
         }
         let cell = |s: &str| s.replace('|', "\\|").replace('\n', " ");
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} |\n",
             cell(&f.area),
             cell(&f.what),
             mark(f.macos),
             mark(f.windows),
+            mark(f.linux),
             cell(&notes.join(" ")),
         ));
     }
@@ -710,8 +800,8 @@ pub fn render_table(ledger: &Ledger) -> String {
     out.push_str(
         "\n## Promises\n\n\
          What a feature keeps to on each platform beyond being there, and the test that holds each \
-         platform to it (one that runs on both is named on both).\n\n\
-         | Feature | Promise | macOS | Windows |\n|---|---|---|---|\n",
+         platform to it (one that runs on several is named on each).\n\n\
+         | Feature | Promise | macOS | Windows | Linux |\n|---|---|---|---|---|\n",
     );
     let cell = |s: &str| s.replace('|', "\\|").replace('\n', " ");
     for f in promised {
@@ -728,11 +818,12 @@ pub fn render_table(ledger: &Ledger) -> String {
                 }
             };
             out.push_str(&format!(
-                "| {} | {} | {} | {} |\n",
+                "| {} | {} | {} | {} | {} |\n",
                 cell(&f.what),
                 cell(&p.what),
                 side(f.macos, &p.macos, &untested.macos),
                 side(f.windows, &p.windows, &untested.windows),
+                side(f.linux, &p.linux, &untested.linux),
             ));
         }
     }
@@ -832,7 +923,7 @@ mod tests {
 
     fn ledger_with(code: &[&str], tests: &[&str]) -> Ledger {
         toml::from_str(&format!(
-            "[[feature]]\nid = \"f\"\narea = \"A\"\nwhat = \"W\"\nmacos = \"yes\"\nwindows = \"yes\"\ncode = {code:?}\ntests = {tests:?}\n"
+            "[[feature]]\nid = \"f\"\narea = \"A\"\nwhat = \"W\"\nmacos = \"yes\"\nwindows = \"yes\"\nlinux = \"yes\"\ncode = {code:?}\ntests = {tests:?}\n"
         ))
         .unwrap()
     }
@@ -892,6 +983,7 @@ mod tests {
             what = "Dictate a message"
             macos = "yes"
             windows = "no"
+            linux = "yes"
 
             [[feature]]
             id = "dictation"
@@ -899,6 +991,7 @@ mod tests {
             what = "Again"
             macos = "n/a"
             windows = "n/a"
+            linux = "n/a"
             code = ["crates/nowhere.rs"]
             "#,
         )
@@ -925,7 +1018,7 @@ mod tests {
         // Unknown fields are a typo, not a note.
         assert!(
             toml::from_str::<Ledger>(
-                "[[feature]]\nid = \"x\"\narea = \"A\"\nwhat = \"W\"\nmacos = \"yes\"\nwindows = \"yes\"\nnotes = \"typo\"\n"
+                "[[feature]]\nid = \"x\"\narea = \"A\"\nwhat = \"W\"\nmacos = \"yes\"\nwindows = \"yes\"\nlinux = \"yes\"\nnotes = \"typo\"\n"
             )
             .is_err()
         );
@@ -936,10 +1029,30 @@ mod tests {
         let source = "#[test]\nfn both() {}\n\n#[test]\n#[cfg(windows)]\nfn pc() {}\n\n\
              #[cfg(target_os = \"macos\")]\n/// Doc.\n#[test]\nasync fn mac() {}\n\n\
              #[cfg(not(windows))]\n#[test]\nfn not_pc() {}\n";
+        use Platform::{Linux, Macos, Windows};
         assert_eq!(test_runs_on(source, "both"), Some(None));
-        assert_eq!(test_runs_on(source, "pc"), Some(Some(Platform::Windows)));
-        assert_eq!(test_runs_on(source, "mac"), Some(Some(Platform::Macos)));
-        assert_eq!(test_runs_on(source, "not_pc"), Some(Some(Platform::Macos)));
+        assert_eq!(test_runs_on(source, "pc"), Some(Some(vec![Windows])));
+        assert_eq!(test_runs_on(source, "mac"), Some(Some(vec![Macos])));
+        assert_eq!(
+            test_runs_on(source, "not_pc"),
+            Some(Some(vec![Macos, Linux]))
+        );
+        let more = "#[cfg(not(target_os = \"macos\"))]\n#[test]\nfn not_mac() {}\n\n\
+             #[cfg(all(unix, not(target_os = \"macos\")))]\n#[test]\nfn linux() {}\n\n\
+             #[cfg(any(target_os = \"macos\", windows))]\n#[test]\nfn mac_or_pc() {}\n\n\
+             #[cfg(all(test, feature = \"x\"))]\n#[test]\nfn featured() {}\n\n\
+             #[cfg(not(test))]\n#[test]\nfn not_test() {}\n";
+        assert_eq!(
+            test_runs_on(more, "not_mac"),
+            Some(Some(vec![Windows, Linux]))
+        );
+        assert_eq!(test_runs_on(more, "linux"), Some(Some(vec![Linux])));
+        assert_eq!(
+            test_runs_on(more, "mac_or_pc"),
+            Some(Some(vec![Macos, Windows]))
+        );
+        assert_eq!(test_runs_on(more, "featured"), Some(None));
+        assert_eq!(test_runs_on(more, "not_test"), Some(None));
         assert_eq!(test_runs_on(source, "bot"), None, "a prefix isn't the name");
         assert_eq!(test_runs_on(source, "nowhere"), None);
     }
@@ -948,7 +1061,7 @@ mod tests {
     fn a_feature_is_shown_live_on_each_platform_or_says_why_not() {
         let problems = |keys: &str, windows: &str| {
             let ledger: Ledger = toml::from_str(&format!(
-                "[[feature]]\nid = \"f\"\narea = \"A\"\nwhat = \"W\"\nmacos = \"yes\"\nwindows = \"{windows}\"\nnote = \"n\"\n{keys}\n"
+                "[[feature]]\nid = \"f\"\narea = \"A\"\nwhat = \"W\"\nmacos = \"yes\"\nwindows = \"{windows}\"\nlinux = \"n/a\"\nnote = \"n\"\n{keys}\n"
             ))
             .unwrap();
             ledger_problems(&ledger, Path::new("."))
@@ -974,7 +1087,7 @@ mod tests {
         );
         // Which steps a platform runs.
         let ledger: Ledger = toml::from_str(&format!(
-            "[[feature]]\nid = \"f\"\narea = \"A\"\nwhat = \"W\"\nmacos = \"yes\"\nwindows = \"yes\"\n{on_screen}\nlive_windows = [\"count phone-apps 1\"]\n"
+            "[[feature]]\nid = \"f\"\narea = \"A\"\nwhat = \"W\"\nmacos = \"yes\"\nwindows = \"yes\"\nlinux = \"yes\"\n{on_screen}\nlive_windows = [\"count phone-apps 1\"]\n"
         ))
         .unwrap();
         let f = &ledger.feature[0];
@@ -1005,7 +1118,7 @@ mod tests {
         .unwrap();
         let problems = |promise: &str, windows: &str| {
             let ledger: Ledger = toml::from_str(&format!(
-                "[[feature]]\nid = \"f\"\narea = \"A\"\nwhat = \"W\"\nmacos = \"yes\"\nwindows = \"{windows}\"\nnote = \"n\"\nlive_skip = \"Not on screen.\"\n\n[[feature.promise]]\n{promise}\n"
+                "[[feature]]\nid = \"f\"\narea = \"A\"\nwhat = \"W\"\nmacos = \"yes\"\nwindows = \"{windows}\"\nlinux = \"n/a\"\nnote = \"n\"\nlive_skip = \"Not on screen.\"\n\n[[feature.promise]]\n{promise}\n"
             ))
             .unwrap();
             ledger_problems(&ledger, &dir)

@@ -85,6 +85,10 @@ pub mod toast;
 pub mod tray;
 pub mod ui;
 pub use trek_updater as updater;
+#[cfg(target_os = "linux")]
+pub mod linux_gtk;
+#[cfg(target_os = "linux")]
+pub mod linux_open_in;
 pub mod video;
 pub mod visualization;
 pub use trek_window_place as window_place;
@@ -299,6 +303,9 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 }
 
 pub fn run() {
+    // Linux: X11 windows (through Xwayland) in a Wayland session, while this is the only thread.
+    #[cfg(target_os = "linux")]
+    linux_gtk::prefer_x11();
     // `trek plugin …` is the plugins CLI: it does its work on the plugins folder and exits, with
     // no window (`trek_core::plugins::cli`).
     if let Some(code) = trek_core::plugins::cli::from_args() {
@@ -392,11 +399,11 @@ pub fn run() {
         // (`system::sync`, `keys::rebind`).
         cx.bind_keys(keys::trek_bindings());
         app_actions(cx);
-        // macOS has the system's menu bar; Windows has none (its commands are in the palette, the
-        // settings, the context menus and the shortcuts), and no Dock to keep the app up with its
-        // main window closed.
+        // macOS has the system's menu bar; Windows and Linux have none (the commands are in the
+        // palette, the settings, the context menus and the shortcuts), and no Dock to keep the app
+        // up with its main window closed.
         cx.set_menus(menus());
-        if cfg!(windows) {
+        if !cfg!(target_os = "macos") {
             root::quit_with_main_window(cx);
         }
 
@@ -428,6 +435,9 @@ pub fn run() {
         let ws = workspace::init(cx);
         perf::phase("workspace");
         ws.update(cx, |ws, cx| ws.hear_deep_links(links_rx, cx));
+        // Linux: GTK, for the tray icon and the web views, running from here on.
+        #[cfg(target_os = "linux")]
+        linux_gtk::ready(cx);
         tray::init(ws.clone(), cx);
         // The Trek theme the settings name, before the kit's theme goes up from it.
         themes::init(&ws, cx);

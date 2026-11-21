@@ -1583,7 +1583,11 @@ impl PanelTool {
     /// The tools this platform has, in `ALL`'s order: the iOS Simulator needs Xcode's tools, so
     /// Windows has no Simulator tab. Its iPhone tab reaches the phone another way (CoreDevice's
     /// services and Apple Mobile Device Service), with the same tools.
+    /// Linux has neither: no Xcode, and no Apple Mobile Device Service to reach a phone through.
     pub fn offered() -> Vec<PanelTool> {
+        if crate::words::is_linux() {
+            return Self::offered_on_linux();
+        }
         Self::offered_on(crate::words::is_windows())
     }
 
@@ -1591,6 +1595,13 @@ impl PanelTool {
         Self::ALL
             .into_iter()
             .filter(|t| !(windows && *t == PanelTool::Simulator))
+            .collect()
+    }
+
+    pub fn offered_on_linux() -> Vec<PanelTool> {
+        Self::ALL
+            .into_iter()
+            .filter(|t| !matches!(t, PanelTool::Simulator | PanelTool::Phone))
             .collect()
     }
     pub fn label(self) -> &'static str {
@@ -10607,7 +10618,10 @@ impl Workspace {
             // The simulator's tools only where there's a simulator to drive (Xcode, not just its
             // command line tools): elsewhere they're tool names and words in every request.
             let sim_tools = tools.simulator && trek_core::detect::has_simulator();
-            for family in trek_mcp_families(tools.computer_use, sim_tools, windows) {
+            // Linux has no computer use or video watcher (`trek-mcp` has neither there).
+            let linux = crate::words::is_linux();
+            let computer_use = tools.computer_use && !linux;
+            for family in trek_mcp_families(computer_use, sim_tools, windows) {
                 let mut env = trek_mcp_env(family, tools.computer_background, windows);
                 // The simulator's `sim_test` writes its run where the Simulator tool reads it,
                 // and a test run takes minutes.
@@ -10628,7 +10642,7 @@ impl Workspace {
                     )
                 });
             }
-            if tools.video {
+            if tools.video && !linux {
                 out.push(video_server(&bin));
             }
         }
@@ -12004,7 +12018,7 @@ pub(crate) fn agent_notes(
             ),
             None => trek_core::artifact::AGENT_INSTRUCTIONS.to_string(),
         });
-    let video = (settings.tools.video && tool_server)
+    let video = (settings.tools.video && tool_server && !crate::words::is_linux())
         .then(|| trek_core::media::AGENT_INSTRUCTIONS.to_string());
     // Every session has its thread's transcript to search (`transcript_log`), and is told where
     // to look when asked to restyle Trek (`themes`).
@@ -12295,6 +12309,17 @@ mod tests {
                 .filter(|t| *t != PanelTool::Simulator)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn linux_offers_neither_the_iphone_nor_the_simulator() {
+        let linux = PanelTool::offered_on_linux();
+        assert!(!linux.contains(&PanelTool::Simulator));
+        assert!(!linux.contains(&PanelTool::Phone));
+        assert!(linux.contains(&PanelTool::Browser), "WebKitGTK");
+        assert_eq!(linux.len(), PanelTool::ALL.len() - 2);
+        let _linux = crate::words::pretend_os(crate::words::Os::Linux);
+        assert_eq!(PanelTool::offered(), linux);
     }
 
     #[test]

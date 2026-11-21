@@ -175,6 +175,17 @@ windows = { version = "0.62", features = ["ApplicationModel_DataTransfer", "Foun
 webview2-com = "0.38"
 windows-61 = { package = "windows", version = "0.61", features = ["Win32_System_Com", "Win32_UI_Shell"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# The iPhone tool's words for what a computer lacks to use one (`setup`), which build anywhere:
+# Linux has no iPhone tool (no Apple Mobile Device Service), so none of its device services.
+trek-phone = { path = "../trek-phone" }
+# GTK, which the tray icon (AppIndicator) and the web views (WebKitGTK) are made of, started and
+# run from GPUI's loop (`linux_gtk`). The version tray-icon and wry are built on.
+gtk = "0.18"
+# The capture build's `shot`: the window's pixels from the X server (GPUI's Linux renderer has no
+# offscreen render of a frame). The version GPUI's X11 platform talks to the server with.
+x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
+
 [target.'cfg(windows)'.build-dependencies]
 # The app icon in trek.exe (build.rs), through the Windows SDK's rc.exe.
 embed-resource = "3"
@@ -192,6 +203,10 @@ zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 gpui_macos = { package = "gpui-pre-macos", version = "=0.3.7" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# The Linux twin of gpui_macos: cosmic-text, so the tests' text lays out as in the app.
+gpui_linux = { package = "gpui-pre-linux", version = "=0.3.7" }
 
 [target.'cfg(windows)'.dev-dependencies]
 # The Windows twin of gpui_macos: DirectWrite, so the tests' text lays out as in the app.

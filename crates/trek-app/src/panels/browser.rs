@@ -853,11 +853,15 @@ struct Tab {
 pub(crate) struct ParentWindow(raw_window_handle::RawWindowHandle);
 
 impl ParentWindow {
-    /// `None` where there's no native window (GPUI's test windows).
+    /// `None` where there's no native window (GPUI's test windows), and on Linux where a web view
+    /// can't go (`linux_gtk::web_view_parent`).
     pub(crate) fn of(window: &Window) -> Option<Self> {
-        raw_window_handle::HasWindowHandle::window_handle(window)
+        let raw = raw_window_handle::HasWindowHandle::window_handle(window)
             .ok()
-            .map(|h| Self(h.as_raw()))
+            .map(|h| h.as_raw())?;
+        #[cfg(target_os = "linux")]
+        let raw = crate::linux_gtk::web_view_parent(raw)?;
+        Some(Self(raw))
     }
 }
 
@@ -2972,7 +2976,9 @@ impl BrowserPanel {
 
     /// Block trackers in every tab, or stop, and load the page in front again so it shows: on
     /// macOS the big ad and tracker networks (`browser_extensions::blocker`), on Windows as
-    /// Edge's Strict tracking prevention does (`native::block_trackers`).
+    /// Edge's Strict tracking prevention does (`native::block_trackers`). Linux's WebKitGTK has
+    /// neither, and its menu has no such row.
+    #[cfg(any(target_os = "macos", windows))]
     fn toggle_block_trackers(&mut self, cx: &mut Context<Self>) {
         let on = self.workspace.update(cx, |ws, cx| {
             ws.settings.browser.block_trackers = !ws.settings.browser.block_trackers;
@@ -3078,6 +3084,7 @@ impl BrowserPanel {
     }
 
     /// Load the web page in front again (not one of Trek's own).
+    #[cfg(any(target_os = "macos", windows))]
     fn reload_page_in_front(&self, cx: &App) {
         if let Some(tab) = self
             .active_tab()
@@ -3180,6 +3187,10 @@ impl BrowserPanel {
     /// The ⋯ menu's ad blocker rows: import, or on/off and the site in front let through
     /// (macOS); on Windows the import, the extension then managed on the Extensions page.
     fn adblock_rows(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        // Linux: WebKitGTK takes no content rules or extensions, so there's no blocker to import.
+        if crate::words::is_linux() {
+            return vec![];
+        }
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let check = |on: bool| {

@@ -171,7 +171,7 @@ pub fn same_secret(a: &str, b: &str) -> bool {
 }
 
 /// The user id of the process at the other end of a connected Unix socket.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 pub fn peer_uid(fd: std::os::fd::RawFd) -> std::io::Result<u32> {
     let (mut uid, mut gid): (libc::uid_t, libc::gid_t) = (0, 0);
     // SAFETY: getpeereid only writes the two ids it's given; `fd` is the caller's open socket.
@@ -179,6 +179,31 @@ pub fn peer_uid(fd: std::os::fd::RawFd) -> std::io::Result<u32> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(uid)
+}
+
+/// Linux has no getpeereid: the kernel's credentials for the peer (SO_PEERCRED).
+#[cfg(target_os = "linux")]
+pub fn peer_uid(fd: std::os::fd::RawFd) -> std::io::Result<u32> {
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: getsockopt writes at most `len` bytes into `cred`; `fd` is the caller's open socket.
+    let ok = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut cred).cast(),
+            &raw mut len,
+        )
+    };
+    if ok != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(cred.uid)
 }
 
 /// This process's effective user id.

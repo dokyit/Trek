@@ -8,8 +8,7 @@
 //! JSON-RPC 2.0 messages are read from stdin and written to stdout, one per line. Logs go to
 //! stderr only.
 
-// Trek's Browser tool has a web view on macOS and Windows only.
-#[cfg(any(target_os = "macos", windows))]
+// Trek's Browser tool, which has a web view on every platform (WebKitGTK on Linux).
 mod browser;
 #[cfg(any(target_os = "macos", windows))]
 mod computer;
@@ -81,13 +80,7 @@ fn main() {
                 std::process::exit(2);
             }
         },
-        #[cfg(any(target_os = "macos", windows))]
         "browser" => serve(Box::new(browser::Browser::from_env())),
-        #[cfg(not(any(target_os = "macos", windows)))]
-        "browser" => {
-            eprintln!("trek-mcp: the browser tools run only on macOS and Windows");
-            std::process::exit(2);
-        }
         // On Windows: its screen through CoreDevice's services, its apps and files through Apple
         // Mobile Device Service.
         #[cfg(any(target_os = "macos", windows))]
@@ -185,7 +178,6 @@ fn mac_update(args: &[String]) -> i32 {
 
 /// Serve `tools` on stdin/stdout, one request at a time, until stdin closes. (`orchestrate`
 /// serves itself, with calls side by side.)
-#[cfg(any(target_os = "macos", windows))]
 fn serve(mut tools: Box<dyn rpc::ToolSet>) {
     use std::io::{BufRead, Write};
 

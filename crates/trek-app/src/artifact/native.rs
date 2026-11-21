@@ -105,11 +105,17 @@ impl NativeSurface {
         let builder = wry::WebViewBuilder::new_with_web_context(&mut context)
             .with_focused(false)
             .with_background_color((background.0, background.1, background.2, 255));
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
         let builder = {
             let _ = background;
             wry::WebViewBuilder::new().with_transparent(true)
         };
+        // Linux: an X11 window inside GPUI's shows nothing of GPUI's through it, so the page
+        // stands on the card's colour, as on Windows.
+        #[cfg(not(any(target_os = "macos", windows)))]
+        let builder = wry::WebViewBuilder::new()
+            .with_focused(false)
+            .with_background_color((background.0, background.1, background.2, 255));
         let web = builder
             .with_url(format!("{origin}/"))
             .with_visible(true)
@@ -229,7 +235,7 @@ impl Surface for NativeSurface {
     }
 
     fn set_background(&self, rgb: (u8, u8, u8)) {
-        if cfg!(windows) {
+        if !cfg!(target_os = "macos") {
             let _ = self.web.set_background_color((rgb.0, rgb.1, rgb.2, 255));
         }
     }
@@ -734,7 +740,133 @@ mod platform {
     }
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(target_os = "linux")]
+mod platform {
+    use super::{Parent, Placement};
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::xproto::{
+        ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, InputFocus, WindowClass,
+    };
+    use x11rb::rust_connection::RustConnection;
+
+    /// An X11 child window over GPUI's that clips the web view in it (X clips a child window's
+    /// children to it), as Windows' child window does. Made on a connection of its own, which
+    /// lives as long as it: X destroys a client's windows when its connection closes.
+    pub struct Clip {
+        conn: RustConnection,
+        window: u32,
+        parent: u32,
+    }
+
+    impl Clip {
+        pub fn new(handle: raw_window_handle::RawWindowHandle) -> Option<Self> {
+            let raw_window_handle::RawWindowHandle::Xlib(h) =
+                crate::linux_gtk::web_view_parent(handle)?
+            else {
+                return None;
+            };
+            let parent = u32::try_from(h.window).ok()?;
+            let (conn, _) = x11rb::connect(None).ok()?;
+            // GPUI's window may be 32 bits deep (see-through): the child takes its depth, visual
+            // and colormap, or X refuses it.
+            let attrs = conn.get_window_attributes(parent).ok()?.reply().ok()?;
+            let depth = conn.get_geometry(parent).ok()?.reply().ok()?.depth;
+            let window = conn.generate_id().ok()?;
+            conn.create_window(
+                depth,
+                window,
+                parent,
+                0,
+                0,
+                1,
+                1,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                attrs.visual,
+                &CreateWindowAux::new()
+                    .colormap(attrs.colormap)
+                    .border_pixel(0)
+                    .background_pixel(0),
+            )
+            .ok()?;
+            // A round trip, so the server has made it before wry (on GTK's connection) puts the
+            // web view's window inside it.
+            conn.get_input_focus().ok()?.reply().ok()?;
+            Some(Self {
+                conn,
+                window,
+                parent,
+            })
+        }
+
+        pub fn handle(&self) -> Parent {
+            Parent(raw_window_handle::RawWindowHandle::Xlib(
+                raw_window_handle::XlibWindowHandle::new(std::ffi::c_ulong::from(self.window)),
+            ))
+        }
+
+        /// Frame the visible part (window px from the top left, in GPUI's logical px) and show it.
+        pub fn place(&self, p: &Placement, scale: f32) {
+            let at = |v: gpui_kit::Pixels| (f32::from(v) * scale).round() as i32;
+            let (x, y) = (at(p.clip.origin.x), at(p.clip.origin.y));
+            let (w, h) = (
+                at(p.clip.origin.x + p.clip.size.width) - x,
+                at(p.clip.origin.y + p.clip.size.height) - y,
+            );
+            let _ = self.conn.configure_window(
+                self.window,
+                &ConfigureWindowAux::new()
+                    .x(x)
+                    .y(y)
+                    .width(w.max(1) as u32)
+                    .height(h.max(1) as u32)
+                    .stack_mode(x11rb::protocol::xproto::StackMode::ABOVE),
+            );
+            let _ = self.conn.map_window(self.window);
+            let _ = self.conn.flush();
+        }
+
+        pub fn hide(&self) {
+            let _ = self.conn.unmap_window(self.window);
+            let _ = self.conn.flush();
+        }
+
+        /// The keys back to GPUI's window.
+        pub fn release_keys(&self) {
+            let _ = self
+                .conn
+                .set_input_focus(InputFocus::PARENT, self.parent, x11rb::CURRENT_TIME);
+            let _ = self.conn.flush();
+        }
+    }
+
+    impl Drop for Clip {
+        fn drop(&mut self) {
+            let _ = self.conn.destroy_window(self.window);
+            let _ = self.conn.flush();
+        }
+    }
+
+    pub fn page_has_keys(_: &gpui_kit::Window) -> bool {
+        false
+    }
+
+    #[cfg(feature = "shots")]
+    pub fn keys_holder(_: &gpui_kit::Window) -> String {
+        "trek".into()
+    }
+
+    #[cfg(feature = "shots")]
+    pub fn shots_keys(_: &gpui_kit::Window, what: &str) -> Result<(), String> {
+        Err(format!("{what}: macOS only"))
+    }
+
+    pub fn snapshot(_: &wry::WebView) -> Option<async_channel::Receiver<Result<Vec<u8>, String>>> {
+        None
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod platform {
     use super::{Parent, Placement};
 
