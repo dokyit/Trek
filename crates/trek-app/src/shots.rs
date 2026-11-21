@@ -13,7 +13,7 @@
 //!
 //! Commands: `route draft|no-project|basecamp|notes|appearance|settings:<page>|thread:<id>|title:<q>|project:<path>|first`,
 //! `send <prompt>`, `attach <path>[|<path>…]` (into the main composer, as a drop: images as thumbnails, other files as tiles), `note text <markdown>|image <path>…|mode write|split|preview` (Notes; see `run`), `project <folder>` (added, and a draft in it), `diff` (the latest turn's changes in the Git tool),
-//! `pair` (a pairing code, its link written to `pair.txt`), `pair-phone [name]|leave` (a stand-in iPhone paired over the protocol, connected or gone), `heic-demo` (an iPhone photo made by the system's codec, attached), `open-link <trek:// link>` (as the system hands Trek one), `file <path> [contains <text>]` and `private <path>` (in the data folder unless absolute, `*name` for a name's end: there, holding `text`, and readable by the user alone), `second-launch <arg>` (Windows: Trek started again, handing `arg` over), `keep-working` / `show-main` (the windows closed with an agent at work, and the main one back), `close-main` (Windows: the close button's own path, with Keep Trek in the tray on), `badge <n>[+]` (the count on the app's icon), `count-all <id> <n>[+]` (`count` over every window), `tray off|on|<state>` (the system's tray or menu bar icon), `programs <name> <n>[+]` / `programs-ended` (programs running under Trek, then gone), `console-windows mark|new <n>` (Windows: console windows on screen), `native` (not translated or emulated), `banners mark|new <n>[+]` (Windows: banners in the notification center), `renders mark|<view> <n>+|<n>-|<=<view>…` (how often views drew), `within <id>[*] <id>` (inside another, as drawn), `banner-permission off|restore` and `file-app <ext> on|off` (Windows: Trek's switch in the notification settings; a default app of the check's own), `cloud-file <abs-path> <text>|fetched <n>[+]|away|off` (Windows: a file that lives only in the cloud, from a sync provider of the check's own), `editor has <text>|note <text>` (the file in front shows it; the preview in front says it), `photos open|shown <0|1>|close` (Mac: the system's Photos picker as the + menu opens it, a sheet on the window), `bonjour on|found|off` (the phone server announced through the system's responder, under a name of the check's own, and found as a phone finds it), `programs-stop`, `motion on|system` (animations whatever the system asks, or back to its setting), `signed-out` (`gh`, as Trek starts it, has no login: a capture run never acts as the user), `self-contained` (no runtime from elsewhere loaded), `browser crash` / `browser expect crashed|failed[:<address>]|loaded|why:<word>` (the page's process ended; the tab as the panel has it, and the reason Trek's page gives), `pair-phone upload <name>` (the stand-in sends a file up), `push on|test|alert`, `new` (⌘N), `settled [on|off]`,
+//! `pair` (a pairing code, its link written to `pair.txt`), `pair-phone [name]|leave` (a stand-in iPhone paired over the protocol, connected or gone), `heic-demo` (an iPhone photo made by the system's codec, attached), `open-link <trek:// link>` (as the system hands Trek one), `file <path> [contains <text>]` and `private <path>` (in the data folder unless absolute, `*name` for a name's end: there, holding `text`, and readable by the user alone), `second-launch <arg>` (Windows: Trek started again, handing `arg` over), `keep-working` / `show-main` (the windows closed with an agent at work, and the main one back), `freeze <seconds>` / `freeze told [n]` (the main thread held as a freeze holds it; the freeze watch told it, with a stacks file on a Mac), `close-main` (Windows: the close button's own path, with Keep Trek in the tray on), `badge <n>[+]` (the count on the app's icon), `count-all <id> <n>[+]` (`count` over every window), `tray off|on|<state>` (the system's tray or menu bar icon), `programs <name> <n>[+]` / `programs-ended` (programs running under Trek, then gone), `console-windows mark|new <n>` (Windows: console windows on screen), `native` (not translated or emulated), `banners mark|new <n>[+]` (Windows: banners in the notification center), `renders mark|<view> <n>+|<n>-|<=<view>…` (how often views drew), `within <id>[*] <id>` (inside another, as drawn), `banner-permission off|restore` and `file-app <ext> on|off` (Windows: Trek's switch in the notification settings; a default app of the check's own), `cloud-file <abs-path> <text>|fetched <n>[+]|away|off` (Windows: a file that lives only in the cloud, from a sync provider of the check's own), `editor has <text>|note <text>` (the file in front shows it; the preview in front says it), `photos open|shown <0|1>|close` (Mac: the system's Photos picker as the + menu opens it, a sheet on the window), `bonjour on|found|off` (the phone server announced through the system's responder, under a name of the check's own, and found as a phone finds it), `programs-stop`, `motion on|system` (animations whatever the system asks, or back to its setting), `signed-out` (`gh`, as Trek starts it, has no login: a capture run never acts as the user), `self-contained` (no runtime from elsewhere loaded), `browser crash` / `browser expect crashed|failed[:<address>]|loaded|why:<word>` (the page's process ended; the tab as the panel has it, and the reason Trek's page gives), `pair-phone upload <name>` (the stand-in sends a file up), `push on|test|alert`, `new` (⌘N), `settled [on|off]`,
 //! `glass on|off`, `tint <0.2–0.95>`, `theme night|paper`, `title <text>` (renames the thread on screen), `dress <Agent>|<Fast model>|<Deep model>` or `dress off` (the mock agent under other names, for marketing frames of a whole window; captioned as examples wherever they're shown), `tools on|off|git|explorer|terminal|browser|sidechat|simulator`,
 //! `range today|week|all` (Basecamp's), `accounts-demo` (accounts for Settings, the picker and the Usage card), `compact-demo` (the thread on screen large and idle past its prompt cache, for the Compact chip), `secret-demo` (a secret's request card), `usage-demo` (plans and limits for the Usage card, no real agent asked), `limits-demo` (the same windows for the mock agent, for the composer's context card), `update-demo ready|wait|later|clear` (an update staged, for the updater's states with work running), `resume-demo resuming|failed|offered|waiting` (the thread on screen's offer after a relaunch), `pace <f>` (the mock agent's speed: 1.0 demo, 0 instant),
 //! `wait <ms>` or `wait idle|permission|question|plan [cap ms]`, `record <name> <ms> [fps]` (frames
@@ -2153,6 +2153,12 @@ fn windows(ws: &Entity<Workspace>, dir: &Path, cx: &mut App) -> anyhow::Result<(
     Ok(())
 }
 
+/// The `freeze` command's hold on the main thread: its own frame, so a stacks file names it.
+#[inline(never)]
+fn hold_the_main_thread_for_a_freeze_check(how_long: Duration) {
+    std::thread::sleep(std::hint::black_box(how_long));
+}
+
 fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::Result<()> {
     // The picture-in-picture window of background computer use, as its buttons and the menu
     // bar icon drive it.
@@ -3258,6 +3264,34 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
     }
     if verb == "show-main" {
         crate::root::show_main(ws.clone(), cx);
+        return Ok(());
+    }
+    // `freeze <seconds>`: the main thread held that long (at most a minute), as a freeze holds it,
+    // for the freeze watch (`trek_logging::freeze`) to tell; `freeze told [n]`: it told n (1) or
+    // more this run, and on a Mac a stacks file is in the log folder.
+    if verb == "freeze" {
+        let arg = arg.trim();
+        if let Some(n) = arg.strip_prefix("told") {
+            let want: usize = n.trim().parse().unwrap_or(1);
+            let told = crate::logging::freeze::told();
+            anyhow::ensure!(told >= want, "freeze told: {told} freezes told, not {want}");
+            if cfg!(target_os = "macos") {
+                let file = crate::logging::freeze::newest_file(&crate::logging::log_dir());
+                anyhow::ensure!(
+                    file.is_some(),
+                    "freeze told: no freeze-*.txt in the log folder"
+                );
+            }
+            return Ok(());
+        }
+        let secs: f64 = arg
+            .parse()
+            .map_err(|_| anyhow::anyhow!("freeze <seconds>|told [n]: bad {arg:?}"))?;
+        anyhow::ensure!(
+            (0.0..=60.0).contains(&secs),
+            "freeze: 0 to 60 seconds, not {secs}"
+        );
+        hold_the_main_thread_for_a_freeze_check(Duration::from_secs_f64(secs));
         return Ok(());
     }
     // `close-main`: the main window's close button by its own path (`root::close_main`), where

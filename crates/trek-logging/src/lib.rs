@@ -1,7 +1,10 @@
 //! Where Trek's log goes: stderr (a terminal launch), and a file a day in `~/Library/Logs/Trek`
 //! (kept a week), so a Finder launch leaves breadcrumbs too. A panic is logged with where it
 //! happened and a backtrace, and leaves a note the next launch shows and a report it can send
-//! (`CrashReport`, with the user's yes).
+//! (`CrashReport`, with the user's yes). A main thread that stops making progress is logged too,
+//! with its stacks on a Mac (`freeze`).
+
+pub mod freeze;
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};

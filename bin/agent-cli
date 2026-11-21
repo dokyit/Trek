@@ -488,10 +488,12 @@ def cmd_where(a):
 
 LOG_DIR = HOME / "Library" / "Logs" / "Trek"
 LEVEL = re.compile(r"^\S+\s+(TRACE|DEBUG|INFO|WARN|ERROR)\s")
+# The freeze watch's WARN when the main thread stops (crates/trek-logging/src/freeze.rs).
+FREEZE = "freeze: the main thread has made no progress"
 
 
 def cmd_logs(a):
-    """Newest ~/Library/Logs/Trek log: warnings/errors/panics first, then the tail. ANSI stripped."""
+    """Newest ~/Library/Logs/Trek log: warnings/errors/panics/freezes first, then the tail. ANSI stripped."""
     logs = sorted(LOG_DIR.glob("*.log"), key=lambda p: p.stat().st_mtime) if LOG_DIR.exists() else []
     if not logs:
         return {"log": None, "note": f"no logs in {LOG_DIR}"}
@@ -504,14 +506,19 @@ def cmd_logs(a):
     cut = lambda l: l[:a.width]
     d = {"log": str(p), "size": human_bytes(p.stat().st_size), "lines": len(lines),
          "warn": sum(1 for l in bad if " WARN " in l[:40]), "error": sum(1 for l in bad if " ERROR " in l[:40]),
-         "panics": sum(1 for l in bad if "panicked" in l),
+         "panics": sum(1 for l in bad if "panicked" in l or "panic on thread" in l),
+         "freezes": sum(1 for l in bad if FREEZE in l),
          "problems": [cut(l) for l in bad[-a.n:]], "tail": [cut(l) for l in lines[-a.n:]]}
     crash = sorted((HOME / "Library" / "Logs" / "DiagnosticReports").glob("trek*.ips"), key=lambda x: x.stat().st_mtime) \
         if IS_MAC and (HOME / "Library" / "Logs" / "DiagnosticReports").exists() else []
     if crash:
         d["latest_crash_report"] = f"{crash[-1]} ({ago(crash[-1].stat().st_mtime)} ago)"
-    d["_text"] = [f"log {d['log']} {d['size']} warn={d['warn']} error={d['error']} panics={d['panics']}"] + \
+    # The freeze watch's stacks files (crates/trek-logging/src/freeze.rs), newest last.
+    freezes = sorted(LOG_DIR.glob("freeze-*.txt"))[-3:]
+    d["freeze_files"] = [f"{f} ({ago(f.stat().st_mtime)} ago)" for f in freezes]
+    d["_text"] = [f"log {d['log']} {d['size']} warn={d['warn']} error={d['error']} panics={d['panics']} freezes={d['freezes']}"] + \
         ([f"crash {d['latest_crash_report']}"] if crash else []) + \
+        [f"freeze {f}" for f in d["freeze_files"]] + \
         ["-- problems (newest last)"] + d["problems"] + ["-- tail"] + d["tail"]
     return d
 

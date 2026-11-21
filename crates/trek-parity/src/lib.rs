@@ -413,6 +413,7 @@ pub fn checks(step: &str) -> bool {
         "share" => words.next() == Some("asked"),
         "phone-server" => words.next() == Some("reach"),
         "toasts" => words.next().is_some_and(|w| w != "clear"),
+        "freeze" => words.next() == Some("told"),
         "opencode-history" => true,
         "update-task" => true,
         _ => false,

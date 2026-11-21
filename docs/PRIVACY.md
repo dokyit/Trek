@@ -37,6 +37,8 @@ In `telemetry/` in Trek's data folder:
 
 A panic also leaves `crash-reports/panic-*.json` in the data folder (the newest five). Until the user answers they wait; with a yes the next launch sends them, with a no it deletes them.
 
+A freeze (the main thread making no progress for 5 seconds, `trek_logging::freeze`) is WARN lines in the log, and on a Mac `freeze-<time>.txt` beside it: every thread's stacks from `/usr/bin/sample`, three a run at most, the newest ten kept. Those files are never sent, with a yes or without; the WARN lines are log lines like any other, so feedback sent with diagnostics can carry them, scrubbed.
+
 ## The install id
 
 A random UUID, made at the first yes. It's the event's `distinct_id`; nothing else about the install or the person is known. Every event sets `$process_person_profile: false` (PostHog makes no person profile) and `$geoip_disable: true` (no country or city from the address it came from). For no IP at all, turn on *Discard client IP data* in the PostHog project's settings. **Reset** in Settings › Privacy makes a new id and drops what was waiting under the old one.
