@@ -6,8 +6,8 @@
 <title>Trek: every agent, one trail</title>
 <meta name="description" content="Trek is a free, open-source Mac and Windows app that runs your coding agents from one inbox: Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models.">
 <link rel="canonical" href="https://trekdesktop.com/">
-<meta name="theme-color" content="#C9C1DE" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#1D1A2C" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#B3B3C7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0E1227" media="(prefers-color-scheme: dark)">
 
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Trek">
@@ -30,8 +30,12 @@
 <link rel="manifest" href="/site.webmanifest?v=3e8b1bb9">
 <link rel="preload" href="/assets/fonts/BricolageGrotesque.woff2?v=a79fdb52" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/assets/fonts/HankenGrotesk.woff2?v=e9201edd" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="/assets/site.css?v=b70befc1">
-<script src="/assets/site.js?v=67ba28b0" defer></script>
+<link rel="stylesheet" href="/assets/site.css?v=528515d1">
+<link rel="preload" as="image" type="image/avif" media="(prefers-color-scheme: dark) and (max-width: 700px)" imagesrcset="/assets/img/backdrop/hill-tall-night-720.avif?v=3666a866 720w, /assets/img/backdrop/hill-tall-night-1080.avif?v=0dd51b57 1080w" imagesizes="100vw">
+<link rel="preload" as="image" type="image/avif" media="(prefers-color-scheme: dark) and (min-width: 701px)" imagesrcset="/assets/img/backdrop/hill-wide-night-1280.avif?v=206d57c3 1280w, /assets/img/backdrop/hill-wide-night-1920.avif?v=68704ba7 1920w, /assets/img/backdrop/hill-wide-night-2560.avif?v=c8c15de1 2560w" imagesizes="100vw">
+<link rel="preload" as="image" type="image/avif" media="(prefers-color-scheme: light) and (max-width: 700px)" imagesrcset="/assets/img/backdrop/hill-tall-day-720.avif?v=40330573 720w, /assets/img/backdrop/hill-tall-day-1080.avif?v=a8ec99af 1080w" imagesizes="100vw">
+<link rel="preload" as="image" type="image/avif" media="(prefers-color-scheme: light) and (min-width: 701px)" imagesrcset="/assets/img/backdrop/hill-wide-day-1280.avif?v=4627ced9 1280w, /assets/img/backdrop/hill-wide-day-1920.avif?v=32312d78 1920w, /assets/img/backdrop/hill-wide-day-2560.avif?v=eef707f4 2560w" imagesizes="100vw">
+<script src="/assets/site.js?v=e8cee57a" defer></script>
 
 <script type="application/ld+json">
 {
@@ -64,7 +68,7 @@
 }
 </script>
 </head>
-<body>
+<body class="home">
 <a class="skip" href="#main">Skip to the page</a>
 <header class="bar"><div class="bar-in">
   <a class="lockup" href="/" aria-label="Trek, home"><svg class="mark" viewBox="13 13 70 70" aria-hidden="true"><use class="post" href="/assets/img/mark.svg?v=7cbb7d26#post"/><use class="board" href="/assets/img/mark.svg?v=7cbb7d26#board-a"/><use class="board" href="/assets/img/mark.svg?v=7cbb7d26#board-b"/></svg><span>trek</span></a>
@@ -77,6 +81,16 @@
 
 <main id="main">
 <section class="hero" data-hero>
+<picture class="scene" aria-hidden="true">
+  <source media="(prefers-color-scheme: dark) and (max-width: 700px)" type="image/avif" srcset="/assets/img/backdrop/hill-tall-night-720.avif?v=3666a866 720w, /assets/img/backdrop/hill-tall-night-1080.avif?v=0dd51b57 1080w" sizes="100vw">
+  <source media="(prefers-color-scheme: dark) and (min-width: 701px)" type="image/avif" srcset="/assets/img/backdrop/hill-wide-night-1280.avif?v=206d57c3 1280w, /assets/img/backdrop/hill-wide-night-1920.avif?v=68704ba7 1920w, /assets/img/backdrop/hill-wide-night-2560.avif?v=c8c15de1 2560w" sizes="100vw">
+  <source media="(prefers-color-scheme: dark) and (max-width: 700px)" srcset="/assets/img/backdrop/hill-tall-night-1080.jpg?v=ca49303a">
+  <source media="(prefers-color-scheme: dark) and (min-width: 701px)" srcset="/assets/img/backdrop/hill-wide-night-1920.jpg?v=c5478f23">
+  <source media="(prefers-color-scheme: light) and (max-width: 700px)" type="image/avif" srcset="/assets/img/backdrop/hill-tall-day-720.avif?v=40330573 720w, /assets/img/backdrop/hill-tall-day-1080.avif?v=a8ec99af 1080w" sizes="100vw">
+  <source media="(prefers-color-scheme: light) and (min-width: 701px)" type="image/avif" srcset="/assets/img/backdrop/hill-wide-day-1280.avif?v=4627ced9 1280w, /assets/img/backdrop/hill-wide-day-1920.avif?v=32312d78 1920w, /assets/img/backdrop/hill-wide-day-2560.avif?v=eef707f4 2560w" sizes="100vw">
+  <source media="(prefers-color-scheme: light) and (max-width: 700px)" srcset="/assets/img/backdrop/hill-tall-day-1080.jpg?v=98e42c0b">
+  <img src="/assets/img/backdrop/hill-wide-day-1920.jpg?v=f0934671" width="2560" height="1600" alt="" fetchpriority="high" decoding="async">
+</picture>
   <div class="hero-copy">
     <svg class="mark mark-hero" viewBox="13 13 70 70" aria-hidden="true"><use class="post" href="/assets/img/mark.svg?v=7cbb7d26#post"/><use class="board board-a" href="/assets/img/mark.svg?v=7cbb7d26#board-a"/><use class="board board-b" href="/assets/img/mark.svg?v=7cbb7d26#board-b"/></svg>
     <h1>Every agent. One trail.</h1>
@@ -106,6 +120,7 @@
     <div class="feat-text">
       <h3>One inbox</h3>
       <p>Running and waiting threads on top. One stops to ask, goes to the top, and gets back to work once you answer.</p>
+      <!-- ill:inbox --><svg class="ill ill-inbox" viewBox="-105 -150 268 297" width="268" height="297" aria-hidden="true" focusable="false"><path class="e" d="M0.0 -13.0 L144.1 70.2 L45.0 127.4 L-99.1 44.2 Z" pathLength="1"/><path class="e" d="M45.0 140.4 L-99.1 57.2 L-99.1 44.2 L45.0 127.4 Z" pathLength="1"/><path class="e" d="M144.1 83.2 L45.0 140.4 L45.0 127.4 L144.1 70.2 Z" pathLength="1"/><path class="e" d="M0.0 -26.0 L144.1 57.2 L45.0 114.4 L-99.1 31.2 Z" pathLength="1"/><path class="e" d="M45.0 127.4 L-99.1 44.2 L-99.1 31.2 L45.0 114.4 Z" pathLength="1"/><path class="e" d="M144.1 70.2 L45.0 127.4 L45.0 114.4 L144.1 57.2 Z" pathLength="1"/><path class="e" d="M0.0 -39.0 L144.1 44.2 L45.0 101.4 L-99.1 18.2 Z" pathLength="1"/><path class="e" d="M45.0 114.4 L-99.1 31.2 L-99.1 18.2 L45.0 101.4 Z" pathLength="1"/><path class="e" d="M144.1 57.2 L45.0 114.4 L45.0 101.4 L144.1 44.2 Z" pathLength="1"/><path class="e" d="M0.0 -52.0 L144.1 31.2 L45.0 88.4 L-99.1 5.2 Z" pathLength="1"/><path class="e" d="M45.0 101.4 L-99.1 18.2 L-99.1 5.2 L45.0 88.4 Z" pathLength="1"/><path class="e" d="M144.1 44.2 L45.0 101.4 L45.0 88.4 L144.1 31.2 Z" pathLength="1"/><path class="e" d="M0.0 -65.0 L144.1 18.2 L45.0 75.4 L-99.1 -7.8 Z" pathLength="1"/><path class="e" d="M45.0 88.4 L-99.1 5.2 L-99.1 -7.8 L45.0 75.4 Z" pathLength="1"/><path class="e" d="M144.1 31.2 L45.0 88.4 L45.0 75.4 L144.1 18.2 Z" pathLength="1"/><path class="ae" d="M15.5 -144.3 L157.4 -33.4 L58.3 23.8 L-83.6 -87.1 Z" pathLength="1"/><path class="ae" d="M56.4 35.4 L-85.6 -75.4 L-83.6 -87.1 L58.3 23.8 Z" pathLength="1"/><path class="ae" d="M155.4 -21.8 L56.4 35.4 L58.3 23.8 L157.4 -33.4 Z" pathLength="1"/></svg><!-- /ill:inbox -->
     </div>
     <div class="panel panel-tall" data-drift>
       <picture><source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/inbox-night-poster.webp?v=d4e72c69"><img class="shot" data-loop="/assets/img/features/inbox.mp4?v=f4103dd4" data-loop-dark="/assets/img/features/inbox-night.mp4?v=d1aa43dd" src="/assets/img/features/inbox-poster.webp?v=740d08fe" width="274" height="330" loading="lazy" decoding="async" alt="Trek's sidebar: threads at work, and one that stops to ask goes to the top of the Inbox with its question."></picture>
@@ -145,6 +160,7 @@
       <div class="feat-text">
         <h3>Worktrees</h3>
         <p>Give a thread its own branch.</p>
+        <!-- ill:worktrees --><svg class="ill ill-worktrees" viewBox="-30 -26 296 226" width="296" height="226" aria-hidden="true" focusable="false"><path class="e" d="M0.0 -20.0 L259.8 130.0 L235.6 144.0 L-24.2 -6.0 Z" pathLength="1"/><path class="e" d="M235.6 164.0 L-24.2 14.0 L-24.2 -6.0 L235.6 144.0 Z" pathLength="1"/><path class="e" d="M259.8 150.0 L235.6 164.0 L235.6 144.0 L259.8 130.0 Z" pathLength="1"/><path class="ae" d="M31.2 78.0 L207.8 180.0 L207.8 160.0 L31.2 58.0 Z" pathLength="1"/><path class="ae" d="M183.6 194.0 L-17.3 78.0 L-17.3 58.0 L183.6 174.0 Z" pathLength="1"/><path class="ae" d="M207.8 180.0 L183.6 194.0 L183.6 174.0 L207.8 160.0 Z" pathLength="1"/><path class="ae" d="M34.6 28.0 L58.9 42.0 L31.2 58.0 L207.8 160.0 L183.6 174.0 L-17.3 58.0 Z" pathLength="1"/></svg><!-- /ill:worktrees -->
       </div>
     </article>
   </div>
@@ -204,6 +220,7 @@
     <div class="feat-text">
       <h3>Study</h3>
       <p>Learn or practise with an agent. It starts from what you already know.</p>
+      <!-- ill:study --><svg class="ill ill-study" viewBox="-93 -100 185 206" width="185" height="206" aria-hidden="true" focusable="false"><path class="e" d="M0.0 -52.0 L86.6 -2.0 L0.0 48.0 L-86.6 -2.0 Z" pathLength="1"/><path class="e" d="M86.6 50.0 L0.0 100.0 L0.0 48.0 L86.6 -2.0 Z" pathLength="1"/><path class="e" d="M0.0 100.0 L-86.6 50.0 L-86.6 -2.0 L0.0 48.0 Z" pathLength="1"/><path class="e" d="M0.0 -72.0 L52.0 -42.0 L0.0 -12.0 L-52.0 -42.0 Z" pathLength="1"/><path class="e" d="M52.0 -2.0 L0.0 28.0 L0.0 -12.0 L52.0 -42.0 Z" pathLength="1"/><path class="e" d="M0.0 28.0 L-52.0 -2.0 L-52.0 -42.0 L0.0 -12.0 Z" pathLength="1"/><path class="dash" d="M27.7 -42.0 L0.0 -26.0 L0.0 -62.0 L27.7 -78.0 Z"/><path class="dash" d="M0.0 -26.0 L-27.7 -42.0 L-27.7 -78.0 L0.0 -62.0 Z"/><path class="dash" d="M0.0 -94.0 L27.7 -78.0 L0.0 -62.0 L-27.7 -78.0 Z"/></svg><!-- /ill:study -->
     </div>
   </article>
 
@@ -252,6 +269,16 @@
 </main>
 
 <footer class="foot">
+<picture class="closing-land" aria-hidden="true">
+  <source media="(prefers-color-scheme: dark) and (max-width: 700px)" type="image/avif" srcset="/assets/img/backdrop/dusk-tall-night-720.avif?v=926ca1f4 720w, /assets/img/backdrop/dusk-tall-night-1080.avif?v=2eb3325b 1080w" sizes="100vw">
+  <source media="(prefers-color-scheme: dark) and (min-width: 701px)" type="image/avif" srcset="/assets/img/backdrop/dusk-wide-night-1280.avif?v=8e728d93 1280w, /assets/img/backdrop/dusk-wide-night-1920.avif?v=750b1dd2 1920w, /assets/img/backdrop/dusk-wide-night-2560.avif?v=f562c9e3 2560w" sizes="100vw">
+  <source media="(prefers-color-scheme: dark) and (max-width: 700px)" srcset="/assets/img/backdrop/dusk-tall-night-1080.jpg?v=cbbf3170">
+  <source media="(prefers-color-scheme: dark) and (min-width: 701px)" srcset="/assets/img/backdrop/dusk-wide-night-1920.jpg?v=193b906d">
+  <source media="(prefers-color-scheme: light) and (max-width: 700px)" type="image/avif" srcset="/assets/img/backdrop/dusk-tall-dusk-720.avif?v=7e244da2 720w, /assets/img/backdrop/dusk-tall-dusk-1080.avif?v=8709420f 1080w" sizes="100vw">
+  <source media="(prefers-color-scheme: light) and (min-width: 701px)" type="image/avif" srcset="/assets/img/backdrop/dusk-wide-dusk-1280.avif?v=9d9837bd 1280w, /assets/img/backdrop/dusk-wide-dusk-1920.avif?v=6c78dbb0 1920w, /assets/img/backdrop/dusk-wide-dusk-2560.avif?v=04dffbb9 2560w" sizes="100vw">
+  <source media="(prefers-color-scheme: light) and (max-width: 700px)" srcset="/assets/img/backdrop/dusk-tall-dusk-1080.jpg?v=85bbdc85">
+  <img src="/assets/img/backdrop/dusk-wide-dusk-1920.jpg?v=23e28aba" width="2560" height="1600" alt="" loading="lazy" decoding="async">
+</picture>
   <div class="foot-in">
     <a class="lockup" href="/" aria-label="Trek, home"><svg class="mark" viewBox="13 13 70 70" aria-hidden="true"><use class="post" href="/assets/img/mark.svg?v=7cbb7d26#post"/><use class="board" href="/assets/img/mark.svg?v=7cbb7d26#board-a"/><use class="board" href="/assets/img/mark.svg?v=7cbb7d26#board-b"/></svg><span>trek</span></a>
     <span class="who">© 2026 Toby Dokyi</span>

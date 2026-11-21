@@ -5,8 +5,9 @@ JavaScript. There is no framework and no build step; the folder is served as it 
 
 ```
 site/
-  index.html            the page: the signpost and the line, the app's window, the features
-                        (each shown by the app doing it), the iPhone, and the download list
+  index.html            the page: one afternoon from a grass hill to dusk in the grass; the
+                        signpost and the line, the app's window, the features (each shown by the
+                        app doing it, three with a line drawing), the iPhone, the download list
   privacy/index.html    docs/PRIVACY.md in plain words, and what this site itself does
   remote/               the web remote: Trek's remote for a phone's browser (an Android phone first of
                         all), which pairs from Trek's QR code and talks to Trek on the user's computer
@@ -125,6 +126,9 @@ staged in a line beside each picture.
 | `features/<name>-paper.webp`, `features/<name>-night.webp`, or `features/<name>.webp` for one picture in both themes | Crops of real captures of the app at 2x: `access`, `worktree`, `undo` and `iphone-threads` in each theme; `study`, `plugins` and `iphone-night` once | One per feature, at their 1x size or a little under |
 | `features/<name>.mp4` (and `<name>-night.mp4`), `features/<name>-poster.webp` (and `-night-poster.webp`) | Silent H.264 loops of real screen recordings and their stills: `inbox` (Paper and Night), `consult`, `themes`, `iphone` (Paper; Night shows a still) | The poster is the picture in the page; the script turns it into the recording as it comes near, and it plays while on screen. With Reduce Motion or no script the poster stays |
 | `features/menubar-{idle,working,attention}.svg` | The app's own menu bar icons, copied from `assets/brand` | In the menu bar feature, large, each with its name |
+| `backdrop/hill-*.avif`, `.jpg` | The first screen's photograph: "Dried grass field under blue sky during daytime" by Chris Mongeau, https://unsplash.com/photos/ZRdSZeVKBaE (Unsplash License), framed wide and tall, graded for Paper and Night, the top of its footpath grassed over from its own grass (`script/site/make_backdrops.py hill`) | Behind the first screen; AVIF at 1280, 1920 and 2560 (720 and 1080 tall), one JPEG for browsers without AVIF; preloaded |
+| `backdrop/dusk-*.avif`, `.jpg` | The page's end: "The sun is setting over a field of tall grass" by Johannes Plenio, https://unsplash.com/photos/X7RUQSjQv0k (Unsplash License), graded dusk for Paper and later night for Night (`make_backdrops.py dusk`) | Behind the last section and the footer, loaded lazily |
+| `backdrop/grain.svg` | A 240 px fractal-noise tile, drawn by the browser | Over the page's light and both photographs, soft-light |
 | `og.jpg` | The share image, 1200 by 630 px: the signpost and the line on the lavender sky | In link previews |
 | `mark.svg`, the icons, `favicon.*`, `apple-touch-icon.png` | The signpost: one post and two boards. `mark.svg` is the only copy of its shape; `script/site/make_icons.py` draws the rest from it | The bar, the first screen, the footer, the browser and the web manifest |
 

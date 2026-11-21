@@ -1,13 +1,13 @@
 """The home page's backdrop, one afternoon passing as you read down: the first screen stands on a
 grass hill in daylight (Night: blue hour), and the page closes at dusk down in the grass (Night:
 later, full night). Each photograph is framed wide for a desktop and tall for a phone, graded for
-Paper and Night by multiplying (never repainting), and encoded for the page (AVIF, WebP and a JPEG
-fallback, at the widths the page asks for).
+Paper and Night by multiplying (never repainting), and encoded for the page (AVIF with a JPEG
+fallback, at the widths the page asks for, into site/assets/img/backdrop/).
 
 make_backdrops.py hill PHOTO OUT_DIR    the hill: {wide,tall}-{day,night}.png masters
 make_backdrops.py dusk PHOTO OUT_DIR    the dusk grass: {wide,tall}-{dusk,night}.png masters
 make_backdrops.py encode MASTER_DIR SITE_IMG_DIR NAME
-                                        NAME-{wide,tall}-<grade>-<width>.{avif,webp,jpg}
+                                        NAME-{wide,tall}-<grade>-<width>.{avif,jpg}
 
 The photographs (Unsplash License; download the originals, the site never serves them):
   hill  Chris Mongeau, "Dried grass field under blue sky during daytime",
@@ -195,8 +195,8 @@ def encode(src, dst, name):
                 im = m.resize((w, round(m.height * w / m.width)), Image.LANCZOS) if w != m.width else m
                 base = f"{dst}/{name}-{fr}-{grade}-{w}"
                 im.save(base + ".avif", quality=AVIF_Q.get(name, 62), speed=4)
-                im.save(base + ".webp", quality=80, method=6)
-                im.save(base + ".jpg", quality=82, optimize=True, progressive=True)
+                if w in (1920, 1080):  # one JPEG a frame, for the few browsers without AVIF
+                    im.save(base + ".jpg", quality=82, optimize=True, progressive=True)
     sizes = {}
     for f in sorted(os.listdir(dst)):
         if f.startswith(name + "-"):

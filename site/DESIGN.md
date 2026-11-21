@@ -1,6 +1,6 @@
 ---
 name: trekdesktop.com
-description: "Trek's website: the signpost under a lavender sky, then the real app doing each job, one row at a time."
+description: "Trek's website: one afternoon while the agents work, from a grass hill in daylight to dusk in the grass, with the real app doing each job on the way."
 colors:
   sky: "#C9C1DE"
   sky-2: "#DCD6EA"
@@ -160,7 +160,7 @@ components:
 
 **Creative North Star: "The Signpost"**
 
-The site is the place a visitor meets Trek before installing it. It opens on one brand moment: the signpost (one post, two pointed boards) under a lavender sky, its boards swinging in and settling once above the line "Every agent. One trail." Under it the real app window stands on a ground line, tilted back, and comes up flat as the page scrolls. After that the page is the app doing each job, one feature to a row, and the rows change their arrangement from one to the next: a split, a wide band, a pair, a strip of three, an iPhone band, a flipped split, a wide band again. Then where each build is, and the end.
+The site is the place a visitor meets Trek before installing it. The home page is one afternoon passing while the agents work: it opens in daylight on a grass hill (a photograph), the light warms to gold and then rose as you read down, and it closes at dusk down in the grass (a second photograph), the hour the work is handed over and left running; at Night it runs from blue hour to full night. The first screen has one brand moment: the signpost (one post, two pointed boards) over the hill, its boards swinging in and settling once above the line "Every agent. One trail." Under it the real app window stands on the hill, tilted back, and comes up flat as the page scrolls. After that the page is the app doing each job, one feature to a row, and the rows change their arrangement from one to the next: a split, a wide band, a pair, a strip of three, an iPhone band, a flipped split, a wide band again. Then where each build is, and the end.
 
 The world is soft and lit from above. A lavender sky field runs into a pale lilac ground by day; by night it is a deep indigo field. Ember belongs to the signpost's boards and the one action that matters. Everything else is ink on lilac, with hairlines tinted lilac and never grey. Panels are pieces of the sky the app is shown against; the captures inside them carry their own colour. Type is two grotesques, upright throughout, at a confident display weight.
 
@@ -182,7 +182,8 @@ A cool lavender-and-lilac field with warm ink type and one ember accent.
 - **Signpost Ember** (board, board-night): the signpost's two boards, the filled Download button, the ring around the visitor's own build, and a 30% tint for text selection. Its hover (board-hover) is a step lighter. Text on it is the board ink: warm ink by day, the indigo sky by night.
 
 ### Neutral
-- **Lavender Sky** (sky, sky-2): the first screen's field, top to bottom, and the iPhone band's field from the other direction. The page's theme colour in the browser.
+- **The afternoon** (home page only, `.home`): one fall of light from the top of the page to its end, under a grain (`assets/img/backdrop/grain.svg`, soft-light) that also lies over both photographs, so no field is ever flat and the texture never changes at a join. Paper: #EFEDF4, #F2EEF1, #F6EBE1, #F5DFCF, #EBCDC5, #C9A3AE (at 0, 24, 46, 70, 88 and 100% of the page). Night: #15132A, #1A1C3A, #141936, #0D1227, #080B19, #05070F. Panels on it are tinted glass (white at 42% to the ink at 7% by day, lilac at 7% to 2.5% at night), not slabs of colour. The theme colour is the hill's sky: #B3B3C7, and #0E1227 at night.
+- **Lavender Sky** (sky, sky-2): the privacy and not-found pages' field.
 - **Lilac Ground** (ground): the page itself below the first screen's ground line; also the text colour on ink buttons.
 - **Panel Lilac** (panel, panel-2): the feature panels, as a 170 degree gradient from panel-2 into panel.
 - **Raised White** (raised): the face of a capture frame, the line button and the menu bar tiles.
@@ -230,7 +231,7 @@ The page and privacy headline is 650 at clamp(2.25rem, 4vw, 3.25rem), 1.05. Priv
 
 Content sits in a column of at most 1180 px plus a fluid gutter (16 to 72 px) on each side; the bar, the sections and the footer all use the same column. Feature rows use fractions of twelve: a split is 4 to 8 (text, then panel), a flipped split 7 to 5 (panel, then text), a pair of cards 7 to 5 or 5 to 7 with 24 px between, a wide feature puts its heading and paragraph on one 4 to 8 baseline row above a full-width panel, and the strip is three equal columns on the ground itself. Sections are clamp(96px, 12vw, 160px) apart; features within a section clamp(72px, 9vw, 120px). The first screen is centred; everything after it is left-aligned.
 
-The first screen is a field with a ground line: the sky gradient ends a fixed depth above the section's foot (clamp(240px, 30vw, 400px), 120 px on a phone) and a 1 px ink hairline at 10% marks it. The window (1086 px) stands across that line.
+The first screen stands on the hill: the photograph fills it down to a fixed depth above the section's foot (clamp(240px, 30vw, 400px), 120 px on a phone), framed wide on a desktop and tall on a phone, and its land fades out along the hill's fall (two overlapping mask ramps, no level line). The window (1086 px) stands in front of it. The footer stands on the dark ground of the dusk photograph, which rises out of the page's light behind the last section.
 
 Under 1024 px splits become one column (a flipped split puts its text first), the strip becomes two columns, the iPhone band stacks, and the build list goes to two columns. Under 768 px the bar drops its links, pairs and the strip go to one column, panels keep their 28 px corners with 16 px padding (the capture's 12 px plus the padding, so the corners are concentric), the hero window stays 680 px wide from the left gutter and runs off the right edge, and the build list is one column. Under 421 px the first screen's buttons fill the width. Under 601 px wide recordings switch to their narrow cut.
 
@@ -242,7 +243,7 @@ Depth is soft and lifted, from light above: low-opacity shade with a long negati
 - **Capture frame** (`var(--ring), 0 2px 4px rgb(var(--shade) / 0.06), 0 24px 48px -20px rgb(var(--shade) / 0.42)`): every capture in a panel or the strip. The ring is `0 0 0 1px rgb(0 0 0 / 0.06)` by day and `rgb(255 255 255 / 0.08)` at night, where a dark ring vanishes.
 - **Ember button** (`0 1px 0 rgb(255 255 255 / 0.28) inset, 0 10px 24px -12px rgb(var(--shade) / 0.55)`), deepening to `0 16px 30px -14px` at 0.6 on hover.
 - **Line button** (inset 1 px line plus `0 1px 2px` at 0.06), lifting to `0 6px 14px -8px` at 0.3 on hover.
-- **Ground contact** (a blurred radial ellipse of shade at 0.32): where the hero window meets the ground. The window's own shadow is in the capture.
+- **Ground contact** (a blurred radial ellipse of shade at 0.32): under the hero window's foot (on the picture, so it tilts with it). The window's own shadow is in the capture.
 - **Menu bar tile** (inset line plus `0 10px 24px -16px` at 0.5).
 - **iPhone** (`0 40px 80px -30px rgb(0 0 0 / 0.45)` on the front phone; a `drop-shadow(0 30px 40px rgb(0 0 0 / 0.28))` on the back one).
 - **Stuck bar** (`0 1px 0` line, with a 14 px backdrop blur over the ground at 82%).
@@ -280,13 +281,20 @@ A panel is a 28 px rounded piece of the sky (panel-2 into panel) with an inset h
 Three small features in a row on the ground itself, each under a top hairline, with a 168 px media slot, a small title and two short lines. It is the quiet passage between panels. One slot holds the menu bar's three icons on 44 px raised tiles with their names (at night the icons are inverted on a light tile).
 
 ### The iPhone band
-A full-width band whose field runs from the ground into sky-2 and the sky, the other way up from the first screen. Text on the left (5 parts), two phones on the right (7 parts): a front phone in a near-black body, its screen a recording, and a back phone tilted -6 degrees, behind and to the left, drifting against the scroll. The phones sit over the band's foot.
+A full-width band in the page's light, with no field of its own. Text on the left (5 parts), two phones on the right (7 parts): a front phone in a near-black body, its screen a recording, and a back phone tilted -6 degrees, behind and to the left, drifting against the scroll. The phones stand whole. As the band arrives they come together (see Motion).
 
 ### Build list
 Four builds in a row (two under 1024 px, one under 768 px), each under an ink hairline at 22%: a title, a sentence that says what the first launch asks, and line buttons that carry the file size once GitHub has answered.
 
 ### Footer
-One line under a hairline: the lockup at 22 px, the copyright in muted ink, four text links in second ink. Nothing else. On a touch screen each link is a 44 px target.
+One line, standing on the dark ground of the dusk photograph (light inks: #F4EFF7, #D9D1E3, #BDB4C9): the lockup at 22 px, the copyright, four text links. Nothing else. On a touch screen each link is a 44 px target.
+
+### Drawings
+A small object under the words of a feature, where the page would otherwise be empty, in one language (`script/site/make_illustrations.py`, inline SVG): line drawings of blocks in isometric projection, one ink line (#3B3040, #C9C0DD at night, 1.3 px) on the page's own light, and one ember line for the thing that needs you. Each face is filled with the light measured where the drawing stands, so hidden edges stay hidden and it reads as line alone. No shading, shadows, fills of colour, icons or people. Each carries one thought:
+- **One inbox:** a quiet stack of threads, and the one that needs you lifted clear of it, tipped toward you, in ember.
+- **Worktrees:** the branch leaves the main beam's side at an angle and runs beside it, one piece, in ember.
+- **Study:** two solid blocks, and the next one only drawn in, as a dashed ember cube.
+On a phone each stands small (88 px high) beside its heading. A drawing that doesn't carry a thought of its own is left out: the page's light is better than a weak drawing.
 
 ### Text pages
 Privacy and not-found sit on a sky that fades into the ground over 420 px, once (a short page shows ground below it, not the sky again), in a 760 px column. Privacy: document headings 1.5rem with 52 px above, paragraphs and lists 14 px apart in second ink, a hairline-ruled table that scrolls sideways when narrow, a muted "Last updated" line. Not-found: the mark at 64 px, a headline, one sentence and one ember button, left-aligned in the middle of the screen.
@@ -298,9 +306,12 @@ One ease, a steep exponential ease-out (`cubic-bezier(0.16, 1, 0.3, 1)`); the pr
 - **First-screen entrance:** headline (450 ms), lede and buttons (400 ms) rise 12 px out of a 4 px blur, 100 ms apart from 0.1 s; the fine line only fades (0.4 s); the window rises 32 px over 600 ms from 0.4 s.
 - **Window tilt:** the window lies back 10 degrees at 94% scale and comes up flat, full size and 40 px higher over three quarters of a screen of scrolling, cubic ease-out, reversible. With a fine pointer, inside the first screen, it turns up to 2.2 degrees towards the mouse.
 - **Drift:** panel captures and the back phone move up to 18 px against the scroll while near the screen.
+- **The phones come together:** as the iPhone band arrives the back phone comes in from the left and the front one from the right (90 and 110 px apart and a little low on a desktop, 80 and 90 px and mostly sideways on a phone), each turning 5 to 6 degrees, and settle in their place by the time the band is mid-screen. Tied to the scroll (`animation-timeline: view()`, a gentle ease-out) where the browser can; elsewhere played once as they arrive (650 ms, 90 ms apart, from site.js). Their place at rest is the layout, so nothing moves after.
+- **Drawings:** each draws its lines in once as its row arrives (450 ms, after 150 ms); the dashed cube fades in after.
+- **The dusk grass** drifts 24 px against the scroll as the page ends (scroll-driven only).
 - **Reveals:** one entrance per row: the features head, each feature row or card (its words arrive with its picture), the iPhone band, the strip as a whole and the build list as a whole rise 12 px out of a 4 px blur over 400 ms, once, as they arrive; 0.1 s apart when two or three arrive together, never more. The staged-threads line just sits there.
 - **Loops:** each recording is a still poster in the page. As it comes within half a screen, and only when motion is welcome, the script swaps it for a muted, looping, inline video (the narrow cut under 601 px), which plays while a quarter of it is visible and pauses otherwise, and pauses while the tab is hidden. There is no visible pause control: the loops stop under Reduce Motion and off screen.
-- **Reduce Motion:** no smooth scroll, no settle, no lean, no tilt, no drift, and the posters stay still; the first screen and each reveal only fade (300 ms and 200 ms); videos already playing pause when the setting turns on.
+- **Reduce Motion:** no smooth scroll, no settle, no lean, no tilt, no drift, the phones and the drawings are simply in place, and the posters stay still; the first screen and each reveal only fade (300 ms and 200 ms); videos already playing pause when the setting turns on.
 - **No script:** reveals are gated on a `js` class the script sets, so the page shows whole; posters stay as pictures; the Download button points at the latest release.
 
 ## Do's and Don'ts
@@ -320,6 +331,8 @@ One ease, a steep exponential ease-out (`cubic-bezier(0.16, 1, 0.3, 1)`); the pr
 ### Don't:
 - **Don't** draw buttons or feature rows as boards on a stick, or use the signpost as scenery, a bullet, a divider or a layout device.
 - **Don't** put the pixel hiker on the home page.
+- **Don't** draw a picture that is only its heading turned into a symbol (a bar for an agent, a gate for permission, swatches for themes). Draw one object with a thought, in the drawings' language, or leave the field to the light.
+- **Don't** let the hill's footpath show above the window: the photograph's own grass is laid over its top (`make_backdrops.py`, `hide_path`), and a trail beside the signpost reads as a hiking app.
 - **Don't** use a dark page with a shrunken window under the headline, or a grid of same-size feature cards.
 - **Don't** use a mock-up, a generated image or a hand-retouched frame as a picture of the app. The one retouch is the hero window's three title-bar buttons, painted in because the test window is never the key window.
 - **Don't** put ember on anything but the boards, the primary button and the visitor's build.

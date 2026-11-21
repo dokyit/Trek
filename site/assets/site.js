@@ -240,6 +240,19 @@
     }, { rootMargin: "0px 0px -12% 0px" });
     all(".reveal").forEach((el) => seen.observe(el));
 
+    // The phones come together as their section arrives. Where the browser ties that to the scroll
+    // the stylesheet does it alone; elsewhere they start apart and meet once, here.
+    const phones = document.querySelector(".home .phones");
+    if (phones && !still.matches && !(window.CSS && CSS.supports("animation-timeline: view()"))) {
+      phones.classList.add("is-apart");
+      const meet = new IntersectionObserver((entries) => {
+        if (!entries.some((e) => e.isIntersecting)) return;
+        requestAnimationFrame(() => phones.classList.add("is-met"));
+        meet.disconnect();
+      }, { threshold: 0.3 });
+      meet.observe(phones);
+    }
+
     // Each recording is a still picture in the page (its poster). As one comes near, and only when
     // motion is welcome, the picture becomes the recording, which plays while it is on screen.
     // With Reduce Motion on, or without this script, the still stays.
