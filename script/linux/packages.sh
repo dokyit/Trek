@@ -19,7 +19,9 @@ build="build-essential pkg-config cmake clang libclang-dev git curl ca-certifica
   libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcursor-dev libxrandr-dev libxi-dev
   libfontconfig1-dev libfreetype6-dev libvulkan-dev
   libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
-  libayatana-appindicator3-dev libxdo-dev libdbus-1-dev libssl-dev libasound2-dev"
+  libayatana-appindicator3-dev libxdo-dev libdbus-1-dev libssl-dev libasound2-dev
+  sqlite3"
+# (sqlite3: the program, which the tests of OpenCode's history run as macOS has it.)
 
 run="xvfb xauth x11-utils x11-xserver-utils xdotool imagemagick weston mesa-vulkan-drivers
   vulkan-tools libgl1-mesa-dri dbus dbus-x11 gnome-keyring libsecret-tools xdg-utils
