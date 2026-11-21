@@ -94,5 +94,33 @@ pub fn prefer_x11() {
     }
 }
 
+/// Whether a library tray-icon draws the tray icon with is installed: libappindicator-sys loads
+/// one of these at its first use, and panics, ending Trek, when none is there.
+pub fn indicator_library() -> bool {
+    static FOUND: OnceLock<bool> = OnceLock::new();
+    *FOUND.get_or_init(|| {
+        [
+            c"libayatana-appindicator3.so.1",
+            c"libappindicator3.so.1",
+            c"libayatana-appindicator3.so",
+            c"libappindicator3.so",
+        ]
+        .iter()
+        .any(|name| {
+            // SAFETY: a NUL-terminated name; the handle, if any, is closed straight away
+            // (tray-icon opens the library again itself).
+            unsafe {
+                let handle = libc::dlopen(name.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
+                if handle.is_null() {
+                    false
+                } else {
+                    libc::dlclose(handle);
+                    true
+                }
+            }
+        })
+    })
+}
+
 /// Why a web view can't open here, in a sentence for the panel that would show it.
 pub const NO_WEB_VIEWS: &str = "Web pages open inside Trek on X11. In a Wayland session, start Trek with WAYLAND_DISPLAY unset to use them, or open the page in your browser.";
