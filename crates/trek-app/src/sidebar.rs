@@ -70,12 +70,24 @@ pub struct Sidebar {
     graph: Graph,
     /// Why each thread that needs the user does, as of the last render (`Workspace::needing_you`).
     why: HashMap<String, Why>,
-    /// The pointer is over the sidebar: the live rows hold still (see `render`).
+    /// The pointer is over the sidebar: the live rows hold still while it's in use there (see
+    /// `render`).
     hovered: bool,
-    /// The live rows as last drawn, held while `hovered`.
+    /// When the pointer last moved over the sidebar (the background executor's clock). A pointer
+    /// resting there (left on a row it clicked, or uncovered by a menu closing over it) isn't
+    /// about to click anything: after `HOLD_REST` the rows stop waiting for it to leave.
+    moved_at: Option<std::time::Instant>,
+    /// The live rows as last drawn, held while the pointer is in use over them.
     shown: Option<Vec<LiveGroup>>,
-    /// The held rows aren't what's current: they're redrawn when the pointer leaves.
+    /// What their headers said (each group's count, "Show N more"), held with them: the Inbox
+    /// never counts a thread it doesn't list.
+    shown_info: HashMap<String, GroupInfo>,
+    /// The held rows aren't what's current: they're redrawn when the pointer leaves or rests.
     deferred: bool,
+    /// The redraw for when the pointer will have rested long enough, while rows are held.
+    release: Option<(std::time::Instant, Task<()>)>,
+    /// The Inbox header's count as last drawn.
+    inbox_count: Option<usize>,
     /// The list's layout animation: rows that move between frames slide to their new places,
     /// new ones fade in (`crate::motion`).
     flip: crate::motion::FlipStore,
@@ -131,6 +143,8 @@ const PROJECTS_LABEL: &str = "live-projects-label";
 const NEWS_SHOWN: usize = 5;
 /// A project's quiet threads on show before "Show more" (unread ones and the open one always are).
 const QUIET_SHOWN: usize = 3;
+/// How long a pointer resting over the sidebar keeps its rows still (`Sidebar::moved_at`).
+const HOLD_REST: std::time::Duration = std::time::Duration::from_secs(2);
 /// A machine's quiet threads on show in Devices before "Show more".
 const MACHINE_SHOWN: usize = 3;
 
@@ -144,7 +158,7 @@ struct LiveGroup {
 }
 
 /// What a live group's header and footer say, worked out with its rows.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct GroupInfo {
     name: String,
     folded: bool,
@@ -218,8 +232,12 @@ impl Sidebar {
             graph: Graph::default(),
             why: HashMap::new(),
             hovered: false,
+            moved_at: None,
             shown: None,
+            shown_info: HashMap::new(),
             deferred: false,
+            release: None,
+            inbox_count: None,
             flip: Default::default(),
             ghosts: vec![],
             last_rows: HashMap::new(),
@@ -300,9 +318,46 @@ impl Sidebar {
     /// The pointer came onto the sidebar or left it. Leaving shows what changed while it was there.
     fn hover_changed(&mut self, hovered: bool, cx: &mut Context<Self>) {
         self.hovered = hovered;
-        if !hovered && self.deferred {
-            cx.notify();
+        if !hovered {
+            self.moved_at = None;
+            if self.deferred {
+                cx.notify();
+            }
         }
+    }
+
+    /// The pointer moved over the sidebar: it's in use there, so the rows hold still for it.
+    fn pointer_moved(&mut self, cx: &mut Context<Self>) {
+        self.moved_at = Some(cx.background_executor().now());
+    }
+
+    /// Whether the rows hold still now: the pointer is over them and has moved there lately.
+    fn holding(&self, cx: &App) -> bool {
+        let now = cx.background_executor().now();
+        self.hovered
+            && self
+                .moved_at
+                .is_some_and(|at| now.saturating_duration_since(at) < HOLD_REST)
+    }
+
+    /// Rows are held for a pointer that may come to rest: redraw once it has rested `HOLD_REST`,
+    /// so what changed shows without waiting for it to leave.
+    fn release_when_rested(&mut self, cx: &mut Context<Self>) {
+        let Some(at) = self.moved_at.map(|at| at + HOLD_REST) else {
+            return;
+        };
+        if self.release.as_ref().is_some_and(|(when, _)| *when == at) {
+            return;
+        }
+        let wait = at.saturating_duration_since(cx.background_executor().now());
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |this, cx| {
+                this.release = None;
+                cx.notify();
+            });
+        });
+        self.release = Some((at, task));
     }
 
     /// How far the row for `key` (a thread id) is drawn from its place right now, while it
@@ -310,6 +365,12 @@ impl Sidebar {
     #[cfg(any(test, feature = "test-support"))]
     pub fn row_offset(&self, key: &str, cx: &App) -> Option<f32> {
         self.flip.borrow().offset(key, crate::motion::now(cx))
+    }
+
+    /// The Inbox header's count as last drawn (`None`: no Inbox).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn inbox_count(&self) -> Option<usize> {
+        self.inbox_count
     }
 
     /// The threads whose rows are fading away.
@@ -3212,15 +3273,23 @@ impl Render for Sidebar {
                 by_id.extend(inbox.into_iter().map(|(t, _)| (t.id.clone(), t)));
             }
         }
-        // While the pointer is over the sidebar its rows hold their places: a thread answered,
-        // stopped or come back with news there mustn't slide another under the next click. What
-        // changed shows once the pointer leaves (`hover_changed`); what the user does here (folding,
-        // "Show more", "Mark all read", searching) shows at once.
+        // While the pointer is in use over the sidebar its rows hold their places: a thread
+        // answered, stopped or come back with news there mustn't slide another under the next
+        // click. What changed shows once the pointer leaves (`hover_changed`) or rests there
+        // (`HOLD_REST`: one left on a row it clicked isn't about to click again, and the list
+        // mustn't wait on it for good); what the user does here (folding, "Show more", "Mark all
+        // read", searching) shows at once. The headers hold with the rows: the Inbox's count is
+        // what it lists.
         let before = self.shown.clone();
-        let layout: Vec<LiveGroup> = match self.shown.take().filter(|_| self.hovered && !searching)
-        {
+        let holding = self.holding(cx) && !searching;
+        let layout: Vec<LiveGroup> = match self.shown.take().filter(|_| holding) {
             Some(held) => {
                 self.deferred = held != fresh;
+                if self.deferred {
+                    for (pid, held_info) in std::mem::take(&mut self.shown_info) {
+                        info.insert(pid, held_info);
+                    }
+                }
                 let ws = self.workspace.read(cx);
                 held.into_iter()
                     .map(|mut g| {
@@ -3245,6 +3314,7 @@ impl Render for Sidebar {
             }
         };
         self.shown = Some(layout.clone());
+        self.shown_info = info.clone();
         let live_shown = !layout.is_empty();
         // A project with no thread to list (just added) has its header and no rows.
         let rows_shown = layout.iter().any(|g| !g.rows.is_empty());
@@ -3309,6 +3379,7 @@ impl Render for Sidebar {
             .filter(|g| ![INBOX, STUDY, ""].contains(&g.pid.as_str()))
             .count();
         let mut first_project = true;
+        self.inbox_count = None;
         for g in layout {
             let pid = g.pid;
             let in_box = pid == INBOX;
@@ -3366,6 +3437,7 @@ impl Render for Sidebar {
                         }))
                         .into_any_element()
                 });
+                self.inbox_count = Some(i.total);
                 div()
                     .id("inbox")
                     .test_support()
@@ -3855,6 +3927,9 @@ impl Render for Sidebar {
         }
 
         self.flip.borrow_mut().end();
+        if self.deferred {
+            self.release_when_rested(cx);
+        }
         let backing = crate::backgrounds::sidebar_list_backing(
             &self.workspace.read(cx).settings.appearance,
             cx,
@@ -3868,6 +3943,7 @@ impl Render for Sidebar {
                 .sidebar_width(window.viewport_size().width.as_f32())))
             .h_full()
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| this.hover_changed(*hovered, cx)))
+            .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, _, cx| this.pointer_moved(cx)))
             .flex_none()
             .when(!self.workspace.read(cx).see_through(), |el| {
                 el.bg(theme.sidebar)

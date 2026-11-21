@@ -470,6 +470,93 @@ fn rows_hold_still_under_the_pointer_and_move_once_it_leaves() {
     });
 }
 
+/// The Inbox's header count as last drawn, and how many of `ids` have a row in the Inbox.
+fn inbox_count_and_rows(trek: &Trek, cx: &mut TestAppContext, ids: &[&String]) -> (usize, usize) {
+    let sidebar = cx.read(|cx| trek.root.read(cx).sidebar.clone());
+    let count = sidebar.read_with(cx, |s, _| s.inbox_count()).unwrap_or(0);
+    let rows = ids
+        .iter()
+        .filter(|id| trek.visible(cx, format!("inbox-{id}")))
+        .count();
+    (count, rows)
+}
+
+#[test]
+fn a_thread_that_starts_waiting_while_the_pointer_rests_on_the_sidebar_rises_to_the_inbox() {
+    run(async |cx| {
+        let trek = open(cx);
+        // A narrow window, as in the recording that found it.
+        cx.simulate_window_resize(
+            trek.window,
+            gpui_kit::size(gpui_kit::px(520.), gpui_kit::px(900.)),
+        );
+        trek.render(cx);
+        let done: Vec<String> = (0..3)
+            .map(|i| quiet(&trek, cx, &format!("Done {i}"), (i as i64 + 1) * 60_000))
+            .collect();
+        for id in &done {
+            trek.update(cx, |ws, cx| {
+                ws.store
+                    .update_thread(id, |t| t.last_seen_at = t.updated_at - 1)
+                    .unwrap();
+                ws.reload(cx);
+            });
+        }
+        let hero = quiet(&trek, cx, "Fix the checkout total", 5 * 60_000);
+        trek.update(cx, |ws, cx| {
+            ws.store
+                .update_thread(&hero, |t| t.run_state = RunState::Working)
+                .unwrap();
+            ws.reload(cx);
+        });
+        let other = quiet(&trek, cx, "Write a tagline", 6 * 60_000);
+        trek.render(cx);
+        let all: Vec<&String> = done.iter().chain([&hero, &other]).collect();
+        assert_eq!(inbox_count_and_rows(&trek, cx, &all), (3, 3));
+
+        // The model menu, opened and closed again.
+        trek.click(cx, "model-pill");
+        trek.render(cx);
+        assert!(trek.visible(cx, "mm-model"), "the menu is open");
+        trek.press(cx, "escape");
+        trek.render(cx);
+        assert!(!trek.visible(cx, "mm-model"), "and closed");
+        // Another thread opened from its row (its tab is off this narrow window's strip): the
+        // pointer stays on the sidebar, where the click left it, and doesn't move again.
+        trek.click(cx, format!("live-line-{other}"));
+        trek.render(cx);
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.route.clone()),
+            Route::Thread(other.clone())
+        );
+
+        // The thread at work stops to ask.
+        trek.update(cx, |ws, cx| {
+            ws.store
+                .update_thread(&hero, |t| t.run_state = RunState::NeedsYou)
+                .unwrap();
+            ws.reload(cx);
+        });
+        trek.render(cx);
+        let (count, rows) = inbox_count_and_rows(&trek, cx, &all);
+        assert_eq!(count, rows, "the Inbox's count is what it lists");
+
+        // The pointer rests there: the list doesn't wait for it to leave.
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(3));
+        trek.render(cx);
+        assert!(
+            trek.visible(cx, format!("inbox-{hero}")),
+            "the waiting thread is in the Inbox"
+        );
+        assert!(
+            !trek.visible(cx, format!("live-line-{hero}")),
+            "and not under Projects"
+        );
+        assert_eq!(inbox_count_and_rows(&trek, cx, &all), (4, 4));
+    });
+}
+
 #[test]
 fn a_thread_waiting_on_you_is_two_lines_high_and_says_what_it_waits_for() {
     run(async |cx| {
