@@ -552,16 +552,14 @@ pub fn set_enabled(workspace: Entity<Workspace>, on: bool, cx: &mut App) {
     // Linux: the icon is an AppIndicator, whose menu is GTK's.
     #[cfg(target_os = "linux")]
     if on && !crate::linux_gtk::ready(cx) {
-        tracing::warn!("menu bar icon unavailable: GTK couldn't start");
+        tracing::warn!("no tray icon: GTK couldn't start");
         return;
     }
     // ...and the AppIndicator library, which the system may not have (Fedora installs it only
     // with a desktop that shows indicators): tray-icon would end Trek without it.
     #[cfg(target_os = "linux")]
     if on && !crate::linux_gtk::indicator_library() {
-        tracing::warn!(
-            "menu bar icon unavailable: no libayatana-appindicator3 (or libappindicator3) here"
-        );
+        tracing::warn!("no tray icon: no libayatana-appindicator3 (or libappindicator3) here");
         return;
     }
     match (on, cx.has_global::<TrayGlobal>()) {
