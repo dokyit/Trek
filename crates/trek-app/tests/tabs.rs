@@ -471,9 +471,87 @@ fn tools_open(
     panel
 }
 
+/// What hides the tools panel or changes its size. On Windows its header has no hide button (the
+/// title bar's tools button, right above it, does that) and leads with its + and size button.
+fn panel_hiders() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["toggle-tools", "panel-fill"]
+    } else {
+        &["panel-close", "toggle-tools", "panel-fill"]
+    }
+}
+
+/// `id`'s thread still on screen, its tab the only one, and no thread started.
+fn still_on(trek: &common::Trek, cx: &mut gpui_kit::TestAppContext, id: &str, threads: usize) {
+    assert_eq!(
+        trek.read(cx, |ws, _| ws.route.clone()),
+        Route::Thread(id.to_string()),
+        "the thread stays on screen"
+    );
+    assert_eq!(tab_ids(trek, cx), vec![id.to_string()], "no other tab");
+    assert_eq!(
+        trek.read(cx, |ws, _| ws.threads.len()),
+        threads,
+        "no thread started"
+    );
+}
+
+/// What a click on the panel could have gone through to: the tab strip's + and `id`'s tab, the
+/// sidebar's new-thread button and its Basecamp, Notes and Study rows.
+fn under_the_panel(id: &str) -> Vec<gpui_kit::ElementId> {
+    [
+        "tab-new".to_string(),
+        format!("tab-{id}"),
+        "new-thread".into(),
+        "open-basecamp".into(),
+        "open-notes".into(),
+        "open-study".into(),
+    ]
+    .into_iter()
+    .map(|n| gpui_kit::ElementId::Name(n.into()))
+    .collect()
+}
+
+/// Each of the panel header's controls (whichever this platform draws) that lies over one of
+/// `under_the_panel`, with a point the two share.
+fn panel_over_others(
+    trek: &common::Trek,
+    cx: &mut gpui_kit::TestAppContext,
+    id: &str,
+) -> Vec<(gpui_kit::ElementId, gpui_kit::Point<gpui_kit::Pixels>)> {
+    use gpui_kit::ElementId;
+    let under = under_the_panel(id);
+    trek.window(cx, |window, _| {
+        let all = gpui_kit::base::test_support::snapshots(window);
+        let header = all.iter().filter(|s| {
+            s.visible()
+                && match s.path().last() {
+                    Some(ElementId::Name(n)) => {
+                        ["panel-close", "panel-fill", "panel-add"].contains(&n.as_ref())
+                    }
+                    Some(ElementId::NamedInteger(n, _)) => n.as_ref() == "panel-tab",
+                    _ => false,
+                }
+        });
+        let below: Vec<_> = all
+            .iter()
+            .filter(|s| s.visible() && s.path().last().is_some_and(|l| under.contains(l)))
+            .collect();
+        header
+            .flat_map(|p| {
+                below.iter().filter_map(move |u| {
+                    let both = p.bounds().intersect(&u.bounds());
+                    (both.size.width >= px(3.) && both.size.height >= px(3.))
+                        .then(|| (p.path().last().cloned().expect("id"), both.center()))
+                })
+            })
+            .collect()
+    })
+}
+
 /// Over the chat (a narrow window) or filling the window, the panel's header lies over the tab
-/// strip, its hide button right on the strip's +: a click there hides the panel and nothing else.
-/// It went through to the + as well, and a new thread opened behind the panel.
+/// strip and the sidebar: on the Mac its hide button right on the strip's +. A click on the panel
+/// is the panel's alone. It went through to the + as well, and a new thread opened behind it.
 #[test]
 fn hiding_the_tools_panel_opens_no_thread_under_it() {
     run(async |cx| {
@@ -489,15 +567,53 @@ fn hiding_the_tools_panel_opens_no_thread_under_it() {
             (600., true, true),
         ] {
             let state = format!("{width} wide, filling the window: {full}");
-            for control in ["panel-close", "toggle-tools", "panel-fill"] {
-                let panel = tools_open(&trek, cx, &id, width, PanelTool::Git, full);
-                assert_eq!(trek.visible(cx, "tools-overlay"), over, "{state}");
+            tools_open(&trek, cx, &id, width, PanelTool::Git, full);
+            assert_eq!(trek.visible(cx, "tools-overlay"), over, "{state}");
+            if !cfg!(windows) {
                 let (close, plus) = (
                     trek.bounds(cx, "panel-close").expect("hide button"),
                     trek.bounds(cx, "tab-new").expect("the strip's +"),
                 );
                 // What makes it a test of the click: over the chat the two are in one place.
                 assert_eq!(close.intersects(&plus), over, "{state}: {close:?} {plus:?}");
+            }
+            // Each of the header's controls where it lies over another, clicked right there.
+            let pairs = panel_over_others(&trek, cx, &id);
+            if cfg!(windows) {
+                // Its + and size button lead the header: over a thread's tab or the sidebar's top
+                // row, depending on the state, or over nothing with a control of its own.
+                assert!(over || pairs.is_empty(), "{state}: {pairs:?}");
+            } else {
+                assert_eq!(!pairs.is_empty(), over, "{state}: {pairs:?}");
+            }
+            for (control, at) in pairs {
+                tools_open(&trek, cx, &id, width, PanelTool::Git, full);
+                let origin = trek.bounds(cx, control.clone()).expect("control").origin;
+                trek.window(cx, |window, cx| {
+                    gpui_kit::test::TestWindowExt::click_at(window, control, at - origin, cx)
+                });
+                trek.render(cx);
+                still_on(&trek, cx, &id, threads);
+            }
+            // And whatever of the strip and the sidebar the panel covers, clicked where it is:
+            // on Windows, where no control may lie on it, the + is under the header's empty end.
+            if over {
+                for under in under_the_panel(&id) {
+                    tools_open(&trek, cx, &id, width, PanelTool::Git, full);
+                    let cover = trek.bounds(cx, "tools-overlay").expect("over");
+                    if !trek
+                        .bounds(cx, under.clone())
+                        .is_some_and(|b| cover.contains(&b.center()))
+                    {
+                        continue;
+                    }
+                    trek.click(cx, under);
+                    trek.render(cx);
+                    still_on(&trek, cx, &id, threads);
+                }
+            }
+            for &control in panel_hiders() {
+                let panel = tools_open(&trek, cx, &id, width, PanelTool::Git, full);
                 trek.click(cx, control);
                 trek.render(cx);
                 let (open, now_full) = cx.read(|cx| (panel.read(cx).open, panel.read(cx).full));
@@ -507,17 +623,7 @@ fn hiding_the_tools_panel_opens_no_thread_under_it() {
                 } else {
                     assert!(!open, "{state}: {control} hides it");
                 }
-                assert_eq!(
-                    trek.read(cx, |ws, _| ws.route.clone()),
-                    Route::Thread(id.clone()),
-                    "{state}: {control} leaves the thread on screen"
-                );
-                assert_eq!(tab_ids(&trek, cx), vec![id.clone()], "{state}: {control}");
-                assert_eq!(
-                    trek.read(cx, |ws, _| ws.threads.len()),
-                    threads,
-                    "{state}: {control} starts no thread"
-                );
+                still_on(&trek, cx, &id, threads);
             }
         }
     });
@@ -554,10 +660,12 @@ fn the_tools_panel_filling_the_window_keeps_clicks_off_the_sidebar() {
                     "{tool:?}: a click where {row} is under the panel"
                 );
                 assert!(cx.read(|cx| panel.read(cx).open), "{tool:?}: {row}");
-                // And hiding it, or putting it back at the side, comes back to that thread.
+                // And putting it back at the side, then hiding it with what hides it here (the
+                // title bar's button on Windows), comes back to that thread.
                 trek.click(cx, "panel-fill");
-                trek.click(cx, "panel-close");
+                trek.click(cx, panel_hiders()[0]);
                 trek.render(cx);
+                assert!(!cx.read(|cx| panel.read(cx).open), "{tool:?}: {row}");
                 assert_eq!(
                     trek.read(cx, |ws, _| ws.route.clone()),
                     Route::Thread(id.clone()),
