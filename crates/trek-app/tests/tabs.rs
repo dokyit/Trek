@@ -1,9 +1,11 @@
-//! Tabs along the top of the chat, threads in no project, and the Notes screen.
+//! Tabs along the top of the chat, threads in no project, and the Notes screen. The tools panel's
+//! own tabs, and its clicks kept off the strip and the sidebar it can lie over.
 
 mod common;
 
 use common::{launch, new_project, open, run, settings};
-use trek_app::workspace::{NO_PROJECT, Route};
+use gpui_kit::{px, size};
+use trek_app::workspace::{NO_PROJECT, PanelTool, Route};
 use trek_core::RunState;
 
 fn tab_ids(trek: &common::Trek, cx: &gpui_kit::TestAppContext) -> Vec<String> {
@@ -442,5 +444,126 @@ fn close_other_tabs_keeps_the_one_asked_about_and_every_thread() {
             trek.read(cx, |ws, _| ids.iter().all(|id| ws.thread(id).is_some())),
             "closing a tab leaves its thread alone"
         );
+    });
+}
+
+/// The tools panel, open on `tool` in `id`'s thread with the window `width` wide, at the side or
+/// filling the window.
+fn tools_open(
+    trek: &common::Trek,
+    cx: &mut gpui_kit::TestAppContext,
+    id: &str,
+    width: f32,
+    tool: PanelTool,
+    full: bool,
+) -> gpui_kit::Entity<trek_app::panels::RightPanel> {
+    cx.simulate_window_resize(trek.window, size(px(width), px(820.)));
+    trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.to_string()), cx));
+    let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
+    trek.window(cx, |window, cx| {
+        panel.update(cx, |p, cx| {
+            p.open_tool(tool, window, cx);
+            p.full = full;
+            cx.notify();
+        })
+    });
+    trek.render(cx);
+    panel
+}
+
+/// Over the chat (a narrow window) or filling the window, the panel's header lies over the tab
+/// strip, its hide button right on the strip's +: a click there hides the panel and nothing else.
+/// It went through to the + as well, and a new thread opened behind the panel.
+#[test]
+fn hiding_the_tools_panel_opens_no_thread_under_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let threads = trek.read(cx, |ws, _| ws.threads.len());
+        // Docked beside the chat, over the chat, and filling the window wide and narrow.
+        for (width, full, over) in [
+            (1280., false, false),
+            (600., false, true),
+            (1280., true, true),
+            (600., true, true),
+        ] {
+            let state = format!("{width} wide, filling the window: {full}");
+            for control in ["panel-close", "toggle-tools", "panel-fill"] {
+                let panel = tools_open(&trek, cx, &id, width, PanelTool::Git, full);
+                assert_eq!(trek.visible(cx, "tools-overlay"), over, "{state}");
+                let (close, plus) = (
+                    trek.bounds(cx, "panel-close").expect("hide button"),
+                    trek.bounds(cx, "tab-new").expect("the strip's +"),
+                );
+                // What makes it a test of the click: over the chat the two are in one place.
+                assert_eq!(close.intersects(&plus), over, "{state}: {close:?} {plus:?}");
+                trek.click(cx, control);
+                trek.render(cx);
+                let (open, now_full) = cx.read(|cx| (panel.read(cx).open, panel.read(cx).full));
+                if control == "panel-fill" {
+                    assert!(open, "{state}: {control} keeps it open");
+                    assert_eq!(now_full, !full, "{state}: {control} changes its size");
+                } else {
+                    assert!(!open, "{state}: {control} hides it");
+                }
+                assert_eq!(
+                    trek.read(cx, |ws, _| ws.route.clone()),
+                    Route::Thread(id.clone()),
+                    "{state}: {control} leaves the thread on screen"
+                );
+                assert_eq!(tab_ids(&trek, cx), vec![id.clone()], "{state}: {control}");
+                assert_eq!(
+                    trek.read(cx, |ws, _| ws.threads.len()),
+                    threads,
+                    "{state}: {control} starts no thread"
+                );
+            }
+        }
+    });
+}
+
+/// Filling the window, the panel lies over the sidebar: a click on a tool where the sidebar's
+/// Basecamp, Notes, Study or new-thread button is under it is the tool's alone. It went through,
+/// and the thread was left for Study behind the panel.
+#[test]
+fn the_tools_panel_filling_the_window_keeps_clicks_off_the_sidebar() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        for tool in [
+            PanelTool::Git,
+            PanelTool::Explorer,
+            PanelTool::Terminal,
+            PanelTool::Browser,
+        ] {
+            for row in ["open-study", "open-notes", "open-basecamp", "new-thread"] {
+                let panel = tools_open(&trek, cx, &id, 1280., tool, true);
+                let over = trek
+                    .bounds(cx, "tools-overlay")
+                    .expect("filling the window");
+                let at = trek.bounds(cx, row).expect("the sidebar under it");
+                assert!(over.contains(&at.center()), "{tool:?}: {row} {at:?}");
+                // A click at the row's place, which is the panel's.
+                trek.click(cx, row);
+                trek.render(cx);
+                assert_eq!(
+                    trek.read(cx, |ws, _| ws.route.clone()),
+                    Route::Thread(id.clone()),
+                    "{tool:?}: a click where {row} is under the panel"
+                );
+                assert!(cx.read(|cx| panel.read(cx).open), "{tool:?}: {row}");
+                // And hiding it, or putting it back at the side, comes back to that thread.
+                trek.click(cx, "panel-fill");
+                trek.click(cx, "panel-close");
+                trek.render(cx);
+                assert_eq!(
+                    trek.read(cx, |ws, _| ws.route.clone()),
+                    Route::Thread(id.clone()),
+                    "{tool:?}: {row}"
+                );
+            }
+        }
     });
 }

@@ -3445,6 +3445,8 @@ impl TrekWindow {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                            // It lies a little over the chat's edge: the press is the grab's alone.
+                            cx.stop_propagation();
                             if e.click_count >= 2 {
                                 this.right_panel.update(cx, |p, cx| {
                                     p.set_width(trek_core::settings::DEFAULT_RIGHT_PANEL_WIDTH, cx)
@@ -3457,7 +3459,6 @@ impl TrekWindow {
                                 ws.overlay_open = true;
                                 cx.notify();
                             });
-                            cx.stop_propagation();
                             cx.notify();
                         }),
                     );
@@ -3467,6 +3468,10 @@ impl TrekWindow {
                     .w(px(right_width))
                     .flex_none()
                     .h_full()
+                    // The pointer over the panel is the panel's, margins included: over the chat
+                    // (a narrow window) or the whole window (filling it), a click on its header or
+                    // a tool must not also reach the tab strip's + or a sidebar row lying under it.
+                    .occlude()
                     .pr_2()
                     .pb_2()
                     // Filling the window it has nothing beside it to be dragged against.
