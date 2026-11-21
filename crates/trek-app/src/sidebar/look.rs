@@ -182,18 +182,27 @@ pub fn section_label(text: &str, count: Option<usize>, cx: &App) -> impl IntoEle
         )
 }
 
-/// The Inbox: what needs the user and what finished unread, on one soft card under the nav.
-pub fn inbox_card(cx: &App) -> Div {
-    let theme = cx.theme();
+/// The Inbox: what needs the user and what finished unread, on one soft card under the nav. The
+/// box its rows are laid out in, its border's room inside it; the card itself (`inbox_card_look`)
+/// is painted by `motion::flip_frame`, which moves its edges with the rows.
+pub fn inbox_card() -> Div {
     v_flex()
         .mx_2()
         .mt(px(INBOX_TOP))
-        .pt(px(2.))
-        .pb(px(4.))
-        .rounded(px(crate::fluent::surface(INBOX_RADIUS)))
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.foreground.opacity(INBOX_WASH))
+        .p(px(INBOX_BORDER))
+        .pt(px(2. + INBOX_BORDER))
+        .pb(px(4. + INBOX_BORDER))
+}
+
+/// The Inbox's card as painted: a soft wash with a hairline border, rounded.
+pub fn inbox_card_look(cx: &App) -> crate::motion::FrameLook {
+    let theme = cx.theme();
+    crate::motion::FrameLook {
+        fill: theme.foreground.opacity(INBOX_WASH),
+        border: theme.border,
+        border_width: px(INBOX_BORDER),
+        radius: px(crate::fluent::surface(INBOX_RADIUS)),
+    }
 }
 
 /// What a row carries under it while it goes up past others (`FlipRow::surface`): what it sits on,

@@ -614,6 +614,263 @@ fn a_thread_rising_to_the_inbox_is_drawn_over_the_rows_it_passes_not_through_the
     });
 }
 
+/// A box: left, top, right, bottom (window px).
+type Area = (f32, f32, f32, f32);
+
+/// A band down the sidebar: top, bottom (window px).
+type Span = (f32, f32);
+
+/// Something done to the window between frames.
+type Step<'a> = &'a dyn Fn(&Trek, &mut TestAppContext);
+
+/// What one frame of the sidebar painted: each glyph's (or icon's) box as painted (inside its
+/// mask), each row's band as drawn and as painted (`Sidebar::painted_bands`), and the horizontal
+/// edges of the wide bordered boxes (the Inbox's card) as painted.
+struct Painted {
+    glyphs: Vec<Area>,
+    rows: Vec<(String, Span, Span)>,
+    edges: Vec<Area>,
+}
+
+fn painted(trek: &Trek, cx: &mut TestAppContext) -> Painted {
+    let side = trek.bounds(cx, "sidebar").expect("the sidebar");
+    let (left, right) = (side.left().as_f32(), side.right().as_f32());
+    let sidebar = cx.read(|cx| trek.root.read(cx).sidebar.clone());
+    let rows = sidebar.read_with(cx, |s, _| s.painted_bands());
+    let (glyphs, edges) = trek.window(cx, |window, _| {
+        let k = window.scale_factor();
+        let visible = |b: gpui_kit::Bounds<gpui_kit::ScaledPixels>,
+                       m: gpui_kit::Bounds<gpui_kit::ScaledPixels>|
+         -> Option<Area> {
+            let a = (
+                b.origin.x.0.max(m.origin.x.0) / k,
+                b.origin.y.0.max(m.origin.y.0) / k,
+                b.right().0.min(m.right().0) / k,
+                b.bottom().0.min(m.bottom().0) / k,
+            );
+            (a.2 > a.0 && a.3 > a.1 && a.0 >= left - 0.5 && a.2 <= right + 0.5).then_some(a)
+        };
+        let glyphs = window
+            .painted_monochrome_sprites()
+            .iter()
+            .filter_map(|s| visible(s.bounds, s.content_mask.bounds))
+            .collect();
+        let mut edges = vec![];
+        for q in window.painted_quads() {
+            let (b, w) = (q.bounds, q.border_widths);
+            if q.border_color.a == 0. || b.size.width.0 / k < (right - left) * 0.8 {
+                continue;
+            }
+            for (y0, y1) in [
+                (b.origin.y, b.origin.y + w.top),
+                (b.bottom() - w.bottom, b.bottom()),
+            ] {
+                if y1 > y0 {
+                    let line = gpui_kit::Bounds::from_corners(
+                        gpui_kit::point(b.origin.x, y0),
+                        gpui_kit::point(b.right(), y1),
+                    );
+                    edges.extend(visible(line, q.content_mask.bounds));
+                }
+            }
+        }
+        (glyphs, edges)
+    });
+    Painted {
+        glyphs,
+        rows,
+        edges,
+    }
+}
+
+/// What's wrong with a frame: two rows painted over the same pixels, a glyph painted across rows
+/// (outside the band its row may paint), or the card's edge painted through a row.
+fn overprint(p: &Painted) -> Option<String> {
+    for (i, (ka, _, (a0, a1))) in p.rows.iter().enumerate() {
+        for (kb, _, (b0, b1)) in &p.rows[i + 1..] {
+            if a1.min(*b1) - a0.max(*b0) > 0.5 {
+                return Some(format!(
+                    "{ka} ({a0}..{a1}) and {kb} ({b0}..{b1}) painted over the same pixels"
+                ));
+            }
+        }
+    }
+    for g in &p.glyphs {
+        let across: Vec<&String> = p
+            .rows
+            .iter()
+            .filter(|(_, _, (t, b))| g.3.min(*b) - g.1.max(*t) > 0.5)
+            .map(|(k, _, _)| k)
+            .collect();
+        if across.len() > 1 {
+            return Some(format!("a glyph {g:?} painted across rows {across:?}"));
+        }
+    }
+    for e in &p.edges {
+        for (k, _, (t, b)) in &p.rows {
+            if e.3.min(*b) - e.1.max(*t) > 0.25 {
+                return Some(format!(
+                    "the card's edge {e:?} painted through {k} ({t}..{b})"
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Rows drawn over each other this frame (before they're cut back): the frame tests something.
+fn passing(p: &Painted) -> bool {
+    p.rows.iter().enumerate().any(|(i, (_, (a0, a1), _))| {
+        p.rows[i + 1..]
+            .iter()
+            .any(|(_, (b0, b1), _)| a1.min(*b1) - a0.max(*b0) > 2.)
+    })
+}
+
+/// Draw frames 8 ms apart until nothing in the sidebar moves, checking each; `mid` runs after the
+/// third (a fold mid-move). `riser`, rising past the others, is never cut by any of them. How many
+/// frames had rows drawn over each other.
+fn step_clean(
+    trek: &Trek,
+    cx: &mut TestAppContext,
+    what: &str,
+    riser: Option<&str>,
+    mid: Option<Step>,
+) -> usize {
+    trek.render(cx);
+    let mut passed = 0;
+    for i in 0..90 {
+        frame(trek, cx, 8);
+        let p = painted(trek, cx);
+        if let Some(wrong) = overprint(&p) {
+            panic!("{what}, frame {i}: {wrong}");
+        }
+        if let Some((_, drawn, cut)) = riser.and_then(|r| p.rows.iter().find(|(k, _, _)| k == r)) {
+            assert_eq!(
+                drawn, cut,
+                "{what}, frame {i}: the rising row is painted whole"
+            );
+        }
+        passed += usize::from(passing(&p));
+        if i == 2
+            && let Some(mid) = mid
+        {
+            mid(trek, cx);
+        }
+    }
+    passed
+}
+
+/// Every kind of reorder, frame by frame, in `look`: no row's text is ever painted over another's.
+fn reorders_paint_clean(theme: trek_core::settings::ThemeChoice, glass: bool) {
+    run(async |cx| {
+        let trek = open(cx);
+        moving(cx);
+        cx.update(|cx| trek_app::apply_theme(theme, None, cx));
+        trek.update(cx, |ws, cx| {
+            ws.settings.appearance.glass = glass;
+            cx.notify();
+        });
+        assert_eq!(trek.read(cx, |ws, _| ws.see_through()), glass);
+        let done: Vec<String> = ["Explain the cart code", "Check the page for typos"]
+            .iter()
+            .enumerate()
+            .map(|(i, title)| quiet(&trek, cx, title, (i as i64 + 1) * 60_000))
+            .collect();
+        for id in &done {
+            set_state(&trek, cx, id, RunState::Idle, true);
+        }
+        let quiet_ones: Vec<String> = (0..3)
+            .map(|i| quiet(&trek, cx, &format!("Quiet {i}"), (i + 8) * 60_000))
+            .collect();
+        let heroes: Vec<String> = ["Fix the checkout total", "Tidy the styles"]
+            .iter()
+            .enumerate()
+            .map(|(i, title)| quiet(&trek, cx, title, (i as i64 + 4) * 60_000))
+            .collect();
+        for id in &heroes {
+            set_state(&trek, cx, id, RunState::Working, false);
+        }
+        let other = elsewhere(&trek, cx, "Elsewhere", 20 * 60_000);
+        trek.render(cx);
+        frame(&trek, cx, 1_000);
+        let at_rest = painted(&trek, cx);
+        assert!(at_rest.glyphs.len() > 20 && at_rest.rows.len() > 8);
+        assert_eq!(overprint(&at_rest), None, "at rest");
+        let pid = pid(&trek, cx, &heroes[0]);
+        let fold = move |trek: &Trek, cx: &mut TestAppContext| {
+            trek.click(cx, format!("live-proj-head-{pid}"));
+        };
+        let mut passed = 0;
+
+        // One rises to the top of the Inbox past the rows between; they're pushed down, the
+        // project's close the gap.
+        set_state(&trek, cx, &heroes[0], RunState::NeedsYou, false);
+        passed += step_clean(&trek, cx, "a row rising", Some(&heroes[0]), None);
+        // Answered, it goes back down to its project.
+        set_state(&trek, cx, &heroes[0], RunState::Working, false);
+        passed += step_clean(&trek, cx, "a row leaving the Inbox", None, None);
+        // Two start to wait in the same frame.
+        trek.update(cx, |ws, cx| {
+            for id in &heroes {
+                ws.store
+                    .update_thread(id, |t| t.run_state = RunState::NeedsYou)
+                    .unwrap();
+            }
+            ws.reload(cx);
+        });
+        passed += step_clean(&trek, cx, "two rising at once", None, None);
+        // Both answered; the project folds as they go down to it, then unfolds as one rises.
+        trek.update(cx, |ws, cx| {
+            for id in &heroes {
+                ws.store
+                    .update_thread(id, |t| t.run_state = RunState::Working)
+                    .unwrap();
+            }
+            ws.reload(cx);
+        });
+        passed += step_clean(&trek, cx, "folding mid-move", None, Some(&fold));
+        set_state(&trek, cx, &heroes[1], RunState::NeedsYou, false);
+        passed += step_clean(&trek, cx, "unfolding mid-move", None, Some(&fold));
+        // A quiet one finishes unread: up into the Inbox's news, under what calls for the user.
+        set_state(&trek, cx, &quiet_ones[2], RunState::Idle, true);
+        passed += step_clean(&trek, cx, "a row joining the news", None, None);
+        // The other project's thread is archived: it fades where it was as the rest close up.
+        trek.update(cx, |ws, cx| ws.archive(&other, cx));
+        passed += step_clean(&trek, cx, "a row fading away", None, None);
+        // A thread just started (its row still fading in) that asks at once: it rises whole.
+        let newcomer = quiet(&trek, cx, "Newcomer", 1_000);
+        set_state(&trek, cx, &newcomer, RunState::Working, false);
+        frame(&trek, cx, 8);
+        set_state(&trek, cx, &newcomer, RunState::NeedsYou, false);
+        passed += step_clean(&trek, cx, "a new row rising", Some(&newcomer), None);
+        assert!(
+            passed >= 10,
+            "rows were drawn over each other mid-move in a few frames: {passed}"
+        );
+    });
+}
+
+#[test]
+fn every_reorder_paints_each_row_clear_of_the_others_in_night() {
+    reorders_paint_clean(trek_core::settings::ThemeChoice::Night, false);
+}
+
+#[test]
+fn every_reorder_paints_each_row_clear_of_the_others_in_paper() {
+    reorders_paint_clean(trek_core::settings::ThemeChoice::Paper, false);
+}
+
+#[test]
+fn every_reorder_paints_each_row_clear_of_the_others_on_glass() {
+    reorders_paint_clean(trek_core::settings::ThemeChoice::Night, true);
+}
+
+#[test]
+fn every_reorder_paints_each_row_clear_of_the_others_on_glass_in_paper() {
+    reorders_paint_clean(trek_core::settings::ThemeChoice::Paper, true);
+}
+
 #[test]
 fn the_palette_stays_while_it_fades_then_goes() {
     run(async |cx| {
