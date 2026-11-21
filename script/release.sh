@@ -113,13 +113,18 @@ if [[ -n ${TREK_NOTARY_KEY:-}${TREK_NOTARY_KEY_ID:-}${TREK_NOTARY_ISSUER:-} ]]; 
     || die "Apple notarizes only what a Developer ID signed, not \"$(trek_sign_identity)\": set TREK_SIGN_IDENTITY"
   NOTARIZE=1
 fi
+BRANCH=$(git symbolic-ref -q --short HEAD || echo main)
 if (( ! DRY )); then
   # Tags others pushed, and where the channel tags moved: the version checks below read them.
   git fetch -q --force origin 'refs/tags/*:refs/tags/*' || die "couldn't fetch tags from origin"
+  [[ -z $(git status --porcelain) ]] || die "the working tree has changes; commit or stash them first"
+  [[ $CHANNEL != stable ]] || git symbolic-ref -q HEAD >/dev/null || die "a stable release is committed to a branch; check one out"
+  # A resumed release: when an earlier run (or a person) pushed this version's "Release v<version>"
+  # on HEAD, build that commit rather than bump a second time (script/lib/release-finish.sh).
+  [[ $CHANNEL != stable ]] || script/lib/release-finish.sh adopt "$VERSION" "$BRANCH"
 fi
-# A tag already on HEAD is a re-run finishing a release whose tag a maintainer pushed (the
-# workflow's token can't create a tag that brings in workflow-file changes); anywhere else, it's
-# taken.
+# A tag already on HEAD is a re-run finishing a release whose tag is pushed but whose GitHub release
+# isn't (a run that failed after its push, or a tag a maintainer pushed); anywhere else, it's taken.
 TAG_ON_HEAD=0
 # (Not for --target: the same run's Apple-silicon job may have tagged this version by now.)
 if [[ -n $VERSION_TAG && -z $TARGET ]] && git rev-parse -q --verify "refs/tags/$VERSION_TAG" >/dev/null; then
@@ -156,8 +161,6 @@ if key(new) < key(current):
     sys.exit(f"release: {new} is older than the workspace version {current}")
 PY
 if (( ! DRY )); then
-  [[ -z $(git status --porcelain) ]] || die "the working tree has changes; commit or stash them first"
-  [[ $CHANNEL != stable ]] || git symbolic-ref -q HEAD >/dev/null || die "a stable release is committed to a branch; check one out"
   gh auth status >/dev/null 2>&1 || die "gh isn't logged in"
   # macOS ties users' Accessibility / Screen Recording grants to the certificate: every release
   # must use the same one. TREK_SIGN_IDENTITY names another on purpose (a Developer ID, say).
@@ -247,24 +250,33 @@ echo "• $OUT/$CHANNEL.json → ${BASE%/}/$NAME"
 
 ASSETS=("$OUT/$DMG_NAME" "$OUT/$NAME" "$OUT/$NAME.minisig" "$OUT/$CHANNEL.json")
 if (( DRY )); then
+  # A stable dry run rehearses the push against a throwaway copy of the repository: the "Release
+  # v<version>" commit of what it built, the check the workflow's gate makes of it, the atomic push
+  # and a second push finding it done. Nothing leaves the machine.
+  [[ $CHANNEL != stable || -n $TARGET ]] || script/lib/release-finish.sh rehearse "$VERSION" "$BRANCH"
   echo "• dry run: built $OUT; not committing, tagging, pushing or publishing. Would publish:"
   echo "    $REPO release $RELEASE_TAG ($CHANNEL): ${(j:, :)${ASSETS[@]:t}}"
   exit 0
 fi
 
 # ---------- publish ----------
+# Everything up to here can fail and leave nothing behind. From here on each step finds what an
+# earlier run already did and carries on from it (script/lib/release-finish.sh), so re-running a
+# failed run finishes the release rather than stranding it.
 if [[ $CHANNEL == stable ]]; then
-  # The workspace version moves with stable releases only.
+  # The workspace version moves with stable releases only. (Already moved: a resumed run on the
+  # bump an earlier run pushed.)
   if [[ $VERSION != "$CURRENT" ]]; then
     git add Cargo.toml Cargo.lock
     git commit -q -m "Release v$VERSION"
+    # The workflow's gate takes CI on the parent for exactly this commit, should the run be resumed.
+    script/lib/release-finish.sh is-bump HEAD "$VERSION" >/dev/null \
+      || echo "! the release commit changes more than the version: a resumed run needs skip_ci_check" >&2
   fi
   COMMITTED=1
-  (( TAG_ON_HEAD )) || git tag -a "$VERSION_TAG" -m "Trek $VERSION"
-  git push origin HEAD
-  git push origin "refs/tags/$VERSION_TAG"
-  gh release create "$RELEASE_TAG" --repo "$REPO" --verify-tag --latest \
-    --title "Trek $VERSION" --notes-file "$OUT/release-notes.md" "${ASSETS[@]}"
+  # The commit and its tag, in one atomic push, retried: both land or neither.
+  script/lib/release-finish.sh push "$VERSION" "$BRANCH"
+  script/lib/release-finish.sh github "$VERSION" "$OUT/release-notes.md" "${ASSETS[@]}"
 else
   # What was built, as a commit off the branch: HEAD's tree with the bumped Cargo.toml and
   # Cargo.lock. Its tags keep it; the branch and the working tree stay at the workspace version.
@@ -275,15 +287,23 @@ else
   rm -f "$INDEX"
   BUILT=HEAD
   [[ $TREE == $(git rev-parse 'HEAD^{tree}') ]] || BUILT=$(git commit-tree "$TREE" -p HEAD -m "Release v$VERSION")
+  TAGS=()
   if [[ -n $VERSION_TAG ]]; then
     git tag -a "$VERSION_TAG" -m "Trek $VERSION" "$BUILT"
-    git push origin "refs/tags/$VERSION_TAG"
+    TAGS+=("refs/tags/$VERSION_TAG")
   fi
   # The channel tag moves to the build, its message naming the version (the next release's
   # checks read it); the release keeps its URL and swaps its assets: the archive first, the
   # manifest that points at it last, then older archives go.
   git tag -f -a "$CHANNEL" -m "Trek $VERSION" "$BUILT"
-  git push -f origin "refs/tags/$CHANNEL"
+  # Both tags in one atomic push (only the channel tag forced), retried when refused: an attempt
+  # that landed after all makes the next one "up to date".
+  for attempt in 1 2 3 4; do
+    git push --atomic origin "${TAGS[@]}" "+refs/tags/$CHANNEL" && break
+    (( attempt < 4 )) || die "pushing ${TAGS[*]} refs/tags/$CHANNEL was refused 4 times; nothing is published yet"
+    echo "• the push was refused (attempt $attempt of 4); trying again in $(( 5 * attempt ))s"
+    sleep $(( 5 * attempt ))
+  done
   if gh release view "$CHANNEL" --repo "$REPO" >/dev/null 2>&1; then
     gh release upload "$CHANNEL" --repo "$REPO" --clobber "$OUT/$NAME" "$OUT/$NAME.minisig" "$OUT/$DMG_NAME"
     gh release upload "$CHANNEL" --repo "$REPO" --clobber "$OUT/$CHANNEL.json"

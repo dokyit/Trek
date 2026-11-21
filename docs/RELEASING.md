@@ -149,16 +149,21 @@ What it does:
    beta's moving release never carries two.
 
 6. Without `--dry-run`:
-   - stable: commits `Release v<version>` on the current branch, tags `v<version>`, pushes both and
-     creates the GitHub release (marked latest) with the disk image, the archive, its `.minisig`,
-     `stable.json`, and `release-notes.md` as its body;
+   - stable: commits `Release v<version>` on the current branch, tags `v<version>`, pushes both in
+     one atomic push (both land or neither; refused pushes are retried) and creates the GitHub release
+     (marked latest) with the disk image, the archive, its `.minisig`, `stable.json`, and
+     `release-notes.md` as its body. Each of these finds what an earlier run did and carries on from it
+     (`script/lib/release-finish.sh`; see "When a release run fails");
    - beta / nightly: records the build as a commit off the branch, tags it (`v<version>` for a beta),
-     moves the channel tag to it, pushes the tags only, and refreshes the channel's prerelease (its body
+     moves the channel tag to it, pushes the tags only (one atomic push, retried), and refreshes the channel's prerelease (its body
      too): archive, signature and disk image first, manifest last, then older archives and disk images
      are deleted. The branch doesn't move and the version bump is undone.
 
    With `--dry-run` the version bump is undone and nothing leaves the machine; the artifacts stay in
-   `dist/release/<version>/`.
+   `dist/release/<version>/`. A stable dry run (without `--target`) also rehearses the push on a
+   throwaway copy of the repository: it commits the bump it built with, checks that the commit is
+   only the version (what the workflow's gate asks of a resumed run, and the dry run fails if it
+   isn't), and pushes it and its tag there twice.
 
 Environment: `TREK_MINISIGN_KEY` (secret key path), `TREK_MINISIGN_PASSWORD` (its password, for a run with
 no terminal; otherwise it's asked for), `TREK_RELEASE_REPO` (default `dokyit/Trek`),
@@ -197,19 +202,42 @@ into the release waits on both. Between the macOS publish and the Windows publis
 sees the new version without a Windows build and says "the Windows build is on its way"; Mac users can
 update at once.
 
-If the Windows job fails, the release exists with only `darwin-aarch64`: re-run just that job (**Re-run
-failed jobs** on the run, or `gh workflow run release-windows.yml --ref windows-port` with the same version
-and channel). It only attaches to the release that exists and replaces its own assets, so it can be run
-again. If the macOS job fails after pushing the tag but before the release exists, `release.sh` refuses the
-same version again ("tag … already exists"): take the next version, or delete the tag it pushed
-(`git push origin :refs/tags/v<version>`).
+**When a release run fails**, re-run the failed jobs: `gh run rerun <run id> --failed` (or **Re-run failed jobs** on the run). A
+failed macOS job's summary says what the run left on origin and GitHub and prints that command, or,
+when `main` has moved on since the run started, the dispatch to start again with. A re-run finishes the
+release from wherever the last one stopped:
+
+- Nothing reaches origin until the build, signing and disk image are done. Then the `Release v<version>`
+  commit and its tag go in one `git push --atomic`: both land or neither, so `main` never has the bump
+  without its tag. A refused push is retried (four tries, re-reading origin each time, done as soon as
+  origin has both on the commit, whoever pushed them).
+- A re-run (or a new dispatch) finds a `Release v<version>` that is only the version bump on top of the
+  commit it started from and carries on from it (`release-finish.sh adopt`): no second bump. A tag already
+  on that commit is used as it is; a tag on any other commit, or a `main` with other work since, stops the
+  run before it pushes anything.
+- The gate (`ci-passed`) takes CI on the parent for exactly that commit: one parent, the message
+  `Release v<version>` for the version asked for, and a diff that touches only Cargo.toml's
+  `[workspace.package]` version and the workspace packages' version lines in Cargo.lock
+  (`release-finish.sh is-bump`). Any other commit needs its own CI pass; `skip_ci_check` stays the
+  emergency override. (The workflow's token pushes that commit, and pushes by it don't start CI.)
+- A GitHub release that already exists is finished, not refused: this platform's archive, signature and
+  disk image are uploaded with its entry merged into `stable.json` only if they aren't all there already,
+  and a draft is published. The Windows and Intel publish jobs replace only their own files and entry, so
+  they can run again too.
+
+v0.4.11 and v0.4.61 were refused at the tag push (`! [remote rejected] v0.4.61 -> v0.4.61 (missing
+necessary objects)`, v0.4.11's said `(failed)`) when the tag went up on its own right after the branch
+push it points into; v0.4.12's was the same. Nothing in those depended on workflow files changing (v0.4.20 to
+v0.4.55 tagged fine after workflow changes); the single atomic push carries the commit and tag in one pack.
 
 A dry run builds, code-signs and minisigns both halves, verifies the signatures against
 `assets/update/minisign.pub`, shows both manifests and SHA-256s in the run's summary, keeps the Mac disk
 image as the run's `mac-dmg` artifact (a week) to open and look at, and publishes nothing: no commit,
 no tag, no release. Without the code-signing secrets below it signs with a throwaway
-"Trek Local Signing" that `script/signing-identity.sh` makes on the runner. A dry run does not prove the
-real p12, the pushes or the release upload; the first real run is the first time those happen.
+"Trek Local Signing" that `script/signing-identity.sh` makes on the runner. Its gate reports what it
+would decide without enforcing it, and its macOS job rehearses the push (above) on a copy of the
+repository. A dry run does not prove the real p12, the pushes to GitHub or the release upload; the first
+real run is the first time those happen.
 
 Secrets, added once from the Mac that has `~/.trek-signing/` (repository Settings > Secrets and
 variables > Actions, or `gh`):

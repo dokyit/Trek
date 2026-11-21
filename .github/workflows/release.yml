@@ -87,32 +87,59 @@ env:
 
 jobs:
   # A release is built from a commit CI passed on: both platforms' tests and lints. v0.4.49 went out
-  # after a red run. A dry run isn't held up (it publishes nothing), nor a release whose
-  # skip_ci_check says it can't wait.
+  # after a red run. One exception: this version's own "Release v<version>" commit, which a run that
+  # failed after pushing it leaves on main and which CI never runs on (the workflow's token pushed
+  # it). When the diff proves it changes nothing but the version (script/lib/release-finish.sh
+  # is-bump), CI on its parent counts. A dry run isn't held up (it publishes nothing; it says what
+  # the check found), nor a release whose skip_ci_check says it can't wait.
   ci-passed:
     name: CI passed on this commit
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       actions: read
+      contents: read
     steps:
+      # Two deep: the commit and its parent, for the bump check.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
       - name: CI's runs of this commit
         env:
           GH_TOKEN: ${{ github.token }}
           DRY_RUN: ${{ inputs.dry_run }}
           SKIP: ${{ inputs.skip_ci_check }}
+          VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if [[ $DRY_RUN == true || $SKIP == true ]]; then
-            echo "Not checked: dry run ($DRY_RUN), skip_ci_check ($SKIP)."
-            exit 0
-          fi
-          conclusions=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&status=completed&per_page=20" --jq '[.workflow_runs[].conclusion] | join(" ")')
-          echo "CI on $GITHUB_SHA: ${conclusions:-no completed run}"
-          if [[ " $conclusions " != *" success "* ]]; then
-            echo "::error::CI hasn't passed on $GITHUB_SHA (macOS and Windows). Release a commit it passed on, or run again with skip_ci_check for an emergency fix."
+          passed() { # commit: has a CI run of it succeeded?
+            local conclusions
+            conclusions=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$1&status=completed&per_page=20" --jq '[.workflow_runs[].conclusion] | join(" ")')
+            echo "CI on $1: ${conclusions:-no completed run}"
+            [[ " $conclusions " == *" success "* ]]
+          }
+          verdict() { # what the check found; enforced only for a real release without skip_ci_check
+            if [[ $DRY_RUN == true || $SKIP == true ]]; then
+              echo "Not enforced: dry run ($DRY_RUN), skip_ci_check ($SKIP). $1"
+              exit 0
+            fi
+            echo "::error::$1"
             exit 1
+          }
+          if passed "$GITHUB_SHA"; then exit 0; fi
+          if why=$(script/lib/release-finish.sh is-bump "$GITHUB_SHA" "$VERSION" 2>&1); then
+            echo "$why"
+            parent=$(git rev-parse "$GITHUB_SHA^1")
+            if passed "$parent"; then
+              echo "Released on CI's pass of $parent, the commit this version bump is on."
+              exit 0
+            fi
+            verdict "CI hasn't passed on $GITHUB_SHA's parent $parent either (this commit is only the version bump). Release a commit CI passed on, or run again with skip_ci_check for an emergency fix."
           fi
+          echo "Not only the v${VERSION#v} bump, so its parent's CI doesn't count: $why"
+          verdict "CI hasn't passed on $GITHUB_SHA (macOS and Windows). Release a commit it passed on, or run again with skip_ci_check for an emergency fix."
 
   macos:
     name: macOS app
@@ -191,14 +218,21 @@ jobs:
       # take it (release.sh's own `gh auth status` runs only for a real release). --dry-run
       # authenticates against the push endpoint and sends nothing (its "[new tag]" line is what
       # it would have done).
+      # A re-run of a run that pushed its "Release v<version>" (or one a person pushed) carries on
+      # from that commit (release-finish.sh adopt), so main fast-forwards to it first.
       - name: GitHub access
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CHANNEL: ${{ inputs.channel }}
+          VERSION: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           gh auth status
           git push --dry-run origin "HEAD:refs/tags/trek-push-probe-$GITHUB_RUN_ID"
-          if [[ $CHANNEL == stable ]]; then git push --dry-run origin HEAD; fi
+          if [[ $CHANNEL == stable ]]; then
+            if [[ $DRY_RUN != true ]]; then script/lib/release-finish.sh adopt "$VERSION" "$GITHUB_REF_NAME"; fi
+            git push --dry-run origin HEAD
+          fi
 
       # The secret is the key file's whole contents (it is all ASCII). Keys and the keychain live
       # in RUNNER_TEMP and go in the last step, whatever happens.
@@ -386,6 +420,20 @@ jobs:
             echo
             cat "$out/release-notes.md"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # After a failure (here or in any step before): what it left on origin and GitHub, and the one
+      # command that resumes the release. Nothing is pushed until the build and signing are done,
+      # and then the commit and its tag go in one atomic push, so main is never left with a bump
+      # and no tag.
+      - name: What the failure left
+        if: failure() && inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          script/lib/release-finish.sh state "$VERSION" "$CHANNEL" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_REF_NAME" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
       # The Windows dry run merges into this manifest, as a real run merges into the release's.
       - name: Manifest for the Windows dry run
@@ -886,7 +934,11 @@ jobs:
           version=${VERSION#v}
           tag=$CHANNEL
           [[ $CHANNEL == stable ]] && tag="v$version"
-          assets=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          resume="gh run rerun $GITHUB_RUN_ID --failed"
+          if ! assets=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'); then
+            echo "::error::there's no release $tag: the macOS job didn't publish it. Its summary says what it left; re-running the failed jobs carries on from there: $resume"
+            exit 1
+          fi
           gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$CHANNEL.json" --output "$RUNNER_TEMP/release.json" --clobber
           missing=()
           wanted=(
@@ -905,6 +957,8 @@ jobs:
             for m in "${missing[@]}"; do
               echo "::error::$tag is missing $m"
             done
+            # The publish jobs add or replace only their own platform's files and entry.
+            echo "Re-run the failed jobs to finish $tag: \`$resume\`" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
           echo "$tag has every platform's downloads and manifest entry."

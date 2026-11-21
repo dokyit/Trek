@@ -51,7 +51,9 @@ jobs:
         run: for f in script/*.sh script/lib/*.sh; do zsh -n "$f"; done
 
       # The release notes step (script/lib/notes.sh) against its fixtures: every release body
-      # carries the install block exactly once. The phone updater's words, against stand-ins.
+      # carries the install block exactly once. The end of a release (script/lib/release-finish.sh:
+      # the atomic push, resuming a failed run, the gate's bump check) against throwaway
+      # repositories. The phone updater's words, against stand-ins.
       # The capture manifests against the commands this driver knows, so a suite can't use one it
       # would refuse (media/README.md). The web remote's plain code (its framing, pairing link and
       # headers) and the site's headers, in Node (script/site/test).
@@ -59,6 +61,7 @@ jobs:
         run: |
           bash script/tests/release-notes.sh
           bash script/tests/merge-manifest.sh
+          bash script/tests/release-finish.sh
           zsh ios/scripts/tests/phone-update.sh
           zsh script/capture.sh check
           node script/site/test/run.mjs
