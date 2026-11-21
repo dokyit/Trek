@@ -25,10 +25,13 @@
     "mac-intel": /^Trek-[\w.+-]+-darwin-x86_64\.dmg$/,
     "win-setup": /^Trek-Setup-x86_64\.exe$/,
     "win-zip": /^Trek-[\w.+-]+-windows-x86_64\.zip$/,
+    "linux-appimage": /^Trek-[\w.+-]+-linux-x86_64\.AppImage$/,
+    "linux-arm": /^Trek-[\w.+-]+-linux-aarch64\.AppImage$/,
+    "linux-deb": /^trek_[\w.+~-]+_amd64\.deb$/,
   };
   // Where each link goes until the API has answered, or if it never does.
-  const FALLBACK = { "mac-arm": LATEST, "mac-intel": LATEST, "win-setup": `${LATEST}/download/Trek-Setup-x86_64.exe`, "win-zip": LATEST };
-  const CHIP = { "mac-arm": "Apple silicon", "mac-intel": "Intel", "win-setup": "Windows 11, x64" };
+  const FALLBACK = { "mac-arm": LATEST, "mac-intel": LATEST, "win-setup": `${LATEST}/download/Trek-Setup-x86_64.exe`, "win-zip": LATEST, "linux-appimage": LATEST, "linux-arm": LATEST, "linux-deb": LATEST };
+  const CHIP = { "mac-arm": "Apple silicon", "mac-intel": "Intel", "win-setup": "Windows 11, x64", "linux-appimage": "x86_64", "linux-arm": "Arm" };
   const megabytes = (bytes) => `${Math.round(bytes / 1e6)} MB`;
 
   /** The Mac's chip from its GPU's name, where the browser gives one. Chrome and Firefox name it
@@ -66,7 +69,11 @@
       // Undecided (Safari): offer Apple silicon, say so, and put the Intel build one tap away.
       return { os: "mac", build: build || "mac-arm", sure: Boolean(build) };
     }
-    if (/Linux|X11|CrOS/i.test(`${platform} ${ua}`)) return { os: "linux", build: null, sure: true };
+    // Linux: offered only once a release has Linux files (`paint`), Arm where the browser says so.
+    if (/Linux|X11|CrOS/i.test(`${platform} ${ua}`)) {
+      const arm = /aarch64|arm64|armv8/i.test(`${platform} ${ua}`);
+      return { os: "linux", build: null, linux: arm ? "linux-arm" : "linux-appimage", sure: true };
+    }
     return { os: "other", build: null, sure: false };
   }
 
@@ -107,6 +114,14 @@
     const assets = (release && release.assets) || {};
     const href = (key) => (assets[key] && assets[key].url) || FALLBACK[key];
 
+    // The Linux card, only once the latest release has a Linux build.
+    const linux = Boolean(assets["linux-appimage"] || assets["linux-arm"]);
+    for (const card of all("[data-linux]")) {
+      card.hidden = !linux;
+      card.parentElement.classList.toggle("has-linux", linux);
+    }
+    if (who.os === "linux" && linux && assets[who.linux]) who = { ...who, build: who.linux };
+
     for (const a of all("[data-build]")) {
       const key = a.dataset.build;
       a.href = href(key);
@@ -120,7 +135,17 @@
     const other = document.querySelector("[data-dl-other]");
     const fine = document.querySelector("[data-dl-fine]");
     if (!primary || !label || !fine) return;
-    if (who.build) {
+    if (who.build && who.os === "linux") {
+      primary.href = href(who.build);
+      label.textContent = "Download for Linux";
+      if (other) {
+        other.hidden = false;
+        other.href = href("linux-deb");
+        other.textContent = ".deb for Ubuntu";
+      }
+      const size = assets[who.build].size ? `, ${megabytes(assets[who.build].size)}` : "";
+      fine.textContent = `Free and open source. Version ${release.version}, ${CHIP[who.build]}${size}. Make it executable, then run it.`;
+    } else if (who.build) {
       const windows = who.os === "windows";
       primary.href = href(who.build);
       label.textContent = windows ? "Download for Windows" : "Download for macOS";
