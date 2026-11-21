@@ -307,27 +307,89 @@ pub struct Flip {
     /// Rows drawn this frame (from `begin`; kept till the next, as placing them comes after
     /// `end`).
     drawn: Vec<SharedString>,
-    /// While a group that's going down is painted: the bands (top, bottom) of the groups going
-    /// up past it. Its rows aren't painted under them.
-    over: Vec<(f32, f32)>,
-    /// Rows going up this frame (drawn below their places), each with the band it's drawn over
-    /// and how far it still has to go, its group's way included (`Lifted`). A row rising past
-    /// others (a thread that now needs the user, on its way to the top of the Inbox) is drawn
-    /// over them: they aren't painted under it, whichever group they're in.
-    lifted: Vec<Lifted>,
+    /// Every row as drawn this frame, in the order they were placed (`Band`). Of two rows drawn
+    /// over the same pixels, only the one on top is painted there: the other is cut back to the
+    /// side of it its middle is on. So no row's text is ever painted over another's, whatever
+    /// moves where (a row rising past others, the rows closing up after it, a group sliding down
+    /// as the Inbox grows, a row going back down to its project, several at once).
+    bands: Vec<Band>,
+    /// How many of `bands` are moving (or fading): with none, nothing is drawn over anything and
+    /// no row is cut, however long the list.
+    movers: usize,
     /// How far the group whose rows are being placed is drawn from its place (0 for none).
     group_offset: f32,
+    /// How far the group under the one being placed is drawn from its place, against that one's
+    /// own offset (`None`: it's the last): the group's frame (`flip_frame`, the Inbox's card)
+    /// ends that much lower, with what's under it.
+    below: Option<f32>,
+    /// While a group that isn't going up is placed: the bands (top, bottom) of the groups going
+    /// up past it. Its rows take no clicks under them (their own rows are placed later, so the
+    /// rows they'll be painted over don't know them yet).
+    over: Vec<(f32, f32)>,
 }
 
-/// A row going up, as drawn this frame.
-struct Lifted {
+/// A band down a list, top to bottom (window px).
+pub type Span = (f32, f32);
+
+/// A row as drawn this frame: the band it covers and its rank.
+#[derive(Clone, Debug)]
+struct Band {
     key: SharedString,
     top: f32,
     bottom: f32,
-    /// How far below its place it's drawn, with its group's offset: of two rows going up past
-    /// each other (one leaving a group that slides down, the rows under it closing up), the one
-    /// with further to go is the one passing, drawn over the other.
+    /// How far from its place in its group it's drawn.
+    offset: f32,
+    rank: Rank,
+}
+
+/// Which of two rows drawn over each other is on top: the one with further to go up (`reach`,
+/// how far below its place it's drawn, its group's way included), so a row rising past others is
+/// over them and a row going down slides under what it passes; of two going the same way, the
+/// one placed later. A row fading in where it goes, new, is under every other (it comes in where
+/// the others already are, see-through), and one fading away (`FlipRow::fading`) under that.
+#[derive(Clone, Copy, Debug)]
+struct Rank {
     reach: f32,
+    seq: usize,
+}
+
+impl Rank {
+    fn over(&self, other: &Rank) -> bool {
+        if (self.reach - other.reach).abs() > PIXEL {
+            self.reach > other.reach
+        } else {
+            self.seq > other.seq
+        }
+    }
+}
+
+/// A row fading in ranks under every row that isn't (`Rank`).
+const ENTERING: f32 = -1e9;
+
+/// How far two bands must overlap to count: less is rounding.
+const OVERLAP: f32 = 0.25;
+
+/// Where a row drawn over `top..bottom` may be painted, kept off `bands` (the rows over it):
+/// above one, if its middle is above that one's, else below it. `None`: anywhere.
+fn clip_off(top: f32, bottom: f32, bands: impl Iterator<Item = (f32, f32)>) -> Option<(f32, f32)> {
+    if bottom <= top {
+        return None;
+    }
+    let mid = (top + bottom) / 2.;
+    let (mut from, mut to) = (top, bottom);
+    let mut clipped = false;
+    for (a, b) in bands {
+        // Over it by more than a hair: rows that only touch don't cut each other.
+        if a < bottom - OVERLAP && b > top + OVERLAP {
+            clipped = true;
+            if mid < (a + b) / 2. {
+                to = to.min(a);
+            } else {
+                from = from.max(b);
+            }
+        }
+    }
+    clipped.then_some((from, to.max(from)))
 }
 
 struct Placed {
@@ -371,7 +433,8 @@ impl Flip {
             self.rows.retain(|k, _| drawn.contains(k));
         }
         self.drawn.clear();
-        self.lifted.clear();
+        self.bands.clear();
+        self.movers = 0;
         if !animate {
             for p in self.rows.values_mut() {
                 p.enter = None;
@@ -473,43 +536,40 @@ impl Flip {
         p.offset.frame(now, window)
     }
 
-    /// Where row `key`, drawn over `top..bottom`, may be painted, kept off the groups going up
-    /// over its own (`over`) and the rows going up past it (`lifted`): above one, if its middle
-    /// is above that one's, else below it. `None`: anywhere. A row going up itself (`reach`) gives
-    /// way only to the rows going up further: the one passing it is never cut by it in turn.
-    fn clip(
-        &self,
-        key: &SharedString,
-        top: f32,
-        bottom: f32,
-        reach: Option<f32>,
-    ) -> Option<(f32, f32)> {
-        if bottom <= top {
+    /// Where row `key`, drawn over `top..bottom` at `rank`, may be painted: off every row drawn
+    /// over it this frame (`bands`, as far as they've been placed). `None`: anywhere.
+    fn clip(&self, key: &SharedString, top: f32, bottom: f32, rank: Rank) -> Option<(f32, f32)> {
+        if self.movers == 0 {
             return None;
         }
-        let passing = self
-            .lifted
+        clip_off(
+            top,
+            bottom,
+            self.bands
+                .iter()
+                .filter(|b| &b.key != key && b.rank.over(&rank))
+                .map(|b| (b.top, b.bottom)),
+        )
+    }
+
+    /// Each row's band in the last frame, top to bottom: where it's drawn, and where it's painted
+    /// (cut back off the rows over it; empty where they cover it). For tests, which check that no
+    /// two are painted over each other.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn painted_bands(&self) -> Vec<(SharedString, Span, Span)> {
+        let mut out: Vec<(SharedString, Span, Span)> = self
+            .bands
             .iter()
-            .filter(|l| &l.key != key && reach.is_none_or(|r| l.reach > r + PIXEL))
-            .map(|l| (l.top, l.bottom));
-        let bands: Vec<(f32, f32)> = match reach {
-            Some(_) => passing.collect(),
-            None => self.over.iter().copied().chain(passing).collect(),
-        };
-        let mid = (top + bottom) / 2.;
-        let (mut from, mut to) = (top, bottom);
-        let mut clipped = false;
-        for (a, b) in bands {
-            if a < bottom && b > top {
-                clipped = true;
-                if mid < (a + b) / 2. {
-                    to = to.min(a);
-                } else {
-                    from = from.max(b);
-                }
-            }
-        }
-        clipped.then_some((from, to.max(from)))
+            .filter(|b| b.bottom > b.top)
+            .map(|b| {
+                let painted = self
+                    .clip(&b.key, b.top, b.bottom, b.rank)
+                    .unwrap_or((b.top, b.bottom));
+                (b.key.clone(), (b.top, b.bottom), painted)
+            })
+            .collect();
+        out.sort_by(|a, b| a.1.0.total_cmp(&b.1.0));
+        out
     }
 }
 
@@ -549,6 +609,8 @@ pub fn flip_row(
         key,
         child,
         surface: None,
+        fading: None,
+        entering: opacity < 1.,
     }
 }
 
@@ -561,11 +623,18 @@ impl FlipRow {
         self.surface = fill.map(|f| (f, radius));
         self
     }
+
+    /// A row fading away where it was, out of the layout (no height of its own; it draws
+    /// `height`): under every other row, which aren't cut for it, and not painted under them.
+    pub fn fading(mut self, height: Pixels) -> Self {
+        self.fading = Some(height);
+        self
+    }
 }
 
 /// Groups of FLIP rows (a project's header and threads), stacked: each group moves as one, its
 /// rows placed against it, and groups trading places pass whole. The ones going up are drawn
-/// (and take clicks) over the ones going down, which aren't painted under them.
+/// (and take clicks) over the ones going down, whose rows aren't painted under theirs.
 pub fn flip_stack(
     store: &FlipStore,
     groups: Vec<(SharedString, AnyElement)>,
@@ -594,14 +663,18 @@ pub struct FlipRow {
     key: SharedString,
     child: AnyElement,
     surface: Option<(Hsla, Pixels)>,
+    fading: Option<Pixels>,
+    /// New, fading in.
+    entering: bool,
 }
 
 /// A FLIP row as drawn this frame.
 pub struct RowFrame {
-    /// Where it's drawn: its place, offset.
+    /// Where it's drawn: its place, offset (for a row fading away, as tall as it draws).
     drawn: Bounds<Pixels>,
-    /// On its way up (`Flip::lifted`): how far it has to go.
-    reach: Option<f32>,
+    rank: Rank,
+    /// Drawn below its place in its group: on its way up past others there.
+    lifted: bool,
 }
 
 pub struct FlipStack {
@@ -685,11 +758,11 @@ fn row_mask(
     store: &FlipStore,
     key: &SharedString,
     drawn: Bounds<Pixels>,
-    reach: Option<f32>,
+    rank: Rank,
 ) -> Option<ContentMask<Pixels>> {
     store
         .borrow()
-        .clip(key, drawn.top().as_f32(), drawn.bottom().as_f32(), reach)
+        .clip(key, drawn.top().as_f32(), drawn.bottom().as_f32(), rank)
         .map(|(top, bottom)| ContentMask {
             bounds: Bounds::from_corners(
                 point(drawn.left(), px(top)),
@@ -722,8 +795,8 @@ impl Element for FlipRow {
 
     /// The layout is done: compare where the row is now with where it was, and draw it offset
     /// by what's left of the difference (its hitboxes go with it, so a click lands on what's
-    /// under the pointer). Where a group or a row going up covers it, it takes no clicks either
-    /// (from the rows placed before it; it isn't painted under any of them).
+    /// under the pointer). Where a row over it covers it, it takes no clicks either (from the
+    /// rows placed before it; it isn't painted under any of them).
     fn prepaint(
         &mut self,
         _: Option<&GlobalElementId>,
@@ -741,19 +814,61 @@ impl Element for FlipRow {
         // a passing row show a sliver under the one going up.
         let scale = window.scale_factor();
         let offset = (offset * scale).round() / scale;
-        let drawn = Bounds::new(point(bounds.left(), bounds.top() + px(offset)), bounds.size);
-        let reach = (offset > PIXEL && bounds.size.height > px(0.)).then(|| {
+        let height = self.fading.unwrap_or(bounds.size.height);
+        let drawn = Bounds::new(
+            point(bounds.left(), bounds.top() + px(offset)),
+            size(bounds.size.width, height),
+        );
+        let rank = {
             let mut flip = self.store.borrow_mut();
-            let reach = offset + flip.group_offset;
-            flip.lifted.push(Lifted {
+            let rank = Rank {
+                reach: match (self.fading, offset + flip.group_offset) {
+                    (Some(_), _) => f32::NEG_INFINITY,
+                    // Coming in where it goes; one already on its way up passes as any row does.
+                    (None, reach) if self.entering && reach <= PIXEL => ENTERING,
+                    (None, reach) => reach,
+                },
+                seq: flip.bands.len(),
+            };
+            flip.bands.push(Band {
                 key: self.key.clone(),
                 top: drawn.top().as_f32(),
                 bottom: drawn.bottom().as_f32(),
-                reach,
+                offset,
+                rank,
             });
-            reach
-        });
-        let mask = row_mask(&self.store, &self.key, drawn, reach);
+            if rank.reach.abs() > PIXEL {
+                flip.movers += 1;
+            }
+            rank
+        };
+        // Its hitboxes are kept off the groups going up past its own, too: they take the clicks
+        // there.
+        let mask = {
+            let flip = self.store.borrow();
+            let (top, bottom) = (drawn.top().as_f32(), drawn.bottom().as_f32());
+            // At rest nothing is drawn over anything (`movers`).
+            let placed = if flip.movers == 0 {
+                &[][..]
+            } else {
+                &flip.bands[..]
+            };
+            clip_off(
+                top,
+                bottom,
+                placed
+                    .iter()
+                    .filter(|b| b.key != self.key && b.rank.over(&rank))
+                    .map(|b| (b.top, b.bottom))
+                    .chain(flip.over.iter().copied()),
+            )
+            .map(|(top, bottom)| ContentMask {
+                bounds: Bounds::from_corners(
+                    point(drawn.left(), px(top)),
+                    point(drawn.right(), px(bottom)),
+                ),
+            })
+        };
         window.with_content_mask(mask, |window| {
             if offset == 0. {
                 self.child.prepaint(window, cx);
@@ -763,11 +878,15 @@ impl Element for FlipRow {
                 });
             }
         });
-        RowFrame { drawn, reach }
+        RowFrame {
+            drawn,
+            rank,
+            lifted: offset > PIXEL && self.fading.is_none(),
+        }
     }
 
-    /// Painted after every row has been placed: kept off every row going up past it this frame,
-    /// or, going up itself, on the surface it carries.
+    /// Painted after every row has been placed: kept off every row over it this frame; going
+    /// up past others, on the surface it carries.
     fn paint(
         &mut self,
         _: Option<&GlobalElementId>,
@@ -778,13 +897,183 @@ impl Element for FlipRow {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let mask = row_mask(&self.store, &self.key, frame.drawn, frame.reach);
+        let mask = row_mask(&self.store, &self.key, frame.drawn, frame.rank);
         window.with_content_mask(mask, |window| {
-            if let Some((surface, radius)) = self.surface.filter(|_| frame.reach.is_some()) {
+            if let Some((surface, radius)) = self.surface.filter(|_| frame.lifted) {
                 window.paint_quad(fill(frame.drawn, surface).corner_radii(radius));
             }
             self.child.paint(window, cx)
         });
+    }
+}
+
+/// How a group's frame (`flip_frame`) is painted: a filled box with a border, as a `div` would
+/// paint it.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameLook {
+    pub fill: Hsla,
+    pub border: Hsla,
+    pub border_width: Pixels,
+    pub radius: Pixels,
+}
+
+/// A box drawn round a group's rows (the Inbox's card) in a stack (`flip_stack`), which moves
+/// with them: while they slide, its top and bottom are drawn where its first row and what's
+/// under it are, not where the layout has them, so its edges never cross a row that's still on
+/// its way. Where a row is drawn across its top or bottom edge (one rising into it from below,
+/// one going down out of it) the edge isn't painted: no line through a row's text, whether or
+/// not the row has a fill of its own. `child` is the group's content, laid out as the box (its
+/// insets the border's room).
+pub fn flip_frame(store: &FlipStore, look: FrameLook, child: impl IntoElement) -> FlipFrame {
+    FlipFrame {
+        store: store.clone(),
+        look,
+        child: child.into_any_element(),
+    }
+}
+
+pub struct FlipFrame {
+    store: FlipStore,
+    look: FrameLook,
+    child: AnyElement,
+}
+
+impl IntoElement for FlipFrame {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+/// Where a group's frame is drawn this frame (`flip_frame`).
+pub struct FrameDrawn {
+    bounds: Bounds<Pixels>,
+}
+
+impl Element for FlipFrame {
+    type RequestLayoutState = ();
+    type PrepaintState = FrameDrawn;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    /// Its rows placed, it ends where they're drawn: its top with its first row's, its bottom
+    /// with the group under it (or, last in the stack, with its own last row).
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) -> FrameDrawn {
+        let first = self.store.borrow().bands.len();
+        self.child.prepaint(window, cx);
+        let flip = self.store.borrow();
+        let own = &flip.bands[first.min(flip.bands.len())..];
+        let top = own.first().map_or(0., |b| b.offset);
+        let bottom = flip
+            .below
+            .or_else(|| {
+                own.iter()
+                    .rev()
+                    .find(|b| b.bottom > b.top)
+                    .map(|b| b.offset)
+            })
+            .unwrap_or(0.);
+        let top = bounds.top() + px(top);
+        let bottom = (bounds.bottom() + px(bottom)).max(top);
+        FrameDrawn {
+            bounds: Bounds::from_corners(point(bounds.left(), top), point(bounds.right(), bottom)),
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        drawn: &mut FrameDrawn,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let b = drawn.bounds;
+        let (top, bottom) = (b.top().as_f32(), b.bottom().as_f32());
+        // The rows drawn over its top or bottom edge (the line its border paints there), as bands
+        // within it.
+        let w = self.look.border_width.as_f32();
+        let edges = [(top, top + w), (bottom - w, bottom)];
+        let across: Vec<(f32, f32)> = {
+            let flip = self.store.borrow();
+            let mut across: Vec<(f32, f32)> = flip
+                .bands
+                .iter()
+                .filter(|r| {
+                    edges
+                        .iter()
+                        .any(|(a, z)| r.top < z - OVERLAP && r.bottom > a + OVERLAP)
+                })
+                .map(|r| (r.top.max(top), r.bottom.min(bottom)))
+                .collect();
+            across.sort_by(|a, b| a.0.total_cmp(&b.0));
+            across
+        };
+        let look = self.look;
+        let quad = |edges: bool| {
+            let w = look.border_width;
+            fill(b, look.fill)
+                .corner_radii(look.radius)
+                .border_widths(Edges {
+                    top: if edges { w } else { px(0.) },
+                    bottom: if edges { w } else { px(0.) },
+                    left: w,
+                    right: w,
+                })
+                .border_color(look.border)
+        };
+        if across.is_empty() {
+            window.paint_quad(quad(true));
+        } else {
+            // Its height in pieces: where a row is across an edge, no edge; elsewhere, all of it.
+            let mut at = top;
+            let mut pieces: Vec<(f32, f32, bool)> = vec![];
+            for (a, z) in across {
+                if a > at {
+                    pieces.push((at, a, true));
+                }
+                if z > at.max(a) {
+                    pieces.push((at.max(a), z, false));
+                }
+                at = at.max(z);
+            }
+            if bottom > at {
+                pieces.push((at, bottom, true));
+            }
+            for (a, z, edges) in pieces {
+                let mask = ContentMask {
+                    bounds: Bounds::from_corners(point(b.left(), px(a)), point(b.right(), px(z))),
+                };
+                window.with_content_mask(Some(mask), |window| window.paint_quad(quad(edges)));
+            }
+        }
+        self.child.paint(window, cx);
     }
 }
 
@@ -801,12 +1090,9 @@ impl Stacked {
     }
 }
 
-/// A stack's groups as laid out this frame, the order they're drawn in, and the bands of the
-/// ones going up.
+/// The order a stack's groups are drawn in this frame.
 pub struct StackFrame {
-    groups: Vec<Stacked>,
     order: Vec<usize>,
-    rising: Vec<(f32, f32)>,
 }
 
 impl Element for FlipStack {
@@ -866,7 +1152,8 @@ impl Element for FlipStack {
                 }
             })
             .collect();
-        // Groups going up last: drawn, and taking clicks, over the ones they pass.
+        // Groups going up last: drawn, and taking clicks, over the ones they pass (their rows
+        // rank over the rows they pass, `Rank`, so those are cut back off them too).
         let mut order: Vec<usize> = (0..groups.len()).collect();
         order.sort_by_key(|i| groups[*i].rising());
         let rising: Vec<(f32, f32)> = groups
@@ -885,8 +1172,9 @@ impl Element for FlipStack {
             let top = point(g.bounds.origin.x, g.bounds.origin.y + px(g.offset));
             let outer = {
                 let mut flip = self.store.borrow_mut();
-                flip.over = if g.rising() { vec![] } else { rising.clone() };
                 flip.group_offset = g.offset;
+                flip.below = groups.get(i + 1).map(|next| next.offset - g.offset);
+                flip.over = if g.rising() { vec![] } else { rising.clone() };
                 flip.group.replace((key.clone(), top))
             };
             window.with_element_offset(point(px(0.), px(g.offset)), |window| {
@@ -895,13 +1183,10 @@ impl Element for FlipStack {
             let mut flip = self.store.borrow_mut();
             flip.group = outer;
             flip.group_offset = 0.;
+            flip.below = None;
             flip.over.clear();
         }
-        StackFrame {
-            groups,
-            order,
-            rising,
-        }
+        StackFrame { order }
     }
 
     fn paint(
@@ -915,14 +1200,8 @@ impl Element for FlipStack {
         cx: &mut App,
     ) {
         for &i in &frame.order {
-            self.store.borrow_mut().over = if frame.groups[i].rising() {
-                vec![]
-            } else {
-                frame.rising.clone()
-            };
             self.groups[i].1.paint(window, cx);
         }
-        self.store.borrow_mut().over.clear();
     }
 }
 

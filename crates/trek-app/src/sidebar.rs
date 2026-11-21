@@ -373,6 +373,18 @@ impl Sidebar {
         self.inbox_count
     }
 
+    /// Each live row's band as last drawn and as painted (cut back off the rows over it), top to
+    /// bottom, by key: no two painted bands overlap (`motion::Flip::painted_bands`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn painted_bands(&self) -> Vec<(String, crate::motion::Span, crate::motion::Span)> {
+        self.flip
+            .borrow()
+            .painted_bands()
+            .into_iter()
+            .map(|(key, drawn, painted)| (key.to_string(), drawn, painted))
+            .collect()
+    }
+
     /// The threads whose rows are fading away.
     #[cfg(any(test, feature = "test-support"))]
     pub fn ghosts(&self) -> Vec<String> {
@@ -3407,7 +3419,7 @@ impl Render for Sidebar {
             // Each group leaves a little air under it, the same wherever it sorts, so its rows never
             // move against it as groups trade places.
             let mut group = if in_box {
-                look::inbox_card(cx)
+                look::inbox_card()
             } else {
                 v_flex().w_full()
             };
@@ -3514,13 +3526,10 @@ impl Render for Sidebar {
                                 .opacity(left)
                                 .child(row),
                         ));
-                        group = group.child(crate::motion::flip_row(
-                            &flip,
-                            ghost.id.clone(),
-                            row,
-                            now,
-                            window,
-                        ));
+                        group = group.child(
+                            crate::motion::flip_row(&flip, ghost.id.clone(), row, now, window)
+                                .fading(px(ghost.height)),
+                        );
                     }
                 }
             }
@@ -3552,6 +3561,13 @@ impl Render for Sidebar {
                     .surface(surface, radius),
                 );
             }
+            // The Inbox's card moves its edges with the rows (`flip_frame`).
+            let group = if in_box {
+                crate::motion::flip_frame(&flip, look::inbox_card_look(cx), group)
+                    .into_any_element()
+            } else {
+                group.into_any_element()
+            };
             live_groups.push((
                 format!("live-g-{pid}").into(),
                 div()
