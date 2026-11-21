@@ -1,7 +1,7 @@
 //! The art `assets/brand/trek_icon.py` writes, against the signpost this crate draws: the mark's
 //! SVGs and the app icons hold the same shapes in the same colours as [`POST`] and [`BOARDS`],
 //! and the app icon's 16 and 32 px art (`trek-icon-{night,paper,glass}-{16,32}.svg`, which
-//! script/bundle.sh and script/windows-icons.py ship at those sizes) is drawn on whole pixels,
+//! script/windows-icons.py ships at those sizes) is drawn on whole pixels,
 //! one drawing in three colourings. Change the drawing in the script and rerun it (it writes
 //! `signpost.rs` too).
 
@@ -137,6 +137,32 @@ fn the_full_icons_hold_the_signpost_the_app_draws() {
             );
         }
     }
+}
+
+#[test]
+fn the_icon_composer_layers_hold_the_signpost_the_app_draws() {
+    // The Mac's AppIcon.icon: full bleed like iOS (the system masks it), the post behind the
+    // boards, in Night's colours.
+    let svg = read("AppIcon.icon/Assets/post.svg") + &read("AppIcon.icon/Assets/boards.svg");
+    let [board, post] = NIGHT;
+    for (i, (shape, want)) in signpost(&svg)
+        .iter()
+        .zip(drawn(1024. / 96., 0.))
+        .enumerate()
+    {
+        assert_close(
+            &numbers(attr(shape, "d").unwrap()),
+            &want,
+            &format!("AppIcon.icon, shape {i}"),
+        );
+        let colour = if i == 0 { post } else { board };
+        assert_eq!(attr(shape, "fill"), Some(format!("#{colour:06X}").as_str()));
+    }
+    let doc = read("AppIcon.icon/icon.json");
+    assert!(
+        doc.contains("\"image-name\": \"boards.svg\"")
+            && doc.contains("\"image-name\": \"post.svg\"")
+    );
 }
 
 #[test]

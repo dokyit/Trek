@@ -174,7 +174,9 @@ jobs:
           fi
           xcrun -sdk macosx metal --version
 
-      # bundle.sh renders the icons with resvg; pigz compresses the archive on every core.
+      # bundle.sh renders the icons with resvg (the icon's Assets.car is compiled ahead, in
+      # assets/brand/AppIcon-compiled: this image's default Xcode can't compile an Icon Composer
+      # .icon); pigz compresses the archive on every core.
       # iconutil, PlistBuddy, codesign, python3 and gh are on the image already.
       - name: Install resvg and pigz
         env:

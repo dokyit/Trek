@@ -50,7 +50,7 @@ echo "• icon"
 # resvg version, or the sizes change. The cache lives under the target dir, so deleting dist/
 # doesn't cost a rerender either.
 ICON_CACHE="$TARGET_DIR/icons"
-ICON_KEY=$( { shasum -a 256 assets/brand/*.svg; resvg --version; print -r -- "iconset 16 32 128 256 512 @2x, 16 32 px drawn small; menubar 22 44"; } | shasum -a 256 | cut -d' ' -f1 )
+ICON_KEY=$( { shasum -a 256 assets/brand/*.svg; resvg --version; print -r -- "iconset 32@2x 128 256 512 @2x; menubar 22 44"; } | shasum -a 256 | cut -d' ' -f1 )
 if [[ $(cat "$ICON_CACHE/stamp" 2>/dev/null) != "$ICON_KEY" \
       || ! -f "$ICON_CACHE/AppIcon.icns" \
       || ! -f "$ICON_CACHE/MenuBarIconTemplate.png" \
@@ -58,13 +58,15 @@ if [[ $(cat "$ICON_CACHE/stamp" 2>/dev/null) != "$ICON_KEY" \
   mkdir -p "$ICON_CACHE"
   ICONSET=$(mktemp -d)/AppIcon.iconset; mkdir -p "$ICONSET"
   pids=()
-  # The art for a frame of $1 px: 16 and 32 px (16 pt at 1x and 2x, 32 pt at 1x) are drawn for
-  # their size, the signpost pixel by pixel (trek_icon.py), as the full art blurs there. From
-  # 64 px up it's the full art. Night is the bundle's icon; the others go up at run time.
-  art() { case $1 in 16|32) print -r -- assets/brand/trek-icon-night-$1.svg ;; *) print -r -- assets/brand/trek-icon-night.svg ;; esac }
-  for s in 16 32 128 256 512; do
-    resvg -w $s -h $s "$(art $s)" "$ICONSET/icon_${s}x${s}.png" & pids+=($!)
-    resvg -w $((s*2)) -h $((s*2)) "$(art $((s*2)))" "$ICONSET/icon_${s}x${s}@2x.png" & pids+=($!)
+  # Night (the bundle's icon; the others go up at run time), from 64 px up. No 16 or 32 px
+  # frames: macOS 26 and later can't match a frame that small to their icon shape and draw it,
+  # whatever its art, as a small tile on a grey plate, while from the 64 px frame they draw
+  # 16 and 32 px themselves. (The Assets.car below is what macOS 13 and later read first.)
+  art=assets/brand/trek-icon-night.svg
+  resvg -w 64 -h 64 $art "$ICONSET/icon_32x32@2x.png" & pids+=($!)
+  for s in 128 256 512; do
+    resvg -w $s -h $s $art "$ICONSET/icon_${s}x${s}.png" & pids+=($!)
+    resvg -w $((s*2)) -h $((s*2)) $art "$ICONSET/icon_${s}x${s}@2x.png" & pids+=($!)
   done
   for p in $pids; do wait $p; done
   iconutil -c icns "$ICONSET" -o "$ICON_CACHE/AppIcon.icns"
@@ -74,8 +76,21 @@ if [[ $(cat "$ICON_CACHE/stamp" 2>/dev/null) != "$ICON_KEY" \
   for p in $pids; do wait $p; done
   print -r -- "$ICON_KEY" > "$ICON_CACHE/stamp"
 fi
+# macOS draws the icon from the asset catalog (CFBundleIconName below): the Icon Composer document
+# assets/brand/AppIcon.icon, compiled by trek_icon.py with Xcode's actool and kept in the
+# repository, as the release runners' Xcode can't compile an .icon. It holds the layered icon
+# macOS 26 and later draw in each look (default, dark, clear, tinted) and the images actool made
+# from it for macOS 13 to 15. The .icns (CFBundleIconFile) is the same art for whatever reads only
+# that (the disk image's volume icon, script/dmg.sh).
+CAR=assets/brand/AppIcon-compiled
+CAR_SOURCE=$( (cd assets/brand/AppIcon.icon && find . -type f | LC_ALL=C sort | xargs shasum -a 256) | shasum -a 256 | cut -d' ' -f1 )
+if [[ $(cat "$CAR/source.sha256" 2>/dev/null) != "$CAR_SOURCE" || ! -f "$CAR/Assets.car" ]]; then
+  echo "bundle: $CAR/Assets.car wasn't compiled from assets/brand/AppIcon.icon as it is now: run python3 assets/brand/trek_icon.py on a Mac with Xcode 26 or later" >&2
+  exit 1
+fi
 rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ICON_CACHE/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+cp "$CAR/Assets.car" "$APP/Contents/Resources/Assets.car"
 
 echo "• bundle"
 cp "$BIN_DIR/trek" "$APP/Contents/MacOS/trek"
@@ -111,6 +126,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key><string>dev.trek.Trek</string>
   <key>CFBundleExecutable</key><string>trek</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundleIconName</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$SHORT</string>
   <key>CFBundleVersion</key><string>$VERSION</string>

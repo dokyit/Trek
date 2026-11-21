@@ -276,11 +276,19 @@ fn set_app_icon(icon: AppIcon, _cx: &mut App) -> bool {
     let Some(mtm) = MainThreadMarker::new() else {
         return true;
     };
-    let Some(bytes) = crate::assets::brand_bytes(app_icon_image(icon)) else {
-        return true;
+    // Night is the bundle's own icon, which macOS 26 and later draw from its asset catalog in the
+    // look the user picked (dark, clear, tinted): put that back rather than a flat picture of it.
+    // A build run outside a bundle (cargo run) has no icon of its own, so it gets the picture.
+    let in_bundle = std::env::current_exe()
+        .is_ok_and(|exe| exe.to_string_lossy().contains(".app/Contents/MacOS/"));
+    let image = if icon == AppIcon::Night && in_bundle {
+        None
+    } else {
+        let Some(bytes) = crate::assets::brand_bytes(app_icon_image(icon)) else {
+            return true;
+        };
+        NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(&bytes))
     };
-    let data = NSData::with_bytes(&bytes);
-    let image = NSImage::initWithData(NSImage::alloc(), &data);
     // SAFETY: on the main thread (`mtm`), with an image AppKit retains; `None` puts the bundle's
     // icon back.
     unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(image.as_deref()) };

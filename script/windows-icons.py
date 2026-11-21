@@ -6,7 +6,7 @@ Writes:
                                                         .icns), 16 20 24 32 48 64 128 256 px,
                                                         embedded in trek.exe by crates/trek-app/build.rs;
                                                         16 and 32 px from the art drawn for those sizes
-                                                        (trek-icon-night-16.svg, -32.svg), as the .icns
+                                                        (trek-icon-night-16.svg, -32.svg)
   assets/brand/trek-paper.ico, trek-glass.ico           the other two Appearance › App icon choices,
                                                         same sizes, embedded as resources 2 and 3
                                                         (winsys::icon_resource has the ids)

@@ -14,16 +14,23 @@ Writes, next to this script:
   trek-icon-*-ios.svg  the same three, full bleed, for iOS (ios/scripts/app-icons.sh renders them)
   trek-icon-{dark,tinted}-ios.svg  the iOS icon's dark and tinted variants: the signpost on clear
   trek-icon-{night,paper,glass}-{16,32}.svg  the three drawn pixel by pixel for 16 and 32 px,
-                       where the full art blurs
+                       where the full art blurs (Windows' .ico frames)
   trek-mark.svg        the signpost alone in Night's colours (cream post), for a dark ground
   trek-mark-paper.svg  the same in Paper's colours (near-black post), for a light ground
   menubar-{idle,working,attention}.svg   44 pt template glyphs for the menu bar and tray
+  AppIcon.icon         the Mac app icon as an Icon Composer document (Night: the signpost's layers
+                       on the navy fill), and AppIcon-compiled/Assets.car, it compiled by Xcode's
+                       actool (Xcode 26 or later; only when the document changed), which the
+                       bundle's Info.plist names (CFBundleIconName) for macOS 26 and later
 
 Run: python3 trek_icon.py. With resvg on PATH (cargo install resvg) it also renders the PNGs the
 app embeds (crates/trek-assets/assets/brand: icon.png, icon-paper.png, icon-glass.png, mark.png,
 mark-paper.png, menubar-*.png), docs/assets/trek-icon.png and the iPhone app's TrekMark image
-sets. script/bundle.sh renders the .icns from trek-icon-night.svg (its 16 and 32 px from
-trek-icon-night-16.svg and -32.svg); the app switches to the others at run time (Settings ›
+sets. script/bundle.sh renders the .icns from trek-icon-night.svg (64 px and up: macOS 26 puts a
+16 or 32 px frame on a grey plate) and copies AppIcon-compiled/Assets.car beside it, refusing
+one compiled from another AppIcon.icon (the release runners' Xcode can't compile an .icon, so the
+compiled catalog is kept here: rerun this script on a Mac with Xcode 26 or later after changing
+the drawing or the colours); the app switches to the others at run time (Settings ›
 Appearance › App icon). script/windows-icons.py makes the Windows .icos the same way,
 ios/scripts/app-icons.sh the iPhone's icons and script/site/make_icons.py the website's.
 
@@ -33,12 +40,42 @@ nothing in the repository), to compare them.
 crates/trek-brand draws the same signpost in the app (the title bar, About, the welcome screens)
 from signpost.rs, which this script writes; its tests read the SVGs here.
 """
-import math, os, shutil, subprocess, sys
+import hashlib, json, math, os, shutil, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
 
-def squircle(cx=512, cy=512, half=412, n=4.2, steps=240, places=1):
+# The Mac tile is the shape macOS masks app icons to: a square with Apple's continuous
+# ("squircle") corners, 824 of 1024 across from 100, its corner radius 0.26 of its side. macOS 26
+# and later re-mask every icon to that shape, and put one whose tile doesn't fill it on a grey
+# plate (a smaller tile inside the system's); the superellipse Trek drew before (n = 4.2) was
+# plated at 32 and 1024 px. 0.26 was fitted to the mask Icon Composer's ictool draws (macOS,
+# design generations 26 and 27) and to the tile the system draws for an accepted .icns, to well
+# under a pixel at 1024. The 16 and 32 px art is Windows' only (the Mac draws those sizes from
+# the full art, see script/bundle.sh) and keeps the superellipse it was drawn on.
+MASK_RADIUS = 0.26
+# The continuous corner as UIBezierPath draws it: each corner runs 1.52866483 r along its edges
+# in three cubic curves. (a, b, c, d, e, f, g) are its control points' offsets, in r.
+CORNER = (1.52866483, 1.08849296, 0.86840694, 0.63149379, 0.07491139, 0.37282383, 0.16905956)
+
+def apple_tile(x=100, y=100, side=824, places=2):
+    """The square (x, y, side) with macOS's icon corners, clockwise from its top edge."""
+    r = MASK_RADIUS * side
+    a, b, c, d, e, f, g = CORNER
+    n = lambda v: f"{v:.{places}f}".rstrip("0").rstrip(".")
+    out = f"M{n(x + a * r)} {n(y)}"
+    for (px, py), (ux, uy), (vx, vy) in (((x + side, y), (1, 0), (0, 1)), ((x + side, y + side), (0, 1), (-1, 0)),
+                                         ((x, y + side), (-1, 0), (0, -1)), ((x, y), (0, -1), (1, 0))):
+        # u runs along the edge into the corner, v along the edge out of it.
+        at = lambda du, dv: f"{n(px - ux * du * r + vx * dv * r)} {n(py - uy * du * r + vy * dv * r)}"
+        out += (f"L{at(a, 0)}C{at(b, 0)} {at(c, 0)} {at(d, e)}C{at(f, g)} {at(g, f)} {at(e, d)}"
+                f"C{at(0, c)} {at(0, b)} {at(0, a)}")
+    return out + "Z"
+
+TILE = apple_tile()
+
+def squircle(cx, cy, half, n=4.2, steps=120, places=2):
+    """A superellipse: the small art's tile."""
     pts = []
     for i in range(steps):
         t = 2 * math.pi * i / steps
@@ -47,8 +84,6 @@ def squircle(cx=512, cy=512, half=412, n=4.2, steps=240, places=1):
         y = cy + half * math.copysign(abs(s) ** (2 / n), s)
         pts.append((x, y))
     return "M" + " L".join(f"{x:.{places}f} {y:.{places}f}" for x, y in pts) + "Z"
-
-TILE = squircle()
 
 def num(v):
     s = f"{v:.2f}".rstrip("0").rstrip(".")
@@ -323,6 +358,84 @@ def glass(m):
         g += f'<path d="{d}" fill="none" stroke="url(#glassedge)" stroke-width="{num(m.k * .45)}"/>'
     return g
 
+# The Mac app icon for macOS 26 and later: an Icon Composer document (Xcode's "Creating your app
+# icon using Icon Composer"), its layers full bleed on the 1024 canvas, unmasked, the signpost in
+# the same place on it as on the tile (the 96-unit square is the canvas, as on iOS), and Night's
+# tile colour as its fill. The system masks it, adds its glass edge and makes the clear and
+# tinted looks; tinted is the iPhone's (white boards before a grey post). script/bundle.sh ships
+# it compiled (AppIcon-compiled/Assets.car, see compile_icon_document) beside the .icns.
+def srgb(hexc):
+    r, g, b = (int(hexc[i:i + 2], 16) / 255 for i in (1, 3, 5))
+    return f"srgb:{r:.5f},{g:.5f},{b:.5f},1.00000"
+
+# The signpost's layers are flat, without Liquid Glass, so the boards keep their ember and the post
+# its cream as on the .icns (glass lightens them); the tile still gets the system's glass edge.
+GLASS_LAYERS = False
+
+def write_icon_document(full, doc):
+    shutil.rmtree(doc, ignore_errors=True)
+    os.makedirs(os.path.join(doc, "Assets"))
+    layer = lambda body: svg(body).replace("<svg ", '<svg width="1024" height="1024" ', 1)
+    boards = "".join(f'<path d="{full.board_d(b)}" fill="{NIGHT["board"]}" fill-rule="evenodd"/>' for b in full.s.boards)
+    with open(os.path.join(doc, "Assets", "boards.svg"), "w") as f:
+        f.write(layer(boards))
+    with open(os.path.join(doc, "Assets", "post.svg"), "w") as f:
+        f.write(layer(f'<path d="{full.post_d()}" fill="{NIGHT["post"]}"/>'))
+    tinted = lambda hexc: [{"appearance": "tinted", "value": {"solid": srgb(hexc)}}]
+    # Front to back: the boards, then the post behind them.
+    # The tile stays Night's navy in the dark look too (it is already a dark icon; left alone,
+    # the system swaps it for black).
+    data = {
+        "fill-specializations": [{"value": {"solid": srgb(NIGHT["tile"])}},
+                                 {"appearance": "dark", "value": {"solid": srgb(NIGHT["tile"])}}],
+        "groups": [{
+            "name": "Signpost",
+            "layers": [
+                {"name": "2 Boards", "image-name": "boards.svg", "glass": GLASS_LAYERS, "fill-specializations": tinted("#FFFFFF")},
+                {"name": "1 Post", "image-name": "post.svg", "glass": GLASS_LAYERS, "fill-specializations": tinted("#9E9E9E")},
+            ],
+            "shadow": {"kind": "neutral", "opacity": 0.5},
+            "specular": True,
+            "translucency": {"enabled": False, "value": 0},
+        }],
+        "supported-platforms": {"squares": ["macOS"]},
+    }
+    with open(os.path.join(doc, "icon.json"), "w") as f:
+        f.write(json.dumps(data, indent=2) + "\n")
+
+def icon_document_digest(doc):
+    """What AppIcon-compiled/source.sha256 records and script/bundle.sh checks: the SHA-256 of
+    `shasum -a 256` over the document's files, sorted, as `cd doc; find . -type f | sort`."""
+    lines = ""
+    for path in sorted(os.path.relpath(os.path.join(d, n), doc) for d, _, ns in os.walk(doc) for n in ns):
+        with open(os.path.join(doc, path), "rb") as f:
+            lines += f"{hashlib.sha256(f.read()).hexdigest()}  ./{path}\n"
+    return hashlib.sha256(lines.encode()).hexdigest()
+
+def compile_icon_document(doc, out):
+    """AppIcon.icon compiled as Xcode does (actool, Xcode 26 or later): Assets.car, which macOS 26
+    and later draw the icon from, with the images actool makes from it for macOS 13 to 15. The
+    release runners' Xcode can't compile an .icon, so the result is kept in the repository with
+    the digest of the document it came from; script/bundle.sh refuses a stale one."""
+    if not shutil.which("xcrun"):
+        print("no xcrun: AppIcon-compiled/Assets.car not rebuilt (run this on a Mac with Xcode 26 or later)")
+        return
+    tmp = tempfile.mkdtemp()
+    try:
+        r = subprocess.run(["xcrun", "actool", doc, "--compile", tmp, "--platform", "macosx",
+                            "--minimum-deployment-target", "13.0", "--app-icon", "AppIcon",
+                            "--output-partial-info-plist", os.path.join(tmp, "partial.plist")],
+                           capture_output=True, text=True)
+        car = os.path.join(tmp, "Assets.car")
+        if not os.path.exists(car):
+            sys.exit(f"actool couldn't compile {doc} (Xcode 26 or later compiles .icon):\n{r.stdout[-800:]}{r.stderr[-800:]}")
+        os.makedirs(out, exist_ok=True)
+        shutil.copyfile(car, os.path.join(out, "Assets.car"))
+        with open(os.path.join(out, "source.sha256"), "w") as f:
+            f.write(icon_document_digest(doc) + "\n")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
 class Writer:
     def __init__(self, slug, out):
         self.slug, self.out = slug, out
@@ -357,10 +470,11 @@ class Writer:
         for slug, (defs, tile, c) in tiles.items():
             for px in (16, 32):
                 half = 7 if px == 16 else 13
-                body = tile(squircle(px / 2, px / 2, half, steps=120, places=2)) + pixels(self.grids[f"tile{px}"], c["post"], c["board"])
+                body = tile(squircle(px / 2, px / 2, half)) + pixels(self.grids[f"tile{px}"], c["post"], c["board"])
                 self.write(f"trek-icon-{slug}-{px}.svg", svg(body, defs, box=f"0 0 {px} {px}"))
         for state in ("idle", "working", "attention"):
             self.write(f"menubar-{state}.svg", menubar(state))
+        write_icon_document(full, os.path.join(self.out, "AppIcon.icon"))
 
 # Menu bar and tray glyphs ------------------------------------------------------------------------
 # Template glyphs (black on clear; macOS tints them, script/windows-icons.py whitens them for a
@@ -459,7 +573,16 @@ def main():
     if shutil.which("rustfmt"):
         subprocess.run(["rustfmt", "--edition", "2024", path], check=True)
     render(HERE)
-    print(f"wrote variant {PICK}: the SVGs here, signpost.rs, the PNGs in crates/trek-assets/assets/brand and docs/assets, and ios/*/Assets.xcassets/TrekMark.imageset")
+    # Recompiled only when the document changed: actool's output differs run to run.
+    doc, compiled = os.path.join(HERE, "AppIcon.icon"), os.path.join(HERE, "AppIcon-compiled")
+    try:
+        with open(os.path.join(compiled, "source.sha256")) as f:
+            current = f.read().strip() == icon_document_digest(doc)
+    except OSError:
+        current = False
+    if not current:
+        compile_icon_document(doc, compiled)
+    print(f"wrote variant {PICK}: the SVGs and AppIcon.icon here (AppIcon-compiled/Assets.car {'unchanged' if current else 'recompiled'}), signpost.rs, the PNGs in crates/trek-assets/assets/brand and docs/assets, and ios/*/Assets.xcassets/TrekMark.imageset")
 
 if __name__ == "__main__":
     main()
