@@ -2127,3 +2127,50 @@ fn every_animation_goes_through_the_motion_policy() {
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
+
+/// Only the panel's own buttons slide it: a tool an agent or a link opens (`open_tool`) is there
+/// at once, so nothing beside the panel re-renders while it would have slid. And once a slide
+/// has settled it costs nothing: frames after it redraw neither the window nor the transcript.
+#[test]
+fn a_tool_opened_by_code_is_there_at_once_and_a_settled_slide_costs_nothing() {
+    run(async |cx| {
+        let trek = open(cx);
+        moving(cx);
+        trek.render(cx);
+        let tools = cx.read(|cx| trek.root.read(cx).right_panel.clone());
+        trek.window(cx, |window, cx| {
+            tools.update(cx, |p, cx| {
+                p.open_tool(trek_app::workspace::PanelTool::Git, window, cx)
+            })
+        });
+        trek.render(cx);
+        assert_eq!(panel(&trek, cx), (1., 0.), "there at once");
+        assert!(!trek.visible(cx, "tools-sliding"));
+
+        // From the title bar: it slides, then settles, and then no frame redraws anything.
+        trek.click(cx, "toggle-tools");
+        frame(&trek, cx, 1_000);
+        assert_eq!(panel(&trek, cx).0, 0.);
+        trek.click(cx, "toggle-tools");
+        frame(&trek, cx, 16);
+        assert!(
+            trek.visible(cx, "tools-sliding"),
+            "the pointer's open slides"
+        );
+        frame(&trek, cx, 1_000);
+        cx.run_until_parked();
+        trek_app::test_support::take_renders();
+        for _ in 0..10 {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            cx.run_until_parked();
+        }
+        let renders = trek_app::test_support::take_renders();
+        for view in ["TrekWindow", "ThreadView", "RightPanel", "Composer"] {
+            assert_eq!(
+                renders.get(view).copied().unwrap_or(0),
+                0,
+                "{view} re-rendered after the slide settled: {renders:?}"
+            );
+        }
+    });
+}

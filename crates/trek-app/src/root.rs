@@ -1391,7 +1391,10 @@ impl Render for WindowTitle {
                             "Tools panel (⌘J)", // icon_button( localizes
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.right_panel.update(cx, |p, cx| p.toggle(cx))
+                            this.right_panel.update(cx, |p, cx| {
+                                p.glide = true;
+                                p.toggle(cx)
+                            })
                         })),
                     ))
                     .children(settle_last)
@@ -2604,10 +2607,16 @@ impl Render for TrekWindow {
             (p.open, p.width, p.open && p.full && !in_settings)
         };
         // The tools panel comes out of the window's right edge and grows from its side to fill
-        // the window, on SURFACE, when the pointer does it (an occasional surface); a key (⌘J)
-        // and Reduce motion put it there at once. Decided as the target changes, so a key typed
-        // mid-way doesn't cut it short.
-        let by_pointer = motion && !window.last_input_was_keyboard();
+        // the window, on SURFACE, when the pointer does it on the panel's own buttons (an
+        // occasional surface); a key (⌘J), a tool an agent or a link opens, and Reduce motion
+        // put it there at once. Decided as the target changes, so a key typed mid-way doesn't
+        // cut it short; at rest none of this asks for a frame.
+        let glide = self.right_panel.read(cx).glide;
+        if glide {
+            // Taken: what it says is about this change only. No notify: nothing to redraw.
+            self.right_panel.update(cx, |p, _| p.glide = false);
+        }
+        let by_pointer = motion && glide && !window.last_input_was_keyboard();
         // Closing, it goes back the way it is (full or at the side).
         let fill_to = if open {
             wants_full

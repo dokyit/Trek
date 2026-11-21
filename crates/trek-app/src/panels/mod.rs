@@ -104,6 +104,11 @@ pub struct RightPanel {
     /// The panel fills the window under the title bar, over the sidebar and the chat (the
     /// header's fill button). Not kept: Trek opens with the panel at its side.
     pub full: bool,
+    /// The next open, close or fill was the pointer's, on one of the panel's own buttons: it
+    /// slides or grows (`TrekWindow::render`). Everything else (⌘J, a tool opened by an agent or
+    /// a link, the sidebar making room) puts it there at once. Taken when the root draws it.
+    pub glide: bool,
+
     tabs: Vec<Tab>,
     active: Option<u64>,
     next_id: u64,
@@ -134,6 +139,8 @@ impl RightPanel {
             workspace,
             open: false,
             full: false,
+            glide: false,
+
             width: trek_core::settings::DEFAULT_RIGHT_PANEL_WIDTH,
             tabs: vec![],
             active: None,
@@ -908,6 +915,8 @@ impl Render for RightPanel {
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.full = !full;
+                this.glide = true;
+
                 this.sync_native(cx);
                 cx.notify();
             }))
@@ -931,7 +940,10 @@ impl Render for RightPanel {
                 .child(wide)
                 .child(
                     ui::icon_button("panel-close", IconName::PanelRightClose, "Hide panel (⌘J)")
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle(cx))),
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.glide = true;
+                            this.toggle(cx)
+                        })),
                 )
         };
 
