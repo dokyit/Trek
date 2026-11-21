@@ -431,7 +431,8 @@ pub struct CommandPalette {
     basecamp: Entity<crate::basecamp::Basecamp>,
     input: Entity<InputState>,
     pub open: bool,
-    /// Coming in and going out: dismissed, it stays drawn (rows and all) until it has faded.
+    /// It opens at once (opened all day, mostly from the keyboard: no animation, as Raycast has
+    /// none) and leaves on `QUICK`: dismissed, it stays drawn (rows and all) until it has faded.
     presence: crate::motion::Presence<()>,
     query: String,
     selected: usize,
@@ -492,7 +493,7 @@ impl CommandPalette {
             beside_only: false,
             input,
             open: false,
-            presence: crate::motion::Presence::new(crate::motion::SURFACE),
+            presence: crate::motion::Presence::new(crate::motion::QUICK),
             query: String::new(),
             selected: 0,
             hits: vec![],
@@ -596,8 +597,8 @@ impl CommandPalette {
         // Already open (⌘P then ⌘K): what has focus now is the palette's own input, not what to go back to.
         let reopened = self.open;
         self.open = true;
-        let motion = self.workspace.read(cx).motion(cx);
-        self.presence.enter((), motion, crate::motion::now(cx));
+        // At once, even mid-exit: reopened as it fades, it's back whole.
+        self.presence.enter((), false, crate::motion::now(cx));
         if !reopened {
             self.restore = window.focused(cx);
         }

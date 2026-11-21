@@ -95,6 +95,11 @@ pub struct TrekWindow {
     pub mode_motion: crate::motion::Spring,
     /// The last frame was mid-way between the modes (see `mode_motion`'s use in `render`).
     mode_fading: bool,
+    /// The tools panel coming out from the window's right edge (1) or gone back into it (0), and
+    /// growing from its side to fill the window (1) or back (0). On `SURFACE` when the pointer
+    /// does it; at once from the keyboard (⌘J) and without motion.
+    pub panel_motion: crate::motion::Spring,
+    pub panel_fill: crate::motion::Spring,
     /// With `TREK_FORCE_ACTIVE`, frames for the window while it's hidden (see `mascot::force_active`).
     _hidden_frames: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -112,8 +117,24 @@ fn sidebar_shown(
     window: &Window,
 ) -> f32 {
     let mut s = spring.borrow_mut();
-    s.set(if collapsed { 0. } else { 1. }, motion, now);
+    s.set_with(
+        toggle_feel(window),
+        if collapsed { 0. } else { 1. },
+        motion,
+        now,
+    );
     s.frame(now, window).clamp(0., 1.)
+}
+
+/// The spring a surface toggles on: `QUICK` when a key did it (⌘B, the switch to the editor:
+/// done tens of times a day, so it wants to be over), `SURFACE` when the pointer did. Read as the
+/// target changes, so a mouse moved mid-flight doesn't change how it goes.
+fn toggle_feel(window: &Window) -> gpui_kit::SpringConfig {
+    if window.last_input_was_keyboard() {
+        crate::motion::QUICK
+    } else {
+        crate::motion::SURFACE
+    }
 }
 
 /// The chat column never gets narrower than this while the right panel is open.
@@ -248,6 +269,18 @@ impl TrekWindow {
                 },
                 now,
             )));
+        let (panel_motion, panel_fill) = {
+            let p = right_panel.read(cx);
+            let at = |v: bool| {
+                crate::motion::Spring::new(
+                    crate::motion::SURFACE,
+                    crate::motion::UNIT,
+                    if v { 1. } else { 0. },
+                    now,
+                )
+            };
+            (at(p.open), at(p.open && p.full))
+        };
         let mode_motion = crate::motion::Spring::new(
             crate::motion::SURFACE,
             crate::motion::UNIT,
@@ -668,6 +701,8 @@ impl TrekWindow {
             sidebar_motion,
             mode_motion,
             mode_fading: false,
+            panel_motion,
+            panel_fill,
             _hidden_frames: hidden_frames,
             _subscriptions: subscriptions,
         }
@@ -2553,7 +2588,8 @@ impl Render for TrekWindow {
         let (now, motion) = (crate::motion::now(cx), self.workspace.read(cx).motion(cx));
         let animates = self.workspace.read(cx).sidebar_animates(collapsed, cx);
         let shown = sidebar_shown(&self.sidebar_motion, collapsed, animates, now, window);
-        self.mode_motion.set(if ide { 1. } else { 0. }, motion, now);
+        self.mode_motion
+            .set_with(toggle_feel(window), if ide { 1. } else { 0. }, motion, now);
         let editor_in = self.mode_motion.frame(now, window).clamp(0., 1.);
         let crossing = self.mode_motion.moving(now);
         // Cached views (the Explorer, the sidebar, the transcript) replay their last painting,
@@ -2563,10 +2599,36 @@ impl Render for TrekWindow {
             crate::motion::redraw_whole(window);
         }
         self.mode_fading = crossing;
-        let (right_open, wanted_width, panel_full) = {
+        let (open, wanted_width, wants_full) = {
             let p = self.right_panel.read(cx);
             (p.open, p.width, p.open && p.full && !in_settings)
         };
+        // The tools panel comes out of the window's right edge and grows from its side to fill
+        // the window, on SURFACE, when the pointer does it (an occasional surface); a key (⌘J)
+        // and Reduce motion put it there at once. Decided as the target changes, so a key typed
+        // mid-way doesn't cut it short.
+        let by_pointer = motion && !window.last_input_was_keyboard();
+        // Closing, it goes back the way it is (full or at the side).
+        let fill_to = if open {
+            wants_full
+        } else {
+            self.panel_fill.target() >= 1.
+        };
+        for (spring, to) in [
+            (&mut self.panel_motion, open),
+            (&mut self.panel_fill, fill_to),
+        ] {
+            let to = if to { 1. } else { 0. };
+            if spring.target() != to || !motion {
+                spring.set(to, by_pointer, now);
+            }
+        }
+        let panel_in = self.panel_motion.frame(now, window).clamp(0., 1.);
+        let fill = self.panel_fill.frame(now, window).clamp(0., 1.);
+        // Still drawn while it slides back out.
+        let right_open = open || (panel_in > 0. && !in_settings);
+        let panel_full = right_open && fill >= 1.;
+        let filling = right_open && fill > 0. && fill < 1.;
         // Whatever the stored width, leave the chat column at least MIN_CHAT wide. A window too
         // narrow for both floats the panel over the chat's right side instead (`overlay_panel`).
         let side = if collapsed || in_settings {
@@ -2576,18 +2638,30 @@ impl Render for TrekWindow {
         };
         let room = window.viewport_size().width.as_f32() - side - 16.;
         // Filling the window, the panel lies over the sidebar and the chat, as wide as the window.
-        let overlay = panel_full || overlay_panel(room);
-        let max_width = if panel_full {
-            window.viewport_size().width.as_f32()
-        } else if overlay {
+        let beside_overlay = overlay_panel(room);
+        let overlay = panel_full || beside_overlay;
+        let side_max = if beside_overlay {
             (room - 40.).max(240.)
         } else {
             (room - MIN_CHAT * 0.8).min((room - MIN_CHAT).max(crate::panels::MIN_PANEL))
         };
+        let side_width = wanted_width.clamp(crate::panels::MIN_PANEL.min(side_max), side_max);
+        let full_width = window.viewport_size().width.as_f32();
+        let max_width = if panel_full { full_width } else { side_max };
         let right_width = if panel_full {
-            max_width
+            full_width
+        } else if filling {
+            crate::motion::lerp(side_width, full_width, fill)
         } else {
-            wanted_width.clamp(crate::panels::MIN_PANEL.min(max_width), max_width)
+            side_width
+        };
+        // On its way to filling the window or back, it's drawn over the chat growing from its
+        // side, and the chat keeps the width it has beside the panel until it's all the way
+        // there (so what shows to its left doesn't jump).
+        let drawn = PanelDrawn {
+            shown: panel_in,
+            over: filling,
+            keep: (filling && !beside_overlay).then_some(side_width),
         };
         let dragging = self.panel_drag.is_some();
         let sidebar_held = self.sidebar_drag.is_some();
@@ -2608,6 +2682,7 @@ impl Render for TrekWindow {
                 right_open,
                 right_width,
                 overlay,
+                drawn,
                 dragging,
                 (sidebar_width, sidebar_held),
                 window,
@@ -2663,6 +2738,7 @@ impl Render for TrekWindow {
                 right_open,
                 right_width,
                 overlay,
+                drawn,
                 dragging,
                 (sidebar_width, sidebar_held),
                 window,
@@ -3034,6 +3110,7 @@ impl TrekWindow {
         right_open: bool,
         right_width: f32,
         overlay: bool,
+        drawn: PanelDrawn,
         dragging: bool,
         (sidebar_width, sidebar_held): (f32, bool),
         window: &mut Window,
@@ -3048,10 +3125,10 @@ impl TrekWindow {
         // and a docked tools panel have theirs. A narrower window keeps the transcript whole.
         let room = window.viewport_size().width.as_f32()
             - sidebar_width * shown
-            - if right_open && !overlay {
-                right_width
-            } else {
-                0.
+            - match drawn.keep {
+                Some(kept) => kept,
+                None if right_open && !overlay && !drawn.over => right_width * drawn.shown,
+                None => 0.,
             };
         // The main area inside its margins and border: what a split's two panes would share.
         let main_room = room - 10. - 8. * (1. - shown);
@@ -3491,23 +3568,56 @@ impl TrekWindow {
                             })
                             .child(self.right_panel.clone().cached(fill())),
                     );
-                if overlay {
-                    el.relative().child(
-                        div()
-                            .id("tools-overlay")
-                            .test_support()
-                            .absolute()
-                            .top_0()
-                            .right_0()
-                            .h_full()
-                            .child(panel),
-                    )
+                // Coming out of the window's right edge (or going back in): as much of it as is
+                // out shows, its left edge leading, laid out whole so nothing in it rewraps.
+                let panel = if drawn.shown < 1. {
+                    div()
+                        .id("tools-sliding")
+                        .test_support()
+                        .w(px(right_width * drawn.shown))
+                        .flex_none()
+                        .h_full()
+                        .overflow_hidden()
+                        .child(panel)
+                } else {
+                    div()
+                        .id("tools-out")
+                        .test_support()
+                        .flex_none()
+                        .h_full()
+                        .child(panel)
+                };
+                if overlay || drawn.over {
+                    el.relative()
+                        .when_some(drawn.keep, |el, kept| {
+                            el.child(div().w(px(kept)).flex_none().h_full())
+                        })
+                        .child(
+                            div()
+                                .id("tools-overlay")
+                                .test_support()
+                                .absolute()
+                                .top_0()
+                                .right_0()
+                                .h_full()
+                                .child(panel),
+                        )
                 } else {
                     el.child(panel)
                 }
             })
             .into_any_element()
     }
+}
+
+/// How the tools panel is drawn this frame (see `render`): how far it's out of the window's right
+/// edge, whether it's on its way to filling the window or back (drawn over the chat), and the
+/// width the chat keeps beside it meanwhile.
+#[derive(Clone, Copy)]
+pub(crate) struct PanelDrawn {
+    shown: f32,
+    over: bool,
+    keep: Option<f32>,
 }
 
 #[cfg(test)]

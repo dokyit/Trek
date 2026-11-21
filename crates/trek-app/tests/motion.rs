@@ -1637,7 +1637,7 @@ fn a_live_toast_closes_and_times_out_and_reduce_motion_takes_it_at_once() {
         });
         frame_in(cx, window, 2_900);
         assert_eq!(toasts(cx), 1);
-        frame_in(cx, window, 200);
+        frame_in(cx, window, 140); // 40 ms into its exit (QUICK: about 150 ms all told)
         assert_eq!(toasts(cx), 1, "still drawn as it goes");
         assert!(in_window(cx, window, |w, _| w
             .find("notification")
@@ -1708,7 +1708,7 @@ fn a_click_on_a_toast_as_it_goes_opens_the_row_under_it() {
         assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), before);
         // On its way out, the row takes the click.
         trek.window(cx, |w, cx| trek_app::toast::dismiss(w, &key, cx));
-        frame(&trek, cx, 30);
+        frame(&trek, cx, 8); // a frame into its exit, still over the row
         assert_eq!(
             trek.window(cx, |w, cx| count(w, cx)),
             1,
@@ -1754,4 +1754,376 @@ fn a_row_leaving_its_group_for_another_goes_from_where_it_was() {
         );
         assert!(after > first + 20., "then down into the history: {after}");
     });
+}
+
+// ---------- the motion pass: frequency, exits, the tools panel, one policy ----------
+
+/// How far the tools panel is out of the window's right edge (1 out), and how far it has grown
+/// from its side to fill the window (1 filling it).
+fn panel(trek: &Trek, cx: &mut TestAppContext) -> (f32, f32) {
+    let now = cx.executor().now();
+    cx.read(|cx| {
+        let root = trek.root.read(cx);
+        (root.panel_motion.value(now), root.panel_fill.value(now))
+    })
+}
+
+/// Values read a frame (16 ms) apart for `frames` frames.
+fn samples(
+    trek: &Trek,
+    cx: &mut TestAppContext,
+    frames: usize,
+    read: impl Fn(&Trek, &mut TestAppContext) -> f32,
+) -> Vec<f32> {
+    (0..frames)
+        .map(|_| {
+            frame(trek, cx, 16);
+            read(trek, cx)
+        })
+        .collect()
+}
+
+fn monotonic(values: &[f32], rising: bool) -> bool {
+    values
+        .windows(2)
+        .all(|w| if rising { w[1] >= w[0] } else { w[1] <= w[0] })
+}
+
+/// The palette is opened all day, mostly from ⌘K: it's there whole in the frame the key lands
+/// in (no fade, no drop), and it leaves on the quick spring, gone in about a quarter second
+/// where it used to take about four tenths.
+#[test]
+fn the_palette_opens_at_once_and_leaves_quicker_than_it_used_to() {
+    run(async |cx| {
+        let trek = open(cx);
+        moving(cx);
+        trek.render(cx);
+        trek.press(cx, "secondary-k");
+        trek.render(cx);
+        let first = trek.bounds(cx, "palette").expect("open in the first frame");
+        frame(&trek, cx, 1_000);
+        let settled = trek.bounds(cx, "palette").unwrap();
+        assert_eq!(
+            first.origin, settled.origin,
+            "no drop-in: it's where it stays"
+        );
+
+        trek.press(cx, "escape");
+        frame(&trek, cx, 16);
+        assert!(
+            trek.visible(cx, "palette"),
+            "it fades out rather than blinking away"
+        );
+        frame(&trek, cx, 250);
+        assert!(!trek.visible(cx, "palette"), "gone by a quarter second");
+
+        // Reopened mid-exit: back whole at once, not fading up from where it was.
+        trek.press(cx, "secondary-k");
+        frame(&trek, cx, 1_000);
+        trek.press(cx, "escape");
+        frame(&trek, cx, 40);
+        trek.press(cx, "secondary-k");
+        trek.render(cx);
+        assert_eq!(trek.bounds(cx, "palette").unwrap().origin, settled.origin);
+    });
+}
+
+/// ⌘B is a keyboard toggle done tens of times a day: it folds on the quick spring. The title
+/// bar's button is the pointer's, and keeps the calmer surface spring. Both start in the first
+/// frame, never overshoot, and settle.
+#[test]
+fn the_sidebar_folds_quicker_from_its_key_than_from_its_button() {
+    run(async |cx| {
+        let trek = open(cx);
+        moving(cx);
+        trek.render(cx);
+        trek.press(cx, "secondary-b");
+        frame(&trek, cx, 100);
+        let by_key = sidebar(&trek, cx);
+        frame(&trek, cx, 1_000);
+        assert_eq!(sidebar(&trek, cx), 0.);
+        trek.press(cx, "secondary-b");
+        frame(&trek, cx, 1_000);
+        assert_eq!(sidebar(&trek, cx), 1.);
+
+        trek.click(cx, "toggle-sidebar");
+        frame(&trek, cx, 16);
+        let first = sidebar(&trek, cx);
+        assert!(first < 1., "moving from the first frame: {first}");
+        frame(&trek, cx, 84);
+        let by_pointer = sidebar(&trek, cx);
+        assert!(
+            by_key < by_pointer - 0.1,
+            "100 ms in, the key's fold is further along: {by_key} vs {by_pointer}"
+        );
+        let rest = samples(&trek, cx, 40, sidebar);
+        assert!(monotonic(&rest, false), "{rest:?}");
+        assert!(rest.iter().all(|v| *v >= 0.), "no overshoot: {rest:?}");
+        assert_eq!(rest.last().copied(), Some(0.));
+    });
+}
+
+/// The tools panel from the title bar's button comes out of the window's right edge, its left
+/// edge leading, and goes back the same way; turned round mid-way it goes back from where it is.
+/// ⌘J (the keyboard's way, all day) puts it there at once.
+#[test]
+fn the_tools_panel_slides_out_from_the_pointer_and_is_there_at_once_from_its_key() {
+    run(async |cx| {
+        let trek = open(cx);
+        moving(cx);
+        trek.render(cx);
+        trek.click(cx, "toggle-tools");
+        frame(&trek, cx, 16);
+        let (first, _) = panel(&trek, cx);
+        assert!(
+            first > 0. && first < 1.,
+            "moving from the first frame: {first}"
+        );
+        assert!(
+            trek.visible(cx, "tools-sliding"),
+            "drawn as far as it's out"
+        );
+        frame(&trek, cx, 44);
+        let (mid, _) = panel(&trek, cx);
+        let shown = trek
+            .bounds(cx, "tools-sliding")
+            .map(|b| b.size.width.as_f32())
+            .unwrap_or(0.);
+        assert!(shown > 20., "{shown}");
+
+        // Closed again mid-way: back from where it is, no jump.
+        trek.click(cx, "toggle-tools");
+        trek.render(cx);
+        let (turned, _) = panel(&trek, cx);
+        assert!((turned - mid).abs() < 0.02, "{mid} → {turned}");
+        let back = samples(&trek, cx, 40, |t, cx| panel(t, cx).0);
+        assert!(
+            back[0] >= turned - 0.2,
+            "no jump back: {turned} → {}",
+            back[0]
+        );
+        assert!(back.iter().all(|v| *v >= 0.), "{back:?}");
+        assert_eq!(back.last().copied(), Some(0.));
+        assert!(!trek.visible(cx, "tools-sliding") && !trek.visible(cx, "tools-out"));
+
+        // Open to the end: then it's simply there, laid out whole.
+        trek.click(cx, "toggle-tools");
+        frame(&trek, cx, 1_000);
+        assert_eq!(panel(&trek, cx).0, 1.);
+        assert!(!trek.visible(cx, "tools-sliding") && trek.visible(cx, "tools-out"));
+        trek.click(cx, "toggle-tools");
+        frame(&trek, cx, 1_000);
+
+        // ⌘J: at once both ways.
+        trek.press(cx, "secondary-j");
+        trek.render(cx);
+        assert_eq!(panel(&trek, cx).0, 1.);
+        assert!(!trek.visible(cx, "tools-sliding") && trek.visible(cx, "tools-out"));
+        trek.press(cx, "secondary-j");
+        trek.render(cx);
+        assert_eq!(panel(&trek, cx).0, 0.);
+        assert!(!trek.visible(cx, "tools-out"));
+    });
+}
+
+/// "Fill the window" grows the panel from its side to the window's whole width over the chat,
+/// and back.
+#[test]
+fn filling_the_window_grows_the_panel_from_its_side_and_back() {
+    run(async |cx| {
+        let trek = open(cx);
+        moving(cx);
+        trek.press(cx, "secondary-j");
+        frame(&trek, cx, 16);
+        let side = trek.bounds(cx, "tools-out").unwrap().size.width.as_f32();
+        let whole = trek.window(cx, |window, _| window.viewport_size().width.as_f32());
+        let width = |trek: &Trek, cx: &mut TestAppContext| {
+            trek.bounds(cx, "tools-overlay")
+                .map(|b| b.size.width.as_f32())
+                .unwrap_or(0.)
+        };
+        trek.click(cx, "panel-fill");
+        frame(&trek, cx, 16);
+        let first = width(&trek, cx);
+        assert!(
+            first > side - 1. && first < whole - 1.,
+            "growing from its side: {side} < {first} < {whole}"
+        );
+        let grow = samples(&trek, cx, 40, width);
+        assert!(monotonic(&grow, true), "{grow:?}");
+        assert!(
+            (grow.last().unwrap() - whole).abs() < 1.,
+            "{grow:?} of {whole}"
+        );
+
+        trek.click(cx, "panel-fill");
+        frame(&trek, cx, 16);
+        let shrinking = width(&trek, cx);
+        assert!(shrinking < whole - 1. && shrinking > side, "{shrinking}");
+        frame(&trek, cx, 1_000);
+        assert!(!trek.visible(cx, "tools-overlay"), "back at the side");
+        let back = trek.bounds(cx, "tools-out").unwrap().size.width.as_f32();
+        assert!((back - side).abs() < 1., "{back} vs {side}");
+    });
+}
+
+/// A toast comes up on the surface spring and goes on the quick one: an exit is quicker than its
+/// entrance.
+#[test]
+fn a_toast_leaves_quicker_than_it_came() {
+    run(async |cx| {
+        let trek = open(cx);
+        moving(cx);
+        cx.update(|cx| trek_app::root::init(trek.ws.clone(), cx));
+        trek.window(cx, |window, _| window.activate_window());
+        cx.run_until_parked();
+        let toasts = |trek: &Trek, cx: &mut TestAppContext| {
+            trek.window(cx, |window, cx| trek_app::toast::count(window, cx))
+        };
+        trek.update(cx, |_, cx| {
+            cx.emit(WorkspaceEvent::Toast {
+                message: "Saved".into(),
+                undo: None,
+            })
+        });
+        trek.render(cx);
+        frame(
+            &trek,
+            cx,
+            trek_app::root::toast_lifetime("Saved", false).as_millis() as u64 + 10,
+        );
+        assert_eq!(toasts(&trek, cx), 1, "on its way out");
+        frame(&trek, cx, 260);
+        assert_eq!(toasts(&trek, cx), 0, "gone in a quarter second");
+    });
+}
+
+/// Trek's Reduce motion: the tools panel and its fill are where they go at once, opened from the
+/// pointer as from the keys.
+#[test]
+fn reduce_motion_puts_the_tools_panel_and_its_fill_there_at_once() {
+    run(async |cx| {
+        let trek = open_with(cx, |s| s.appearance.reduce_motion = true);
+        moving(cx);
+        trek.render(cx);
+        trek.click(cx, "toggle-tools");
+        trek.render(cx);
+        assert_eq!(panel(&trek, cx), (1., 0.));
+        assert!(!trek.visible(cx, "tools-sliding"));
+        trek.click(cx, "panel-fill");
+        trek.render(cx);
+        assert_eq!(panel(&trek, cx), (1., 1.));
+        let whole = trek.window(cx, |window, _| window.viewport_size().width);
+        let over = trek.bounds(cx, "tools-overlay").unwrap();
+        assert!((over.size.width - whole).abs() < px(1.), "{over:?}");
+        trek.click(cx, "panel-fill");
+        trek.click(cx, "toggle-sidebar");
+        trek.render(cx);
+        assert_eq!(sidebar(&trek, cx), 0., "the button's fold is at once too");
+    });
+}
+
+/// A "Still" Trek theme (motion scale 0) is as good as Reduce motion: the policy says no, and
+/// the app's flag, which GPUI's and the components' own animations read, is set.
+#[test]
+fn a_motion_scale_of_zero_stills_everything_reduce_motion_does() {
+    run(async |cx| {
+        let trek = open_with(cx, |s| s.appearance.motion_scale = 0.);
+        moving(cx);
+        assert!(!trek.read(cx, |ws, cx| ws.motion(cx)));
+        assert!(!cx.update(|cx| trek_app::motion::enabled(cx)));
+        cx.update(|cx| trek_app::system::reduce_motion_as(false, &trek.ws, cx));
+        assert!(cx.update(|cx| cx.reduce_motion()));
+        trek.press(cx, "secondary-b");
+        assert_eq!(sidebar(&trek, cx), 0., "folded at once");
+        trek.update(cx, |ws, _| ws.settings.appearance.motion_scale = 1.35);
+        cx.update(|cx| trek_app::system::reduce_motion_as(false, &trek.ws, cx));
+        assert!(trek.read(cx, |ws, cx| ws.motion(cx)));
+        assert!(!cx.update(|cx| cx.reduce_motion()));
+    });
+}
+
+/// Every animation goes through the one motion policy: a fixed-time one takes its `Animation`
+/// from `motion::timed` or `motion::looping` (the named times at the motion scale), nothing but
+/// the policy reads the reduce-motion flag, and a view that draws itself frame by frame on its
+/// own clock is one of those checked to ask the policy. A new one fails here until it does.
+#[test]
+fn every_animation_goes_through_the_motion_policy() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    // Hand clocks: each asks `motion::enabled` (or `Workspace::motion`) and takes its time from
+    // the named times, or asks for frames for something other than motion (a re-measure).
+    const OWN_FRAMES: &[&str] = &[
+        // The expanded card's dialog follows the window: not motion.
+        "artifact/mod.rs",
+        // The chart's entrance: Workspace::motion, visualization::entering.
+        "basecamp.rs",
+        // The status chip's fade: motion::enabled, motion::FADE.
+        "composer.rs",
+        // The Compact shimmer, still without motion.
+        "context_popover.rs",
+        // The toolbar re-measured: not motion.
+        "notes.rs",
+        // The welcome's entrance: Workspace::motion.
+        "onboarding/steps.rs",
+        // Drawn in only with Workspace::motion.
+        "panels/branch_graph.rs",
+        // The page's load progress: a status.
+        "panels/browser.rs",
+        // The tab strip re-measured: not motion.
+        "panels/mod.rs",
+        // The busy ring: motion::enabled.
+        "pr_card.rs",
+        // A new title's reveal: Workspace::motion, at the motion scale.
+        "root.rs",
+        "sidebar.rs",
+        "thread_window.rs",
+        // The strip re-measured: not motion.
+        "tabs.rs",
+        // Entrances and the hover lift: motion::enabled, at the motion scale.
+        "visualization/mod.rs",
+    ];
+    let mut wrong = Vec::new();
+    let mut dirs = vec![src.clone()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(&src)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let text = std::fs::read_to_string(&path).unwrap();
+            for (n, line) in text.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                let at = format!("{rel}:{}", n + 1);
+                if rel != "motion.rs" && code.contains("Animation::new(") {
+                    wrong.push(format!(
+                        "{at}: Animation::new — use motion::timed or motion::looping"
+                    ));
+                }
+                if rel != "motion.rs"
+                    && rel != "system.rs"
+                    && (code.contains(".reduce_motion()") || code.contains("set_reduce_motion("))
+                {
+                    wrong.push(format!(
+                        "{at}: the reduce-motion flag — ask motion::enabled"
+                    ));
+                }
+                if code.contains("request_animation_frame") && !OWN_FRAMES.contains(&rel.as_str()) {
+                    wrong.push(format!(
+                        "{at}: frames on its own clock — ask motion::enabled, take the time from \
+                         motion::scaled, then list the file in OWN_FRAMES"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
