@@ -1,7 +1,9 @@
 use std::rc::Rc;
 
 use gpui::{
-    Anchor, AnyElement, App, Context, DismissEvent, ElementId, EventEmitter, FocusHandle,
+    Anchor, Animation, AnimationExt as _, AnyElement, App, Context, DismissEvent, ElementId,
+    EventEmitter, FocusHandle, px,
+
     Focusable, InteractiveElement as _, IntoElement, KeyBinding, MouseButton, ParentElement as _,
     Render, RenderOnce, Role, StatefulInteractiveElement as _, StyleRefinement, Styled,
     Subscription, Window, div, prelude::FluentBuilder as _,
@@ -13,6 +15,15 @@ use crate::{
 };
 
 const CONTEXT: &str = "Popover";
+
+/// Trek: a popover the pointer opens fades in as it moves this far away from its trigger, over
+/// `ENTER_TIME`; one the keyboard opens (all day, by shortcut) is there at once. GPUI can't scale
+/// a subtree (only images and SVGs take a transform), so the few points of travel say where it
+/// came from. No exit: a closed popover stops being drawn in the frame it closes. Reduce motion
+/// draws the end state at once (GPUI's animation reads the app's flag).
+const ENTER_TRAVEL: f32 = 4.;
+const ENTER_TIME: std::time::Duration = std::time::Duration::from_millis(120);
+
 
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
@@ -39,7 +50,13 @@ pub struct PopoverState {
     /// Held while open, so that a state collected without being closed — this
     /// lives in element state — takes its registration with it.
     deferred_context: Option<DeferredPopover>,
+    /// Trek: how many times it has opened (each opening's entrance is its own), whether it was
+    /// open last drawn, and whether the keyboard opened it this time.
+    opened: usize,
+    was_open: bool,
+    by_key: bool,
 }
+
 
 impl PopoverState {
     pub fn new(default_open: bool, cx: &mut App) -> Self {
@@ -51,7 +68,11 @@ impl PopoverState {
             on_open_change: None,
             dismiss_subscription: None,
             deferred_context: None,
+            opened: 0,
+            was_open: default_open,
+            by_key: true,
         }
+
     }
 
     pub fn is_open(&self) -> bool {
@@ -345,8 +366,24 @@ impl RenderOnce for Popover {
                 }
             });
         if !open {
+            state.update(cx, |state, _| state.was_open = false);
             return popup.into_any_element();
         }
+        let (opened, by_key) = state.update(cx, |state, _| {
+            if !state.was_open {
+                state.opened += 1;
+                state.by_key = window.last_input_was_keyboard();
+            }
+            state.was_open = true;
+            (state.opened, state.by_key)
+        });
+        // Above its trigger it rises from it; below, it drops from it.
+        let travel = if self.anchor.is_bottom() {
+            ENTER_TRAVEL
+        } else {
+            -ENTER_TRAVEL
+        };
+
 
         let content = div()
             .id("content")
@@ -371,7 +408,16 @@ impl RenderOnce for Popover {
                     }
                 })
             });
-        popup.content(content).into_any_element()
+        if by_key {
+            return popup.content(content).into_any_element();
+        }
+        popup
+            .content(content.relative().with_animation(
+                ("popover-enter", opened),
+                Animation::new(ENTER_TIME).with_easing(crate::animation::ease_out_cubic),
+                move |el, t| el.opacity(t).top(px(travel * (1. - t))),
+            ))
+            .into_any_element()
     }
 }
 

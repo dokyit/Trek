@@ -1297,7 +1297,7 @@ fn card(
                         .text_color(theme.muted_foreground)
                         .with_animation(
                             "hub-git-busy",
-                            Animation::new(std::time::Duration::from_secs(1)).repeat(),
+                            crate::motion::looping(std::time::Duration::from_secs(1)),
                             |i, t| i.transform(Transformation::rotate(percentage(t))),
                         )
                         .into_any_element(),

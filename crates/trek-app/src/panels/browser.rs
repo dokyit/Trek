@@ -4224,9 +4224,7 @@ pub fn loading_line(still: bool, ember: Hsla) -> impl IntoElement {
         bar.w(relative(0.32))
             .with_animation(
                 "browser-loading",
-                Animation::new(Duration::from_millis(1100))
-                    .repeat()
-                    .with_easing(ease_in_out),
+                crate::motion::looping(Duration::from_millis(1100)),
                 |el, t| el.left(relative(-0.32 + 1.32 * t)),
             )
             .into_any_element()
