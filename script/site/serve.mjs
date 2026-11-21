@@ -98,7 +98,15 @@ export function serve(port = 8080, root = ROOT) {
         info = await stat(file);
       }
       const body = await readFile(file);
-      res.writeHead(200, { 'Content-Type': TYPES[extname(file)] || 'application/octet-stream', ...headersFor(rules, path) });
+      // Over plain http on this computer, two of the live site's headers would break the page in
+      // Safari and Trek's own Browser (WebKit sends the stylesheet's request to https://localhost,
+      // where nothing answers; Chrome leaves localhost alone): they are left off here.
+      const headers = headersFor(rules, path);
+      delete headers['Strict-Transport-Security'];
+      if (headers['Content-Security-Policy']) {
+        headers['Content-Security-Policy'] = headers['Content-Security-Policy'].replace(/;?\s*upgrade-insecure-requests/, '');
+      }
+      res.writeHead(200, { 'Content-Type': TYPES[extname(file)] || 'application/octet-stream', ...headers });
       res.end(body);
     } catch {
       res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }).end('Not found');
