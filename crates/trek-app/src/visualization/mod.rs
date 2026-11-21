@@ -32,9 +32,9 @@ use crate::fluent;
 
 const PLUGIN: &str = "trek-visualization";
 /// How long marks take to arrive the first time a visualization is drawn.
-pub const ENTER: Duration = Duration::from_millis(720);
-/// How long a hovered mark takes to lift.
-const LIFT: Duration = Duration::from_millis(160);
+pub const ENTER: Duration = crate::motion::SHOWCASE;
+/// How long a hovered mark takes to lift: a hover's change, so short (Krehel: 150 ms or less).
+const LIFT: Duration = crate::motion::FADE;
 /// One sweep of the shimmer over a visualization still being written.
 const SHIMMER: Duration = Duration::from_millis(1600);
 /// The width assumed before the first frame measures the real one.
@@ -281,6 +281,11 @@ pub fn relayout(cx: &mut App) {
 static ENTERED: LazyLock<Mutex<HashMap<u64, Instant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// How long an entrance takes at the motion scale (never quite nothing: it's divided by).
+pub fn entering() -> Duration {
+    crate::motion::scaled(ENTER).max(Duration::from_millis(1))
+}
+
 /// How far the entrance of `hash` has played, 0 to 1 (1 at once without motion).
 fn entrance(hash: u64, motion: bool, window: &mut Window) -> f32 {
     if !motion {
@@ -291,19 +296,16 @@ fn entrance(hash: u64, motion: bool, window: &mut Window) -> f32 {
         entered.retain(|_, at| at.elapsed() < ENTER);
     }
     let at = *entered.entry(hash).or_insert_with(Instant::now);
-    let t = at.elapsed().as_secs_f32() / ENTER.as_secs_f32();
+    let t = at.elapsed().as_secs_f32() / entering().as_secs_f32();
     if t < 1. {
         window.request_animation_frame();
     }
     t.min(1.)
 }
 
-/// Motion is allowed: neither Trek's Reduce motion setting nor the system asks for less.
+/// Motion is allowed, by the app's policy (`motion::enabled`).
 pub fn motion(cx: &App) -> bool {
-    match cx.try_global::<crate::workspace::GlobalWorkspace>() {
-        Some(ws) => ws.0.read(cx).motion(cx),
-        None => !cx.reduce_motion(),
-    }
+    crate::motion::enabled(cx)
 }
 
 /// The colours every part of an artifact draws with, from the theme.
@@ -778,7 +780,10 @@ fn artifact(
     };
     let lift = match hover_at {
         Some(at) if motion => {
-            let t = at.elapsed().as_secs_f32() / LIFT.as_secs_f32();
+            let t = at.elapsed().as_secs_f32()
+                / crate::motion::scaled(LIFT)
+                    .max(Duration::from_millis(1))
+                    .as_secs_f32();
             if t < 1. {
                 window.request_animation_frame();
             }

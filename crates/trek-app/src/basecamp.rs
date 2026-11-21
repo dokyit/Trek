@@ -537,7 +537,7 @@ impl Basecamp {
             |_, _| now,
         );
         let t = now.saturating_duration_since(*since.read(cx)).as_secs_f32()
-            / crate::visualization::ENTER.as_secs_f32();
+            / crate::visualization::entering().as_secs_f32();
         if t < 1. {
             window.request_animation_frame();
         }

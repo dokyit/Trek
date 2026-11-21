@@ -982,13 +982,13 @@ fn tick_box(id: SharedString, on: bool, cx: &App) -> AnyElement {
             let tick = Icon::new(L::Check)
                 .size(px(11.))
                 .text_color(theme.background);
-            el.child(if cx.reduce_motion() {
+            el.child(if !crate::motion::enabled(cx) {
                 tick.into_any_element()
             } else {
                 let bg = theme.background;
                 tick.with_animation(
                     SharedString::from(format!("{id}-tick")),
-                    Animation::new(TICK).with_easing(ease_out_quint()),
+                    crate::motion::timed(TICK),
                     move |i, t| i.text_color(bg.opacity(t)),
                 )
                 .into_any_element()

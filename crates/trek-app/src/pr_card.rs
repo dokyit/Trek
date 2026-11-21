@@ -19,7 +19,6 @@ use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::Duration;
 use trek_core::store::{Item, ToolStatus};
 
 /// `Item::Tool` ids of this form are PR/release cards; the key after it is unique in the thread.
@@ -321,7 +320,7 @@ fn chip_hue(card: &Card, cx: &App) -> Option<Hue> {
 /// The reference's busy mark: a short arc running round a faint ring (not a dotted spinner).
 /// Still, as a quarter arc, when motion is reduced.
 pub fn ring_spinner(size: f32, color: Hsla, cx: &App) -> AnyElement {
-    let motion = !cx.reduce_motion();
+    let motion = crate::motion::enabled(cx);
     canvas(
         move |_, _, _| {},
         move |b, _, window, _| {
@@ -2509,7 +2508,7 @@ fn ink(cx: &App) -> Ink {
 pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> AnyElement {
     let ink = ink(cx);
     let hue = hues(cx);
-    let motion = !cx.reduce_motion();
+    let motion = crate::motion::enabled(cx);
     let head = header(ix, card, &actions, &hue, &ink, cx);
     let graph = graph(card, clock, motion, cx);
     let footer = footer(ix, card, &actions, &hue, &ink, cx);
@@ -2534,8 +2533,8 @@ pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> A
         frame
             .with_animation(
                 SharedString::from(format!("pr-card-enter-{ix}-{}", card.created_ms)),
-                Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
-                |el, t| el.opacity(t).mt(px(2. + 8. * (1. - t))),
+                crate::motion::timed(crate::motion::ENTER),
+                |el, t| el.opacity(t).mt(px(2. + crate::motion::RISE * (1. - t))),
             )
             .into_any_element()
     } else {
