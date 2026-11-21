@@ -141,11 +141,11 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
 [data-release] { font-variant-numeric: tabular-nums; }
 .fine .text-link { color: var(--ink); }
 .hero-window { position: relative; z-index: 1; width: min(1086px, 100%); margin: clamp(40px, 5vw, 56px) auto 0; perspective: 2200px; perspective-origin: 50% 0%; }
-.hero-window picture { display: block; transform-origin: 50% 100%; transform: rotateX(var(--tilt, 0deg)) translate3d(0, var(--lift, 0px), 0) scale(var(--zoom, 1)); will-change: transform; }
+.hero-window picture { position: relative; display: block; transform-origin: 50% 100%; transform: rotateX(var(--tilt, 0deg)) translate3d(0, var(--lift, 0px), 0) scale(var(--zoom, 1)); will-change: transform; }
 .hero-window img { width: 100%; }
 .hero-window figcaption { position: relative; margin-top: 26px; font-size: 13px; color: var(--mute); }
 /* The window's own shadow is in the capture; this is where it meets the ground. */
-.hero-window::before { content: ""; position: absolute; inset: auto 6% -18px; height: 60px; border-radius: 50%; background: radial-gradient(closest-side, rgb(var(--shade) / 0.32), transparent); filter: blur(10px); transform: translateY(8px); }
+.hero-window picture::before { content: ""; position: absolute; z-index: -1; inset: auto 6% calc(4.1% - 30px); height: 60px; border-radius: 50%; background: radial-gradient(closest-side, rgb(var(--shade) / 0.32), transparent); filter: blur(10px); }
 
 /* The first screen builds once, in about a second and a half, then holds still: the post stands,
    the headline, line and buttons rise 100 ms apart, the window follows, and the boards come round
