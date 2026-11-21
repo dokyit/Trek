@@ -62,6 +62,7 @@ impl Workspace {
     /// start (looking for their programs only: nothing is run, so a test process may too).
     pub fn sync_added_agents(&mut self, cx: &mut gpui_kit::Context<Self>) {
         trek_core::catalog::set_added_agents(&self.settings.added_agents);
+        self.prune_registry_installs();
         let list = self.settings.added_agents.clone();
         let (tx, rx) = async_channel::bounded(1);
         trek_core::runtime().spawn(async move {
@@ -179,7 +180,10 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Install registry agent `id` (or update it to the registry's version) and add it.
+    /// Install registry agent `id` and add it. One already added is updated to the registry's
+    /// newer version instead, the way a check's update is: through the updates queue when a check
+    /// has its row (after its running turns, its sessions ended first), else here, checked to
+    /// start before it's used (`registry::update`). Never to an older version.
     pub fn install_registry_agent(&mut self, id: &str, cx: &mut gpui_kit::Context<Self>) {
         let Some(agent) = self
             .added_agents
@@ -190,11 +194,34 @@ impl Workspace {
         else {
             return;
         };
+        let key = AgentId::Acp(id.to_string()).key();
         if matches!(
             self.added_agents.installs.get(id),
             Some(Install::Running(_))
-        ) {
+        ) || self.agent_updating(&key)
+        {
             return;
+        }
+        let current = self
+            .settings
+            .added_agents
+            .iter()
+            .find(|a| a.id == id && a.source == registry::AgentSource::Registry)
+            .cloned();
+        if current.is_some() {
+            let row = format!("registry:{id}");
+            if self.agent_updates.request(&row) {
+                self.pump_agent_updates(cx);
+                cx.notify();
+                return;
+            }
+            // Asked for already: not twice. Otherwise no check has listed it yet.
+            if matches!(
+                self.agent_updates.job(&row),
+                Some(crate::agent_updates::Job::Queued | crate::agent_updates::Job::Running)
+            ) {
+                return;
+            }
         }
         self.added_agents
             .installs
@@ -205,9 +232,13 @@ impl Workspace {
             let progress = move |p: Progress| {
                 let _ = steps.try_send(Step::Progress(p));
             };
-            let done = registry::install(&agent, &progress)
-                .await
-                .map_err(|e| format!("{e:#}"));
+            let done = match &current {
+                Some(current) => registry::update(current, &agent, &progress)
+                    .await
+                    .map(|(added, _)| added),
+                None => registry::install(&agent, &progress).await,
+            }
+            .map_err(|e| format!("{e:#}"));
             let _ = tx.send(Step::Done(done)).await;
         });
         let id = id.to_string();
@@ -274,9 +305,9 @@ impl Workspace {
         Ok(())
     }
 
-    /// Save `agent` as added (replacing one with its id) and look for it.
-    fn put_added(&mut self, agent: AddedAgent, cx: &mut gpui_kit::Context<Self>) {
-        let agent_id = agent.id.clone();
+    /// Save `agent` as added (replacing one with its id) and look for it. A registry agent's other
+    /// versions go once none of its sessions runs (now, or at the next launch).
+    pub(super) fn put_added(&mut self, agent: AddedAgent, cx: &mut gpui_kit::Context<Self>) {
         let key = AgentId::Acp(agent.id.clone()).key();
         match self
             .settings
@@ -287,12 +318,74 @@ impl Workspace {
             Some(old) => *old = agent,
             None => self.settings.added_agents.push(agent),
         }
-        // A new version or command reports its models afresh.
+        // A new version or command reports its models afresh: finding it again (`sync`) asks it.
         self.acp_info.remove(&key);
-        let id = agent_id.clone();
+        let id = key.strip_prefix("acp:").unwrap_or(&key).to_string();
         trek_core::runtime().spawn_blocking(move || registry::forget_probe(&id));
         self.save_settings(cx);
         self.sync_added_agents(cx);
+    }
+
+    /// What `key`'s agent reported of itself (models, sign-in) is forgotten, in memory and in its
+    /// probe cache, and asked again once it's found: after an update, a new command, a sign-in.
+    pub fn forget_acp_info(&mut self, key: &str, cx: &mut gpui_kit::Context<Self>) {
+        if !matches!(
+            AgentId::from_key(key),
+            AgentId::Acp(_) | AgentId::OpenCode | AgentId::Droid
+        ) {
+            return;
+        }
+        self.acp_info.remove(key);
+        let id = key.strip_prefix("acp:").unwrap_or(key).to_string();
+        let (tx, rx) = async_channel::bounded::<()>(1);
+        trek_core::runtime().spawn_blocking(move || {
+            registry::forget_probe(&id);
+            let _ = tx.send_blocking(());
+        });
+        let key = key.to_string();
+        let task = cx.spawn(async move |this, cx| {
+            let _ = rx.recv().await;
+            let _ = this.update(cx, |this, cx| this.probe_acp_agent(&key, cx));
+        });
+        self.keep(task);
+    }
+
+    /// A registry agent of `key` is being installed or updated from the Add agent sheet.
+    pub fn registry_installing(&self, key: &str) -> bool {
+        key.strip_prefix("acp:").is_some_and(|id| {
+            matches!(
+                self.added_agents.installs.get(id),
+                Some(Install::Running(_))
+            )
+        })
+    }
+
+    /// Remove registry agents' versions that are no longer theirs, of those with no session
+    /// running (a session keeps the version it started with until it ends).
+    pub(super) fn prune_registry_installs(&self) {
+        let idle: Vec<(String, String)> = self
+            .settings
+            .added_agents
+            .iter()
+            .filter(|a| a.source == registry::AgentSource::Registry)
+            .filter(|a| {
+                let key = AgentId::Acp(a.id.clone()).key();
+                !self.registry_installing(&key)
+                    && !self.agent_updating(&key)
+                    && !self.threads.iter().any(|t| {
+                        t.agent.key() == key
+                            && self.live.get(&t.id).is_some_and(|l| l.commands.is_some())
+                    })
+            })
+            .filter_map(|a| Some((a.id.clone(), a.version.clone()?)))
+            .collect();
+        if !idle.is_empty() {
+            trek_core::runtime().spawn_blocking(move || {
+                for (id, version) in idle {
+                    registry::prune(&id, &version);
+                }
+            });
+        }
     }
 
     /// Remove an added agent: from settings, and its download, icon and secrets from the Mac.
@@ -323,12 +416,8 @@ impl Workspace {
             .iter()
             .find(|a| a.id == id && a.source == registry::AgentSource::Registry)?;
         let listed = self.added_agents.registry.as_ref()?.agent(id)?;
-        (added.version.as_deref() != Some(listed.version.as_str())
-            && trek_core::agent_update::is_newer(
-                &listed.version,
-                added.version.as_deref().unwrap_or("0"),
-            ))
-        .then(|| listed.version.clone())
+        registry::newer_listed(&listed.version, added.version.as_deref().unwrap_or("0"))
+            .then(|| listed.version.clone())
     }
 }
 

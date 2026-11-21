@@ -911,3 +911,121 @@ fn the_cards_buttons_stay_inside_it_in_a_wide_font_and_a_narrow_window() {
         }
     });
 }
+
+/// An agent installed from the ACP Registry is updated through the same card as the CLIs: once
+/// its new version is in (a receipt, as `registry::update` leaves it once the new version has
+/// started), settings run that version, and what the old one reported (its models) is asked
+/// again. A CLI's update forgets what its old binary reported too.
+#[test]
+fn a_registry_agents_update_runs_its_new_version_and_its_models_are_asked_again() {
+    use trek_core::agent_update::{Builtin, Install, UpdateCommand};
+    use trek_core::registry::{AddedAgent, AgentSource};
+    run(async |cx| {
+        let trek = open(cx);
+        let id = format!("fake-reg-{}", std::process::id());
+        let key = format!("acp:{id}");
+        let home = trek_core::registry::agents_dir().join(&id);
+        let at = |v: &str| home.join(v).join("bin").join("agent");
+        let agent = |v: &str| AddedAgent {
+            id: id.clone(),
+            name: "Fake Agent".into(),
+            command: at(v).display().to_string(),
+            source: AgentSource::Registry,
+            version: Some(v.into()),
+            distribution: Some("binary".into()),
+            ..Default::default()
+        };
+        // 1.5.0 was installed and seen to start: its receipt is in its folder.
+        std::fs::create_dir_all(home.join("1.5.0")).unwrap();
+        std::fs::write(
+            home.join("1.5.0").join(".trek-install.json"),
+            serde_json::to_vec(&agent("1.5.0")).unwrap(),
+        )
+        .unwrap();
+        trek.update(cx, |ws, cx| {
+            ws.settings.added_agents.push(agent("1.3.0"));
+            ws.sync_added_agents(cx);
+            // What each reported before: three models, say.
+            ws.acp_info
+                .insert(key.clone(), Err("1.3.0's three models".into()));
+            ws.acp_info
+                .insert("acp:github-copilot".into(), Err("the old Copilot's".into()));
+            let registry_row = AgentVersion {
+                id: format!("registry:{id}"),
+                agent: key.clone(),
+                name: "Fake Agent".into(),
+                binary: at("1.3.0"),
+                installed: Some("1.3.0".into()),
+                latest: Some("1.5.0".into()),
+                install: Install::Registry {
+                    id: id.clone(),
+                    distribution: "binary".into(),
+                },
+                command: Some(UpdateCommand {
+                    builtin: Some(Builtin::Registry),
+                    ..UpdateCommand::new(at("1.3.0"), &[])
+                }),
+                error: None,
+            };
+            let copilot = AgentVersion {
+                id: "copilot".into(),
+                agent: "acp:github-copilot".into(),
+                name: "GitHub Copilot".into(),
+                binary: "/opt/homebrew/bin/copilot".into(),
+                installed: Some("1.0.113".into()),
+                latest: Some("1.0.114".into()),
+                install: Install::Native,
+                command: Some(UpdateCommand::new("/opt/homebrew/bin/copilot", &["update"])),
+                error: None,
+            };
+            let u = &mut ws.agent_updates;
+            u.found = vec![registry_row, copilot];
+            u.checked_at = trek_core::store::now_ms();
+            u.runner = Runner::Fake(Arc::new(|v: &AgentVersion| Outcome::Updated {
+                version: v.latest.clone().unwrap(),
+                output: String::new(),
+            }));
+            cx.notify();
+        });
+        trek.update(cx, |ws, cx| {
+            ws.navigate(Route::Settings(SettingsPage::Agents), cx)
+        });
+        trek.render(cx);
+        let row = format!("agent-update-row-registry:{id}");
+        assert!(
+            trek.visible(cx, gpui_kit::SharedString::from(row)),
+            "listed with the CLIs"
+        );
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.agent_updates.updatable()),
+            [format!("registry:{id}"), "copilot".to_string()]
+        );
+
+        trek.update(cx, |ws, cx| ws.update_all_agents(cx));
+        trek.wait(cx, "both updates", |ws| {
+            ws.agent_updates.updatable().is_empty() && !ws.agent_updates.running()
+        })
+        .await;
+        trek.read(cx, |ws, _| {
+            let now = ws
+                .settings
+                .added_agents
+                .iter()
+                .find(|a| a.id == id)
+                .unwrap();
+            assert_eq!(now.version.as_deref(), Some("1.5.0"));
+            assert_eq!(now.command, at("1.5.0").display().to_string());
+            assert_eq!(
+                trek_core::catalog::added_agent(&id).and_then(|a| a.version),
+                Some("1.5.0".into()),
+                "what new sessions start"
+            );
+            assert!(
+                !ws.acp_info.contains_key(&key),
+                "its models are asked again"
+            );
+            assert!(!ws.acp_info.contains_key("acp:github-copilot"));
+        });
+        let _ = std::fs::remove_dir_all(&home);
+    });
+}

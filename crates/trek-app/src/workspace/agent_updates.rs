@@ -9,7 +9,7 @@ use super::{Workspace, WorkspaceEvent};
 use gpui_kit::Context;
 use trek_agents::Command;
 use trek_core::AgentId;
-use trek_core::agent_update::{Outcome, Snapshot};
+use trek_core::agent_update::{Install, Outcome, Snapshot};
 use trek_core::store::now_ms;
 
 /// Why an agent's update hasn't started yet.
@@ -20,14 +20,16 @@ pub enum Hold {
 }
 
 impl Workspace {
-    /// Look for new versions of the agent CLIs. A background check (`user: false`) runs only
-    /// with the setting on. Not in a test process: that would run the user's own CLIs.
+    /// Look for new versions of the agent CLIs and of the agents installed from the ACP Registry.
+    /// A background check (`user: false`) runs only with the setting on. Not in a test process,
+    /// which would run the user's own CLIs, except for its registry installs against a fixture
+    /// registry (`check_all` checks nothing else there).
     pub fn check_agent_updates(&mut self, user: bool, cx: &mut Context<Self>) {
         let u = &mut self.agent_updates;
         if u.checking
             || u.mock
             || (!user && !self.settings.updates.check_agents)
-            || trek_core::paths::isolated()
+            || (trek_core::paths::isolated() && trek_core::registry::fixture().is_none())
         {
             return;
         }
@@ -158,8 +160,12 @@ impl Workspace {
             self.check_agent_updates(true, cx);
             return;
         }
-        // One update, or the batch run as an administrator (one prompt from Windows for all).
-        let Some(ids) = self.agent_updates.next(|a| self.agent_busy(a)) else {
+        // One update, or the batch run as an administrator (one prompt from Windows for all). A
+        // registry agent being installed from the Add agent sheet waits for that to end.
+        let Some(ids) = self
+            .agent_updates
+            .next(|a| self.agent_busy(a) || self.registry_installing(a))
+        else {
             return;
         };
         let (ids, versions): (Vec<String>, Vec<_>) = ids
@@ -208,6 +214,15 @@ impl Workspace {
             .iter()
             .find(|v| v.id == id)
             .map(|v| (v.agent.clone(), v.name.clone()));
+        let registry_id = self
+            .agent_updates
+            .found
+            .iter()
+            .find(|v| v.id == id)
+            .and_then(|v| match &v.install {
+                Install::Registry { id, .. } => Some(id.clone()),
+                _ => None,
+            });
         let (agent, name) = row.clone().unwrap_or_else(|| {
             let h = trek_core::agent_update::harness(id);
             (
@@ -237,7 +252,26 @@ impl Workspace {
             Outcome::Failed { summary, .. } => format!("Couldn't update {name}: {summary}"),
         };
         let installed = matches!(outcome, Outcome::Updated { .. });
+        if let Outcome::Updated { version, .. } = &outcome
+            && !dry
+        {
+            match &registry_id {
+                // A registry agent's new version is what settings start from now: its receipt,
+                // written once it was seen to start. Its models are asked afresh (`put_added`).
+                Some(rid) => match trek_core::registry::receipt(rid, version) {
+                    Some(added) => self.put_added(added, cx),
+                    None => tracing::warn!("{rid} {version} was installed but left no receipt"),
+                },
+                // A CLI's new version may offer other models: what Trek knew of it goes, and it's
+                // asked again (its cache is the old binary's, `ProbeCache`).
+                None => self.forget_acp_info(&agent, cx),
+            }
+        }
         self.agent_updates.finish(id, outcome);
+        // The version it was at goes now that the new one is in use.
+        if registry_id.is_some() && installed && !dry {
+            self.prune_registry_installs();
+        }
         // Its new version is cached too: a later launch doesn't offer it again, with checks off
         // (none runs to say so) or before its check is in.
         if installed && !dry {

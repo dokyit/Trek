@@ -1408,6 +1408,35 @@ impl SettingsView {
                 Some(true) => format!("{account} · It worked"),
                 None => account,
             };
+            // A registry agent whose maker's own CLI is here too, with more of the plan's models.
+            let same_cli = match &a.agent {
+                AgentId::Acp(id) if crate::workspace::is_added(&a.agent) => {
+                    trek_core::registry::same_maker_cli(id).and_then(|cli| {
+                        ws.agents
+                            .iter()
+                            .find(|o| o.agent == cli && o.availability != Availability::NotInstalled)
+                            .map(|o| {
+                                let n = ws
+                                    .acp_info
+                                    .get(&cli.key())
+                                    .and_then(|r| r.as_ref().ok())
+                                    .map(|i| i.models.len())
+                                    .filter(|n| *n > 0);
+                                match n {
+                                    Some(n) => format!(
+                                        "{} is installed too, with {n} models: Trek lists it on its own. This is Google's separate ACP server.",
+                                        o.name
+                                    ),
+                                    None => format!(
+                                        "{} is installed too: Trek lists it on its own, with the models of your plan. This is Google's separate ACP server.",
+                                        o.name
+                                    ),
+                                }
+                            })
+                    })
+                }
+                _ => None,
+            };
             let title = h_flex()
                 .gap(px(10.))
                 .child(ui::agent_logo(&a.agent, px(22.), cx))
@@ -1432,7 +1461,17 @@ impl SettingsView {
                                     muted
                                 })
                                 .child(account),
-                        ),
+                        )
+                        .when_some(same_cli, |el, said| {
+                            el.child(
+                                div()
+                                    .id(SharedString::from(format!("same-cli-{key}")))
+                                    .test_support()
+                                    .text_size(px(text::BODY))
+                                    .text_color(muted)
+                                    .child(said),
+                            )
+                        }),
                 );
             // A login that took stops being waited on once the agent is signed in.
             if !needs_login {
@@ -1527,9 +1566,12 @@ impl SettingsView {
                             )
                     })
             });
-            let more = match more {
-                Some(b) => Some(b.into_any_element()),
-                None => self.added_menu(&a.agent, cx),
+            // One the user added has its own menu (its update, Remove), even when Trek knows its
+            // sign-in line too (the registry's Antigravity shares the CLI's).
+            let more = match (self.added_menu(&a.agent, cx), more) {
+                (Some(added), _) => Some(added),
+                (None, Some(b)) => Some(b.into_any_element()),
+                (None, None) => None,
             };
             let k2 = key.clone();
             let toggle = Switch::new(SharedString::from(format!("enable-{key}")))
@@ -1786,24 +1828,16 @@ impl SettingsView {
     fn agent_updates_section(&mut self, first: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let ws = self.workspace.read(cx);
         let (on, u) = (ws.settings.updates.check_agents, &ws.agent_updates);
-        let (checking, checked_at, listed, missed) = (
-            u.checking,
-            u.checked_at,
-            !u.listed().is_empty(),
-            u.unchecked_note(),
+        let (checking, listed) = (u.checking, !u.listed().is_empty());
+        // "Up to date" only about agents that were compared: an offline check proves nothing,
+        // and an agent of the user's own command, or one Trek can't place, isn't checked at all.
+        let last = crate::agent_updates::summary(
+            u,
+            &crate::agent_updates::not_checked(ws),
+            &relative_ago(u.checked_at),
         );
-        // "Up to date" only when every agent was compared: an offline check proves nothing.
-        let last = match (checking, checked_at, missed) {
-            (true, ..) => "Checking now…".to_string(),
-            (false, 0, _) => "Not checked yet.".to_string(),
-            (false, at, Some(missed)) => format!("Checked {}. {missed}", relative_ago(at)),
-            (false, at, None) if !listed => {
-                format!("Checked {}: every agent is up to date.", relative_ago(at))
-            }
-            (false, at, None) => format!("Checked {}.", relative_ago(at)),
-        };
         let description = format!(
-            "At launch and every 12 hours, Trek checks each agent CLI against where it came from: npm, {} or its maker. Updates wait for running turns to end. {last}",
+            "At launch and every 12 hours, Trek checks each agent CLI against where it came from (npm, {} or its maker) and each agent added from the ACP Registry against the registry. Updates wait for running turns to end. {last}",
             crate::words::words().package_manager
         );
         let controls = h_flex()

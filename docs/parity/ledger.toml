@@ -774,14 +774,19 @@ what = "Agent CLIs kept up to date, the way each was installed"
 macos = "yes"
 windows = "yes"
 live = ["route settings:agents", "wait 300", "reveal check-agent-updates", "count check-agent-updates 1", "count agent-updates-auto 1"]
-how = { macos = "npm, Bun, pnpm, Volta, Homebrew, and vendors' own updaters.", windows = "npm, Volta, WinGet, Scoop, Chocolatey (one administrator prompt for all), PowerShell installers and vendors' own updaters. A CLI that replaces its own files (Copilot) updates itself even when WinGet installed it; the version probes end with what they started; an update waits for the agent's running copies to end." }
-code = ["crates/trek-core/src/agent_update.rs", "crates/trek-core/src/detect.rs", "crates/trek-core/src/elevated.rs", "crates/trek-core/src/procs.rs", "crates/trek-app/src/agent_updates.rs"]
-tests = ["crates/trek-core/src/agent_update.rs", "crates/trek-core/src/detect.rs", "crates/trek-app/tests/agent_updates.rs"]
+how = { macos = "npm, Bun, pnpm, Volta, Homebrew, and vendors' own updaters; agents added from the ACP Registry against the registry's index, installed by Trek beside the version in use (SHA-256 checked, started once to answer ACP's initialize) and used only then. Agents of the user's own command aren't checked, and Settings says so.", windows = "npm, Volta, WinGet, Scoop, Chocolatey (one administrator prompt for all), PowerShell installers and vendors' own updaters; registry agents as on the Mac, with the registry's Windows build. A CLI that replaces its own files (Copilot) updates itself even when WinGet installed it; the version probes end with what they started; an update waits for the agent's running copies to end." }
+code = ["crates/trek-core/src/agent_update.rs", "crates/trek-core/src/registry.rs", "crates/trek-core/src/detect.rs", "crates/trek-core/src/elevated.rs", "crates/trek-core/src/procs.rs", "crates/trek-app/src/agent_updates.rs"]
+tests = ["crates/trek-core/src/agent_update.rs", "crates/trek-core/src/registry.rs", "crates/trek-core/src/detect.rs", "crates/trek-app/tests/agent_updates.rs"]
 
 [[feature.promise]]
 what = "An update waits for its agent's running turn"
 macos = "crates/trek-app/tests/agent_updates.rs::an_update_waits_for_its_agents_running_turn"
 windows = "crates/trek-app/tests/agent_updates.rs::an_update_waits_for_its_agents_running_turn"
+
+[[feature.promise]]
+what = "An agent from the ACP Registry is checked and updated like the CLIs, and its models are asked again"
+macos = "crates/trek-app/tests/agent_updates.rs::a_registry_agents_update_runs_its_new_version_and_its_models_are_asked_again"
+windows = "crates/trek-app/tests/agent_updates.rs::a_registry_agents_update_runs_its_new_version_and_its_models_are_asked_again"
 
 [[feature]]
 id = "model-names"
@@ -1433,7 +1438,7 @@ what = "Add an agent from the ACP Registry, or one of your own by its command"
 macos = "yes"
 windows = "yes"
 live = ["agent-install codex 40", "route settings:agents", "wait 400", "reveal add-agent", "count add-agent 1"]
-how = { macos = "The registry's macOS build, else its npm package through npx, else its Python one through uvx; an unpacked build is made executable. Your own command is a name on the PATH, a /… path or ~/….", windows = "The registry's Windows build, else npx or uvx; symlinks in a .tar build are skipped, as making one needs a privilege. Your own command is a name on the PATH (any PATHEXT extension), a drive or network path (C:\\…, \\\\server\\…) or ~\\…." }
+how = { macos = "The registry's macOS build (HTTPS only, redirects included), else its npm package through npx, else its Python one through uvx; an unpacked build is made executable. Your own command is a name on the PATH, a /… path or ~/….", windows = "The registry's Windows build, else npx or uvx; symlinks in a .tar build are skipped, as making one needs a privilege. Your own command is a name on the PATH (any PATHEXT extension), a drive or network path (C:\\…, \\\\server\\…) or ~\\…." }
 code = ["crates/trek-core/src/registry.rs"]
 tests = ["crates/trek-core/src/registry.rs"]
 

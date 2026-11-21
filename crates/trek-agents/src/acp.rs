@@ -1480,12 +1480,19 @@ pub async fn run(
     let mut ctl = controls(&result);
     let mut model = ctl.current_model.clone();
     let mut switched = None;
+    // A model the agent won't switch to (one the account's plan hasn't, say) is said in the
+    // agent's words, with the one the session is on instead: never a silent fallback.
+    let mut refused_model = None;
     if let Some(want) = config.model.as_ref().filter(|m| model.as_ref() != Some(*m))
         && let Some((method, params)) = model_request(&ctl, &session_id, want)
     {
-        if let Ok(Ok(r)) = agent.call(method, params, &fs, &mut backlog, setup).await {
-            model = Some(want.clone());
-            switched = Some(r);
+        match agent.call(method, params, &fs, &mut backlog, setup).await {
+            Ok(Ok(r)) => {
+                model = Some(want.clone());
+                switched = Some(r);
+            }
+            Ok(Err(e)) => refused_model = Some((want.clone(), rpc_message(&e))),
+            Err(e) => refused_model = Some((want.clone(), format!("{e:#}"))),
         }
     }
     // The effort levels are the model's, so they're read after it's chosen: what the agent said
@@ -1545,6 +1552,19 @@ pub async fn run(
     }
     for notice in left_out {
         events.send(AgentEvent::Notice(notice)).await?;
+    }
+    if let Some((want, why)) = refused_model {
+        let on = model
+            .as_deref()
+            .map(|m| format!(" This session is on {m}."))
+            .unwrap_or_default();
+        events
+            .send(AgentEvent::Notice(format!(
+                "{} didn't switch to {want}: {why}.{on}",
+                agent.name,
+                why = why.trim_end_matches('.')
+            )))
+            .await?;
     }
     if let Some(notice) = agent.db_notice.take() {
         events.send(AgentEvent::Notice(notice)).await?;
@@ -2031,6 +2051,19 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
         other => AgentId::Acp(other.into()),
     };
     probe_at(&agent_id, &trek_core::paths::home(), &ProbeCache::dir()).await
+}
+
+/// `acp_probe`, whatever was kept from last time: after a sign-in or a switch of account, whose
+/// plan decides which models the agent offers (the same binary, so its cache would still hold).
+pub async fn acp_probe_fresh(id: &str) -> Result<AcpInfo> {
+    let agent_id = match id {
+        "opencode" => AgentId::OpenCode,
+        "droid" => AgentId::Droid,
+        other => AgentId::Acp(other.into()),
+    };
+    let cache = ProbeCache::dir();
+    let _ = std::fs::remove_file(ProbeCache::path(&cache, &agent_id));
+    probe_at(&agent_id, &trek_core::paths::home(), &cache).await
 }
 
 /// `acp_probe` with the agent run in `home` and its answer kept in `cache`.
@@ -2733,6 +2766,58 @@ mod tests {
         assert!(
             matches!(seen.last(), Some(AgentEvent::TurnComplete { error: Some(e) }) if e.contains("ended the turn without a reply")),
             "the turn ends with the first prompt: {seen:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A session asked to start on a model the agent won't switch to (one the account's plan
+    /// hasn't) says so in the agent's own words, and which model it's on instead.
+    #[test]
+    fn a_model_the_agent_refuses_at_the_start_is_said_not_swallowed() {
+        let dir = std::env::temp_dir().join(format!("trek-acp-refused-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        trek_core::paths::isolate(dir.join("data"));
+        std::fs::write(
+            dir.join("fake-acp-config.json"),
+            r#"{"models":{"flash":[],"opus":[]},"current":"flash"}"#,
+        )
+        .unwrap();
+        let config = SessionConfig {
+            agent: fake_agent(),
+            cwd: dir.clone(),
+            model: Some("gemini-4-neon".into()),
+            effort: Effort::Off,
+            hand_holding: HandHolding::Auto,
+            plan: false,
+            read_only: false,
+            resume: None,
+            resume_at: None,
+            fork: false,
+            recap: None,
+            fast: None,
+            mcp_servers: vec![],
+            instructions: None,
+            read_dirs: vec![],
+            claude_extra_tools: false,
+            script: false,
+            transcript: None,
+        };
+        let h = crate::start(config);
+        let notice = trek_core::runtime().block_on(async {
+            let notice = loop {
+                match next_event(&h, &dir).await {
+                    AgentEvent::Notice(n) => break n,
+                    AgentEvent::Error(e) => panic!("{e}"),
+                    _ => {}
+                }
+            };
+            h.commands.send(Command::Shutdown).await.unwrap();
+            notice
+        });
+        assert_eq!(
+            notice,
+            "Fake didn't switch to gemini-4-neon: Invalid params: no model gemini-4-neon. This session is on flash."
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -4,9 +4,16 @@
 //! `catalog::set_added_agents` makes them known to every part of Trek.
 //!
 //! The registry is fetched on demand and cached in the data folder. Installing an agent prefers
-//! its macOS binary (downloaded, checked against its checksum when the registry gives one, and
-//! unpacked under `agents/<id>/<version>/`), then an npm package run by `npx`, then a Python one
-//! run by `uvx`. Package versions must be pinned: what runs is what was listed.
+//! its macOS binary (downloaded over HTTPS only, redirects included, checked against its checksum
+//! when the registry gives one, and unpacked under `agents/<id>/<version>/`), then an npm package
+//! run by `npx`, then a Python one run by `uvx`. Package versions must be pinned: what runs is
+//! what was listed.
+//!
+//! An installed agent is kept up to date by `agent_update`'s checks like the CLIs are: `update`
+//! installs the registry's newer version beside the one in use, starts it once to see it answer
+//! ACP's `initialize`, and only then hands it over (a receipt in its folder says what to run); the
+//! old version's folder goes once nothing runs from it (`prune`). A version that doesn't start is
+//! removed again and the old one stays. Nothing is ever replaced by an older version.
 
 use crate::types::AgentId;
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -30,8 +37,17 @@ const PACKAGE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 pub const STALE_AFTER_MS: i64 = 6 * 60 * 60 * 1000;
 
 /// Points Trek at a registry file instead of the network (the shots harness and design reviews).
-/// Icons are read from an `icons` folder beside it, as `<id>.svg`.
+/// Icons are read from an `icons` folder beside it, as `<id>.svg`, and a binary's download from
+/// an `archives` folder, by the file name its URL ends in (still checked against its checksum).
+/// Only binaries are installed from one, even by a test process: never a package.
 const FIXTURE_ENV: &str = "TREK_ACP_REGISTRY";
+
+/// The registry file `TREK_ACP_REGISTRY` names, if it's set.
+pub fn fixture() -> Option<PathBuf> {
+    std::env::var_os(FIXTURE_ENV)
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+}
 
 // ---------------------------------------------------------------------------------------------
 // The index
@@ -313,6 +329,19 @@ pub fn built_in(registry_id: &str) -> Option<AgentId> {
         id if crate::catalog::ACP_AGENTS.iter().any(|a| a.id == id) => AgentId::Acp(id.into()),
         _ => return None,
     })
+}
+
+/// A registry agent that isn't its maker's CLI, though that CLI is built into Trek and serves
+/// ACP too: the registry's "Google Antigravity" (`antigravity-acp`) is Google's separate ACP
+/// server, whose model list (Gemini 3.8 Flash alone, at its 1.3.0 and 1.5.0) is shorter than the
+/// one Antigravity CLI's own `agy acp` gives the same account (with Claude and GPT-OSS models).
+/// They share the sign-in in `~/.gemini`. Settings says so on the registry agent's row when the
+/// CLI is installed.
+pub fn same_maker_cli(registry_id: &str) -> Option<AgentId> {
+    match registry_id {
+        "antigravity-acp" => Some(AgentId::Acp("antigravity".into())),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -667,6 +696,17 @@ pub fn agents_dir() -> PathBuf {
     crate::paths::data_dir().join("agents")
 }
 
+/// `agent` is one Trek installed itself from a fixture registry (`FIXTURE_ENV`) into its own
+/// data folder: no program of the user's, so even a test process or design review may start it
+/// to ask what it offers.
+pub fn from_fixture(agent: &AddedAgent) -> bool {
+    fixture().is_some()
+        && agent.source == AgentSource::Registry
+        && agent.distribution.as_deref() == Some("binary")
+        && Path::new(&agent.command).starts_with(agents_dir())
+        && !agent.command.contains("..")
+}
+
 /// Forget an added agent: its download and icon, its secrets, and what its probe learned.
 pub fn remove(agent: &AddedAgent) {
     if valid_id(&agent.id) {
@@ -713,10 +753,23 @@ fn attach_icons(r: &mut Registry) {
     }
 }
 
+/// What the registry, its icons and downloads are fetched with: HTTPS only, a redirect to plain
+/// HTTP refused like a link to one (the index's links are all `https://`, `checked`), a few
+/// redirects at most, no cookies kept. It sends Trek's version as its user agent, nothing else.
 fn client(timeout: Duration) -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .timeout(timeout)
         .connect_timeout(Duration::from_secs(20))
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.url().scheme() != "https" {
+                attempt.error("a redirect away from HTTPS")
+            } else if attempt.previous().len() >= 5 {
+                attempt.error("too many redirects")
+            } else {
+                attempt.follow()
+            }
+        }))
         .user_agent(format!("Trek/{}", crate::VERSION))
         .build()?)
 }
@@ -740,9 +793,7 @@ async fn get_capped(client: &reqwest::Client, url: &str, cap: usize) -> Result<V
 /// Fetch the index (and the icons not cached yet), keep it, and return it. A test process never
 /// reaches the network: it reads `TREK_ACP_REGISTRY` or nothing.
 pub async fn fetch() -> Result<Registry> {
-    let fixture = std::env::var_os(FIXTURE_ENV)
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty());
+    let fixture = fixture();
     let text = match &fixture {
         Some(path) => std::fs::read_to_string(path)
             .with_context(|| format!("couldn't read {}", path.display()))?,
@@ -829,16 +880,26 @@ pub enum Progress {
 }
 
 /// Install `agent` on this Mac and return it as an added agent. A binary already unpacked for
-/// this version is used as it is. `progress` is called from the runtime.
+/// this version is used as it is. `progress` is called from the runtime. Other versions already
+/// here stay: they go once the new one is in use (`prune`). Its receipt is written beside it.
 pub async fn install(
     agent: &RegistryAgent,
     progress: &(dyn Fn(Progress) + Send + Sync),
 ) -> Result<AddedAgent> {
-    // Downloads and package managers stay out of tests and design reviews.
-    anyhow::ensure!(
-        !crate::paths::isolated(),
-        "Agents aren't installed from a test process."
-    );
+    install_from(agent, progress, fixture_archives().as_deref()).await
+}
+
+/// A fixture registry's `archives` folder (`FIXTURE_ENV`).
+fn fixture_archives() -> Option<PathBuf> {
+    Some(fixture()?.parent()?.join("archives"))
+}
+
+/// `install`, a binary's download read from the folder `archives` when given (a fixture's).
+async fn install_from(
+    agent: &RegistryAgent,
+    progress: &(dyn Fn(Progress) + Send + Sync),
+    archives: Option<&Path>,
+) -> Result<AddedAgent> {
     let plan = plan(agent, current_target()).ok_or_else(|| {
         anyhow!(
             "{} has no build for {}.",
@@ -846,6 +907,13 @@ pub async fn install(
             if cfg!(windows) { "this PC" } else { "this Mac" }
         )
     })?; // the app's `words` table, which core can't reach
+    // Downloads and package managers stay out of tests and design reviews; a fixture registry's
+    // binaries (from its own folder) are the one exception.
+    anyhow::ensure!(
+        !crate::paths::isolated() || (archives.is_some() && matches!(plan, Plan::Binary(_))),
+        "Agents aren't installed from a test process."
+    );
+    anyhow::ensure!(valid_id(&agent.id), "{:?} isn't an agent id", agent.id);
     let home = agents_dir().join(&agent.id);
     std::fs::create_dir_all(&home)?;
     let mut added = AddedAgent {
@@ -879,15 +947,8 @@ pub async fn install(
             let root = home.join(&agent.version);
             let exe = segments.iter().fold(root.clone(), |p, s| p.join(s));
             if !exe.is_file() {
-                download_and_unpack(&t, &home, &root, &segments, progress).await?;
-            }
-            // Older versions go once the new one is in place (a thread still running one keeps it
-            // open until it ends).
-            for entry in std::fs::read_dir(&home).into_iter().flatten().flatten() {
-                let name = entry.file_name();
-                if entry.path().is_dir() && name != agent.version.as_str() {
-                    let _ = std::fs::remove_dir_all(entry.path());
-                }
+                let local = archives.and_then(|dir| archive_in(dir, &t.archive));
+                download_and_unpack(&t, &home, &root, &segments, local, progress).await?;
             }
             added.command = exe.display().to_string();
             added.args = t.args;
@@ -921,7 +982,254 @@ pub async fn install(
             added.env = env(&p.env);
         }
     }
+    write_receipt(&added)?;
     Ok(added)
+}
+
+/// The receipt of an install: the added agent it made, in its version's folder
+/// (`agents/<id>/<version>/`), which a package's install has too, for this alone.
+fn receipt_path(id: &str, version: &str) -> Option<PathBuf> {
+    (valid_id(id) && valid_version(version)).then(|| {
+        agents_dir()
+            .join(id)
+            .join(version)
+            .join(".trek-install.json")
+    })
+}
+
+fn write_receipt(added: &AddedAgent) -> Result<()> {
+    let Some(path) = added
+        .version
+        .as_deref()
+        .and_then(|v| receipt_path(&added.id, v))
+    else {
+        bail!("{} has no version to install", added.name);
+    };
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, serde_json::to_vec_pretty(added)?)
+        .and_then(|_| std::fs::rename(&tmp, &path))
+        .with_context(|| format!("couldn't write {}", path.display()))
+}
+
+/// What `install` (through `update`) made of registry agent `id` at `version`, for the app to
+/// put in its settings once the update is in: `None` when there's no such install here.
+pub fn receipt(id: &str, version: &str) -> Option<AddedAgent> {
+    let text = std::fs::read_to_string(receipt_path(id, version)?).ok()?;
+    serde_json::from_str::<AddedAgent>(&text)
+        .ok()
+        .filter(|a| a.id == id && a.version.as_deref() == Some(version))
+        .filter(|a| a.source == AgentSource::Registry)
+}
+
+/// Remove what's left of registry agent `id` other than version `keep`: older versions, and the
+/// downloads and unpackings of installs that never finished (a Trek that quit mid-download).
+/// Only once nothing runs from them: the app calls it when the agent has no session.
+pub fn prune(id: &str, keep: &str) {
+    if !valid_id(id) || !valid_version(keep) {
+        return;
+    }
+    let home = agents_dir().join(id);
+    for entry in std::fs::read_dir(&home).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        // A download under way (`.download-<pid>`) is written to as it goes: only one left
+        // untouched for hours is a leftover.
+        let stale = || {
+            entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > Duration::from_secs(6 * 60 * 60))
+        };
+        let unfinished =
+            (name.starts_with(".download-") || name.starts_with(".unpack-")) && stale();
+        if unfinished {
+            let _ = std::fs::remove_dir_all(&path).or_else(|_| std::fs::remove_file(&path));
+        } else if path.is_dir() && !name.starts_with('.') && name != keep {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+}
+
+/// How long an agent is given to answer `initialize` after an update: a binary's cold start, or
+/// `npx` finding a package it has just fetched.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
+const PACKAGE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Start `agent` as Trek would and ask ACP's `initialize`, which needs no sign-in and opens no
+/// session: whether the new version runs at all, before it's handed over. Its own version, if it
+/// says one. Ended as soon as it has answered.
+pub async fn handshake(agent: &AddedAgent) -> Result<Option<String>> {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    let program = agent
+        .resolve()
+        .ok_or_else(|| anyhow!("{} can't start: {}", agent.name, agent.missing()))?;
+    if let Some(problem) = crate::detect::batch_args_problem(&program, &agent.args) {
+        bail!("{} can't start: {problem}", agent.name);
+    }
+    // A folder of its own to start in: the agent's working folder is nobody's project.
+    let cwd = crate::paths::data_dir().join("tmp").join(format!(
+        "acp-check-{}-{}",
+        agent.id,
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&cwd)?;
+    let wait = if agent.distribution.as_deref().is_some_and(|d| d != "binary") {
+        PACKAGE_HANDSHAKE_TIMEOUT
+    } else {
+        HANDSHAKE_TIMEOUT
+    };
+    let run = async {
+        let mut child = crate::procs::async_command(&program)
+            .args(&agent.args)
+            .envs(agent.launch_env())
+            .env("PATH", crate::detect::login_path())
+            .current_dir(&cwd)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .with_context(|| format!("{} didn't start", agent.name))?;
+        let mut stdin = child.stdin.take().context("no stdin")?;
+        let stdout = child.stdout.take().context("no stdout")?;
+        let hello = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": 1,
+                "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false },
+                "clientInfo": { "name": "Trek", "version": crate::VERSION },
+            },
+        });
+        stdin.write_all(format!("{hello}\n").as_bytes()).await?;
+        stdin.flush().await?;
+        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        let answer = loop {
+            let Some(line) = lines.next_line().await? else {
+                bail!("{} stopped before it answered", agent.name);
+            };
+            let Ok(m) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue; // a log line on stdout
+            };
+            if m["id"] == 0 && (m.get("result").is_some() || m.get("error").is_some()) {
+                break m;
+            }
+        };
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        if let Some(e) = answer.get("error").filter(|e| !e.is_null()) {
+            bail!(
+                "{} refused to start: {}",
+                agent.name,
+                e["message"].as_str().unwrap_or("no reason given")
+            );
+        }
+        Ok(answer["result"]["agentInfo"]["version"]
+            .as_str()
+            .map(String::from))
+    };
+    let done = tokio::time::timeout(wait, run).await;
+    let _ = std::fs::remove_dir_all(&cwd);
+    done.map_err(|_| anyhow!("{} didn't answer in {}s", agent.name, wait.as_secs()))?
+}
+
+/// Install `listed`, the registry's newer version of `current`, and check it starts; the added
+/// agent to use from now on, and what was done, a line a step. Never a version that isn't newer
+/// than the one installed. A new version that doesn't start is removed again, and `current` is
+/// left as it was: nothing it runs from is touched (`prune` takes it once the new one is in use).
+pub async fn update(
+    current: &AddedAgent,
+    listed: &RegistryAgent,
+    progress: &(dyn Fn(Progress) + Send + Sync),
+) -> Result<(AddedAgent, String)> {
+    update_from(current, listed, progress, fixture_archives().as_deref()).await
+}
+
+/// `update`, a binary's download read from the folder `archives` when given (`install_from`).
+async fn update_from(
+    current: &AddedAgent,
+    listed: &RegistryAgent,
+    progress: &(dyn Fn(Progress) + Send + Sync),
+    archives: Option<&Path>,
+) -> Result<(AddedAgent, String)> {
+    anyhow::ensure!(
+        current.source == AgentSource::Registry && current.id == listed.id,
+        "{} wasn't installed from the ACP Registry",
+        current.name
+    );
+    let from = current.version.clone().unwrap_or_default();
+    anyhow::ensure!(
+        newer_listed(&listed.version, &from),
+        "The ACP Registry lists {} {}, which isn't newer than the {from} installed, so Trek left it as it is.",
+        listed.name,
+        listed.version
+    );
+    let mut said = vec![format!(
+        "{} {} from the ACP Registry, for {}",
+        listed.name,
+        listed.version,
+        current_target().unwrap_or("this computer")
+    )];
+    let mut added = install_from(listed, progress, archives).await?;
+    // The variables the user gave it (secrets in the Keychain) stay with it; the registry's own
+    // are the new version's.
+    for v in &current.env {
+        if !added.env.iter().any(|e| e.name == v.name) {
+            added.env.push(v.clone());
+        }
+    }
+    let target = listed
+        .distribution
+        .binary
+        .get(current_target().unwrap_or_default());
+    match (added.distribution.as_deref(), target) {
+        (Some("binary"), Some(t)) if t.sha256.is_some() => said.push(format!(
+            "Downloaded {}; its SHA-256 matches the registry's",
+            t.archive
+        )),
+        (Some("binary"), Some(t)) => said.push(format!(
+            "Downloaded {}; the registry gives no checksum for it",
+            t.archive
+        )),
+        (kind, _) => said.push(format!(
+            "Runs with {}: {}",
+            kind.unwrap_or("its package manager"),
+            added.command_line()
+        )),
+    }
+    match handshake(&added).await {
+        Ok(version) => said.push(match version {
+            Some(v) => format!("It starts and answers ACP, as version {v}"),
+            None => "It starts and answers ACP".into(),
+        }),
+        Err(e) => {
+            if listed.version != from {
+                let _ =
+                    std::fs::remove_dir_all(agents_dir().join(&listed.id).join(&listed.version));
+            }
+            bail!("{e:#}, so Trek kept {from}.");
+        }
+    }
+    write_receipt(&added)?;
+    Ok((added, said.join("\n")))
+}
+
+/// `listed` (the registry's version) is one to update to from `installed`: newer as numbers
+/// compare, never older, never one that can't be ordered (`agent_update::is_newer`).
+pub fn newer_listed(listed: &str, installed: &str) -> bool {
+    let (listed, installed) = (bare_version(listed), bare_version(installed));
+    listed != installed && crate::agent_update::is_newer(listed, installed)
+}
+
+/// A version as numbers compare it: an entry may spell one as its tag does ("v1.6.0").
+pub fn bare_version(v: &str) -> &str {
+    v.strip_prefix(['v', 'V']).unwrap_or(v)
 }
 
 /// Copy the cached icon beside the install, where clearing the cache doesn't take it.
@@ -996,13 +1304,15 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(sha2::Sha256::digest(bytes))
 }
 
-/// Download `t`'s archive into `home`, check it, and unpack it as `root`. Unpacked beside it
-/// first and moved into place whole, so a failed install leaves nothing half there.
+/// Download `t`'s archive into `home` (or read it from `local`, a fixture's copy), check it, and
+/// unpack it as `root`. Unpacked beside it first and moved into place whole, so a failed install
+/// leaves nothing half there.
 async fn download_and_unpack(
     t: &BinaryTarget,
     home: &Path,
     root: &Path,
     segments: &[String],
+    local: Option<PathBuf>,
     progress: &(dyn Fn(Progress) + Send + Sync),
 ) -> Result<()> {
     use sha2::Digest as _;
@@ -1012,6 +1322,26 @@ async fn download_and_unpack(
     let staging = home.join(format!(".unpack-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&staging);
     let result = async {
+        if let Some(local) = local {
+            // A fixture registry's download, from its own folder: checked like any other.
+            let bytes = std::fs::read(&local)
+                .with_context(|| format!("couldn't read {}", local.display()))?;
+            progress(Progress::Downloading {
+                done: bytes.len() as u64,
+                total: Some(bytes.len() as u64),
+            });
+            if let Some(expected) = &t.sha256
+                && !sha256_hex(&bytes).eq_ignore_ascii_case(expected)
+            {
+                bail!("The download doesn't match the registry's checksum, so it wasn't installed");
+            }
+            std::fs::write(&download, &bytes)?;
+            progress(Progress::Unpacking);
+            unpack(&download, kind, &staging, segments).await?;
+            let _ = std::fs::remove_dir_all(root);
+            std::fs::rename(&staging, root)?;
+            return Ok(());
+        }
         let mut resp = client(ARCHIVE_TIMEOUT)?
             .get(&t.archive)
             .send()
@@ -1057,6 +1387,14 @@ async fn download_and_unpack(
     let _ = std::fs::remove_file(&download);
     let _ = std::fs::remove_dir_all(&staging);
     result
+}
+
+/// The file `url` names in the folder `archives` (a fixture's): the last segment of the URL's
+/// path, which must be a plain file name.
+fn archive_in(archives: &Path, url: &str) -> Option<PathBuf> {
+    let name = url.split(['?', '#']).next()?.rsplit('/').next()?;
+    let name = command_segments(name).filter(|s| s.len() == 1)?.remove(0);
+    Some(archives.join(name))
 }
 
 /// Unpack `archive` into `into` (a raw binary is the command itself) and make the command
@@ -1791,5 +2129,219 @@ mod tests {
                 .contains("compressed another way")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_a_newer_registry_version_is_one_to_update_to() {
+        for (listed, installed) in [
+            ("1.5.0", "1.3.0"),
+            ("1.5.10", "1.5.9"),
+            ("2.0.0", "1.99.99"),
+            ("1.5.0", "1.5.0-beta.1"),
+            ("1.5.0-beta.1", "1.4.9"),
+            ("2026.11.19", "2026.11.2"),
+            ("v1.6.0", "1.5.0"),
+        ] {
+            assert!(newer_listed(listed, installed), "{listed} over {installed}");
+        }
+        for (listed, installed) in [
+            ("1.5.0", "1.5.0"),
+            ("1.5.9", "1.5.10"),
+            ("1.3.0", "1.5.0"),
+            ("1.5.0-beta.1", "1.5.0"),
+            // Two pre-releases of one version, or a version that isn't numbered, can't be
+            // ordered: nothing is offered rather than a guess.
+            ("1.5.0-beta.2", "1.5.0-beta.1"),
+            ("latest", "1.0.0"),
+            ("1.0.0", "unknown"),
+        ] {
+            assert!(
+                !newer_listed(listed, installed),
+                "{listed} over {installed}"
+            );
+        }
+    }
+
+    /// A one-file zip of `bin/agent`, made executable, with `script` in it.
+    #[cfg(unix)]
+    fn agent_zip(path: &Path, script: &str) -> String {
+        let mut z = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .unix_permissions(0o755);
+        z.start_file("bin/agent", options).unwrap();
+        std::io::Write::write_all(&mut z, script.as_bytes()).unwrap();
+        z.finish().unwrap();
+        sha256_hex(&std::fs::read(path).unwrap())
+    }
+
+    /// A stand-in ACP agent that answers `initialize` as version `version`, and one that doesn't
+    /// start at all.
+    #[cfg(unix)]
+    fn answers(version: &str) -> String {
+        format!(
+            "#!/bin/sh\nread line\necho '{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{\"protocolVersion\":1,\"agentInfo\":{{\"name\":\"fake\",\"version\":\"{version}\"}}}}}}'\nsleep 30\n"
+        )
+    }
+    #[cfg(unix)]
+    const BROKEN: &str = "#!/bin/sh\necho 'dyld: missing library' >&2\nexit 3\n";
+
+    #[cfg(unix)]
+    fn listed(id: &str, version: &str, archive: &str, sha256: &str) -> RegistryAgent {
+        let target = current_target().unwrap();
+        parse(&format!(
+            r#"{{"version":"1.0.0","agents":[{{"id":"{id}","name":"Fake Agent","version":"{version}",
+            "distribution":{{"binary":{{"{target}":{{"archive":"https://dl.example.com/{archive}","cmd":"./bin/agent","sha256":"{sha256}"}}}}}}}}]}}"#
+        ))
+        .unwrap()
+        .agents
+        .remove(0)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_update_is_used_only_once_it_starts_and_the_old_version_stays_until_then() {
+        let rt = crate::runtime();
+        let id = format!("fake-up-{}", uuid::Uuid::new_v4().simple());
+        let archives = std::env::temp_dir().join(format!("trek-registry-archives-{id}"));
+        std::fs::create_dir_all(&archives).unwrap();
+        let home = agents_dir().join(&id);
+        // 1.0.0 is installed and in use.
+        let old = home.join("1.0.0").join("bin").join("agent");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, answers("1.0.0")).unwrap();
+        let current = AddedAgent {
+            id: id.clone(),
+            name: "Fake Agent".into(),
+            command: old.display().to_string(),
+            source: AgentSource::Registry,
+            version: Some("1.0.0".into()),
+            distribution: Some("binary".into()),
+            env: vec![EnvVar {
+                name: "MY_TOKEN".into(),
+                value: "t".into(),
+                secret: false,
+            }],
+            ..Default::default()
+        };
+        let none = |_: Progress| {};
+
+        // 2.0.0 starts: it's handed over, with the user's variable, and its receipt says so.
+        let sha = agent_zip(&archives.join("good.zip"), &answers("2.0.0"));
+        let (added, said) = rt
+            .block_on(update_from(
+                &current,
+                &listed(&id, "2.0.0", "good.zip", &sha),
+                &none,
+                Some(&archives),
+            ))
+            .unwrap();
+        assert_eq!(added.version.as_deref(), Some("2.0.0"));
+        assert!(
+            added.command.ends_with("2.0.0/bin/agent"),
+            "{}",
+            added.command
+        );
+        assert!(added.env.iter().any(|v| v.name == "MY_TOKEN"));
+        assert!(said.contains("SHA-256 matches"), "{said}");
+        assert!(said.contains("as version 2.0.0"), "{said}");
+        assert_eq!(receipt(&id, "2.0.0"), Some(added.clone()));
+        assert!(old.is_file(), "the version in use stays until it's pruned");
+
+        // 3.0.0 doesn't start: it's removed again, and 2.0.0 is still what runs.
+        let sha = agent_zip(&archives.join("broken.zip"), BROKEN);
+        let err = rt
+            .block_on(update_from(
+                &added,
+                &listed(&id, "3.0.0", "broken.zip", &sha),
+                &none,
+                Some(&archives),
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("so Trek kept 2.0.0"), "{err}");
+        assert!(!home.join("3.0.0").exists(), "nothing of it is left");
+        assert_eq!(receipt(&id, "3.0.0"), None);
+        assert!(Path::new(&added.command).is_file());
+
+        // A download that isn't what the registry's checksum says is never unpacked.
+        agent_zip(&archives.join("tampered.zip"), &answers("4.0.0"));
+        let err = rt
+            .block_on(update_from(
+                &added,
+                &listed(&id, "4.0.0", "tampered.zip", &"0".repeat(64)),
+                &none,
+                Some(&archives),
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("doesn't match the registry's checksum"),
+            "{err}"
+        );
+        assert!(!home.join("4.0.0").exists());
+
+        // An older version (a registry that went back) is never installed.
+        let err = rt
+            .block_on(update_from(
+                &added,
+                &listed(&id, "1.5.0", "good.zip", &sha256_hex(b"")),
+                &none,
+                Some(&archives),
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("isn't newer"), "{err}");
+
+        // Once 2.0.0 is in use, the rest goes: 1.0.0 and a download a Trek left behind long ago.
+        let left = home.join(".download-4242");
+        std::fs::write(&left, b"half").unwrap();
+        let long_ago = std::time::SystemTime::now() - Duration::from_secs(7 * 60 * 60);
+        std::fs::File::options()
+            .write(true)
+            .open(&left)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+        let fresh = home.join(".download-4243");
+        std::fs::write(&fresh, b"under way").unwrap();
+        prune(&id, "2.0.0");
+        assert!(!home.join("1.0.0").exists() && !left.exists());
+        assert!(
+            fresh.exists(),
+            "one being written now is left to its install"
+        );
+        assert!(Path::new(&added.command).is_file());
+
+        // No fixture folder: a test process installs nothing.
+        assert!(
+            rt.block_on(update_from(
+                &added,
+                &listed(&id, "5.0.0", "good.zip", &sha),
+                &none,
+                None,
+            ))
+            .unwrap_err()
+            .to_string()
+            .contains("test process")
+        );
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&archives);
+    }
+
+    #[test]
+    fn the_registrys_antigravity_points_at_the_cli_trek_has_built_in() {
+        assert_eq!(
+            same_maker_cli("antigravity-acp"),
+            Some(AgentId::Acp("antigravity".into()))
+        );
+        assert_eq!(same_maker_cli("devin"), None);
+        // It isn't the CLI: the registry's server can still be added.
+        assert_eq!(built_in("antigravity-acp"), None);
+        assert!(
+            crate::catalog::ACP_AGENTS
+                .iter()
+                .any(|a| a.id == "antigravity" && a.binary == "agy")
+        );
     }
 }

@@ -666,6 +666,8 @@ pub fn logo_key(agent: &AgentId) -> Option<&'static str> {
         AgentId::Codex => "codex".to_string(),
         AgentId::OpenCode => "opencode".to_string(),
         AgentId::Droid => "droid".to_string(),
+        // Google's CLI, under Google's mark.
+        AgentId::Acp(id) if id == "antigravity" => "google".to_string(),
         AgentId::Acp(id) | AgentId::Direct(id) => id.clone(),
     };
     KEYS.iter().find(|k| **k == key).copied()

@@ -12,6 +12,8 @@ An agent asks for a token with `request_secret` on `trek-orchestrate`: a masked 
 
 Claude Code and Codex can have several accounts: a label and a config folder of its own under Trek's data folder (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`), linked to the user's own setup. The default account is the user's normal login, no variable set. A thread runs on the account picked in the model menu; moving it starts a new session there from a recap, so in a thread under way the pick waits for the next message as a switch of agent does (the bar names the account), and with a switch waiting the menu lists the new agent's accounts. A thread started from the phone runs on the agent's normal login. The Usage card has a row per account, and a limit bar offers "Continue on <account>".
 
+Agents added from the ACP Registry are kept up to date by the same check as the CLIs (`agent_update::check_all` → `check_registry`/`registry_rows`, rows `registry:<id>`): the registry's index is fetched, a newer version (never an older one; numbers compare, `registry::newer_listed`) is offered in Settings' updates card, the sidebar card and Update all, and Trek installs it itself (`Builtin::Registry` → `registry::update`): beside the version in use, SHA-256 checked, started once to answer ACP's `initialize`, then handed over through a receipt (`agents/<id>/<version>/.trek-install.json`); one that doesn't start is removed and the old version stays. Old versions go once no session runs them (`registry::prune`). After any ACP agent's update, and after a login terminal, what it reported (its models) is asked again (`forget_acp_info`, `acp_probe_fresh`). The summary under "Check for agent updates" says "up to date" only of agents it compared, and names those it doesn't check (your own command, a CLI it can't place, a registry agent added since the last check). Google's Antigravity CLI (`agy acp`) is built in as "Antigravity CLI"; the registry's "Google Antigravity" is Google's separate ACP server with fewer models, and its row says so when the CLI is installed.
+
 ## Reach it as a user
 
 Open **Settings → Agents & Subscriptions**, **API Keys**, **Local Models**, **General**, or **Permissions**. Thread-specific choices live below the composer.
@@ -28,6 +30,19 @@ Open **Settings → Agents & Subscriptions**, **API Keys**, **Local Models**, **
 ./.agents/skills/verify-trek/scripts/trek-dev control media-demo install ffmpeg   # a real download into the run's data folder, with progress in Settings › Tools › Video (media-demo failed yt-dlp: the failed row)
 ./.agents/skills/verify-trek/scripts/trek-dev control sign-in-demo start   # Droid signed out; its login opened in the terminal dock (no program runs)
 ./.agents/skills/verify-trek/scripts/trek-dev control sign-in-demo done    # what Trek's next look at Droid would find: signed in. Within seconds: a toast, the dock strip, Settings' row
+```
+
+A registry agent's update end to end, with no network and no agent of yours: `TREK_ACP_REGISTRY` points the app at a fixture registry, whose binaries are read from an `archives` folder beside it (checksums still checked) and which an isolated app may install, check and probe.
+
+```sh
+python3 -I evidence/registry-fixture/make.py 1.0.0   # a stand-in ACP agent: 1.0.0 with 3 models, 1.1.0 with 6
+TREK_ACP_REGISTRY="$PWD/evidence/registry-fixture/registry.json" ./.agents/skills/verify-trek/scripts/trek-dev start
+./.agents/skills/verify-trek/scripts/trek-dev open settings:agents-&-subscriptions
+./.agents/skills/verify-trek/scripts/trek-dev control click add-agent
+./.agents/skills/verify-trek/scripts/trek-dev control click registry-add-stand-in-agent   # Signed in · 3 models · v1.0.0
+python3 -I evidence/registry-fixture/make.py 1.1.0                                          # the registry now lists 1.1.0
+./.agents/skills/verify-trek/scripts/trek-dev control click check-agent-updates             # 1.0.0 → 1.1.0, Update
+./.agents/skills/verify-trek/scripts/trek-dev control click agent-update-registry:stand-in-agent   # 6 models · v1.1.0
 ```
 
 The isolated app exposes only the Mock agent and never reads the Keychain. Test real-agent detection manually in a normal profile; do not put credentials into verification commands or files.

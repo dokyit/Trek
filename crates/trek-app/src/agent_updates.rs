@@ -409,12 +409,14 @@ impl AgentUpdates {
     }
 
     /// What the last check couldn't compare, for Settings: "Couldn't check Codex and Grok:
-    /// offline, or the release feed didn't answer." `None` when every agent was compared.
+    /// offline, or the release feed didn't answer." `None` when every agent was compared. A row
+    /// whose newest version is the one an earlier check found (`carry_over`: this one couldn't
+    /// reach its feed) wasn't compared either, whatever it shows.
     pub fn unchecked_note(&self) -> Option<String> {
         let missed: Vec<&AgentVersion> = self
             .found
             .iter()
-            .filter(|v| !v.compared() && !self.jobs.contains_key(&v.id))
+            .filter(|v| (!v.compared() || v.error.is_some()) && !self.jobs.contains_key(&v.id))
             .collect();
         let names: Vec<&str> = missed.iter().map(|v| v.name.as_str()).collect();
         let names = match names.as_slice() {
@@ -437,6 +439,145 @@ impl AgentUpdates {
             _ => ".".into(),
         };
         Some(format!("Couldn't check {names}{reason}"))
+    }
+}
+
+/// An agent on this computer that the checks don't cover, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotChecked {
+    /// One the user added by its own command: theirs to keep up to date.
+    OwnCommand(String),
+    /// A CLI Trek found but couldn't tell how it was installed (a package manager it doesn't
+    /// know, a package of another name), so there's nowhere to ask and no way to update it.
+    Unknown(String),
+    /// One added from the ACP Registry since the last check: the next one compares it.
+    NotYet(String),
+}
+
+/// Settings' line under "Check for agent updates": when Trek last looked and what it found,
+/// never "up to date" about an agent it didn't compare (`unchecked_note`) or doesn't check
+/// (`not_checked`). `ago` is when, in words ("just now", "2 hours ago").
+pub fn summary(u: &AgentUpdates, not_checked: &[NotChecked], ago: &str) -> String {
+    if u.checking {
+        return "Checking now…".into();
+    }
+    if u.checked_at == 0 {
+        return "Not checked yet.".into();
+    }
+    let missed = u.unchecked_note();
+    let names = |want: fn(&NotChecked) -> Option<&String>| -> Vec<&str> {
+        not_checked
+            .iter()
+            .filter_map(want)
+            .map(String::as_str)
+            .collect()
+    };
+    let own = names(|n| match n {
+        NotChecked::OwnCommand(name) => Some(name),
+        _ => None,
+    });
+    let unknown = names(|n| match n {
+        NotChecked::Unknown(name) => Some(name),
+        _ => None,
+    });
+    let not_yet = names(|n| match n {
+        NotChecked::NotYet(name) => Some(name),
+        _ => None,
+    });
+    let all_covered = own.is_empty() && unknown.is_empty() && not_yet.is_empty();
+    let mut said = vec![match (&missed, u.listed().is_empty(), all_covered) {
+        (None, true, true) => format!("Checked {ago}: every agent is up to date."),
+        (None, true, false) => format!("Checked {ago}: every agent Trek checks is up to date."),
+        _ => format!("Checked {ago}."),
+    }];
+    said.extend(missed);
+    if !own.is_empty() {
+        let (verb, what) = if own.len() == 1 {
+            ("runs", "your own command")
+        } else {
+            ("run", "your own commands")
+        };
+        said.push(format!(
+            "{} {verb} {what}, which Trek doesn't check.",
+            and_list(&own)
+        ));
+    }
+    if !not_yet.is_empty() {
+        let (has, it) = if not_yet.len() == 1 {
+            ("hasn't", "it")
+        } else {
+            ("haven't", "them")
+        };
+        said.push(format!(
+            "{} {has} been checked yet: Check now compares {it}.",
+            and_list(&not_yet)
+        ));
+    }
+    if !unknown.is_empty() {
+        let (was, them) = if unknown.len() == 1 {
+            ("was", "it")
+        } else {
+            ("were", "them")
+        };
+        said.push(format!(
+            "Trek can't tell how {} {was} installed, so it doesn't check {them}.",
+            and_list(&unknown)
+        ));
+    }
+    said.join(" ")
+}
+
+/// The agents on this computer the checks don't cover: those the user added by a command of
+/// their own, and CLIs Trek found that no check's row is for (installed a way Trek can't tell).
+/// Nothing about the CLIs until a check of this launch is in: an earlier launch's rows may be
+/// another install's.
+pub fn not_checked(ws: &Workspace) -> Vec<NotChecked> {
+    let u = &ws.agent_updates;
+    let mut out: Vec<NotChecked> = ws
+        .settings
+        .added_agents
+        .iter()
+        .filter_map(|a| match a.source {
+            trek_core::registry::AgentSource::Command => {
+                Some(NotChecked::OwnCommand(a.name.clone()))
+            }
+            // Added since the check that's shown (or before any): it isn't among its rows.
+            trek_core::registry::AgentSource::Registry
+                if !u.mock
+                    && !u
+                        .found
+                        .iter()
+                        .any(|v| v.agent == AgentId::Acp(a.id.clone()).key()) =>
+            {
+                Some(NotChecked::NotYet(a.name.clone()))
+            }
+            trek_core::registry::AgentSource::Registry => None,
+        })
+        .collect();
+    if u.checked_at == 0 || u.stale || u.mock {
+        return out;
+    }
+    out.extend(
+        ws.agents
+            .iter()
+            .filter(|a| a.availability != trek_core::detect::Availability::NotInstalled)
+            .filter(|a| match &a.agent {
+                AgentId::Direct(_) => false,
+                AgentId::Acp(_) => !crate::workspace::is_added(&a.agent),
+                _ => true,
+            })
+            .filter(|a| !u.found.iter().any(|v| v.agent == a.agent.key()))
+            .map(|a| NotChecked::Unknown(a.name.clone())),
+    );
+    out
+}
+
+/// "A", "A and B", "A, B and C".
+fn and_list(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }
 
@@ -510,6 +651,7 @@ pub fn detail(
     let agent = AgentId::from_key(&v.agent);
     let shown = v.command.as_ref().map(|c| c.shown()).unwrap_or_default();
     let admin = v.command.as_ref().is_some_and(|c| c.elevated);
+    let registry = matches!(v.install, trek_core::agent_update::Install::Registry { .. });
     let via = match v.install {
         trek_core::agent_update::Install::Native => "Via its own installer".to_string(),
         ref i => format!("Via {}", i.label()),
@@ -517,6 +659,11 @@ pub fn detail(
     let line = match job {
         None if admin => format!("{via} · Windows will ask to allow it"),
         None => via,
+        Some(Job::Running) if registry => format!(
+            "Installing {} beside {}, then starting it once to check it",
+            v.latest.as_deref().unwrap_or("the new version"),
+            v.installed.as_deref().unwrap_or("the one in use")
+        ),
         Some(Job::Queued) if stale => "Checks what's installed first".into(),
         Some(Job::Queued) if hold == Some(Hold::Turn) => {
             format!("Waits for {}'s turn to end", agent.display_name())
@@ -607,7 +754,9 @@ fn row(
             ws.update(cx, |ws, cx| ws.update_agent(&key, cx))
         }
     };
-    let runs = if admin {
+    let runs = if matches!(v.install, trek_core::agent_update::Install::Registry { .. }) {
+        "Downloads it from the ACP Registry, checks its SHA-256, and keeps the version in use until the new one starts".to_string()
+    } else if admin {
         format!("Runs {shown} as an administrator")
     } else {
         format!("Runs {shown}")
@@ -1185,6 +1334,119 @@ mod tests {
         assert_eq!(
             u.unchecked_note().as_deref(),
             Some("Couldn't check Codex: it didn't say its version.")
+        );
+    }
+
+    /// A registry install's row as a check makes it, at `installed` with the registry at `latest`.
+    fn registry_row(installed: &str, latest: Option<&str>, error: Option<&str>) -> AgentVersion {
+        AgentVersion {
+            id: "registry:antigravity-acp".into(),
+            agent: "acp:antigravity-acp".into(),
+            name: "Google Antigravity".into(),
+            binary: "/x/agy_acp_server.par".into(),
+            installed: Some(installed.into()),
+            latest: latest.map(String::from),
+            install: Install::Registry {
+                id: "antigravity-acp".into(),
+                distribution: "binary".into(),
+            },
+            command: latest.map(|_| UpdateCommand {
+                builtin: Some(trek_core::agent_update::Builtin::Registry),
+                ..UpdateCommand::new("/x/agy_acp_server.par", &[])
+            }),
+            error: error.map(String::from),
+        }
+    }
+
+    #[test]
+    fn the_summary_says_up_to_date_only_of_what_it_compared() {
+        use super::{NotChecked, summary};
+        let at = |found: Vec<AgentVersion>| AgentUpdates {
+            found,
+            checked_at: 1,
+            ..Default::default()
+        };
+        let mut current = mock_versions();
+        for v in &mut current {
+            v.installed = v.latest.clone();
+        }
+        // Everything compared and current.
+        let mut all = current.clone();
+        all.push(registry_row("1.5.0", Some("1.5.0"), None));
+        assert_eq!(
+            summary(&at(all.clone()), &[], "just now"),
+            "Checked just now: every agent is up to date."
+        );
+        // A registry agent behind: no "up to date", the card lists it.
+        let mut behind = current.clone();
+        behind.push(registry_row("1.3.0", Some("1.5.0"), None));
+        let u = at(behind);
+        assert_eq!(u.updatable(), ["registry:antigravity-acp"]);
+        assert_eq!(summary(&u, &[], "just now"), "Checked just now.");
+        // The registry couldn't be reached: said, never "up to date".
+        let mut offline = current.clone();
+        offline.push(registry_row(
+            "1.3.0",
+            None,
+            Some("Couldn't reach the ACP Registry"),
+        ));
+        assert_eq!(
+            summary(&at(offline), &[], "2 hours ago"),
+            "Checked 2 hours ago. Couldn't check Google Antigravity: couldn't reach the ACP Registry."
+        );
+        // Its newest version carried over from the check before isn't this check's: still said.
+        let mut carried = current.clone();
+        carried.push(registry_row(
+            "1.5.0",
+            Some("1.5.0"),
+            Some("Couldn't reach the ACP Registry"),
+        ));
+        assert!(
+            summary(&at(carried), &[], "just now").contains("Couldn't check Google Antigravity")
+        );
+        // Agents of the user's own command, and CLIs Trek can't place, aren't checked: said so.
+        let own = [NotChecked::OwnCommand("My Agent".into())];
+        assert_eq!(
+            summary(&at(all.clone()), &own, "just now"),
+            "Checked just now: every agent Trek checks is up to date. My Agent runs your own command, which Trek doesn't check."
+        );
+        let both = [
+            NotChecked::OwnCommand("My Agent".into()),
+            NotChecked::OwnCommand("Bot".into()),
+            NotChecked::Unknown("Goose".into()),
+        ];
+        assert_eq!(
+            summary(&at(all), &both, "just now"),
+            "Checked just now: every agent Trek checks is up to date. My Agent and Bot run your own commands, which Trek doesn't check. Trek can't tell how Goose was installed, so it doesn't check it."
+        );
+        // Before any check, and while one runs.
+        let new = [NotChecked::NotYet("Stand-in Agent".into())];
+        assert_eq!(
+            summary(&at(current.clone()), &new, "just now"),
+            "Checked just now: every agent Trek checks is up to date. Stand-in Agent hasn't been checked yet: Check now compares it."
+        );
+        assert_eq!(
+            summary(&AgentUpdates::default(), &own, "x"),
+            "Not checked yet."
+        );
+        let checking = AgentUpdates {
+            checking: true,
+            checked_at: 1,
+            ..Default::default()
+        };
+        assert_eq!(summary(&checking, &[], "x"), "Checking now…");
+    }
+
+    #[test]
+    fn a_registry_rows_update_says_what_trek_does() {
+        let row = registry_row("1.3.0", Some("1.5.0"), None);
+        assert_eq!(
+            detail(&row, None, None, false),
+            ("Via the ACP Registry".to_string(), false)
+        );
+        assert_eq!(
+            detail(&row, Some(&Job::Running), None, false).0,
+            "Installing 1.5.0 beside 1.3.0, then starting it once to check it"
         );
     }
 

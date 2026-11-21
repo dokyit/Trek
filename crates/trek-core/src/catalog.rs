@@ -555,6 +555,11 @@ const DEVIN: Hint = Hint {
     unix: "curl -fsSL https://cli.devin.ai/install.sh | bash",
     windows: "irm https://cli.devin.ai/install.ps1 | iex",
 };
+// The lines Antigravity CLI's README gives (github.com/google-antigravity/antigravity-cli).
+const ANTIGRAVITY: Hint = Hint {
+    unix: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+    windows: "irm https://antigravity.google/cli/install.ps1 | iex",
+};
 // Goose's script, without the interactive `goose configure` it ends with (Sign in runs that).
 // Its installer for Windows is a script; it supports x86-64 only. Run from memory, as the others
 // are, so that a machine's execution policy doesn't stop it.
@@ -630,6 +635,17 @@ pub const ACP_AGENTS: &[AcpAgent] = &[
         version_marker: None,
         install_hint: DEVIN.here(),
     },
+    // Google's Antigravity CLI, which serves ACP itself (`agy acp`) with the models of the
+    // account's plan. The ACP Registry's "Google Antigravity" (`antigravity-acp`) is another
+    // program, Google's separate ACP server, which offers fewer of them (`registry::same_maker_cli`).
+    AcpAgent {
+        id: "antigravity",
+        name: "Antigravity CLI",
+        binary: "agy",
+        args: &["acp"],
+        version_marker: None,
+        install_hint: ANTIGRAVITY.here(),
+    },
     AcpAgent {
         id: "goose",
         name: "Goose",
@@ -679,6 +695,7 @@ const INSTALL_HINTS: &[(&str, Hint)] = &[
     ("qwen-code", QWEN_CODE),
     ("grok", GROK),
     ("devin", DEVIN),
+    ("antigravity", ANTIGRAVITY),
     ("goose", GOOSE),
     ("amp", AMP),
     ("pi", PI),
@@ -768,7 +785,8 @@ pub fn agent_setup(key: &str) -> Option<AgentSetup> {
 }
 
 pub fn acp_display_name(id: &str) -> String {
-    if id == "antigravity" || id == "antigravity-acp" {
+    // The registry's server; Google's CLI is "Antigravity CLI" (`ACP_AGENTS`).
+    if id == "antigravity-acp" {
         return "Google Antigravity".to_string();
     }
     match ACP_AGENTS.iter().find(|a| a.id == id) {
@@ -918,6 +936,7 @@ mod tests {
         "qwen-code",
         "grok",
         "devin",
+        "antigravity",
         "goose",
         "amp",
         "pi",

@@ -19,7 +19,7 @@ mod tests_cmd_args;
 #[cfg(test)]
 mod tests_stop;
 
-pub use acp::{AcpInfo, acp_authenticate, acp_probe};
+pub use acp::{AcpInfo, acp_authenticate, acp_probe, acp_probe_fresh};
 pub use claude::Replay as ClaudeReplay;
 /// What a Codex thread on Windows is told when its sandbox needs its one-time setup: the thread
 /// view offers to run codex in Trek's terminal beside it.

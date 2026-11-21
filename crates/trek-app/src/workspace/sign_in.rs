@@ -166,8 +166,9 @@ impl Workspace {
                 self.detect_agents(cx);
             }
             AgentId::ClaudeCode => self.recheck_status(agent, cx),
-            // OpenCode, Droid and the ACP agents say it when asked to start a session.
-            _ => self.probe_acp(Some(key), cx),
+            // OpenCode, Droid and the ACP agents say it when asked to start a session; what they
+            // said before the login (another account's models) isn't kept.
+            _ => self.reprobe_acp_agent(key, cx),
         }
     }
 

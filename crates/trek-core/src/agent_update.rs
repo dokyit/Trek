@@ -117,6 +117,8 @@ impl Harness {
                 self.packages().contains(&name.as_str())
             }
             Install::Volta | Install::Native => true,
+            // Trek's own install, never a CLI's.
+            Install::Registry { .. } => false,
         }
     }
 
@@ -349,6 +351,20 @@ pub const HARNESSES: &[Harness] = &[
         brew: &[],
         adapter: false,
     },
+    // Google's Antigravity CLI (`agy`), from its own installer, which publishes each release on
+    // GitHub; it updates itself (`agy update`, and on its own as it runs).
+    Harness {
+        agent: "acp:antigravity",
+        binary: "agy",
+        npm: None,
+        moved_from: None,
+        majors: &[],
+        self_update: Some(&["update"]),
+        installer: None,
+        feed: Feed::GitHub("google-antigravity/antigravity-cli"),
+        brew: &[],
+        adapter: false,
+    },
     Harness {
         agent: "acp:goose",
         binary: "goose",
@@ -460,12 +476,20 @@ pub enum Install {
     Volta,
     /// The vendor's own installer.
     Native,
+    /// An agent Trek installed from the ACP Registry (`registry`), by its registry id, as a
+    /// `binary`, `npx` or `uvx` install: Trek's own to update, from the registry's index.
+    Registry {
+        id: String,
+        #[serde(default)]
+        distribution: String,
+    },
 }
 
 impl Install {
     /// "npm", "Homebrew", …: how it's described next to its versions.
     pub fn label(&self) -> &'static str {
         match self {
+            Install::Registry { .. } => "the ACP Registry",
             Install::Npm { .. } => "npm",
             Install::Bun { .. } => "Bun",
             Install::Pnpm { .. } => "pnpm",
@@ -973,6 +997,8 @@ pub fn source(h: &Harness, install: &Install, installed: Option<&str>) -> Option
         // Scoop's buckets are git repositories it pulls before updating: they follow the
         // vendor's release closely.
         Install::Native | Install::Scoop { .. } => vendor_source(h, installed),
+        // Asked of the registry's index, all such installs at once (`registry_rows`).
+        Install::Registry { .. } => None,
     }
 }
 
@@ -1187,6 +1213,10 @@ pub enum Builtin {
     /// again: its release bundle (manifest, SHA-256, zip) installed as the line installs it, short
     /// of the PATH change it already made and the setup wizard it ends with (`install_devin_bundle`).
     DevinBundle,
+    /// An agent installed from the ACP Registry: the registry's newer version installed beside
+    /// it, checked against the registry's SHA-256, and started once before it's used
+    /// (`registry::update`). `program` is the command it runs now.
+    Registry,
 }
 
 /// The extensions `CreateProcess` can run, in the order `PATHEXT` gives them (its own default
@@ -1565,6 +1595,8 @@ pub fn update_command(
                 }
             })
         }),
+        // A registry install is no CLI's (`registry_rows` makes its command).
+        Install::Registry { .. } => None,
     }
 }
 
@@ -1828,16 +1860,23 @@ pub async fn check(h: &Harness, feeds: &Feeds) -> Option<AgentVersion> {
     })
 }
 
-/// Check every agent CLI on this computer, side by side. Takes a few seconds; never fails as a whole.
+/// Check every agent CLI on this computer, and every agent installed from the ACP Registry, side
+/// by side. Takes a few seconds; never fails as a whole. A test process checks only the registry
+/// installs, and only against a fixture registry (`registry::fixture`): it runs no CLI of the
+/// user's and asks no feed.
 pub async fn check_all() -> Vec<AgentVersion> {
+    let registry = check_registry();
+    if crate::paths::isolated() {
+        return registry.await;
+    }
     let feeds = Feeds::open(client());
-    let found = futures::future::join_all(HARNESSES.iter().map(|h| check(h, &feeds)))
-        .await
-        .into_iter()
-        .flatten()
-        .collect();
+    let (clis, registry) = futures::future::join(
+        futures::future::join_all(HARNESSES.iter().map(|h| check(h, &feeds))),
+        registry,
+    )
+    .await;
     feeds.save();
-    found
+    clis.into_iter().flatten().chain(registry).collect()
 }
 
 /// How an update went.
@@ -1972,6 +2011,7 @@ async fn run_update_settling(v: &AgentVersion, settle: (u32, Duration)) -> Outco
         return not_trek_command(v);
     }
     let ran = match cmd.builtin {
+        Some(Builtin::Registry) => return registry_update(v).await,
         Some(Builtin::DevinBundle) => match tokio::time::timeout(
             UPDATE_TIMEOUT,
             install_devin_bundle(&cmd.program, &devin_manifest_url(), DEVIN_HOST),
@@ -1998,6 +2038,136 @@ async fn run_update_settling(v: &AgentVersion, settle: (u32, Duration)) -> Outco
         Ok((code, output)) => conclude(v, cmd, code, output, settle).await,
         Err(failed) => failed,
     }
+}
+
+/// Update registry row `v`: its agent as settings have it (`catalog::added_agents`), to the
+/// version the registry's index lists now (the check has just fetched it), never an older one.
+/// The new version's receipt is what the app puts in settings (`registry::receipt`).
+async fn registry_update(v: &AgentVersion) -> Outcome {
+    let failed = |summary: String| Outcome::Failed {
+        summary,
+        output: String::new(),
+    };
+    let Install::Registry { id, .. } = &v.install else {
+        return no_command(v);
+    };
+    let Some(current) = crate::catalog::added_agent(id)
+        .filter(|a| a.source == crate::registry::AgentSource::Registry)
+    else {
+        return failed(format!(
+            "{} isn't installed from the ACP Registry anymore.",
+            v.name
+        ));
+    };
+    let Some(listed) = crate::registry::load_cached().and_then(|r| r.agent(id).cloned()) else {
+        return failed(format!(
+            "{} isn't in the copy of the ACP Registry Trek has. Check again, then update.",
+            v.name
+        ));
+    };
+    match tokio::time::timeout(
+        UPDATE_TIMEOUT,
+        crate::registry::update(&current, &listed, &|_| {}),
+    )
+    .await
+    {
+        Ok(Ok((added, said))) => Outcome::Updated {
+            version: added.version.unwrap_or(listed.version),
+            output: said,
+        },
+        Ok(Err(e)) => failed(format!("{e:#}")),
+        Err(_) => failed(format!(
+            "Installing {} {} took longer than 15 minutes, so Trek stopped.",
+            v.name, listed.version
+        )),
+    }
+}
+
+/// The update rows of the agents installed from the ACP Registry (`added`), as `registry` (just
+/// fetched, or why it couldn't be) lists them for `target`. Never fails: one that can't be
+/// compared says why, and one that can be has Trek's own update (`Builtin::Registry`) when the
+/// registry has a build of it for this computer. Rows are `registry:<id>`.
+pub fn registry_rows(
+    added: &[crate::registry::AddedAgent],
+    registry: Result<&crate::registry::Registry, &str>,
+    target: Option<&str>,
+) -> Vec<AgentVersion> {
+    added
+        .iter()
+        .filter(|a| {
+            a.source == crate::registry::AgentSource::Registry && crate::registry::valid_id(&a.id)
+        })
+        .map(|a| {
+            let mut row = AgentVersion {
+                id: format!("registry:{}", a.id),
+                agent: AgentId::Acp(a.id.clone()).key(),
+                name: a.name.clone(),
+                binary: a.resolve().unwrap_or_else(|| PathBuf::from(&a.command)),
+                installed: a
+                    .version
+                    .as_deref()
+                    .map(|v| crate::registry::bare_version(v).to_string()),
+                latest: None,
+                install: Install::Registry {
+                    id: a.id.clone(),
+                    distribution: a.distribution.clone().unwrap_or_else(|| "binary".into()),
+                },
+                command: None,
+                error: None,
+            };
+            match registry.map(|r| r.agent(&a.id)) {
+                Err(e) => row.error = Some(e.trim_end_matches('.').to_string()),
+                Ok(None) => {
+                    row.error = Some(
+                        "It's no longer listed in the ACP Registry, so it stays as it is".into(),
+                    )
+                }
+                Ok(Some(listed)) => {
+                    row.latest = Some(crate::registry::bare_version(&listed.version).to_string());
+                    let newer = a
+                        .version
+                        .as_deref()
+                        .is_none_or(|i| crate::registry::newer_listed(&listed.version, i));
+                    if crate::registry::plan(listed, target).is_some() {
+                        row.command = Some(UpdateCommand {
+                            builtin: Some(Builtin::Registry),
+                            display: Some(format!(
+                                "Trek's download of {} from the ACP Registry",
+                                listed.version
+                            )),
+                            ..UpdateCommand::new(&row.binary, &[])
+                        });
+                    } else if newer {
+                        row.error = Some(format!(
+                            "The ACP Registry's {} has no build for {}",
+                            listed.version,
+                            if cfg!(windows) { "this PC" } else { "this Mac" }
+                        ));
+                    }
+                }
+            }
+            row
+        })
+        .collect()
+}
+
+/// Check the agents installed from the ACP Registry: fetch its index (refreshing the cached one
+/// the Add agent sheet shows too) and compare. Nothing to fetch when there are none.
+pub async fn check_registry() -> Vec<AgentVersion> {
+    let added: Vec<_> = crate::catalog::added_agents()
+        .into_iter()
+        .filter(|a| a.source == crate::registry::AgentSource::Registry)
+        .collect();
+    if added.is_empty() {
+        return vec![];
+    }
+    // The outermost reason only ("Couldn't reach the ACP Registry"): the row says it in a line.
+    let fetched = crate::registry::fetch().await.map_err(|e| e.to_string());
+    registry_rows(
+        &added,
+        fetched.as_ref().map_err(String::as_str),
+        crate::registry::current_target(),
+    )
 }
 
 fn no_command(v: &AgentVersion) -> Outcome {
@@ -6276,5 +6446,197 @@ mod tests {
         println!("installed: {version:?}");
         assert!(version.is_some());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The ACP Registry's index as a check would fetch it: Antigravity at `version` for every
+    /// platform but Intel Macs, and an agent of nobody's.
+    fn registry_at(version: &str) -> crate::registry::Registry {
+        let target = |t: &str| {
+            format!(
+                r#""{t}":{{"archive":"https://dl.google.com/agy-{version}-{t}.zip","cmd":"./agy_acp_server.par","sha256":"{}"}}"#,
+                "a".repeat(64)
+            )
+        };
+        let targets = [
+            "darwin-aarch64",
+            "windows-x86_64",
+            "windows-aarch64",
+            "linux-x86_64",
+        ]
+        .map(target)
+        .join(",");
+        crate::registry::parse(&format!(
+            r#"{{"version":"1.0.0","agents":[{{"id":"antigravity-acp","name":"Google Antigravity","version":"{version}","distribution":{{"binary":{{{targets}}}}}}},{{"id":"other","name":"Other","version":"1.0.0"}}]}}"#
+        ))
+        .unwrap()
+    }
+
+    fn antigravity(version: &str) -> crate::registry::AddedAgent {
+        crate::registry::AddedAgent {
+            id: "antigravity-acp".into(),
+            name: "Google Antigravity".into(),
+            command: "/Users/me/Library/Application Support/dev.trek.Trek/agents/antigravity-acp/1.3.0/agy_acp_server.par".into(),
+            source: crate::registry::AgentSource::Registry,
+            version: Some(version.into()),
+            distribution: Some("binary".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn agents_from_the_registry_are_checked_against_it() {
+        let mine = crate::registry::AddedAgent {
+            id: "mine".into(),
+            name: "Mine".into(),
+            command: "/opt/mine".into(),
+            ..Default::default()
+        };
+        let added = [antigravity("1.3.0"), mine];
+        let mac = Some("darwin-aarch64");
+
+        // Behind the registry: offered, and Trek installs it itself.
+        let r = registry_at("1.5.0");
+        let rows = registry_rows(&added, Ok(&r), mac);
+        assert_eq!(rows.len(), 1, "the user's own command isn't checked");
+        let row = &rows[0];
+        assert_eq!(row.id, "registry:antigravity-acp");
+        assert_eq!(row.agent, "acp:antigravity-acp");
+        assert_eq!(
+            (row.installed.as_deref(), row.latest.as_deref()),
+            (Some("1.3.0"), Some("1.5.0"))
+        );
+        assert!(row.compared() && row.update_available() && row.error.is_none());
+        assert_eq!(
+            row.command.as_ref().and_then(|c| c.builtin),
+            Some(Builtin::Registry)
+        );
+        assert_eq!(
+            row.install,
+            Install::Registry {
+                id: "antigravity-acp".into(),
+                distribution: "binary".into()
+            }
+        );
+        assert_eq!(row.install.label(), "the ACP Registry");
+        // `1.5.10` is newer than `1.5.9`: numbers, not text.
+        let rows = registry_rows(&[antigravity("1.5.9")], Ok(&registry_at("1.5.10")), mac);
+        assert!(rows[0].update_available());
+
+        // At the registry's version: compared, nothing to install.
+        let rows = registry_rows(&[antigravity("1.5.0")], Ok(&r), mac);
+        assert!(rows[0].compared() && !rows[0].update_available() && rows[0].error.is_none());
+
+        // The registry went back a version: never a downgrade.
+        let rows = registry_rows(&[antigravity("1.5.0")], Ok(&registry_at("1.3.0")), mac);
+        assert!(!rows[0].update_available());
+
+        // Unreachable: it says it couldn't check, and has no newest version of its own.
+        let rows = registry_rows(&added, Err("Couldn't reach the ACP Registry"), mac);
+        assert_eq!(rows[0].latest, None);
+        assert_eq!(
+            rows[0].error.as_deref(),
+            Some("Couldn't reach the ACP Registry")
+        );
+        assert!(!rows[0].compared());
+
+        // Gone from the registry: it keeps working as it is, and says so.
+        let rows = registry_rows(&[antigravity("1.3.0")], Ok(&registry_at("1.5.0")), mac);
+        assert!(rows[0].error.is_none());
+        let empty = crate::registry::parse(r#"{"version":"1.0.0","agents":[]}"#).unwrap();
+        let rows = registry_rows(&[antigravity("1.3.0")], Ok(&empty), mac);
+        assert!(
+            rows[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("no longer listed")
+        );
+        assert!(!rows[0].update_available());
+
+        // No build of the new version for this computer (an Intel Mac): said, not offered.
+        let rows = registry_rows(&[antigravity("1.3.0")], Ok(&r), Some("darwin-x86_64"));
+        assert!(!rows[0].update_available());
+        assert!(rows[0].error.as_deref().unwrap().contains("has no build"));
+    }
+
+    #[test]
+    fn every_kind_of_install_has_a_way_to_be_checked_or_says_it_has_none() {
+        // Each kind an agent can come from, and where its newest version is asked.
+        let cli = h;
+        let h = cli("acp:antigravity");
+        assert_eq!(h.binary, "agy");
+        assert_eq!(
+            source(h, &Install::Native, Some("1.5.9")),
+            Some(Source::Feed(Feed::GitHub(
+                "google-antigravity/antigravity-cli"
+            )))
+        );
+        assert_eq!(
+            update_command(
+                h,
+                &Install::Native,
+                Path::new("/Users/me/.local/bin/agy"),
+                false,
+                None
+            )
+            .map(|c| c.shown()),
+            Some("agy update".to_string())
+        );
+        let npm = Install::Npm {
+            package: "@openai/codex".into(),
+            prefix: "/opt/homebrew".into(),
+        };
+        assert_eq!(
+            source(cli("codex"), &npm, None),
+            Some(Source::Npm("@openai/codex".into()))
+        );
+        let brew = Install::Brew {
+            formula: "opencode".into(),
+            prefix: "/opt/homebrew".into(),
+            tap: None,
+        };
+        assert_eq!(
+            source(cli("opencode"), &brew, None),
+            Some(Source::Formula("opencode".into()))
+        );
+        // A registry install is asked of the registry (`registry_rows`), never of a CLI's feed,
+        // and no CLI's harness claims it.
+        let registry = Install::Registry {
+            id: "antigravity-acp".into(),
+            distribution: "binary".into(),
+        };
+        assert_eq!(source(h, &registry, None), None);
+        assert!(!h.owns(&registry));
+        assert_eq!(
+            update_command(h, &registry, Path::new("/x"), false, None),
+            None
+        );
+        // Its release feed names it as GitHub does.
+        assert_eq!(
+            parse_latest(
+                &Source::Feed(Feed::GitHub("google-antigravity/antigravity-cli")),
+                r#"{"tag_name":"1.5.13"}"#
+            )
+            .map(|l| l.version),
+            Some("1.5.13".into())
+        );
+        // A row cached by an earlier Trek, from the registry, reads back.
+        let row = AgentVersion {
+            id: "registry:antigravity-acp".into(),
+            agent: "acp:antigravity-acp".into(),
+            name: "Google Antigravity".into(),
+            binary: "/x".into(),
+            installed: Some("1.3.0".into()),
+            latest: Some("1.5.0".into()),
+            install: registry,
+            command: Some(UpdateCommand {
+                builtin: Some(Builtin::Registry),
+                ..UpdateCommand::new("/x", &[])
+            }),
+            error: None,
+        };
+        let json = serde_json::to_string(&row).unwrap();
+        assert!(json.contains(r#""kind":"registry""#) && json.contains(r#""builtin":"registry""#));
+        assert_eq!(serde_json::from_str::<AgentVersion>(&json).unwrap(), row);
     }
 }

@@ -10300,11 +10300,20 @@ impl Workspace {
     }
 
     fn probe_acp(&mut self, only: Option<&str>, cx: &mut Context<Self>) {
+        self.probe_acp_as(only, false, cx);
+    }
+
+    /// Ask the ACP agent keyed `key` what it offers now, whatever it said last time: after its
+    /// login terminal, as the account (and so its plan's models) may be another one.
+    pub(crate) fn reprobe_acp_agent(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.probe_acp_as(Some(key), true, cx);
+    }
+
+    fn probe_acp_as(&mut self, only: Option<&str>, fresh: bool, cx: &mut Context<Self>) {
         // Probing starts the agent and opens a session in its history: not for agents the user
-        // turned off, nor from an isolated (test) process.
-        if !trek_core::paths::real_agents() {
-            return;
-        }
+        // turned off, nor from an isolated (test) process, unless it's one that process installed
+        // itself from a fixture registry (`registry::from_fixture`).
+        let real = trek_core::paths::real_agents();
         let ids: Vec<String> = self
             .agents
             .iter()
@@ -10315,6 +10324,10 @@ impl Workspace {
                         AgentId::OpenCode | AgentId::Droid | AgentId::Acp(_)
                     )
             })
+            .filter(|a| {
+                real || matches!(&a.agent, AgentId::Acp(id) if trek_core::catalog::added_agent(id)
+                    .is_some_and(|added| trek_core::registry::from_fixture(&added)))
+            })
             .map(|a| a.agent.key())
             .filter(|k| !self.settings.disabled_agents.contains(k) && only.is_none_or(|o| o == k))
             .collect();
@@ -10322,9 +10335,12 @@ impl Workspace {
             let (tx, rx) = async_channel::bounded(1);
             let probe_id = id.strip_prefix("acp:").unwrap_or(&id).to_string();
             trek_core::runtime().spawn(async move {
-                let r = trek_agents::acp_probe(&probe_id)
-                    .await
-                    .map_err(|e| format!("{e:#}"));
+                let r = if fresh {
+                    trek_agents::acp_probe_fresh(&probe_id).await
+                } else {
+                    trek_agents::acp_probe(&probe_id).await
+                }
+                .map_err(|e| format!("{e:#}"));
                 let _ = tx.send(r).await;
             });
             let task = cx.spawn(async move |this, cx| {

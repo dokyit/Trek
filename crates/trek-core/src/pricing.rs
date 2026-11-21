@@ -1063,6 +1063,20 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_clis_models_are_priced_as_their_makers_price_them() {
+        // What `agy acp` 1.5.13 lists for a Google AI Pro account (and the registry's server its
+        // Flash ones): its effort and "thinking" suffixes name the same model.
+        let agent = AgentId::Acp("antigravity".into());
+        let id = |m: &str| price(m, &agent).map(|(p, _)| p.model);
+        assert_eq!(id("gemini-3.8-flash-high"), Some("gemini-3.8-flash"));
+        assert_eq!(id("gemini-3.8-flash-low"), Some("gemini-3.8-flash"));
+        assert_eq!(id("claude-sonnet-4-6"), Some("claude-sonnet-4-6"));
+        assert_eq!(id("claude-opus-4-6-thinking"), Some("claude-opus-4-6"));
+        // No price of its own Trek can cite for GPT-OSS 120B: unknown, not a guess.
+        assert_eq!(id("gpt-oss-120b-medium"), None);
+    }
+
+    #[test]
     fn announced_prices_apply_from_their_day() {
         let agent = AgentId::Direct("google".into());
         assert_eq!(
