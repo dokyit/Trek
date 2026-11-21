@@ -426,8 +426,8 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
 /* On a phone each drawing stands small beside its heading, so the page grows no longer. */
 @media (max-width: 767px) {
   .feat-text:has(.ill) { display: grid; grid-template-columns: 1fr auto; grid-template-areas: "h i" "p p"; column-gap: 16px; align-items: end; }
-  .feat-text h3 { grid-area: h; }
-  .feat-text p { grid-area: p; }
+  .feat-text:has(.ill) h3 { grid-area: h; }
+  .feat-text:has(.ill) p { grid-area: p; }
   .feat-text .ill { grid-area: i; width: auto; max-width: none; height: 88px; margin: 0; }
 }
 /* Each drawing draws itself in once as its row arrives. */
