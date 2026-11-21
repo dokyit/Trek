@@ -37,26 +37,26 @@ typography:
     fontFamily: "Bricolage Grotesque, ui-sans-serif, system-ui, sans-serif"
     fontSize: "clamp(2.9rem, 7.4vw, 5.75rem)"
     fontWeight: 680
-    lineHeight: 0.96
-    letterSpacing: "-0.038em"
+    lineHeight: 1.02
+    letterSpacing: "-0.022em"
   headline:
     fontFamily: "Bricolage Grotesque, ui-sans-serif, system-ui, sans-serif"
     fontSize: "clamp(2.3rem, 4.6vw, 3.9rem)"
     fontWeight: 650
-    lineHeight: 1
-    letterSpacing: "-0.032em"
+    lineHeight: 1.04
+    letterSpacing: "-0.02em"
   title-large:
     fontFamily: "Bricolage Grotesque, ui-sans-serif, system-ui, sans-serif"
     fontSize: "clamp(2rem, 3.4vw, 2.9rem)"
     fontWeight: 650
-    lineHeight: 1.08
-    letterSpacing: "-0.024em"
+    lineHeight: 1.1
+    letterSpacing: "-0.02em"
   title:
     fontFamily: "Bricolage Grotesque, ui-sans-serif, system-ui, sans-serif"
     fontSize: "clamp(1.55rem, 2.3vw, 2rem)"
     fontWeight: 650
-    lineHeight: 1.08
-    letterSpacing: "-0.024em"
+    lineHeight: 1.1
+    letterSpacing: "-0.02em"
   title-small:
     fontFamily: "Bricolage Grotesque, ui-sans-serif, system-ui, sans-serif"
     fontSize: "1.4rem"
@@ -101,7 +101,6 @@ rounded:
   shot: "12px"
   button: "14px"
   tile: "16px"
-  panel-narrow: "22px"
   panel: "28px"
 spacing:
   gutter: "clamp(16px, 5vw, 72px)"
@@ -207,20 +206,20 @@ A cool lavender-and-lilac field with warm ink type and one ember accent.
 **Body Font:** Hanken Grotesk (with ui-sans-serif, system-ui)
 **Label/Mono Font:** JetBrains Mono, for inline code on the privacy page only
 
-**Character:** A characterful display grotesque at 650 to 700, tightly tracked, over a calm, clear text grotesque. Both upright; no italics anywhere.
+**Character:** A characterful display grotesque at 650 to 700, tracked in just enough that no two letters touch (-0.022em on the display line, -0.02em on every other heading), over a calm, clear text grotesque. Both upright; no italics anywhere.
 
 ### Hierarchy
-- **Display** (680, clamp to 5.75rem, 0.96): the first screen's headline only.
-- **Headline** (650, clamp to 3.9rem, 1): a section's headline: the features head, Trek for iPhone, Get Trek.
+- **Display** (680, clamp to 5.75rem, 1.02): the first screen's headline only.
+- **Headline** (650, clamp to 3.9rem, 1.04): a section's headline: the features head, Trek for iPhone, Get Trek.
 - **Title large** (650, clamp to 2.9rem): a feature that has a split row to itself.
-- **Title** (650, clamp to 2rem, 1.08): other feature headings. Title small (1.4rem) in the strip, 1.35rem in the build list.
+- **Title** (650, clamp to 2rem, 1.1): other feature headings. Title small (1.4rem) in the strip, 1.35rem in the build list.
 - **Wordmark** (700, 27 px, -0.035em): the lowercase "trek" in the lockup; 22 px in the footer.
 - **Lede** (400, clamp 18 to 21 px, 1.45): the sentence under the display headline, at most 30ch. Section ledes are 19 px, feature text 17 to 18 px at most 40 to 48ch, all in second ink.
 - **Body** (400, 17 px, 1.55): everything else.
 - **Label** (600, 16 px; 17 px on the big button, 15 px on the small): buttons. A file size inside a button is 500, 13 px, tabular, at 72% opacity.
-- **Caption** (14 px; 13 px under the hero window): fine print and captions, in second or muted ink.
+- **Caption** (14 px; 13 px under the hero window): fine print and captions, in second or muted ink. The line under the first screen's buttons sets its numbers tabular and keeps room for two lines, so the version and size GitHub sends move nothing.
 
-The page and privacy headline is 650 at clamp(2.25rem, 4vw, 3.25rem), 1.05. Headings use `text-wrap: balance` and paragraphs `text-wrap: pretty`. `font-synthesis: none` is set, so the browser never fakes a weight or a slant.
+The page and privacy headline is 650 at clamp(2.25rem, 4vw, 3.25rem), 1.05. Privacy paragraphs stop at 70ch. Headings use `text-wrap: balance` and paragraphs `text-wrap: pretty`. Apostrophes in the page's words are typographic (’). `font-synthesis: none` is set, so the browser never fakes a weight or a slant.
 
 ### Named Rules
 **The Plain Headline Rule.** A headline is a plain statement in one colour, in short words. Nothing sits above it: no label, no pill, no eyebrow. Display copy has no colon and no semicolon. No paragraph opens with a bold lead-in.
@@ -233,14 +232,14 @@ Content sits in a column of at most 1180 px plus a fluid gutter (16 to 72 px) on
 
 The first screen is a field with a ground line: the sky gradient ends a fixed depth above the section's foot (clamp(240px, 30vw, 400px), 120 px on a phone) and a 1 px ink hairline at 10% marks it. The window (1086 px) stands across that line.
 
-Under 1024 px splits become one column (a flipped split puts its text first), the strip becomes two columns, the iPhone band stacks, and the build list goes to two columns. Under 768 px the bar drops its links, pairs and the strip go to one column, panels take 22 px corners and 22 px padding, the hero window stays 680 px wide from the left gutter and runs off the right edge, and the build list is one column. Under 421 px the first screen's buttons fill the width. Under 601 px wide recordings switch to their narrow cut.
+Under 1024 px splits become one column (a flipped split puts its text first), the strip becomes two columns, the iPhone band stacks, and the build list goes to two columns. Under 768 px the bar drops its links, pairs and the strip go to one column, panels keep their 28 px corners with 16 px padding (the capture's 12 px plus the padding, so the corners are concentric), the hero window stays 680 px wide from the left gutter and runs off the right edge, and the build list is one column. Under 421 px the first screen's buttons fill the width. Under 601 px wide recordings switch to their narrow cut.
 
 ## Elevation & Depth
 
 Depth is soft and lifted, from light above: low-opacity shade with a long negative-spread blur, never a hard offset. Panels are flat at rest with an inset hairline; what floats is the app.
 
 ### Shadow Vocabulary
-- **Capture frame** (`0 0 0 1px rgb(0 0 0 / 0.07), 0 2px 4px rgb(var(--shade) / 0.06), 0 24px 48px -20px rgb(var(--shade) / 0.42)`): every capture in a panel or the strip.
+- **Capture frame** (`var(--ring), 0 2px 4px rgb(var(--shade) / 0.06), 0 24px 48px -20px rgb(var(--shade) / 0.42)`): every capture in a panel or the strip. The ring is `0 0 0 1px rgb(0 0 0 / 0.06)` by day and `rgb(255 255 255 / 0.08)` at night, where a dark ring vanishes.
 - **Ember button** (`0 1px 0 rgb(255 255 255 / 0.28) inset, 0 10px 24px -12px rgb(var(--shade) / 0.55)`), deepening to `0 16px 30px -14px` at 0.6 on hover.
 - **Line button** (inset 1 px line plus `0 1px 2px` at 0.06), lifting to `0 6px 14px -8px` at 0.3 on hover.
 - **Ground contact** (a blurred radial ellipse of shade at 0.32): where the hero window meets the ground. The window's own shadow is in the capture.
@@ -248,27 +247,31 @@ Depth is soft and lifted, from light above: low-opacity shade with a long negati
 - **iPhone** (`0 40px 80px -30px rgb(0 0 0 / 0.45)` on the front phone; a `drop-shadow(0 30px 40px rgb(0 0 0 / 0.28))` on the back one).
 - **Stuck bar** (`0 1px 0` line, with a 14 px backdrop blur over the ground at 82%).
 
+In forced-colours mode, which drops every shadow, panels and every button get a 1 px CanvasText border, and captures, phones and the menu bar tiles a 1 px outline drawn inside their edge (an outline, so a capture is never resized by a border).
+
 ### Named Rules
 **The App Floats Rule.** Shadows belong to the things that are the app (captures, phones, the window) and to buttons. Panels, the strip and the build list do not cast shadows.
 
 ## Shapes
 
-Corners are gently rounded and grow with the thing: 5 px inline code, 8 px the focus outline, 10 px the skip link, 11 px a small button, 12 px a capture (the app's own window radius), 14 px a big button, 16 px a menu bar tile, 28 px a panel (22 px on a phone). A capture that bleeds out of its panel's foot keeps its top corners and loses its bottom ones; a cropped tall capture fades to nothing over its last 28%, and a strip capture fades out to the right over its last 22%. Phones use their device radii (54 and 45 px, 42 and 37 px on a phone). Nothing is a pill.
+Corners are gently rounded and grow with the thing: 5 px inline code, 8 px the focus outline, 10 px the skip link, 11 px a small button, 12 px a capture (the app's own window radius), 14 px a big button, 16 px a menu bar tile, 28 px a panel. A capture that bleeds out of its panel's foot keeps its top corners and loses its bottom ones; a cropped tall capture fades to nothing over its last 28%, and a strip capture fades out to the right over its last 22%. Phones use their device radii (54 and 45 px, 42 and 37 px on a phone). Nothing is a pill.
 
 The mark lives in one file, `assets/img/mark.svg`: a rounded post and two pointed boards with rounded joins, each a path with an id. Pages draw it with `<use>` so the CSS colours the post and the boards and can move each board.
 
 ## Components
 
 ### Bar and lockup
-Fixed at the top, transparent over the sky, gaining a ground (82% ground, blurred) and a hairline once the page has moved 8 px. Lockup on the left: the mark at 30 px and the lowercase "trek" wordmark. Two nav links in second ink (500, 15 px) brighten to ink on hover. A small ink Download button at the right. The privacy and not-found pages start with the bar already stuck.
+Fixed at the top, transparent over the sky, gaining a ground (82% ground, blurred) and a hairline once the page has moved 8 px. Lockup on the left: the mark at 30 px and the lowercase "trek" wordmark. Two nav links in second ink (500, 15 px) brighten to ink on hover. A small ink Download button at the right. The lockup's target is 44 px tall without making the bar taller. The privacy and not-found pages start with the bar already stuck.
 
 ### Buttons
-- **Shape:** 14 px corners on the 56 px big button, 11 px on the 40 px small button. A stroked 20 px download arrow (2.2 stroke, round caps) sits before the label where there is one.
+- **Shape:** 14 px corners on the 56 px big button, 11 px on the 40 px small button (44 px on a touch screen). A stroked 20 px download arrow (2 px as drawn, `vector-effect: non-scaling-stroke`, round caps) sits before the label where there is one.
 - **Ember (primary):** board on board ink, with an inner top highlight and a soft shade below. Hover lightens one step, rises 1 px and deepens the shadow; press returns it. One per screen.
 - **Ink:** ink on ground; hover mixes 14% ember into the ink. The bar's Download.
 - **Quiet:** ink text on raised white at 42%, with an inset hairline; hover raises the fill to 75%. The first screen's second choice.
 - **Line:** ink on raised white with an inset hairline and a faint drop; hover darkens the ring and lifts. The visitor's own build gets a 2 px inset ember ring.
 - **Transitions:** colours 180 ms, shadow and transform 220 ms, all on the site's ease-out.
+- **Hover** styling sits under `@media (hover: hover)`, so a tap on a touch screen never leaves a button looking hovered; buttons also drop the browser's grey tap flash.
+- **Press:** every button scales to 0.96 over 150 ms ease-out while pressed (the `scale` property, apart from the hover's lift), never when disabled.
 
 ### Panels and captures
 A panel is a 28 px rounded piece of the sky (panel-2 into panel) with an inset hairline, holding one real capture centred. Variants: tall (420 to 560 px high), mid (280 to 380 px), wide (more padding top and bottom), bleed (no bottom padding; the capture rises from the panel's foot with square bottom corners), crop (a fixed height, the capture starts at the top and fades out). A capture is shown at the size it was cut for, not stretched to fill.
@@ -283,21 +286,21 @@ A full-width band whose field runs from the ground into sky-2 and the sky, the o
 Four builds in a row (two under 1024 px, one under 768 px), each under an ink hairline at 22%: a title, a sentence that says what the first launch asks, and line buttons that carry the file size once GitHub has answered.
 
 ### Footer
-One line under a hairline: the lockup at 22 px, the copyright in muted ink, four text links in second ink. Nothing else.
+One line under a hairline: the lockup at 22 px, the copyright in muted ink, four text links in second ink. Nothing else. On a touch screen each link is a 44 px target.
 
 ### Text pages
-Privacy and not-found sit on a sky that fades into the ground over 420 px, in a 760 px column. Privacy: document headings 1.5rem with 52 px above, paragraphs and lists 14 px apart in second ink, a hairline-ruled table that scrolls sideways when narrow, a muted "Last updated" line. Not-found: the mark at 64 px, a headline, one sentence and one ember button, left-aligned in the middle of the screen.
+Privacy and not-found sit on a sky that fades into the ground over 420 px, once (a short page shows ground below it, not the sky again), in a 760 px column. Privacy: document headings 1.5rem with 52 px above, paragraphs and lists 14 px apart in second ink, a hairline-ruled table that scrolls sideways when narrow, a muted "Last updated" line. Not-found: the mark at 64 px, a headline, one sentence and one ember button, left-aligned in the middle of the screen.
 
 ### Motion
-One ease, a steep exponential ease-out (`cubic-bezier(0.16, 1, 0.3, 1)`). Transforms, opacity, blur and clip only. Nothing loops but the app's own recordings.
-- **Signpost settle:** on load the post grows up from its foot (0.7 s), then each board swings round the post from a sliver, overshoots and settles (1.5 s, the second 0.17 s after the first). Once.
-- **Hover lean:** while the ember button is hovered or focused the left-pointing board turns 5 degrees; while the quiet button is, the right-pointing board turns -5 degrees (0.6 s).
-- **First-screen entrance:** headline, lede, buttons and fine line rise 14 px and clear a 6 px blur, 0.1 to 0.38 s apart; the window rises 60 px over 1.3 s.
+One ease, a steep exponential ease-out (`cubic-bezier(0.16, 1, 0.3, 1)`); the press uses plain ease-out. Transforms, opacity, blur and clip only. Nothing loops but the app's own recordings. One entrance token: `--enter` 400 ms, `--rise` 12 px, `--blur` 4 px.
+- **Signpost settle:** on load the post grows up from its foot (0.45 s), then each board swings round the post from a sliver, overshoots and settles (1.1 s, at 0.15 s and 0.27 s). Once. The first screen is still by about 1.4 s.
+- **Hover lean:** while the ember button is hovered (with a pointer that hovers) or focused the left-pointing board turns 5 degrees; while the quiet button is, the right-pointing board turns -5 degrees (0.6 s).
+- **First-screen entrance:** headline (450 ms), lede and buttons (400 ms) rise 12 px out of a 4 px blur, 100 ms apart from 0.1 s; the fine line only fades (0.4 s); the window rises 32 px over 600 ms from 0.4 s.
 - **Window tilt:** the window lies back 10 degrees at 94% scale and comes up flat, full size and 40 px higher over three quarters of a screen of scrolling, cubic ease-out, reversible. With a fine pointer, inside the first screen, it turns up to 2.2 degrees towards the mouse.
 - **Drift:** panel captures and the back phone move up to 18 px against the scroll while near the screen.
-- **Reveals:** headings, text, panels and builds rise 28 px and clear a 6 px blur once as they arrive, 0.08 s apart when several arrive together.
-- **Loops:** each recording is a still poster in the page. As it comes within half a screen, and only when motion is welcome, the script swaps it for a muted, looping, inline video (the narrow cut under 601 px), which plays while a quarter of it is visible and pauses otherwise.
-- **Reduce Motion:** no smooth scroll, no settle, no lean, no entrance, no tilt, no drift, no reveal, and the posters stay still; videos already playing pause when the setting turns on.
+- **Reveals:** one entrance per row: the features head, each feature row or card (its words arrive with its picture), the iPhone band, the strip as a whole and the build list as a whole rise 12 px out of a 4 px blur over 400 ms, once, as they arrive; 0.1 s apart when two or three arrive together, never more. The staged-threads line just sits there.
+- **Loops:** each recording is a still poster in the page. As it comes within half a screen, and only when motion is welcome, the script swaps it for a muted, looping, inline video (the narrow cut under 601 px), which plays while a quarter of it is visible and pauses otherwise, and pauses while the tab is hidden. There is no visible pause control: the loops stop under Reduce Motion and off screen.
+- **Reduce Motion:** no smooth scroll, no settle, no lean, no tilt, no drift, and the posters stay still; the first screen and each reveal only fade (300 ms and 200 ms); videos already playing pause when the setting turns on.
 - **No script:** reveals are gated on a `js` class the script sets, so the page shows whole; posters stay as pictures; the Download button points at the latest release.
 
 ## Do's and Don'ts

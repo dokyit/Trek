@@ -23,7 +23,7 @@
 <link rel="manifest" href="/site.webmanifest?v=3e8b1bb9">
 <link rel="preload" href="/assets/fonts/BricolageGrotesque.woff2?v=a79fdb52" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/assets/fonts/HankenGrotesk.woff2?v=e9201edd" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="/assets/site.css?v=94b5c324">
+<link rel="stylesheet" href="/assets/site.css?v=1fc923d5">
 </head>
 <body class="page-sky">
 <a class="skip" href="#main">Skip to the page</a>
@@ -46,11 +46,11 @@
       <p>On the first launch after setup, Trek asks whether it may share anonymous usage data. If you used an earlier version, it asks you once too. You can change your answer at any time in <strong>Settings, Privacy</strong>, and that page shows exactly what was sent last.</p>
       <ul>
         <li>With a yes, Trek shares anonymous usage counts (how often Trek opens, which agents and tools are used), crash and error reports, and the app version, operating system and architecture.</li>
-        <li>From version 0.4.58, a yes also covers usage totals: each day's token counts and what they would cost at API prices, by agent and model, which of Trek's features you use, how many projects, threads and agents you have, and your theme. If you said yes before that version, Trek asks you about the totals once, and keeps sharing only what you agreed to if you say no. Usage totals have their own switch in Settings, Privacy.</li>
+        <li>From version 0.4.58, a yes also covers usage totals: each day’s token counts and what they would cost at API prices, by agent and model, which of Trek’s features you use, how many projects, threads and agents you have, and your theme. If you said yes before that version, Trek asks you about the totals once, and keeps sharing only what you agreed to if you say no. Usage totals have their own switch in Settings, Privacy.</li>
         <li>Trek never shares prompts, code, file names, paths, transcripts, keys or account emails.</li>
         <li>With a no, nothing is sent, ever, except feedback you send yourself.</li>
       </ul>
-      <p>Nothing is sent before you answer. Nothing is sent if the <code>DO_NOT_TRACK</code> environment variable is set; Trek then doesn't ask, and the Privacy page says why.</p>
+      <p>Nothing is sent before you answer. Nothing is sent if the <code>DO_NOT_TRACK</code> environment variable is set; Trek then doesn’t ask, and the Privacy page says why.</p>
 
       <h2>Where it goes</h2>
       <p>Usage data, crash reports and feedback go to <a href="https://posthog.com">PostHog</a>, on its US cloud (<code>us.i.posthog.com</code>). The key built into Trek can only add events. It cannot read them.</p>
@@ -64,10 +64,10 @@
             <tr><th scope="row">Install</th><td>The first launch after a yes, once. It says whether Trek was already set up on this computer.</td></tr>
             <tr><th scope="row">App opened</th><td>A launch, at most once a day.</td></tr>
             <tr><th scope="row">App updated</th><td>The first launch of a new version, with the old and new version numbers.</td></tr>
-            <tr><th scope="row">Feature used</th><td>The day after: one count for each agent you messaged and each tool panel you opened that day. The names are Trek's own words, such as <code>claude-code</code> or <code>terminal</code>, never anything you typed. An agent you added yourself is counted as "other". With usage totals, it also counts a few things done in Trek, such as starting a thread, a study session or a note, and turns that failed or were stopped.</td></tr>
-            <tr><th scope="row">Tokens used</th><td>Only with usage totals. The day after: for each agent and model, the day's input, output and cache token counts and what they would cost at the provider's API prices. That cost is an estimate from public prices, not what you paid. A model you named yourself, or one running on your computer, is counted as "other". Nothing from before your yes is counted.</td></tr>
+            <tr><th scope="row">Feature used</th><td>The day after: one count for each agent you messaged and each tool panel you opened that day. The names are Trek’s own words, such as <code>claude-code</code> or <code>terminal</code>, never anything you typed. An agent you added yourself is counted as "other". With usage totals, it also counts a few things done in Trek, such as starting a thread, a study session or a note, and turns that failed or were stopped.</td></tr>
+            <tr><th scope="row">Tokens used</th><td>Only with usage totals. The day after: for each agent and model, the day’s input, output and cache token counts and what they would cost at the provider’s API prices. That cost is an estimate from public prices, not what you paid. A model you named yourself, or one running on your computer, is counted as "other". Nothing from before your yes is counted.</td></tr>
             <tr><th scope="row">Setup</th><td>Only with usage totals, at most once a day: how many projects, threads and agents you have, your theme, and whether glass and the phone server are on.</td></tr>
-            <tr><th scope="row">Crash</th><td>The launch after a crash: the error message, where in Trek's own source it happened, and a backtrace.</td></tr>
+            <tr><th scope="row">Crash</th><td>The launch after a crash: the error message, where in Trek’s own source it happened, and a backtrace.</td></tr>
             <tr><th scope="row">Feedback</th><td>Only when you send feedback. See below.</td></tr>
           </tbody>
         </table>
@@ -86,17 +86,17 @@
 
       <h2>Feedback</h2>
       <p>Help, Send Feedback opens a form: what happened, whether it is a bug or an idea, an optional email for a reply, and <strong>Include diagnostics</strong>, which is on by default. The form says in a line what it will send, and shows all of it on request before anything goes. Sending it is the consent, so it works even if you said no to usage data.</p>
-      <p>With diagnostics, feedback carries the app version, operating system and architecture, up to 20 recent warning and error lines, and the last 200 lines of Trek's log, cleaned as described above. Without diagnostics it carries none of that. If you said no to usage data, feedback is sent under a new random id each time, so it can't be tied to anything.</p>
+      <p>With diagnostics, feedback carries the app version, operating system and architecture, up to 20 recent warning and error lines, and the last 200 lines of Trek’s log, cleaned as described above. Without diagnostics it carries none of that. If you said no to usage data, feedback is sent under a new random id each time, so it can’t be tied to anything.</p>
       <p>The form can also open a new issue on GitHub with your message and diagnostics filled in. It never includes your email there, because an issue is public.</p>
 
       <h2>What stays on your computer</h2>
-      <p>In a <code>telemetry</code> folder in Trek's data folder: your answers, the install id, today's counts and token totals, events waiting to be sent (at most 500; each is dropped after five failed tries or a week), and a copy of the last request exactly as it was sent. A crash also leaves a report in the data folder. Until you answer the question it waits there; with a yes the next launch sends it, and with a no it is deleted.</p>
+      <p>In a <code>telemetry</code> folder in Trek’s data folder: your answers, the install id, today’s counts and token totals, events waiting to be sent (at most 500; each is dropped after five failed tries or a week), and a copy of the last request exactly as it was sent. A crash also leaves a report in the data folder. Until you answer the question it waits there; with a yes the next launch sends it, and with a no it is deleted.</p>
 
       <h2>The iPhone app</h2>
-      <p>What you type, dictate or attach in the iPhone app goes to your paired computer, over your local network or your own Tailscale network. From there it goes to the agent you chose on that computer. Claude Code sends it to Anthropic and Codex sends it to OpenAI, for example, under the account you use there and that provider's terms. A model server on your own computer keeps it there unless you set it up otherwise. Trek has no servers in between and keeps no copy on servers of its own. The iPhone keeps threads and files you opened on the phone itself, so they open quickly.</p>
+      <p>What you type, dictate or attach in the iPhone app goes to your paired computer, over your local network or your own Tailscale network. From there it goes to the agent you chose on that computer. Claude Code sends it to Anthropic and Codex sends it to OpenAI, for example, under the account you use there and that provider’s terms. A model server on your own computer keeps it there unless you set it up otherwise. Trek has no servers in between and keeps no copy on servers of its own. The iPhone keeps threads and files you opened on the phone itself, so they open quickly.</p>
       <p>The app asks before your first message, and again before the first message to a provider it has not named yet. Not now sends nothing. You can withdraw the permission in Settings, Privacy and feedback. That stops further sending. It does not delete what your computer or the provider already has.</p>
       <p>Dictation turns speech into text on the iPhone when your language allows it. Otherwise your speech goes to Apple to be turned into text.</p>
-      <p>Trek for iPhone sends no usage data and no crash reports. It has the same feedback form. Feedback goes only when you press Send: your message, your email address if you give one, and, unless you turn it off, the app's version, the iOS version and the architecture. It goes to PostHog under a new random id each time and is not used for tracking.</p>
+      <p>Trek for iPhone sends no usage data and no crash reports. It has the same feedback form. Feedback goes only when you press Send: your message, your email address if you give one, and, unless you turn it off, the app’s version, the iOS version and the architecture. It goes to PostHog under a new random id each time and is not used for tracking.</p>
 
       <h2>Having your data deleted</h2>
       <p>Saying no in Settings, Privacy stops everything from that moment and drops what was waiting to be sent. PostHog keeps what was sent for one year and does not store the address it came from. To have it deleted sooner, write to <!--email_off--><a href="mailto:support@trekdesktop.com">support@trekdesktop.com</a><!--/email_off--> with your install id, which that page shows, or the email address you gave with feedback.</p>
@@ -104,19 +104,19 @@
       <h2>What else Trek connects to</h2>
       <ul>
         <li>Your agents and models. Your prompts and code go to the agents and model providers you choose, through their own tools or your API keys, as they do in a terminal. Trek never reads or stores the logins of the agent CLIs it drives.</li>
-        <li>Updates. Trek checks its releases on GitHub for a new version of itself, and public package feeds for new versions of your agents' command-line tools.</li>
+        <li>Updates. Trek checks its releases on GitHub for a new version of itself, and public package feeds for new versions of your agents’ command-line tools.</li>
         <li>Your phone. The iPhone app connects straight to your computer over your Wi-Fi or Tailscale. No Trek server sits in between. Push notifications go through ntfy, only if you turn them on.</li>
-        <li>The phone remote. For an Android phone or another browser, <a href="/remote/">trekdesktop.com/remote</a> loads from this site and then talks only to your computer. The computers you pair and their tokens stay in that browser's storage on the phone. It may ask for the microphone, to dictate, and the camera, to send a photo. If you turn on its notifications, your computer sends them through the browser's own push service.</li>
+        <li>The phone remote. For an Android phone or another browser, <a href="/remote/">trekdesktop.com/remote</a> loads from this site and then talks only to your computer. The computers you pair and their tokens stay in that browser’s storage on the phone. It may ask for the microphone, to dictate, and the camera, to send a photo. If you turn on its notifications, your computer sends them through the browser’s own push service.</li>
       </ul>
 
       <h2>This website</h2>
       <p>This site sets no cookies and carries no analytics, trackers or third-party fonts. Its pages, type and pictures all come from this domain, which is hosted on Cloudflare; like any host, Cloudflare receives the request your browser makes in order to answer it.</p>
-      <p>The home page makes one request elsewhere: your browser asks GitHub's public API for Trek's latest release, so the download button can point at the right file. That request goes to GitHub and is covered by GitHub's own privacy statement. With JavaScript off it isn't made, and the button leads to the release page.</p>
+      <p>The home page makes one request elsewhere: your browser asks GitHub’s public API for Trek’s latest release, so the download button can point at the right file. That request goes to GitHub and is covered by GitHub’s own privacy statement. With JavaScript off it isn’t made, and the button leads to the release page.</p>
 
       <h2>Questions</h2>
       <p>Write to <!--email_off--><a href="mailto:support@trekdesktop.com">support@trekdesktop.com</a><!--/email_off-->. The full technical account, with every property of every event, is in <a href="https://github.com/dokyit/Trek/blob/main/docs/PRIVACY.md">docs/PRIVACY.md</a> in the repository, and the code that sends it is in <code>crates/trek-telemetry</code>.</p>
-      <h2>Other companies' names</h2>
-      <p>Trek isn't affiliated with or endorsed by Anthropic, OpenAI, Google, Microsoft or any other maker of the agents it runs. Their names belong to their owners and are used only to say which agents Trek works with.</p>
+      <h2>Other companies’ names</h2>
+      <p>Trek isn’t affiliated with or endorsed by Anthropic, OpenAI, Google, Microsoft or any other maker of the agents it runs. Their names belong to their owners and are used only to say which agents Trek works with.</p>
 
       <p class="updated">Last updated 19 November 2026.</p>
     </div>

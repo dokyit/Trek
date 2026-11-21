@@ -138,8 +138,8 @@
       label.textContent = "See the downloads";
       if (other) other.hidden = true;
       if (who.os === "mobile") {
-        fine.textContent = "Trek is a desktop app. Open this page on your Mac or PC to download it. On a phone, use ";
-        fine.append(link("/remote/", "the remote"), " to answer your agents.");
+        fine.textContent = "Trek is a free, open-source desktop app. Open this page on your Mac or PC to download it. On a phone, use ";
+        fine.append(link("/remote/", "the\u00a0remote"), " to answer your agents.");
       } else {
         fine.textContent = "There is no Linux build yet. Trek runs on macOS and Windows.";
       }
@@ -228,12 +228,12 @@
     }, { rootMargin: "20% 0px" });
     driftable.forEach((el) => near.observe(el));
 
-    // Things come in once, a beat apart when they arrive together.
+    // Things come in once, a beat apart when they arrive together, and never more than two beats.
     const seen = new IntersectionObserver((entries) => {
       let n = 0;
       for (const entry of entries) {
         if (!entry.isIntersecting) continue;
-        entry.target.style.setProperty("--delay", `${(n++ * 0.08).toFixed(2)}s`);
+        entry.target.style.setProperty("--delay", `${(Math.min(n++, 2) * 0.1).toFixed(2)}s`);
         entry.target.classList.add("is-in");
         seen.unobserve(entry.target);
       }
@@ -276,7 +276,13 @@
       }
     }, { rootMargin: "50% 0px" });
     posters.forEach((img) => coming.observe(img));
+    // The loops have no button: they stop with Reduce Motion, off screen and in a hidden tab.
     still.addEventListener("change", () => { if (still.matches) all("video").forEach((v) => v.pause()); });
+    document.addEventListener("visibilitychange", () => {
+      for (const v of all("video")) {
+        if (document.hidden) v.pause(); else { play.unobserve(v); play.observe(v); } // asks again whether it is seen
+      }
+    });
   } else {
     all(".reveal").forEach((el) => el.classList.add("is-in"));
   }
