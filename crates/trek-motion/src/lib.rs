@@ -366,6 +366,20 @@ impl Rank {
 /// A row fading in ranks under every row that isn't (`Rank`).
 const ENTERING: f32 = -1e9;
 
+/// How far under another a row has gone (px of it cut off) when it has faded out altogether: its
+/// edge rows of padding go first, so letters are cut only where they can't be seen. With the
+/// rows moving, it's a frame or two either way.
+const CUT_FADE: f32 = 3.;
+
+/// A row's opacity with `cut` px of it cut off by the rows over it.
+fn cut_opacity(cut: f32) -> f32 {
+    if cut <= OVERLAP {
+        1.
+    } else {
+        (1. - cut / CUT_FADE).clamp(0., 1.)
+    }
+}
+
 /// How far two bands must overlap to count: less is rounding.
 const OVERLAP: f32 = 0.25;
 
@@ -886,7 +900,8 @@ impl Element for FlipRow {
     }
 
     /// Painted after every row has been placed: kept off every row over it this frame; going
-    /// up past others, on the surface it carries.
+    /// up past others, on the surface it carries. A row a few pixels under another fades out
+    /// (`CUT_FADE`): nothing of it is cut mid-letter where it can be seen.
     fn paint(
         &mut self,
         _: Option<&GlobalElementId>,
@@ -898,11 +913,19 @@ impl Element for FlipRow {
         cx: &mut App,
     ) {
         let mask = row_mask(&self.store, &self.key, frame.drawn, frame.rank);
+        let opacity = mask.as_ref().map_or(1., |m| {
+            let cut = (m.bounds.top() - frame.drawn.top())
+                .max(frame.drawn.bottom() - m.bounds.bottom())
+                .as_f32();
+            cut_opacity(cut)
+        });
         window.with_content_mask(mask, |window| {
-            if let Some((surface, radius)) = self.surface.filter(|_| frame.lifted) {
-                window.paint_quad(fill(frame.drawn, surface).corner_radii(radius));
-            }
-            self.child.paint(window, cx)
+            window.with_paint_opacity(opacity, |window| {
+                if let Some((surface, radius)) = self.surface.filter(|_| frame.lifted) {
+                    window.paint_quad(fill(frame.drawn, surface).corner_radii(radius));
+                }
+                self.child.paint(window, cx)
+            })
         });
     }
 }
