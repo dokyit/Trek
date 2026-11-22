@@ -26,6 +26,7 @@
 #   TREK_MINISIGN            the minisign binary (default: minisign on PATH)
 #   TREK_REPO                owner/name (default $GITHUB_REPOSITORY, else dokyit/Trek)
 #   BUILD=0                  reuse the binaries already in the target folder
+#   TREK_RELEASE_DIR         where the version folders are (default dist/release; tests use it)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -47,7 +48,7 @@ while [[ $# -gt 0 ]]; do
     --publish) publish=1; shift ;;
     --skip-tests) skip_tests=1; shift ;;
     --existing-manifest) existing=$2; shift 2 ;;
-    -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,29p' "$0"; exit 0 ;;
     -*) die "unknown option $1" ;;
     *) [[ -z $version ]] || die "one version, please"; version=${1#v}; shift ;;
   esac
@@ -64,7 +65,7 @@ esac
 [[ $mode == build && $publish == 1 ]] && die "--build-only never uploads; the upload half is --publish-only --publish"
 repo=${TREK_REPO:-${GITHUB_REPOSITORY:-dokyit/Trek}}
 tag=$channel; [[ $channel == stable ]] && tag=v$version
-out=dist/release/$version
+out=${TREK_RELEASE_DIR:-dist/release}/$version
 pubkey=assets/update/minisign.pub
 minisign=${TREK_MINISIGN:-minisign}
 

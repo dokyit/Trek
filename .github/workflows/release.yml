@@ -480,14 +480,22 @@ jobs:
           script/lib/release-finish.sh state "$VERSION" "$CHANNEL" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_REF_NAME" \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
-      # The Windows dry run merges into this manifest, as a real run merges into the release's.
-      - name: Manifest for the Windows dry run
+      # The Windows, Intel and Linux dry runs merge into this manifest, as a real run's merge into
+      # the release's. One file named outright, so it's at the artifact's top where they look:
+      # upload-artifact keeps the folders after a wildcard (script/lib/dry-run-manifest.sh).
+      - name: Manifest for the dry runs
+        if: inputs.dry_run
+        env:
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+        run: script/lib/dry-run-manifest.sh stage "$VERSION" "$CHANNEL" dist/release "$RUNNER_TEMP/mac-manifest"
+
+      - name: Manifest artifact for the dry runs
         if: inputs.dry_run
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mac-manifest
-          # Any version directory: release.sh takes a leading "v" off the version, the input may not.
-          path: dist/release/*/${{ inputs.channel }}.json
+          path: ${{ runner.temp }}/mac-manifest/${{ inputs.channel }}.json
           retention-days: 1
           if-no-files-found: error
 
@@ -999,8 +1007,14 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $version = $env:TREK_VERSION.TrimStart('v')
           $more = @{}
+          # The Mac's, which the merge must find (script/lib/dry-run-manifest.sh find): without it
+          # the dry run would pass without trying the merge a real run makes.
           $mac = "$env:RUNNER_TEMP\mac-manifest\$env:TREK_CHANNEL.json"
-          if (Test-Path $mac) { $more.ExistingManifest = $mac }
+          if (-not (Test-Path $mac)) {
+            Write-Output "::error::the mac-manifest artifact has no $env:TREK_CHANNEL.json at its top; the macOS job's `"Manifest for the dry runs`" stages it there"
+            exit 1
+          }
+          $more.ExistingManifest = $mac
           ./script/release.ps1 $env:TREK_VERSION -Channel $env:TREK_CHANNEL -PublishOnly @more
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $out = "dist\release\$version"
@@ -1052,7 +1066,8 @@ jobs:
           CHANNEL: ${{ inputs.channel }}
         run: |
           out="dist/release/${VERSION#v}"
-          merged=$(python3 script/lib/merge-manifest.py "$RUNNER_TEMP/mac-manifest/$CHANNEL.json" "$out/$CHANNEL.json")
+          mac=$(script/lib/dry-run-manifest.sh find "$RUNNER_TEMP/mac-manifest" "$CHANNEL")
+          merged=$(python3 script/lib/merge-manifest.py "$mac" "$out/$CHANNEL.json")
           {
             echo "### Manifest with the Intel build (dry run: nothing uploaded)"
             echo
@@ -1116,10 +1131,10 @@ jobs:
           VERSION: ${{ inputs.version }}
           CHANNEL: ${{ inputs.channel }}
         run: |
-          mac="$RUNNER_TEMP/mac-manifest/$CHANNEL.json"
-          more=()
-          [[ -f $mac ]] && more=(--existing-manifest "$mac")
-          script/release-linux.sh "$VERSION" --channel "$CHANNEL" --publish-only "${more[@]}"
+          # Into the Mac's manifest, as a real run merges into the release's: without it the
+          # Linux entries would merge into a stand-in and try nothing (as 0.4.64-beta.1's did).
+          mac=$(script/lib/dry-run-manifest.sh find "$RUNNER_TEMP/mac-manifest" "$CHANNEL")
+          script/release-linux.sh "$VERSION" --channel "$CHANNEL" --publish-only --existing-manifest "$mac"
           {
             echo "### Manifest with the Linux builds (dry run: nothing uploaded)"
             echo
