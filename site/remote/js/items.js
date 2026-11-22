@@ -295,7 +295,7 @@ function WorkCard({ card, threadId }) {
     )}</div>`}
     ${card.conflicts?.length > 0 && html`<div class="muted" style=${{ fontSize: '13px', marginTop: '6px' }}>Conflicts in ${card.conflicts.join(', ')}</div>`}
     <div class="row-btns" style=${{ marginTop: '10px' }}>
-      ${card.url && html`<a class="btn small" href=${card.url} target="_blank" rel="noopener noreferrer"><${Icon} name="external" size="s" />Open</a>`}
+      ${card.url && /^https?:\/\//.test(card.url) && html`<a class="btn small" href=${card.url} target="_blank" rel="noopener noreferrer"><${Icon} name="external" size="s" />Open</a>`}
       ${(card.actions || []).includes('merge') && html`<button class="btn small primary" type="button" disabled=${busy} onClick=${() => act('merge')}>Merge</button>`}
       ${(card.actions || []).includes('resolve') && html`<button class="btn small" type="button" disabled=${busy} onClick=${() => act('resolve')}>Resolve conflicts</button>`}
       ${(card.actions || []).includes('rerun') && html`<button class="btn small" type="button" disabled=${busy} onClick=${() => act('rerun')}>Re-run</button>`}

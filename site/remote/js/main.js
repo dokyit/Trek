@@ -7,7 +7,6 @@ import { html } from './ui.js';
 import * as app from './model.js';
 import { parsePairing } from './link.js';
 import { openTarget } from './push.js';
-import { localNetworkPermission } from './client.js';
 import { apply } from './look.js';
 import { ThreadScreen } from './thread.js';
 import { MachinesScreen, NewThreadScreen, PairScreen, SettingsScreen, ThreadsScreen, WelcomeScreen } from './screens.js';
@@ -64,9 +63,10 @@ async function start() {
     // The link itself too: an iPhone's Safari copies it into the Home Screen app, which keeps a
     // pairing of its own (`PairScreen`).
     app.state.pairing = { hostId: pairing.hostId, name: pairing.name, routes: pairing.routes, certs: pairing.certs, pairing: { code: pairing.code }, push: pairing.push, link: location.origin + location.pathname + hash };
+    // Never pairs by itself (as the iPhone app doesn't): any page can open a pairing link, one
+    // naming a computer that isn't the user's among them. Connect pairs, once the user has read
+    // whose it is.
     app.go({ screen: 'pair' }, { replace: true });
-    // A browser that already lets the page on the network pairs at once; otherwise Connect asks.
-    if ((await localNetworkPermission()) === 'granted') app.use(app.state.pairing);
   } else if (new URLSearchParams(location.search).has('demo')) {
     app.startDemo();
   } else if (machines.length) {
