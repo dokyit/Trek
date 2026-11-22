@@ -1163,6 +1163,23 @@ fn origin_of(url: &str) -> Option<&str> {
     Some(&url[..scheme.len() + 3 + end])
 }
 
+/// `url` as the log names it: without its query or fragment, where sign-in codes and tokens travel
+/// (`?code=…`, `#access_token=…`), nor a name and password before its host. The log may go with
+/// feedback.
+fn for_log(url: &str) -> String {
+    let url = &url[..url.find(['?', '#']).unwrap_or(url.len())];
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let end = rest.find('/').unwrap_or(rest.len());
+            let host = rest[..end]
+                .rsplit_once('@')
+                .map_or(&rest[..end], |(_, h)| h);
+            format!("{scheme}://{host}{}", &rest[end..])
+        }
+        None => url.to_string(),
+    }
+}
+
 /// `a` and `b` are on one origin: what a page can move between by the history API, and no more.
 fn same_origin(a: &str, b: &str) -> bool {
     matches!((origin_of(a), origin_of(b)), (Some(x), Some(y)) if x.eq_ignore_ascii_case(y))
@@ -2405,7 +2422,7 @@ impl BrowserPanel {
                     url
                 };
                 if let Some((heading, why)) = asks::load_failure(&domain, code, &url) {
-                    tracing::info!("browser: {url} failed: {domain} {code}");
+                    tracing::info!("browser: {} failed: {domain} {code}", for_log(&url));
                     self.show_load_failure(id, url, Some((heading, &why)), cx);
                 }
             }
@@ -2416,7 +2433,7 @@ impl BrowserPanel {
                     .is_some_and(|at| at.elapsed() < Duration::from_secs(60));
                 tab.crashed = Some(Instant::now());
                 let url = tab.page.address();
-                tracing::warn!("browser: the page's process ended ({url})");
+                tracing::warn!("browser: the page's process ended ({})", for_log(&url));
                 if again || url.is_empty() {
                     self.show_load_failure(id, url, Some(asks::CRASHED), cx);
                 } else {
@@ -4559,11 +4576,34 @@ mod tests {
     use super::{Captures, Msg, PAGES_SCHEME, native, webview2};
     use super::{
         DRAWN_DARK_JS, ERROR_URL, FAVICON_MAX_BYTES, Page, SAFARI_FALLBACK, START_URL,
-        decode_favicon, download_favicon, error_page_why, extract_title, favicon_url,
+        decode_favicon, download_favicon, error_page_why, extract_title, favicon_url, for_log,
         force_dark_js, from_view, from_webview2, host_of, normalize, plist_version,
         safari_user_agent, same_origin, scheme_lags_a_load, snap_frame, to_view, to_webview2,
     };
     use gpui_kit::ImageFormat;
+
+    /// The log names a page without what sign-ins put in its address: the query, the fragment, a
+    /// name and password.
+    #[test]
+    fn the_log_names_a_page_without_its_codes() {
+        assert_eq!(
+            for_log("http://localhost:8123/callback?code=4/0Ab_secret&state=x"),
+            "http://localhost:8123/callback"
+        );
+        assert_eq!(
+            for_log("https://app.example/#access_token=abc"),
+            "https://app.example/"
+        );
+        assert_eq!(
+            for_log("https://me:hunter2@host.example/x"),
+            "https://host.example/x"
+        );
+        assert_eq!(
+            for_log("https://example.com/a/b"),
+            "https://example.com/a/b"
+        );
+        assert_eq!(for_log("about:blank"), "about:blank");
+    }
 
     #[test]
     fn a_page_can_only_name_an_address_on_its_own_origin() {

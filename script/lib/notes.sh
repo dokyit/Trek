@@ -42,7 +42,7 @@ EOF
 trek_linux_install_line() { # version
   # Debian orders 0.4.1~beta.2 before 0.4.1 (script/bundle-linux.sh names the .deb so).
   cat <<'EOF' | sed "s/@VERSION@/$1/g; s/@DEBVERSION@/$(echo "$1" | sed 's/-/~/')/g"
-- **Linux** (a preview; Ubuntu 22.04, Debian 12, Fedora 36 or later; x86_64 or Arm): on Ubuntu or Debian, `sudo apt install ./trek_@DEBVERSION@_amd64.deb` (`_arm64.deb` on Arm) installs Trek with what it needs; download the next `.deb` to update. Elsewhere, download `Trek-@VERSION@-linux-x86_64.AppImage` (`-linux-aarch64` on Arm), make it executable and run it: it updates itself from Settings → Updates, and needs GTK 3 and WebKitGTK 4.1 from your package manager. (`Trek-@VERSION@-linux-x86_64.tar.gz` is the same app as a folder.)
+- **Linux** (a preview; Ubuntu 22.04, Debian 12, Fedora 36 or later; x86_64 or Arm): on Ubuntu or Debian, `sudo apt install ./trek_@DEBVERSION@_amd64.deb` (`_arm64.deb` on Arm) installs Trek with what it needs, and Trek says in Settings → Updates when a new version is out, whose `.deb` you install to update. Elsewhere, download `Trek-@VERSION@-linux-x86_64.AppImage` (`-linux-aarch64` on Arm), make it executable and run it: it updates itself from Settings → Updates, and needs GTK 3 and WebKitGTK 4.1 from your package manager. (`Trek-@VERSION@-linux-x86_64.tar.gz` is the same app as a folder.)
 EOF
 }
 

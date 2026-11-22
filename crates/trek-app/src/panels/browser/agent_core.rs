@@ -335,6 +335,28 @@ pub struct Ask {
     pub kind: Sensitive,
     pub title: String,
     pub detail: String,
+    /// The site it's on (the page's origin, lower case): "Allow for this session" covers this
+    /// kind of action on this site alone.
+    pub site: String,
+    /// What of the script the card can't show, in characters: the user can't allow what they
+    /// can't read, so a card isn't put up for it.
+    pub hidden: usize,
+}
+
+/// The most of a script an approval card shows.
+pub const SCRIPT_SHOWN: usize = 4000;
+
+/// Where an action asked about happens: the page's origin, or the page itself when it has none
+/// (`about:blank`).
+pub fn site_of(page: &str) -> String {
+    super::origin_of(page).unwrap_or(page).to_ascii_lowercase()
+}
+
+/// The page in front is still the one the user was asked about: the same tab, on the same site.
+/// A page may move on while the card is up (a hostile one may send itself elsewhere), or the user
+/// may switch tabs: what they allowed was for the page the card named.
+pub fn same_page(asked: (u64, &str), now: (u64, &str)) -> bool {
+    asked.0 == now.0 && site_of(asked.1) == site_of(now.1)
 }
 
 /// Whether `kind` needs the user's yes at `access`. Full access asks nothing; Auto lets a form go
@@ -357,12 +379,16 @@ pub fn ask_for(tool: &str, args: &Value, probe: Option<&Value>) -> Option<Ask> {
         .and_then(|p| p["describe"].as_str())
         .unwrap_or("an element")
         .to_string();
+    let site = site_of(page);
     if tool == "browser_eval" {
-        let js = args["js"].as_str().unwrap_or_default();
+        let js = args["js"].as_str().unwrap_or_default().trim();
+        let length = js.chars().count();
         return Some(Ask {
             kind: Sensitive::Eval,
             title: format!("Run a script in {host}"),
-            detail: clip(js.trim(), 600),
+            detail: clip(js, SCRIPT_SHOWN),
+            site,
+            hidden: length.saturating_sub(SCRIPT_SHOWN),
         });
     }
     let probe = probe?;
@@ -371,6 +397,8 @@ pub fn ask_for(tool: &str, args: &Value, probe: Option<&Value>) -> Option<Ask> {
             kind: Sensitive::Password,
             title: format!("Type into a password field on {host}"),
             detail: format!("The agent wants to type into {what} on {page}."),
+            site,
+            hidden: 0,
         });
     }
     if let Some(file) = probe["download"]
@@ -381,6 +409,8 @@ pub fn ask_for(tool: &str, args: &Value, probe: Option<&Value>) -> Option<Ask> {
             kind: Sensitive::Download,
             title: format!("Download a file from {host}"),
             detail: format!("The agent wants to click {what}, which downloads {file}."),
+            site,
+            hidden: 0,
         });
     }
     let submits = tool == "browser_click"
@@ -402,6 +432,8 @@ pub fn ask_for(tool: &str, args: &Value, probe: Option<&Value>) -> Option<Ask> {
                         _ => format!("Enter in {what}"),
                     }
                 ),
+                site,
+                hidden: 0,
             });
         }
     }
@@ -712,6 +744,46 @@ Focused: textbox \"Email\"
             (js.kind, js.detail.as_str()),
             (Sensitive::Eval, "document.cookie")
         );
+    }
+
+    /// What the user allows is for the page the card names: a session's yes covers that site
+    /// alone, a page that moved on (or another tab in front) isn't the one asked about, and a
+    /// script longer than the card shows says how much it hides.
+    #[test]
+    fn an_approval_is_for_the_page_and_script_it_names() {
+        let at = |page: &str| json!({ "page": page });
+        let local = ask_for(
+            "browser_eval",
+            &json!({"js": "1"}),
+            Some(&at("http://localhost:3000/app")),
+        )
+        .unwrap();
+        let mail = ask_for(
+            "browser_eval",
+            &json!({"js": "1"}),
+            Some(&at("https://mail.example.com/inbox")),
+        )
+        .unwrap();
+        assert_eq!(local.site, "http://localhost:3000");
+        assert_ne!(local.site, mail.site, "a session's yes is per site");
+        assert!(same_page(
+            (1, "http://localhost:3000/app"),
+            (1, "http://localhost:3000/other#x")
+        ));
+        assert!(!same_page(
+            (1, "http://localhost:3000/app"),
+            (1, "https://mail.example.com/inbox")
+        ));
+        assert!(!same_page(
+            (1, "http://localhost:3000/app"),
+            (2, "http://localhost:3000/app")
+        ));
+        assert!(same_page((1, "about:blank"), (1, "about:blank")));
+        assert_eq!(local.hidden, 0);
+        let long = "x".repeat(SCRIPT_SHOWN + 25);
+        let long = ask_for("browser_eval", &json!({ "js": long }), None).unwrap();
+        assert_eq!(long.hidden, 25);
+        assert_eq!(long.detail.chars().count(), SCRIPT_SHOWN);
     }
 
     #[test]

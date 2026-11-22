@@ -263,10 +263,10 @@ macos = "yes"
 windows = "yes"
 linux = "partial"
 live = ["update-demo ready", "wait 300", "count updater 1", "update-demo clear"]
-how = { macos = "The bundle swapped in one rename.", windows = "A staged folder swapped by trek-update.exe after quitting, with rollback, and guarded-folder (ransomware protection, Defender) handling.", linux = "The AppImage replaces itself, checked against the same minisign key; a .deb install says to get the new .deb (there's no apt repository)." }
-note = "Linux: only the AppImage updates itself; a .deb or tarball install is updated by hand."
-code = ["crates/trek-core/src/update.rs", "crates/trek-update/src/lib.rs"]
-tests = ["crates/trek-update/tests/swap.rs", "crates/trek-app/tests/common/mod.rs"]
+how = { macos = "The bundle swapped in one rename.", windows = "A staged folder swapped by trek-update.exe after quitting, with rollback, and guarded-folder (ransomware protection, Defender) handling.", linux = "The AppImage replaces itself, checked against the same minisign key. A .deb or tarball install checks the same feed and says when a new version is out, in Settings › Updates and the sidebar's notice, with a button to the release's page (built from the feed and the version, never a link from the manifest); it downloads nothing (there's no apt repository)." }
+note = "Linux: only the AppImage updates itself; a .deb or tarball install is told of a new version and updated by hand."
+code = ["crates/trek-core/src/update.rs", "crates/trek-update/src/lib.rs", "crates/trek-updater/src/lib.rs"]
+tests = ["crates/trek-update/tests/swap.rs", "crates/trek-app/tests/common/mod.rs", "crates/trek-app/tests/update_notice.rs"]
 
 [[feature]]
 id = "native-builds"
@@ -1464,8 +1464,8 @@ macos = "yes"
 windows = "yes"
 linux = "yes"
 live = ["route project:{project}", "pace 0", "send mock:write", "wait idle 30000", "wait 1000", "count path-* 1+"]
-how = { macos = "`/Users/…` and `~/…` paths.", windows = "Drive paths (`C:\\…`, `C:/…`), network ones (`\\\\server\\…`), `~\\…` and `.\\…`, with either separator, and `file:///C:/…` links (an image drawn inline); a `:line` after one is cut off, the drive's `C:` kept." }
-code = ["crates/trek-app/src/md.rs"]
+how = { macos = "`/Users/…` and `~/…` paths. One under the automounter's `/net/<host>/` isn't looked up (looking mounts that computer), unless the thread's folder is on that host. A link to a file that runs a program when opened (an app, a script, one marked executable) asks first.", windows = "Drive paths (`C:\\…`, `C:/…`), network ones (`\\\\server\\…`), `~\\…` and `.\\…`, with either separator, and `file:///C:/…` links (an image drawn inline); a `:line` after one is cut off, the drive's `C:` kept. A network path (`\\\\server\\…`, `\\\\?\\UNC\\…`) or a device one isn't looked up (looking connects to that server and offers it the user's sign-in), unless the thread's folder is on that server. A link to a file that runs a program when opened (`.exe`, `.bat`, `.ps1`, `.lnk`, … by its extension: Windows marks nothing executable) asks first.", linux = "`/home/…` and `~/…` paths. One under autofs's `/net/<host>/` (as on the Mac), or in a share the file manager mounted (GVFS's `/run/user/<uid>/gvfs/smb-share:server=<host>,…`, `sftp:host=…`, `dav:host=…`; not a phone's `mtp:`), isn't looked up unless the thread's folder is on that host: looking waits on that server. A link to a file that runs a program when opened (one marked executable, an `.AppImage`, a `.desktop` entry, a `.deb`, `.rpm`, `.snap` or `.flatpakref` whose installer it starts) asks first, as does a link of a scheme another app takes (`ssh:`, `smb:`, `sftp:`, anything else `xdg-open` hands on)." }
+code = ["crates/trek-app/src/md.rs", "crates/trek-core/src/paths.rs"]
 tests = ["crates/trek-app/src/md.rs"]
 
 [[feature]]

@@ -332,6 +332,10 @@ fn mentioned_paths(text: &str, cwd: Option<&Path>, keep: fn(&Path) -> bool) -> V
         } else {
             continue;
         };
+        // Another computer's (`\\server\share`): looking would connect there.
+        if crate::paths::reaches_out(&path, cwd) {
+            continue;
+        }
         if keep(&path) && !out.contains(&path) {
             out.push(path);
         }

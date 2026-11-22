@@ -265,7 +265,7 @@ Trek drives each vendor's own CLI, so your subscriptions work as they do in the 
 
 **Linux**, a preview (Ubuntu 22.04, Debian 12, Fedora 36 or later; x86_64 or Arm), from the first release that carries Linux downloads:
 
-1. Ubuntu or Debian: download `trek_<version>_amd64.deb` (`_arm64.deb` on Arm) and run `sudo apt install ./trek_<version>_amd64.deb`, which brings what Trek needs. Download the next `.deb` to update.
+1. Ubuntu or Debian: download `trek_<version>_amd64.deb` (`_arm64.deb` on Arm) and run `sudo apt install ./trek_<version>_amd64.deb`, which brings what Trek needs. Trek says in **Settings › Updates** when a new version is out; download its `.deb` to update.
 2. Anywhere else: download `Trek-<version>-linux-x86_64.AppImage` (`linux-aarch64` on Arm), `chmod +x` it and run it. It needs GTK 3 and WebKitGTK 4.1 from your package manager (it names them if they're missing), adds itself to your app menu, and updates itself from **Settings › Updates**.
 
 <details>

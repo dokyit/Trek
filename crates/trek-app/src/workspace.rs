@@ -2454,7 +2454,9 @@ impl Workspace {
             );
             this.arrived(relocated, cx);
         }
-        if trek_core::update::blocker().is_none() {
+        // A .deb or tarball install, which the user updates by hand, shows what the new one brought
+        // as well (`Blocker::notify_only`).
+        if trek_core::update::blocker().is_none_or(|b| b.notify_only()) {
             // Windows: trek-update couldn't swap the update in, and put this version back.
             if let Some(failure) = trek_core::update::take_install_failure() {
                 match relocate::failure_offer(&failure, windows) {
@@ -10801,11 +10803,17 @@ impl Workspace {
 
     // ---------- updates ----------
 
-    pub fn update_view(&self, cx: &App) -> UpdateView {
+    /// Why this copy can't replace itself (`trek_core::update::blocker`), or what a test said.
+    fn update_blocker(&self) -> Option<trek_core::update::Blocker> {
         #[cfg(any(test, feature = "test-support", feature = "shots"))]
-        let blocker = self.blocked.unwrap_or_else(trek_core::update::blocker);
-        #[cfg(not(any(test, feature = "test-support", feature = "shots")))]
-        let blocker = trek_core::update::blocker();
+        if let Some(said) = self.blocked {
+            return said;
+        }
+        trek_core::update::blocker()
+    }
+
+    pub fn update_view(&self, cx: &App) -> UpdateView {
+        let blocker = self.update_blocker();
         self.moving_view(crate::updater::wait::with_running(
             crate::updater::describe_update(
                 &self.updater.status,
@@ -10827,6 +10835,16 @@ impl Workspace {
             UpdateAction::DismissOldCopy => self.dismiss_old_copy(cx),
             UpdateAction::Check => self.check_for_updates(true, cx),
             UpdateAction::Download => self.download_update(cx),
+            // Linux's .deb and tarball: the release's page, built from the feed and the version
+            // the check found (never a link the manifest gives).
+            UpdateAction::OpenDownloadPage => {
+                if let Some(offer) = &self.updater.offer {
+                    cx.open_url(&trek_core::update::download_page(
+                        &self.settings.updates,
+                        &offer.version,
+                    ));
+                }
+            }
             UpdateAction::Restart => {
                 self.updater.later = None;
                 self.restart_to_update(cx)
@@ -10874,10 +10892,13 @@ impl Workspace {
                 trek_core::update::blocker()
             }
         });
-        if blocked.is_some() {
+        // Linux's .deb and tarball do ask, only to say what's out (`Blocker::notify_only`): what the
+        // check finds is never downloaded.
+        if blocked.is_some_and(|b| !b.notify_only()) {
             cx.notify();
             return;
         }
+        let downloads = blocked.is_none();
         let Some(ticket) = self
             .updater
             .begin_check(self.settings.updates.channel, now_ms())
@@ -10900,7 +10921,7 @@ impl Workspace {
         let task = cx.spawn(async move |this, cx| {
             let Ok(result) = rx.recv().await else { return };
             let _ = this.update(cx, |this, cx| {
-                let auto_download = this.settings.updates.auto_download;
+                let auto_download = downloads && this.settings.updates.auto_download;
                 let before = this.updater.offer.as_ref().map(|o| o.version.clone());
                 let download = this.updater.finish_check(
                     ticket,
@@ -10949,7 +10970,8 @@ impl Workspace {
     /// What this version brought, until the user has seen it: only after an update, and only for
     /// a release (a dev build has no notes of its own).
     pub fn whats_new(&self) -> Option<&trek_core::changelog::Release> {
-        if trek_core::update::blocker().is_some()
+        // A .deb or tarball install is updated by hand (`notify_only`), and has notes as much.
+        if trek_core::update::blocker().is_some_and(|b| !b.notify_only())
             || self.settings.updates.seen_notes == trek_core::VERSION
         {
             return None;
@@ -10995,6 +11017,10 @@ impl Workspace {
     /// Download, verify and unpack the update the last check found; it's `Ready` once the new
     /// bundle sits staged, so installing is a rename.
     pub fn download_update(&mut self, cx: &mut Context<Self>) {
+        // Linux's .deb and tarball only say what's out: nothing downloads there.
+        if self.update_blocker().is_some_and(|b| b.notify_only()) {
+            return;
+        }
         let Some(crate::updater::DownloadJob {
             update,
             ticket,

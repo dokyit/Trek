@@ -236,6 +236,105 @@ fn tildify_with(path: &std::path::Path, sep: &str) -> String {
     }
 }
 
+/// The other computer that looking at `path` would reach: on Windows a share's server
+/// (`\\server\share\…`, `//server/…`, `\\?\UNC\server\…`), or any other `\\?\` or `\\.\` device
+/// path but a drive's (`device`); elsewhere the automounter's `/net/<host>/…`, and on Linux a share
+/// GVFS (the file manager) mounted, `/run/user/<uid>/gvfs/smb-share:server=<host>,…/…` (`host=`
+/// for sftp, dav, ftp and the rest). `None` for a path on this one. Asking whether such a path exists connects to that computer, and on Windows offers
+/// it the user's sign-in (NTLM), so text an agent or a web page wrote mustn't make Trek look.
+pub fn other_machine(path: &std::path::Path) -> Option<String> {
+    other_machine_on(&path.to_string_lossy(), WINDOWS)
+}
+
+/// Paths are read as Windows reads them (shares, device paths) or as Unix does (`/net`).
+const WINDOWS: bool = cfg!(windows);
+
+/// [`other_machine`] for a path written `raw`, as Windows reads it (`windows`) or as Unix does.
+pub fn other_machine_on(raw: &str, windows: bool) -> Option<String> {
+    let lower = |s: &str| s.to_ascii_lowercase();
+    if !windows {
+        if let Some(rest) = raw.strip_prefix("/net/") {
+            let host = rest.split('/').next().unwrap_or_default();
+            return (!host.is_empty()).then(|| lower(host));
+        }
+        return gvfs_host(raw).map(|h| lower(&h));
+    }
+    let sep = |c: char| c == '\\' || c == '/';
+    let mut chars = raw.chars();
+    if !(chars.next().is_some_and(sep) && chars.next().is_some_and(sep)) {
+        return None;
+    }
+    let rest = &raw[2..];
+    let mut parts = rest.split(sep);
+    let first = parts.next().unwrap_or_default();
+    if first == "?" || first == "." {
+        let next = parts.next().unwrap_or_default();
+        // `\\?\C:\…`, a drive's long form, is this computer's.
+        let drive = next.len() == 2
+            && next.as_bytes()[0].is_ascii_alphabetic()
+            && next.as_bytes()[1] == b':';
+        if drive {
+            return None;
+        }
+        if next.eq_ignore_ascii_case("UNC") {
+            let server = parts.next().unwrap_or_default();
+            return Some(if server.is_empty() {
+                "device".into()
+            } else {
+                lower(server)
+            });
+        }
+        return Some("device".into());
+    }
+    Some(if first.is_empty() {
+        "device".into()
+    } else {
+        lower(first)
+    })
+}
+
+/// The server of a GVFS mount's path, `/run/user/<uid>/gvfs/<backend>:<key>=<value>,…/…`: its
+/// `server=` (an SMB share) or `host=` (sftp, dav, ftp, nfs, afp…). A phone's mount (`mtp:`,
+/// `gphoto2:`, `afc:`, whose `host=` is the device) or one with neither key (`trash:`) is this
+/// computer's, as is anything that isn't under a user's runtime folder.
+fn gvfs_host(raw: &str) -> Option<String> {
+    let rest = raw.strip_prefix("/run/user/")?;
+    let mut parts = rest.split('/');
+    let uid = parts.next()?;
+    if uid.is_empty() || !uid.bytes().all(|b| b.is_ascii_digit()) || parts.next()? != "gvfs" {
+        return None;
+    }
+    let (backend, keys) = parts.next()?.split_once(':')?;
+    if matches!(backend, "mtp" | "gphoto2" | "afc") {
+        return None;
+    }
+    keys.split(',')
+        .filter_map(|kv| kv.split_once('='))
+        .find(|(k, _)| *k == "server" || *k == "host")
+        .map(|(_, v)| v.to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Whether looking at `path` reaches another computer ([`other_machine`]) that `cwd`, the folder
+/// the text naming it belongs to, isn't on already: a project kept on a share still finds its own
+/// files there, while a path an answer names on any other server isn't looked at.
+pub fn reaches_out(path: &std::path::Path, cwd: Option<&std::path::Path>) -> bool {
+    reaches_out_on(
+        &path.to_string_lossy(),
+        cwd.map(|c| c.to_string_lossy()).as_deref(),
+        WINDOWS,
+    )
+}
+
+/// [`reaches_out`] for paths written `path` and `cwd`, as Windows reads them (`windows`) or as
+/// Unix does.
+fn reaches_out_on(path: &str, cwd: Option<&str>, windows: bool) -> bool {
+    match other_machine_on(path, windows) {
+        None => false,
+        Some(machine) => cwd.and_then(|c| other_machine_on(c, windows)).as_ref() != Some(&machine),
+    }
+}
+
 /// Move `path` to the Trash (the Recycle Bin on Windows), where the user can still get it back.
 pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
     let path = path.to_path_buf();
@@ -397,6 +496,96 @@ mod tests {
         // What can be downloaded again stays with the rest of an isolated process's data, not
         // in the user's local folder.
         assert_eq!(super::local_data_dir(), dir);
+    }
+
+    /// A path that would make Trek connect to another computer just to look at it: a Windows
+    /// share in every form Windows takes one, a device path, the automounter's `/net`. A drive's
+    /// long form, a local path, and the Unix reading of backslashes are this computer's.
+    #[test]
+    fn paths_on_other_machines_are_told_apart() {
+        use super::other_machine_on as other;
+        for (raw, machine) in [
+            (r"\\attacker.example\share\x.png", "attacker.example"),
+            ("//Attacker/share/x", "attacker"),
+            (r"\/attacker\share", "attacker"),
+            (r"\\?\UNC\nas\code\a.rs", "nas"),
+            (r"\\.\UNC\nas\code", "nas"),
+            (r"\\.\pipe\trek", "device"),
+            (r"\\?\GLOBALROOT\Device\x", "device"),
+            (r"\\", "device"),
+        ] {
+            assert_eq!(other(raw, true).as_deref(), Some(machine), "{raw}");
+        }
+        for raw in [
+            r"C:\Users\me\x.png",
+            r"\\?\C:\Users\me",
+            r"\Users\me",
+            "src/main.rs",
+        ] {
+            assert_eq!(other(raw, true), None, "{raw}");
+        }
+        assert_eq!(
+            other("/net/host.example/x", false).as_deref(),
+            Some("host.example")
+        );
+        for raw in [
+            r"\\attacker\share\x",
+            "//attacker/share",
+            "/network/x",
+            "/net",
+            "/Users/me/net/x",
+        ] {
+            assert_eq!(other(raw, false), None, "{raw}");
+        }
+        // A project on a share still sees its own files there, and no other server's.
+        use super::reaches_out_on as out;
+        let share = Some(r"\\NAS\code\proj");
+        assert!(!out(r"\\nas\code\proj\a.rs", share, true));
+        assert!(out(r"\\evil\s\a.rs", share, true));
+        assert!(out(r"\\evil\s\a.rs", None, true));
+        assert!(!out(r"C:\code\a.rs", None, true));
+        // GVFS's mounts (Linux's file manager): a share's server, an sftp or WebDAV host; a
+        // phone or the trash isn't another computer.
+        for (raw, machine) in [
+            (
+                "/run/user/1000/gvfs/smb-share:server=NAS.local,share=code/a.png",
+                "nas.local",
+            ),
+            (
+                "/run/user/1000/gvfs/sftp:host=example.com,user=me/x",
+                "example.com",
+            ),
+            (
+                "/run/user/42/gvfs/dav:host=dav.example,ssl=true/x",
+                "dav.example",
+            ),
+        ] {
+            assert_eq!(other(raw, false).as_deref(), Some(machine), "{raw}");
+        }
+        for raw in [
+            "/run/user/1000/gvfs/mtp:host=Google_Pixel_123/x",
+            "/run/user/1000/gvfs/trash:/x",
+            "/run/user/1000/gvfs",
+            "/run/user/me/gvfs/smb-share:server=nas,share=c/x",
+            "/home/me/run/user/1000/gvfs/sftp:host=h/x",
+        ] {
+            assert_eq!(other(raw, false), None, "{raw}");
+        }
+        let gvfs = Some("/run/user/1000/gvfs/smb-share:server=nas,share=code/proj");
+        assert!(!out(
+            "/run/user/1000/gvfs/smb-share:server=nas,share=code/proj/a.rs",
+            gvfs,
+            false
+        ));
+        assert!(out(
+            "/run/user/1000/gvfs/sftp:host=evil.example/a",
+            gvfs,
+            false
+        ));
+        let net = Some("/net/nas/code");
+        assert!(!out("/net/nas/code/a.rs", net, false));
+        assert!(out("/net/evil/a", net, false));
+        assert!(!out("/tmp/a", None, false));
     }
 
     #[test]

@@ -268,7 +268,7 @@ impl Telemetry {
         // Unanswered, they wait for the answer; answered, they're sent or not wanted.
         if self.state.consent != Consent::Unasked {
             for mut crash in trek_logging::take_crash_reports(&self.data_dir) {
-                crash.message = scrubber.scrub(&crash.message);
+                crash.message = scrubber.scrub(&scrub::without_quoted_text(&crash.message));
                 crash.location = scrubber.scrub(&crash.location);
                 crash.backtrace = scrubber.scrub(&crash.backtrace);
                 self.enqueue(&Event::Crash(crash), at);

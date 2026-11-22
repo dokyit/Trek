@@ -178,8 +178,26 @@ impl Blocker {
             Blocker::SharedFolder => "Trek's folder has other files in it, and an update replaces the whole folder, so Trek can't update itself there. Put Trek's three files in a folder of their own to get updates.".into(),
             Blocker::LinkedFolder => "Trek is running from a link to its folder, so it can't update itself. Start Trek from the folder itself to get updates.".into(),
             Blocker::GuardedFolder(folder) => guarded_message(folder, std::env::var_os("USERPROFILE").map(PathBuf::from).filter(|p| p.is_absolute()).as_deref()),
-            Blocker::Packaged => "Trek was installed from a .deb package, so it doesn't update itself. Download the new .deb from trekdesktop.com and install it to update.".into(),
-            Blocker::NotAppImage => "This copy of Trek doesn't update itself. Download the new version from trekdesktop.com, or use the AppImage, which updates itself.".into(),
+            Blocker::Packaged => "Trek was installed from a .deb package, so it doesn't update itself. It says here when a new version is out, for you to download and install.".into(),
+            Blocker::NotAppImage => "This copy of Trek doesn't update itself. It says here when a new version is out, for you to download; the AppImage updates itself.".into(),
+        }
+    }
+
+    /// Linux's `.deb` and tarball: Trek can't replace itself there, but it still looks for a newer
+    /// version and says where to download it (`out_message`, `download_page`). Nothing downloads.
+    pub fn notify_only(self) -> bool {
+        matches!(self, Blocker::Packaged | Blocker::NotAppImage)
+    }
+
+    /// What a copy that only notifies (`notify_only`) says when `version` is out.
+    pub fn out_message(self, version: &str) -> String {
+        match self {
+            Blocker::Packaged => format!(
+                "Trek {version} is out. This copy came from a .deb, so download the new .deb and install it to update."
+            ),
+            _ => format!(
+                "Trek {version} is out. This copy doesn't update itself: download the new version, or use the AppImage, which does."
+            ),
         }
     }
 
@@ -944,6 +962,21 @@ fn channel_key(c: Channel) -> &'static str {
 /// URL (`https://github.com/<owner>/<repo>/releases`), a template with `{channel}`, or one
 /// manifest URL ending in `.json` used for every channel (each takes only the versions it offers:
 /// `check`).
+/// Where a copy that only notifies (`Blocker::notify_only`) sends the user for `version`: its
+/// release on GitHub (a stable one's own tag, a beta's or nightly's moving one), which has the
+/// .deb, the AppImage and the tarball. Built from the feed Trek reads and the version, never a
+/// link the manifest gives. A feed that isn't GitHub's: the site's downloads.
+pub fn download_page(updates: &Updates, version: &semver::Version) -> String {
+    let Some(repo) = crate::changelog::github_repo(updates) else {
+        return "https://trekdesktop.com/#install".into();
+    };
+    let tag = match crate::changelog::channel_of(version) {
+        Channel::Stable => format!("v{version}"),
+        c => channel_key(c).to_string(),
+    };
+    format!("https://github.com/{repo}/releases/tag/{tag}")
+}
+
 pub fn manifest_urls(updates: &Updates) -> Vec<String> {
     let feed = updates.feed_url.trim().trim_end_matches('/');
     let feed = if feed.is_empty() { OFFICIAL_FEED } else { feed };
@@ -2366,6 +2399,58 @@ mod tests {
             )
             .0,
             "nothing"
+        );
+    }
+
+    /// A .deb or tarball install is told of a new version and sent to its release's page, which
+    /// Trek builds from its own feed (never a link from the manifest); the others either update
+    /// themselves or say why they can't.
+    #[test]
+    fn a_copy_that_only_notifies_is_sent_to_the_release_page() {
+        let v = |s: &str| semver::Version::parse(s).unwrap();
+        let mut u = Updates::default();
+        assert_eq!(
+            download_page(&u, &v("0.4.64")),
+            "https://github.com/dokyit/Trek/releases/tag/v0.4.64"
+        );
+        assert_eq!(
+            download_page(&u, &v("0.4.64-beta.2")),
+            "https://github.com/dokyit/Trek/releases/tag/beta"
+        );
+        assert_eq!(
+            download_page(&u, &v("0.4.64-nightly.20261122")),
+            "https://github.com/dokyit/Trek/releases/tag/nightly"
+        );
+        u.feed_url = "https://github.com/someone/fork/releases/".into();
+        assert_eq!(
+            download_page(&u, &v("1.0.0")),
+            "https://github.com/someone/fork/releases/tag/v1.0.0"
+        );
+        u.feed_url = "https://example.com/trek.json".into();
+        assert_eq!(
+            download_page(&u, &v("1.0.0")),
+            "https://trekdesktop.com/#install"
+        );
+
+        assert!(Blocker::Packaged.notify_only() && Blocker::NotAppImage.notify_only());
+        for b in [
+            Blocker::DevBuild,
+            Blocker::Translocated,
+            Blocker::ReadOnlyLocation,
+            Blocker::ProtectedFolder,
+            Blocker::SharedFolder,
+            Blocker::LinkedFolder,
+        ] {
+            assert!(!b.notify_only(), "{b:?}");
+        }
+        assert_eq!(
+            Blocker::Packaged.out_message("0.4.64"),
+            "Trek 0.4.64 is out. This copy came from a .deb, so download the new .deb and install it to update."
+        );
+        assert!(
+            Blocker::NotAppImage
+                .out_message("0.4.64")
+                .starts_with("Trek 0.4.64 is out.")
         );
     }
 

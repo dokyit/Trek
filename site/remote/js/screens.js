@@ -174,6 +174,7 @@ export function PairScreen() {
   const connect = () => app.use(pairing, { gesture: true });
   const failed = {
     pairing_failed: 'That code didn’t work: it was used already, or it’s more than a few minutes old. Show a new code on your computer and scan it again.',
+    pairing_conflict: state.detail,
     offline: `Couldn’t reach ${pairing.name}${state.detail ? ` (${state.detail})` : ''}. Is this phone on the same Wi-Fi as it, or on the same tailnet?`,
     permission: state.detail === 'denied' ? 'This browser is blocking the page from your local network. Allow “Local network access” for this site in the browser’s site settings, then try again.' : null,
     unsupported: 'This browser can’t make the connection Trek needs (WebTransport). Open the link in Chrome, Edge or Samsung Internet.',
