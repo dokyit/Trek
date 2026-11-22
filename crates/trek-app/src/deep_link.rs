@@ -64,16 +64,11 @@ fn open_link(link: Link, cx: &mut App) {
     if !cx.has_global::<workspace::GlobalWorkspace>() {
         return;
     }
-    // Gone since the link was made (or never there): said, not opened as an empty editor.
-    if !link.path().exists() {
-        return refuse(
-            format!("There's no file at {} any more.", link.path().display()),
-            cx,
-        );
-    }
     let ws = workspace::workspace_global(cx);
+    // Only a path in the user's projects is looked at before they agree (`trusted` and `within`):
+    // any web page can open a link, and looking at a `\\server\share` path would connect there.
     if trusted(ws.read(cx), link.path()) {
-        return follow(link, cx);
+        return follow_if_there(link, cx);
     }
     // The window has to exist before it can ask.
     crate::root::show_main(ws.clone(), cx);
@@ -96,10 +91,23 @@ fn open_link(link: Link, cx: &mut App) {
     let Ok(answer) = answer else { return };
     cx.spawn(async move |cx| {
         if answer.await == Ok(0) {
-            cx.update(|cx| follow(link, cx));
+            cx.update(|cx| follow_if_there(link, cx));
         }
     })
     .detach();
+}
+
+/// [`follow`] a file link, unless the file is gone since the link was made (or never was): that's
+/// said, not opened as an empty editor. Asked only of a path the user's projects hold or the user
+/// agreed to open.
+fn follow_if_there(link: Link, cx: &mut App) {
+    if !link.path().exists() {
+        return refuse(
+            format!("There's no file at {} any more.", link.path().display()),
+            cx,
+        );
+    }
+    follow(link, cx);
 }
 
 /// A `trek://thread/<id>` link: the thread on screen as clicking its banner shows it, in its own

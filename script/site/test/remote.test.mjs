@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { FrameReader, OP, closeFrame, encodeFrame, textFrame } from '../../../site/remote/js/frame.js';
-import { liveHashes, parsePairing, parseRoute, sessionUrl, toBase64 } from '../../../site/remote/js/link.js';
+import { liveHashes, mayReplace, parsePairing, parseRoute, sessionUrl, toBase64 } from '../../../site/remote/js/link.js';
 import { ROOT, headersFor, parseHeaders } from '../serve.mjs';
 
 const enc = new TextEncoder();
@@ -138,6 +138,18 @@ test('addresses become WebTransport URLs, IPv6 in brackets', () => {
   assert.equal(sessionUrl('[::1]:7420'), 'https://[::1]:7420/trek');
   assert.equal(sessionUrl('10.0.0.2:7420'), 'https://10.0.0.2:7420/trek');
   for (const bad of ['', 'nohost', ':7420', '1.2.3.4:', '1.2.3.4:99999', '[::1]7420', 'a b:1', 'x/y:1']) assert.equal(parseRoute(bad), null, bad);
+});
+
+test('a pairing only takes a kept computer’s place when it pinned that computer’s certificates', () => {
+  const HASH_C = toBase64(new Uint8Array(32).fill(3));
+  const kept = { hostId: '7f3c', name: 'Toby’s PC', token: 't', certs: [{ hash: HASH_A, from: 1, to: 2 }, { hash: HASH_B, from: 2, to: 3 }] };
+  assert.ok(mayReplace(null, [{ hash: HASH_C }]), 'nothing kept under that id');
+  assert.ok(mayReplace(kept, [{ hash: HASH_A }, { hash: HASH_B }]), 'the same computer, paired again');
+  // A link anyone can write, naming the kept computer's id: its certificates are others'.
+  assert.ok(!mayReplace(kept, [{ hash: HASH_C }]));
+  assert.ok(!mayReplace(kept, [{ hash: HASH_A }, { hash: HASH_C }]), 'one of its own beside another isn’t proof');
+  assert.ok(!mayReplace(kept, []));
+  assert.ok(!mayReplace({ ...kept, certs: undefined }, [{ hash: HASH_A }]));
 });
 
 test('certificates that have ended aren’t pinned', () => {

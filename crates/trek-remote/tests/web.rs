@@ -392,3 +392,51 @@ async fn a_push_key_that_isnt_one_leaves_the_web_remote_listening_without_notifi
     );
     handle.shutdown();
 }
+
+/// Pages that open a session and never say who they are don't take the places the iPhone app and
+/// other machines connect in: whoever stalls the web remote's handshakes (one the network check
+/// turns away only once its session is up, among them) leaves a phone dialing the server over
+/// TCP from that same address its place.
+#[tokio::test]
+async fn stalled_pages_leave_phones_their_places() {
+    let handle = start().await;
+    let hashes: Vec<String> = handle.web_certs().into_iter().map(|c| c.hash).collect();
+    let port = listening(&handle).port();
+    let mut stalled = Vec::new();
+    for _ in 0..server::PRE_AUTH_PER_ADDRESS {
+        let config = wtransport::ClientConfig::builder()
+            .with_bind_default()
+            .with_server_certificate_hashes(hashes.iter().map(|h| digest(h)))
+            .build();
+        let endpoint = wtransport::Endpoint::client(config).unwrap();
+        let options = ConnectOptions::builder(format!("https://127.0.0.1:{port}/trek"))
+            .add_header("origin", ORIGIN)
+            .build();
+        // The session is up, and no stream ever comes.
+        let connection = endpoint.connect(options).await.unwrap();
+        stalled.push((endpoint, connection));
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    handle.pairing_offer_with_code("K7Q2-9XMV");
+    let url = format!("ws://127.0.0.1:{}", handle.local_addr().port());
+    let (mut phone, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    let pair = json!({"type":"pair","id":"1","protocol":1,"code":"K7Q2-9XMV","device_id":"ios-1","device_name":"iPhone","platform":"ios"});
+    phone
+        .send(Message::Text(pair.to_string().into()))
+        .await
+        .unwrap();
+    let answer = loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), phone.next())
+            .await
+            .expect("an answer in time")
+            .expect("the phone's place kept open")
+            .expect("a frame");
+        if let Message::Text(text) = frame {
+            break serde_json::from_str::<Value>(&text).unwrap();
+        }
+    };
+    assert_eq!(answer["type"], "paired", "{answer}");
+    drop(stalled);
+    handle.shutdown();
+}

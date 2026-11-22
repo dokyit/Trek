@@ -172,7 +172,8 @@ pub struct LastConnection {
     pub local: SocketAddr,
 }
 
-/// Connections that haven't authenticated yet, at most.
+/// Connections that haven't authenticated yet, at most: as many again for the web remote's, which
+/// have places of their own.
 pub const PRE_AUTH_TOTAL: usize = 16;
 /// ...and from one address (an IPv6 one by its /64), so one device on the network can't take
 /// every place.
@@ -333,6 +334,7 @@ impl RemoteServer {
             notices,
             shutdown,
             pre_auth: PreAuthSlots::new(PRE_AUTH_TOTAL, PRE_AUTH_PER_ADDRESS),
+            web_pre_auth: PreAuthSlots::new(PRE_AUTH_TOTAL, PRE_AUTH_PER_ADDRESS),
             push_enabled: AtomicBool::new(false),
             watchers: Watchers {
                 counts: Mutex::new(HashMap::new()),
@@ -566,6 +568,10 @@ struct Inner {
     notices: broadcast::Sender<ServerNotice>,
     shutdown: watch::Sender<bool>,
     pre_auth: PreAuthSlots,
+    /// The web remote's own places, apart from the phones' and machines' (`pre_auth`): a session
+    /// is let in by its network only once it's up ([`serve_web`]), so places it takes before that
+    /// must not be ones a phone dialing in over TCP needs.
+    web_pre_auth: PreAuthSlots,
     watchers: Watchers,
     state: Mutex<State>,
     /// Whether the computer sends phone notifications at all, as `web_push` tells the page.
@@ -951,7 +957,7 @@ async fn web_accept_loop<H: RemoteHost>(
             _ = stopped(&mut shutdown) => break,
         };
         let peer = canonical(incoming.remote_address());
-        let Some(slot) = inner.pre_auth.take(peer.ip()) else {
+        let Some(slot) = inner.web_pre_auth.take(peer.ip()) else {
             tracing::info!(%peer, "web remote refused: too many unauthenticated connections");
             incoming.refuse();
             continue;

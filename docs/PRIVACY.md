@@ -88,6 +88,7 @@ A crash report, and the log lines in feedback, go through `trek_telemetry::Scrub
 - A project's folder, and whatever path follows it, becomes `[path]`. So does any other absolute path, except the system's (`/usr/…`, `/opt/homebrew/…`, `/Applications/…`, `C:\Windows\…`); one under the home folder is `~/[path]`.
 - Trek's own data and log folders become `[Trek data]` and `[Trek logs]`; a crate in cargo's registry is named from the crate (`gpui-pre-0.3.7/src/window.rs`).
 - The home folder anywhere else is `~`.
+- A crash's message loses the text the panic quoted (from 0.4.64): Rust's own messages quote what they were working on between backticks (``… is not a char boundary; … of `<the text>` ``, up to 256 characters of it), which may be something the user wrote. A quoted span with a space in it, or longer than a name, is sent as `` `[text]` ``; a name (`Option::unwrap()`, `None`) stays (`scrub::without_quoted_text`).
 
 ## Feedback
 
