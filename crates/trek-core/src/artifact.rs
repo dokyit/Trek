@@ -55,6 +55,25 @@ pub const AGENT_INSTRUCTIONS: &str = "When an interactive or rich visual genuine
 /// (nothing on the local network or the machine), no `file:`, no plugins, no forms, no `<base>`.
 pub const CSP: &str = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https: blob:; style-src 'unsafe-inline' https:; img-src https: data: blob:; font-src https: data:; media-src https: data: blob:; connect-src https: data: blob:; worker-src blob: https:; child-src blob: data:; frame-src blob: data:; object-src 'none'; form-action 'none'; base-uri 'none'";
 
+/// Where a document may fetch KaTeX, bundled in the app (`trek_assets::assets::katex_file`), from
+/// its own origin: `/_trek/katex/katex.min.js`, `auto-render.min.js`, `katex.min.css` and
+/// `fonts/KaTeX_*.woff2`. A study question card draws its formulas with it, so it asks no CDN.
+pub const KATEX_PATH: &str = "/_trek/katex/";
+
+/// The policy a document that uses the bundled KaTeX (`KATEX_PATH`) is served under: the same as
+/// `CSP`, except that scripts, styles and fonts come from the document's own origin (the bundled
+/// files) and inline code, and not from the web or `eval`. A study card needs nothing from a CDN.
+pub const STUDY_CSP: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src https: data: blob:; font-src 'self' data:; media-src https: data: blob:; connect-src https: data: blob:; worker-src blob: https:; child-src blob: data:; frame-src blob: data:; object-src 'none'; form-action 'none'; base-uri 'none'";
+
+/// The policy `html` is served under: `STUDY_CSP` when it loads the bundled KaTeX, else `CSP`.
+pub fn csp_for(html: &str) -> &'static str {
+    if html.contains(KATEX_PATH) {
+        STUDY_CSP
+    } else {
+        CSP
+    }
+}
+
 /// `source`, a fenced block as Markdown found it, ends in its closing fence. An open fence runs to
 /// the end of the answer, so while an agent is still writing the block its last line is code.
 pub fn fence_closed(source: &str) -> bool {
@@ -1544,6 +1563,36 @@ process.stdout.write(JSON.stringify({ sent, out: out === undefined ? null : out 
                 && CSP.contains("object-src 'none'")
                 && CSP.contains("base-uri 'none'")
         );
+    }
+
+    #[test]
+    fn a_document_with_the_bundled_katex_gets_its_own_origin_and_no_cdn() {
+        let card = "<script defer src=\"/_trek/katex/katex.min.js\"></script>";
+        assert_eq!(csp_for(card), STUDY_CSP);
+        assert_eq!(
+            csp_for("<script src=\"https://cdn.jsdelivr.net/x.js\">"),
+            CSP
+        );
+        // Scripts, styles and fonts: its own files, no web host. The rest is `CSP`'s.
+        for directive in ["script-src", "style-src", "font-src"] {
+            let own = STUDY_CSP
+                .split("; ")
+                .find(|d| d.starts_with(directive))
+                .unwrap();
+            assert!(own.contains("'self'") && !own.contains("https:"), "{own}");
+        }
+        assert!(!STUDY_CSP.contains("'unsafe-eval'") && !STUDY_CSP.contains("http:"));
+        let same = |csp: &str| {
+            csp.split("; ")
+                .filter(|d| {
+                    !["script-src", "style-src", "font-src"]
+                        .iter()
+                        .any(|n| d.starts_with(n))
+                })
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(same(STUDY_CSP), same(CSP));
     }
 
     #[test]

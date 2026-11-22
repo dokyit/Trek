@@ -101,7 +101,7 @@ impl Doc {
         } else if self.remote.is_some() {
             core::REMOTE_VIDEO_CSP
         } else {
-            core::CSP
+            core::csp_for(&self.html)
         }
     }
 

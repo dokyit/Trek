@@ -287,7 +287,7 @@ A full-width band in the page's light, with no field of its own. Text on the lef
 Four builds in a row (two under 1024 px, one under 768 px), each under an ink hairline at 22%: a title, a sentence that says what the first launch asks, and line buttons that carry the file size once GitHub has answered.
 
 ### Footer
-One line, standing on the dark ground of the dusk photograph (light inks: #F4EFF7, #D9D1E3, #BDB4C9): the lockup at 22 px, the copyright, four text links. Nothing else. On a touch screen each link is a 44 px target.
+One line, standing on the dark ground of the dusk photograph (light inks: #F4EFF7, #D9D1E3, #BDB4C9): the lockup at 22 px, the copyright, five text links (GitHub, Releases, Privacy, Terms, support). Nothing else. On a touch screen each link is a 44 px target.
 
 ### Drawings
 A small object under the words of a feature, where the page would otherwise be empty, in one language (`script/site/make_illustrations.py`, inline SVG): line drawings of blocks in isometric projection, one ink line (#3B3040, #C9C0DD at night, 1.3 px) on the page's own light, and one ember line for the thing that needs you. Each face is filled with the light measured where the drawing stands, so hidden edges stay hidden and it reads as line alone. No shading, shadows, fills of colour, icons or people. Each carries one thought:
@@ -341,3 +341,7 @@ One ease, a steep exponential ease-out (`cubic-bezier(0.16, 1, 0.3, 1)`); the pr
 - **Don't** add trackers, analytics, cookies, or type or script from another domain. The only request off the domain is to GitHub's API for the latest release.
 - **Don't** loop anything that is not the app's own recording.
 - **Don't** credit the fonts in the footer or add words to it.
+
+## Where the photographs come from
+
+Both are Unsplash photographs, free to use under the Unsplash License (no credit is required; it is given here and in `NOTICE`): the first screen's "Dried grass field under blue sky during daytime" by Chris Mongeau (unsplash.com/photos/ZRdSZeVKBaE), and the end's "The sun is setting over a field of tall grass" by Johannes Plenio (unsplash.com/photos/X7RUQSjQv0k). `script/site/make_backdrops.py` frames and grades them; `site/README.md` lists each file.

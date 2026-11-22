@@ -33,6 +33,9 @@ Source: "{#BinDir}\trek-mcp.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; If trek-update exists
 Source: "{#BinDir}\trek-update.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "Uninstall-Trek.ps1"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+; The licence and the third-party notices, beside the program (Apache-2.0 and the fonts' and icons' licences ask for it)
+Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\NOTICE"; DestDir: "{app}"; DestName: "NOTICE.txt"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Trek"; Filename: "{app}\trek.exe"

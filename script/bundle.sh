@@ -117,6 +117,10 @@ fi
 # template icon instead of the colour app icon when they stand in for an evicted item.
 cp "$ICON_CACHE/MenuBarIconTemplate.png" "$APP/Contents/Resources/MenuBarIconTemplate.png"
 cp "$ICON_CACHE/MenuBarIconTemplate@2x.png" "$APP/Contents/Resources/MenuBarIconTemplate@2x.png"
+# The licence and the third-party notices travel with the app (Apache-2.0 and the fonts' and icons'
+# licences ask for it); the signature below seals them with the rest of Resources.
+cp LICENSE "$APP/Contents/Resources/LICENSE"
+cp NOTICE "$APP/Contents/Resources/NOTICE"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

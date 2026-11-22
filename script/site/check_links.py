@@ -38,7 +38,7 @@ class Page(HTMLParser):
 
 
 pages = {}
-for f in [site / "index.html", site / "privacy" / "index.html", site / "404.html"]:
+for f in [site / "index.html", site / "privacy" / "index.html", site / "terms" / "index.html", site / "404.html"]:
     p = Page()
     p.feed(f.read_text())
     pages[f] = p
