@@ -1,9 +1,13 @@
-//! A live card in the transcript for work a thread's agent pushed out: a pull request it
-//! opened (`gh pr create`), watches (`gh run watch`, `gh pr checks`) or merges (`gh pr merge`),
-//! and the repo's own releases (`script/release.sh`, `gh workflow run release.yml`,
-//! `gh release create`). Where a tool row would only say the command ran, the card follows the
-//! thing it made: merge state, checks and conflicts refresh from `gh` while it's open
-//! (`Workspace::watch_pr`), and it offers the next step (Resolve conflicts, Merge, Open).
+//! A live card in the transcript for work a thread's agent pushed out or waits on: a pull
+//! request it opened (`gh pr create`), checks, looks at or merges (`gh pr checks`, `gh pr view`,
+//! `gh pr merge`), a workflow run it watches, polls, re-runs or dispatches (`gh run watch`,
+//! `gh run view` in an `until` loop, `gh run rerun`, `gh workflow run`), and the repo's own
+//! releases (`script/release.sh`, `gh workflow run release.yml`, `gh release create`). Where a
+//! tool row would only say the command ran, the card follows the thing it made: merge state,
+//! checks and conflicts refresh from `gh` while it's open (`Workspace::watch_pr`), and it offers
+//! the next step (Resolve conflicts, Merge, Open). A thread has one card per PR or run: a later
+//! command about it brings that card down to where the command is (`surface`), and a sub-agent's
+//! waits get theirs in the thread too.
 //!
 //! The card is a transcript `Item::Tool` whose id starts [`ROW`]; its `detail` is the card as
 //! JSON, so it persists like any row and older Treks (and the phone) show a plain tool row. Its
@@ -214,6 +218,9 @@ pub struct Card {
     pub workflow: bool,
     /// Release cards: the workflow run this dispatch made, once it shows in `gh run list`.
     pub run_id: Option<u64>,
+    /// Run cards: the workflow a `gh workflow run` dispatched (`live.yml`, a release dry run's
+    /// `release.yml`), whose run the card finds (`number`) once `gh run list` has it.
+    pub dispatch: String,
     /// The thread opened this pull request, or it's its branch's own, rather than one it only
     /// looked at (`gh pr checks 123`): failing checks are its to fix (`workspace::pr_checks`).
     pub opened: bool,
@@ -551,12 +558,28 @@ pub enum Call {
     /// `gh run watch [<run id>]`: a run card follows the run it names (none named: the PR
     /// card's checks are what it's waiting on, or the id `gh` prints once it's done).
     RunWatch(Option<String>),
-    /// `gh pr checks [<pr>]`: the PR card's checks are what it's waiting on.
+    /// `gh pr checks [<pr>]`: the PR card's checks are what it's waiting on (the PR's card is
+    /// made when the thread has none: it may only be looking at someone else's).
     PrChecks(Option<String>),
+    /// `gh pr view <pr>` (`--json statusCheckRollup`, `state`, …): a look at the PR it names.
+    PrView(String),
+    /// `gh run view <run>` (its jobs, log or status, often polled in an `until` loop) and
+    /// `gh api repos/<owner>/<repo>/actions/runs/<run>…`: a look at the run it names.
+    RunView(String),
+    /// `gh run rerun <run>` (or the API's `…/runs/<run>/rerun`): the run goes again.
+    RunRerun(String),
     /// `script/release.sh <version> [--channel …]` — a local release.
     Release { version: String, channel: String },
     /// `gh workflow run release.yml -f version=… -f channel=…`.
     ReleaseWorkflow { version: String, channel: String },
+    /// `gh workflow run <workflow>` for anything but a real release (`ci.yml`, `live.yml`, a
+    /// release dry run, which publishes nothing but runs for most of an hour): a run card that
+    /// finds its run once GitHub lists it.
+    WorkflowRun {
+        workflow: String,
+        /// `-f dry_run=true`, with the version it's a dry run of.
+        dry_run: Option<String>,
+    },
     /// `gh release create <tag>`.
     ReleaseTag { tag: String },
     /// A `git` verb that moves a PR's work along (commit, push, fetch, merge, pull, rebase):
@@ -575,39 +598,262 @@ pub enum GitVerb {
     Rebase,
 }
 
-/// Command lines are split per `&&`/`;`/`|`/newline segment: a `gh` call wins over a `git` one
-/// (`git commit && gh pr create` opens the card, it doesn't just re-word its step).
+/// The strongest call of a command line ([`calls`]): what the command is for, when it's for one
+/// thing.
 pub fn call(title: &str, detail: &str) -> Option<Call> {
-    if crate::activity::tool_kind(title) != crate::activity::ToolKind::Command {
-        return None;
-    }
-    let mut git = None;
-    for segment in segments(detail) {
-        let words = shell_words(&segment);
-        match call_in(&words) {
-            Some(Call::Git(_)) => git = git.or_else(|| call_in(&words)),
-            Some(c) => return Some(c),
-            None => {}
-        }
-    }
-    git
+    let mut all = calls(title, detail);
+    // The first of the strongest: `max_by_key` would take the last.
+    let best = all
+        .iter()
+        .enumerate()
+        .max_by_key(|(ix, c)| (rank(c), std::cmp::Reverse(*ix)))?
+        .0;
+    Some(all.swap_remove(best))
 }
 
-/// The segment from its command on: past `VAR=value` assignments and wrappers that run the rest
-/// (`env`, `time`…). Only a command in this place is one; a word elsewhere is an argument
+/// Every call a command line makes that a card speaks for, in order, one per PR or run (the
+/// strongest: `gh pr checks 49 | awk … && gh pr merge 49` is the merge), each command found
+/// wherever the shell runs it: per `&&`/`;`/`|`/newline segment, inside `$(…)` and backticks,
+/// and in a loop's body (`until [ "$(gh run view 123 --json status …)" = completed ]`), with a
+/// `$name` given a literal number earlier on the line filled in (`id=123; … gh run view $id`).
+/// A `gh` call wins over a `git` one (`git commit && gh pr create` opens the card, it doesn't
+/// just re-word its step).
+pub fn calls(title: &str, detail: &str) -> Vec<Call> {
+    found(title, detail).into_iter().map(|f| f.call).collect()
+}
+
+/// A call [`found`] in a command line, with what it says about it besides.
+#[derive(Debug, Clone, PartialEq)]
+struct Found {
+    call: Call,
+    /// `-R`/`--repo owner/repo`, or the repository a `gh api` path names.
+    repo: Option<String>,
+    /// The command line polls in a loop (`until`, `while`): it's waiting on what it looks at.
+    looped: bool,
+}
+
+/// How strongly a call speaks for its card: of two for the same PR or run, the stronger is kept,
+/// and the strongest of a line is [`call`]'s.
+fn rank(c: &Call) -> u8 {
+    match c {
+        Call::PrCreate { .. } => 9,
+        Call::Release { .. } | Call::ReleaseWorkflow { .. } | Call::ReleaseTag { .. } => 8,
+        Call::PrMerge(_) => 7,
+        Call::RunRerun(_) => 6,
+        Call::RunWatch(_) | Call::WorkflowRun { .. } => 5,
+        Call::PrChecks(_) => 4,
+        Call::PrView(_) | Call::RunView(_) => 3,
+        Call::Git(_) => 0,
+    }
+}
+
+/// A PR named by url or by number, as the number.
+fn pr_key(pr: &str) -> &str {
+    pr.trim_end_matches('/').rsplit('/').next().unwrap_or(pr)
+}
+
+/// What a call is about: calls with the same target speak for the same card.
+fn target(c: &Call) -> String {
+    match c {
+        Call::PrMerge(Some(p)) | Call::PrChecks(Some(p)) | Call::PrView(p) => {
+            format!("pr:{}", pr_key(p))
+        }
+        Call::PrMerge(None) | Call::PrChecks(None) => "pr:branch".into(),
+        Call::RunWatch(None) => "run:?".into(),
+        Call::RunWatch(Some(r)) | Call::RunView(r) | Call::RunRerun(r) => format!("run:{r}"),
+        Call::PrCreate { .. } => "create".into(),
+        Call::Release { .. } | Call::ReleaseWorkflow { .. } | Call::ReleaseTag { .. } => {
+            "release".into()
+        }
+        Call::WorkflowRun { workflow, .. } => format!("dispatch:{workflow}"),
+        Call::Git(_) => "git".into(),
+    }
+}
+
+fn found(title: &str, detail: &str) -> Vec<Found> {
+    if crate::activity::tool_kind(title) != crate::activity::ToolKind::Command {
+        return vec![];
+    }
+    let mut vars = std::collections::HashMap::new();
+    let mut all = vec![];
+    collect(detail, &mut vars, &mut all, 0);
+    let looped = loops(detail);
+    let mut out: Vec<Found> = vec![];
+    for (call, repo) in all {
+        let t = target(&call);
+        match out.iter_mut().find(|f| target(&f.call) == t) {
+            Some(f) if rank(&call) > rank(&f.call) => {
+                f.call = call;
+                f.repo = repo.or(f.repo.take());
+            }
+            Some(_) => {}
+            None => out.push(Found { call, repo, looped }),
+        }
+    }
+    if out.iter().any(|f| !matches!(f.call, Call::Git(_))) {
+        out.retain(|f| !matches!(f.call, Call::Git(_)));
+    }
+    out
+}
+
+/// Whether a command line waits in a loop: a segment that starts `until` or `while`.
+fn loops(detail: &str) -> bool {
+    segments(detail).iter().any(|s| {
+        let words = shell_words(s);
+        matches!(
+            words.first().map(|w| w.trim_start_matches(['(', '{'])),
+            Some("until" | "while")
+        )
+    })
+}
+
+/// The calls in `text`, in order, with the repo each names (`collect`'s list for [`found`]).
+fn collect(
+    text: &str,
+    vars: &mut std::collections::HashMap<String, String>,
+    out: &mut Vec<(Call, Option<String>)>,
+    depth: u8,
+) {
+    // A substitution inside a substitution is as deep as anyone writes them.
+    if depth > 3 {
+        return;
+    }
+    for segment in segments(text) {
+        for body in substitutions(&segment) {
+            collect(&body, vars, out, depth + 1);
+        }
+        let words: Vec<String> = shell_words(&segment)
+            .into_iter()
+            .map(|w| expand(w, vars))
+            .collect();
+        note_numbers(&words, vars);
+        let cmd = command(&words);
+        let repo = (cmd.first().map(String::as_str) == Some("gh"))
+            .then(|| flag(cmd, &["--repo", "-R"]))
+            .flatten()
+            .or_else(|| api_run(cmd).and_then(|(_, repo, _)| repo));
+        if let Some(c) = call_in(&words) {
+            out.push((c, repo));
+        }
+    }
+}
+
+/// `$name`, `${name}`: the number it was given earlier on the line, else as written.
+fn expand(word: String, vars: &std::collections::HashMap<String, String>) -> String {
+    let name = word
+        .strip_prefix("${")
+        .and_then(|w| w.strip_suffix('}'))
+        .or_else(|| word.strip_prefix('$'));
+    name.and_then(|n| vars.get(n)).cloned().unwrap_or(word)
+}
+
+/// `name=<number>` assignments a segment starts with (`id=45009652043; while …`), for [`expand`].
+fn note_numbers(words: &[String], vars: &mut std::collections::HashMap<String, String>) {
+    for w in words {
+        let Some((name, value)) = w.split_once('=').filter(|(n, _)| is_name(n)) else {
+            break;
+        };
+        if is_number(value) {
+            vars.insert(name.to_string(), value.to_string());
+        } else {
+            vars.remove(name);
+        }
+    }
+}
+
+fn is_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+}
+
+/// What the shell runs inside a segment's `$(…)` and backticks (double-quoted ones included,
+/// single-quoted ones are text).
+fn substitutions(segment: &str) -> Vec<String> {
+    let chars: Vec<char> = segment.chars().collect();
+    let mut out = vec![];
+    let mut single = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\'' && !in_double(&chars, i) {
+            single = !single;
+        } else if !single && c == '$' && chars.get(i + 1) == Some(&'(') {
+            // To its matching `)`, past quoted parentheses.
+            let (mut depth, mut j, mut quote) = (1, i + 2, None::<char>);
+            while j < chars.len() {
+                match (quote, chars[j]) {
+                    (Some(q), ch) if ch == q => quote = None,
+                    (Some(_), _) => {}
+                    (None, '"' | '\'') => quote = Some(chars[j]),
+                    (None, '(') => depth += 1,
+                    (None, ')') => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            out.push(chars[i + 2..j.min(chars.len())].iter().collect());
+            i = j;
+        } else if !single && c == '`' {
+            let end = chars[i + 1..]
+                .iter()
+                .position(|&ch| ch == '`')
+                .map_or(chars.len(), |p| i + 1 + p);
+            out.push(chars[i + 1..end].iter().collect());
+            i = end;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Whether `chars[i]` is inside double quotes (a `'` there is a plain character).
+fn in_double(chars: &[char], i: usize) -> bool {
+    let mut double = false;
+    let mut single = false;
+    for (j, &c) in chars[..i].iter().enumerate() {
+        match c {
+            '"' if !single && (j == 0 || chars[j - 1] != '\\') => double = !double,
+            '\'' if !double => single = !single,
+            _ => {}
+        }
+    }
+    double
+}
+
+/// The segment from its command on: past `VAR=value` assignments, the shell's own words that
+/// lead into one (`do`, `then`, `until`, `!`…) and wrappers that run the rest (`env`, `time`…).
+/// Only a command in this place is one; a word elsewhere is an argument
 /// (`sed -n 1,9p script/release.sh`, `echo gh pr merge`).
 fn command(words: &[String]) -> &[String] {
-    let assignment = |w: &str| {
-        w.split_once('=').is_some_and(|(name, _)| {
-            !name.is_empty()
-                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                && !name.starts_with(|c: char| c.is_ascii_digit())
-        })
-    };
+    let assignment = |w: &str| w.split_once('=').is_some_and(|(name, _)| is_name(name));
     let start = words
         .iter()
         .position(|w| {
-            !assignment(w) && !matches!(w.as_str(), "env" | "time" | "command" | "exec" | "nohup")
+            !assignment(w)
+                && !matches!(
+                    w.as_str(),
+                    "env"
+                        | "time"
+                        | "command"
+                        | "exec"
+                        | "nohup"
+                        | "do"
+                        | "then"
+                        | "else"
+                        | "elif"
+                        | "if"
+                        | "until"
+                        | "while"
+                        | "!"
+                        | "{"
+                        | "("
+                )
         })
         .unwrap_or(words.len());
     &words[start..]
@@ -670,11 +916,31 @@ fn is_number(w: &str) -> bool {
 
 /// The PR `gh <sub…>` names, when it names one (a number or a url).
 fn pr_arg(words: &[String], sub: &[&str]) -> Option<String> {
-    after(words, sub)
-        .iter()
-        .find(|w| !w.starts_with('-'))
+    positional(after(words, sub))
+        .into_iter()
+        .next()
         .filter(|w| w.contains("/pull/") || is_number(w))
-        .cloned()
+}
+
+/// The run `gh <sub…>` names, when it names one by its id.
+fn run_arg(words: &[String], sub: &[&str]) -> Option<String> {
+    positional(after(words, sub))
+        .into_iter()
+        .next()
+        .filter(|w| is_number(w))
+}
+
+/// `gh api <path>` for a workflow run (`repos/<owner>/<repo>/actions/runs/<run>[/…]`): the run,
+/// its repo when the path spells it out, and whether it asks for a re-run.
+fn api_run(words: &[String]) -> Option<(String, Option<String>, bool)> {
+    let path = positional(after(words, &["api"])).into_iter().next()?;
+    let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    let at = parts.windows(2).position(|w| w == ["actions", "runs"])?;
+    let run = parts.get(at + 2).filter(|r| is_number(r))?;
+    let repo = (parts.first() == Some(&"repos") && at == 3 && !parts[1].starts_with('{'))
+        .then(|| format!("{}/{}", parts[1], parts[2]));
+    let rerun = parts.get(at + 3).is_some_and(|w| w.starts_with("rerun"));
+    Some((run.to_string(), repo, rerun))
 }
 
 /// The run id `gh run watch` prints ("✓ main CI · 39779843418", or a `…/actions/runs/<id>`
@@ -736,6 +1002,31 @@ fn positional(words: &[String]) -> Vec<String> {
         "--tag",
         "--target",
         "--subject",
+        // `gh`'s output and selection flags (`gh pr checks 49 --jq …`, `gh run view 9 --job 4`).
+        "--jq",
+        "-q",
+        "--template",
+        "--job",
+        "-j",
+        "--attempt",
+        "--interval",
+        "-i",
+        "--branch",
+        "--commit",
+        "--user",
+        "--status",
+        "-s",
+        "--event",
+        "-L",
+        // `gh api`'s.
+        "-X",
+        "--method",
+        "-F",
+        "--raw-field",
+        "--header",
+        "--input",
+        "--hostname",
+        "--cache",
     ];
     let mut out = vec![];
     let mut skip = false;
@@ -792,45 +1083,59 @@ fn call_in(words: &[String]) -> Option<Call> {
         ));
     }
     if is_gh(words, &["run", "watch"]) {
-        let run = after(words, &["run", "watch"])
-            .iter()
-            .find(|w| !w.starts_with('-'))
-            .filter(|w| is_number(w))
-            .cloned();
-        return Some(Call::RunWatch(run));
+        return Some(Call::RunWatch(run_arg(words, &["run", "watch"])));
     }
     if is_gh(words, &["pr", "checks"]) {
         return Some(Call::PrChecks(pr_arg(words, &["pr", "checks"])));
     }
+    // Looks at one PR or run (a PR named by its branch, or none, is left to `gh pr checks`).
+    if is_gh(words, &["pr", "view"]) {
+        return pr_arg(words, &["pr", "view"]).map(Call::PrView);
+    }
+    if is_gh(words, &["run", "view"]) {
+        return run_arg(words, &["run", "view"]).map(Call::RunView);
+    }
+    if is_gh(words, &["run", "rerun"]) {
+        return run_arg(words, &["run", "rerun"]).map(Call::RunRerun);
+    }
+    if let Some((run, _, rerun)) = api_run(words) {
+        return Some(if rerun {
+            Call::RunRerun(run)
+        } else {
+            Call::RunView(run)
+        });
+    }
     if is_gh(words, &["workflow", "run"]) {
-        if positional(words).iter().any(|w| w.contains("release")) {
-            let mut version = String::new();
-            let mut channel = String::new();
-            let mut dry_run = false;
-            for (i, w) in words.iter().enumerate() {
-                let field = if matches!(w.as_str(), "-f" | "--field") {
-                    words.get(i + 1).cloned()
-                } else {
-                    w.strip_prefix("--field=")
-                        .or_else(|| w.strip_prefix("-f="))
-                        .map(String::from)
-                };
-                if let Some(f) = field {
-                    if let Some(v) = f.strip_prefix("version=") {
-                        version = v.to_string();
-                    } else if let Some(v) = f.strip_prefix("channel=") {
-                        channel = v.to_string();
-                    } else if let Some(v) = f.strip_prefix("dry_run=") {
-                        dry_run = v == "true";
-                    }
+        let workflow = positional(words).get(3).cloned()?;
+        let mut version = String::new();
+        let mut channel = String::new();
+        let mut dry_run = false;
+        for (i, w) in words.iter().enumerate() {
+            let field = if matches!(w.as_str(), "-f" | "--field" | "-F" | "--raw-field") {
+                words.get(i + 1).cloned()
+            } else {
+                w.strip_prefix("--field=")
+                    .or_else(|| w.strip_prefix("-f="))
+                    .map(String::from)
+            };
+            if let Some(f) = field {
+                if let Some(v) = f.strip_prefix("version=") {
+                    version = v.to_string();
+                } else if let Some(v) = f.strip_prefix("channel=") {
+                    channel = v.to_string();
+                } else if let Some(v) = f.strip_prefix("dry_run=") {
+                    dry_run = v == "true";
                 }
             }
-            if dry_run {
-                return None;
-            }
+        }
+        // A dry run publishes nothing: its run is followed as a run, not as a release.
+        if workflow.contains("release") && !dry_run {
             return Some(Call::ReleaseWorkflow { version, channel });
         }
-        return None;
+        return Some(Call::WorkflowRun {
+            workflow,
+            dry_run: dry_run.then_some(version),
+        });
     }
     if is_gh(words, &["release", "create"]) {
         let pos = positional(words);
@@ -865,13 +1170,17 @@ fn call_in(words: &[String]) -> Option<Call> {
     verb.map(Call::Git)
 }
 
-/// The command line cut into its commands: at `&`, `;`, `|` and line ends, but not inside quotes
-/// (`git commit -m "fix; gh pr merge 5"` is one command). A backslash before a line end joins the
-/// lines, and the body of a heredoc (`<<EOF` … `EOF`) is text, not commands.
+/// The command line cut into its commands: at `&`, `;`, `|`, a subshell's parentheses and line
+/// ends, but not inside quotes (`git commit -m "fix; gh pr merge 5"` is one command), a `$(…)` or
+/// backticks (whose commands [`substitutions`] gives), nor at a redirection's `&` (`2>&1`,
+/// `&>/dev/null`). A backslash before a line end joins the lines, and the body of a heredoc
+/// (`<<EOF` … `EOF`) is text, not commands.
 fn segments(text: &str) -> Vec<String> {
     let mut out = vec![];
     let mut cur = String::new();
     let mut quote: Option<char> = None;
+    // How deep in `$(…)` this is, unquoted (inside, nothing cuts).
+    let mut subst = 0usize;
     // Heredoc terminators waiting for the end of the line that named them.
     let mut heredocs: Vec<(String, bool)> = vec![];
     let mut chars = text.chars().peekable();
@@ -885,7 +1194,28 @@ fn segments(text: &str) -> Vec<String> {
                     cur.extend(chars.next());
                 }
             }
+            None if subst > 0 => {
+                cur.push(c);
+                match c {
+                    '"' | '\'' | '`' => quote = Some(c),
+                    '(' => subst += 1,
+                    ')' => subst -= 1,
+                    _ => {}
+                }
+            }
             None => match c {
+                '$' if chars.peek() == Some(&'(') => {
+                    chars.next();
+                    cur.push_str("$(");
+                    subst = 1;
+                }
+                '`' => {
+                    quote = Some(c);
+                    cur.push(c);
+                }
+                // A redirection, not a separator: `2>&1`, `>&2`, `&>/dev/null`.
+                '&' if cur.ends_with('>') || chars.peek() == Some(&'>') => cur.push(c),
+                '(' | ')' => out.push(std::mem::take(&mut cur)),
                 '"' | '\'' => {
                     quote = Some(c);
                     cur.push(c);
@@ -1023,9 +1353,22 @@ fn enter_phase(card: &mut Card, phase: Phase) {
 pub fn followable(card: &Card) -> bool {
     match card.kind {
         Kind::Pr => card.phase != Phase::Creating,
-        Kind::Run => card.number.is_some(),
+        Kind::Run => card.number.is_some() || !card.dispatch.is_empty(),
         Kind::Release => is_workflow(card),
     }
+}
+
+/// A PR the thread only looked at (not its own, nothing of the thread's under way on it) that
+/// has said where it stands, open, ready or conflicted with no check running: its watcher stops
+/// there, as following someone else's PR closely for an hour would spend GitHub's limit on it.
+/// The next command about it looks again.
+pub fn looked_enough(card: &Card) -> bool {
+    card.kind == Kind::Pr
+        && !card.opened
+        && !card.merging
+        && !card.resolving
+        && matches!(card.phase, Phase::Open | Phase::Ready | Phase::Conflicted)
+        && card.checks.iter().all(|c| !c.state.pending())
 }
 
 /// The workflow run a failed card can re-run: a run card's own, a release workflow's.
@@ -1172,7 +1515,7 @@ fn moved_to(dir: &Path, to: &str) -> PathBuf {
     dir.join(to)
 }
 
-/// A command call started: surface or move the card it speaks for. `cwd`: where its `gh` runs
+/// A command call started: surface or move the cards it speaks for. `cwd`: where its `gh` runs
 /// unless the command line moves it (`command_dir`).
 pub fn tool_started(
     live: &mut crate::workspace::LiveThread,
@@ -1181,11 +1524,86 @@ pub fn tool_started(
     detail: &str,
     cwd: Option<&Path>,
 ) -> Effects {
+    started(live, call_id, title, detail, cwd, false)
+}
+
+/// A call one of the agent's own sub-agents made (`call_id` unique in the thread): what it waits
+/// on gets its card in the thread, where the user is looking. What it only looks at once, and its
+/// `git` work, stay its own (a sub-agent bisecting runs would leave a card per run).
+pub fn sub_tool_started(
+    live: &mut crate::workspace::LiveThread,
+    call_id: &str,
+    title: &str,
+    detail: &str,
+    cwd: Option<&Path>,
+) -> Effects {
+    started(live, call_id, title, detail, cwd, true)
+}
+
+fn started(
+    live: &mut crate::workspace::LiveThread,
+    call_id: &str,
+    title: &str,
+    detail: &str,
+    cwd: Option<&Path>,
+    sub: bool,
+) -> Effects {
     let mut fx = Effects::default();
-    let Some(call) = call(title, detail) else {
+    let mut found = found(title, detail);
+    if sub {
+        found.retain(|f| match f.call {
+            Call::PrView(_) | Call::RunView(_) => f.looped,
+            Call::Git(_) => false,
+            _ => true,
+        });
+    }
+    if found.is_empty() {
         return fx;
-    };
+    }
     let dir = command_dir(detail, cwd.unwrap_or_else(|| Path::new("")));
+    // The strongest first: it's the one whose end the call's own end finishes (`pr_calls`).
+    found.sort_by_key(|f| std::cmp::Reverse(rank(&f.call)));
+    for f in found {
+        start_one(live, call_id, f, &dir, &mut fx);
+    }
+    fx
+}
+
+/// `call_id`'s end finishes `row` (`tool_finished`), unless a stronger call of its line got
+/// there first.
+fn claim(live: &mut crate::workspace::LiveThread, call_id: &str, row: &str) {
+    live.pr_calls
+        .entry(call_id.to_string())
+        .or_insert_with(|| row.to_string());
+}
+
+/// A card a look made: what it is, where `gh` asks about it, and the repo it's in when the
+/// command named one.
+fn looked_at(kind: Kind, dir: &Path, repo: Option<String>, step: &str) -> Card {
+    Card {
+        kind,
+        title: if kind == Kind::Pr {
+            "Pull request".into()
+        } else {
+            String::new()
+        },
+        repo_dir: dir.to_string_lossy().into_owned(),
+        repo,
+        phase: Phase::Checking,
+        step: step.into(),
+        created_ms: now_ms(),
+        ..Default::default()
+    }
+}
+
+fn start_one(
+    live: &mut crate::workspace::LiveThread,
+    call_id: &str,
+    f: Found,
+    dir: &Path,
+    fx: &mut Effects,
+) {
+    let Found { call, repo, .. } = f;
     match call {
         Call::PrCreate { title, base, head } => {
             let key = format!("creating-{call_id}");
@@ -1195,65 +1613,134 @@ pub fn tool_started(
                 base: base.unwrap_or_else(|| "main".into()),
                 head: head.unwrap_or_default(),
                 repo_dir: dir.to_string_lossy().into_owned(),
+                repo,
                 phase: Phase::Creating,
                 step: "Opening the pull request".into(),
                 created_ms: now_ms(),
                 opened: true,
                 ..Default::default()
             };
-            let row = push(live, &key, &card, &mut fx);
-            live.pr_calls.insert(call_id.to_string(), row);
+            let row = push(live, &key, &card, fx);
+            claim(live, call_id, &row);
         }
         Call::PrMerge(pr) => {
-            // The card of the PR it names, else the thread's latest: it goes to Merging.
+            // The card of the PR it names, else the thread's latest: it goes to Merging. A PR the
+            // thread has no card for gets one (merging someone else's, or one it opened in
+            // another thread): the merge is news either way.
             let target = match pr.as_deref() {
-                Some(p) => cards(live).into_iter().find(|(_, _, c)| {
-                    c.url.as_deref() == Some(p) || c.number.is_some_and(|n| n.to_string() == p)
-                }),
+                Some(p) => find_pr(live, p, repo.as_deref()),
                 None => latest_pr(live),
             };
-            if let Some((ix, id, mut c)) = target {
-                c.merging = true;
-                enter_phase(&mut c, Phase::Merging);
-                c.step = "Merging the pull request".into();
-                rewrite(live, ix, &c, &mut fx);
-                live.pr_calls.insert(call_id.to_string(), id.clone());
-                fx.watch.push(id);
-            }
+            let (ix, row, mut c) = match target {
+                Some((ix, row, c)) => {
+                    let ix = surface(live, ix, fx);
+                    (ix, row, c)
+                }
+                None => {
+                    let mut c = looked_at(Kind::Pr, dir, repo, "Merging the pull request");
+                    // None named: `gh` merges the branch's own.
+                    c.opened = pr.is_none();
+                    c.number = pr.as_deref().and_then(|p| pr_key(p).parse().ok());
+                    c.url = pr.filter(|p| p.contains("/pull/"));
+                    let key = match c.number {
+                        Some(n) => format!("pr-{n}"),
+                        None => format!("pr-{call_id}"),
+                    };
+                    let row = push(live, &key, &c, fx);
+                    (live.items.len() - 1, row, c)
+                }
+            };
+            c.merging = true;
+            enter_phase(&mut c, Phase::Merging);
+            c.step = "Merging the pull request".into();
+            rewrite(live, ix, &c, fx);
+            claim(live, call_id, &row);
+            fx.watch.push(row);
         }
-        Call::RunWatch(Some(run)) => watch_run(live, call_id, &run, &dir, &mut fx),
+        Call::RunWatch(Some(run)) => watch_run(live, call_id, &run, dir, repo, fx),
         Call::RunWatch(None) => {
             // No id on the line (`gh run watch "$id"`): the PR card's checks, else the id `gh`
             // prints says which run once the call is over.
-            if !watch_checks(live, None, &mut fx) {
+            if !watch_checks(live, None, None, fx) && !live.pr_calls.contains_key(call_id) {
                 live.pr_calls
                     .insert(call_id.to_string(), row_id(RUN_UNKNOWN));
             }
         }
         Call::PrChecks(pr) => {
-            if !watch_checks(live, pr.as_deref(), &mut fx) {
+            if !watch_checks(live, pr.as_deref(), repo.as_deref(), fx) {
                 // No card for it yet: one for the PR it names (the branch's, named none), filled
                 // in by `gh pr view`.
                 let key = match pr.as_deref() {
-                    Some(p) => format!("checks-{p}"),
+                    Some(p) => format!("checks-{}", pr_key(p)),
                     None => format!("checks-{call_id}"),
                 };
-                let card = Card {
-                    kind: Kind::Pr,
-                    title: "Pull request".into(),
-                    // None named: `gh` asks about the branch it's on.
-                    opened: pr.is_none(),
-                    number: pr.as_deref().and_then(|p| p.parse().ok()),
-                    url: pr.filter(|p| p.contains("/pull/")),
-                    repo_dir: dir.to_string_lossy().into_owned(),
-                    phase: Phase::Checking,
-                    step: "Watching checks".into(),
-                    created_ms: now_ms(),
-                    ..Default::default()
-                };
-                let row = push(live, &key, &card, &mut fx);
+                let mut card = looked_at(Kind::Pr, dir, repo, "Watching checks");
+                // None named: `gh` asks about the branch it's on.
+                card.opened = pr.is_none();
+                card.number = pr.as_deref().and_then(|p| pr_key(p).parse().ok());
+                card.url = pr.filter(|p| p.contains("/pull/"));
+                let row = push(live, &key, &card, fx);
                 fx.watch.push(row);
             }
+        }
+        Call::PrView(pr) => match find_pr(live, &pr, repo.as_deref()) {
+            // A look leaves the card as it is, at the look; one still under way is looked at
+            // again too.
+            Some((ix, row, c)) => {
+                surface(live, ix, fx);
+                if !c.phase.terminal() && followable(&c) {
+                    fx.watch.push(row);
+                }
+            }
+            None => {
+                let mut card = looked_at(Kind::Pr, dir, repo, "Looking up the pull request");
+                card.number = pr_key(&pr).parse().ok();
+                card.url = Some(pr.clone()).filter(|p| p.contains("/pull/"));
+                let row = push(live, &format!("pr-{}", pr_key(&pr)), &card, fx);
+                fx.watch.push(row);
+            }
+        },
+        Call::RunView(run) => match find_run(live, &run) {
+            Some((ix, row, c)) => {
+                surface(live, ix, fx);
+                if !c.phase.terminal() {
+                    fx.watch.push(row);
+                }
+            }
+            None => {
+                let mut card = looked_at(Kind::Run, dir, repo, "Looking at the run");
+                card.number = run.parse().ok();
+                let row = push(live, &format!("run-{run}"), &card, fx);
+                fx.watch.push(row);
+            }
+        },
+        Call::RunRerun(run) => {
+            let (ix, row, mut c) = match find_run(live, &run) {
+                Some((ix, row, c)) => (surface(live, ix, fx), row, c),
+                None => {
+                    let mut c = looked_at(Kind::Run, dir, repo, "Re-running the run");
+                    c.number = run.parse().ok();
+                    let row = push(live, &format!("run-{run}"), &c, fx);
+                    (live.items.len() - 1, row, c)
+                }
+            };
+            rerun_started(&mut c);
+            rewrite(live, ix, &c, fx);
+            fx.watch.push(row);
+        }
+        Call::WorkflowRun { workflow, dry_run } => {
+            // A run of its own each time: it's found by when it started (`pick_run`).
+            let mut card = looked_at(Kind::Run, dir, repo, "Starting the workflow");
+            card.dispatch = workflow;
+            card.event = "workflow_dispatch".into();
+            card.subject = match dry_run.as_deref() {
+                Some("") => "Dry run".into(),
+                Some(v) => format!("Dry run of v{}", v.trim_start_matches('v')),
+                None => String::new(),
+            };
+            let row = push(live, &format!("dispatch-{call_id}"), &card, fx);
+            claim(live, call_id, &row);
+            fx.watch.push(row);
         }
         Call::ReleaseWorkflow { version, channel } => {
             let key = format!(
@@ -1269,11 +1756,11 @@ pub fn tool_started(
                 &channel,
                 "release.yml",
                 "Release workflow running",
-                &dir,
+                dir,
             );
             card.workflow = true;
-            let row = push(live, &key, &card, &mut fx);
-            live.pr_calls.insert(call_id.to_string(), row.clone());
+            let row = push(live, &key, &card, fx);
+            claim(live, call_id, &row);
             fx.watch.push(row);
         }
         Call::Release { version, channel } => {
@@ -1290,10 +1777,10 @@ pub fn tool_started(
                 &channel,
                 "release.sh",
                 "Building and publishing",
-                &dir,
+                dir,
             );
-            let row = push(live, &key, &card, &mut fx);
-            live.pr_calls.insert(call_id.to_string(), row);
+            let row = push(live, &key, &card, fx);
+            claim(live, call_id, &row);
         }
         Call::ReleaseTag { tag } => {
             let key = format!("release-{}", if tag.is_empty() { call_id } else { &tag });
@@ -1302,11 +1789,11 @@ pub fn tool_started(
                 "",
                 "gh release",
                 "Publishing the release",
-                &dir,
+                dir,
             );
             card.title = format!("Release {tag}");
-            let row = push(live, &key, &card, &mut fx);
-            live.pr_calls.insert(call_id.to_string(), row);
+            let row = push(live, &key, &card, fx);
+            claim(live, call_id, &row);
         }
         Call::Git(verb) => {
             // The thread's open PR card narrates the step ("Committing the last changes").
@@ -1340,34 +1827,126 @@ pub fn tool_started(
                         GitVerb::Pull => "Updating the branch".into(),
                         GitVerb::Rebase => "Rebasing the branch".into(),
                     };
-                    rewrite(live, ix, &c, &mut fx);
+                    rewrite(live, ix, &c, fx);
                 }
             }
         }
     }
-    fx
 }
 
 /// `pr_calls`' mark for a `gh run watch` whose run is only known from its output.
 const RUN_UNKNOWN: &str = "run-?";
 
-/// The PR card `pr` names (none: the thread's latest) goes to Checking and is followed;
-/// `false` when there's no such card still open.
+/// How far back a card may be and still be at hand: a command that speaks for one this near (in
+/// the same turn) leaves it where it is, so `gh pr checks` then `gh pr merge` don't shuffle it.
+const AT_HAND: usize = 12;
+
+/// The card at `ix` comes down to the end of the transcript when it's out of sight (an earlier
+/// turn's, or many rows up): a command that speaks for a PR or run shows its card there, the one
+/// card the thread has for it, rather than updating it hundreds of rows up where nobody looks.
+/// Its row id stays, so its watcher, the slow watch and the phone keep finding it. Where it is
+/// now.
+fn surface(live: &mut crate::workspace::LiveThread, ix: usize, fx: &mut Effects) -> usize {
+    let len = live.items.len();
+    let turn = live
+        .items
+        .iter()
+        .rposition(|i| matches!(i, Item::User { .. }))
+        .map_or(0, |u| u + 1);
+    if ix >= len || (ix >= turn && len - ix <= AT_HAND) {
+        return ix;
+    }
+    let Some(item) = live.items.get(ix).cloned() else {
+        return ix;
+    };
+    let mut n = 0;
+    live.items.retain(|_| {
+        let keep = n != ix;
+        n += 1;
+        keep
+    });
+    // What points into the transcript by position past it moves up one.
+    for at in [&mut live.streaming, &mut live.reasoning] {
+        *at = match *at {
+            Some(p) if p > ix => Some(p - 1),
+            Some(p) if p == ix => None,
+            other => other,
+        };
+    }
+    live.streaming = None;
+    let at = live.items.push(item);
+    if let Some(item) = live.items.id_at(at) {
+        fx.changed.push(item.to_string());
+    }
+    at
+}
+
+/// Card rows whose JSON may hold `needle`, parsed: a thread of thousands of rows has hundreds of
+/// cards, and only a few are about the PR or run asked for.
+fn cards_with(live: &crate::workspace::LiveThread, needle: &str) -> Vec<(usize, String, Card)> {
+    live.items
+        .iter()
+        .enumerate()
+        .filter_map(|(ix, i)| match i {
+            Item::Tool { id, detail, .. } if of_row(id).is_some() && detail.contains(needle) => {
+                read(id, detail).map(|c| (ix, id.clone(), c))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The thread's latest card for the PR `pr` names (a number or a url), in `repo` when the command
+/// named one.
+fn find_pr(
+    live: &crate::workspace::LiveThread,
+    pr: &str,
+    repo: Option<&str>,
+) -> Option<(usize, String, Card)> {
+    let n: u64 = pr_key(pr).parse().ok()?;
+    cards_with(live, &format!("\"number\":{n}"))
+        .into_iter()
+        .filter(|(_, _, c)| {
+            c.kind == Kind::Pr
+                && (c.url.as_deref() == Some(pr) || c.number == Some(n))
+                && match (repo, c.repo.as_deref(), c.url.as_deref()) {
+                    (Some(r), Some(have), _) => r.eq_ignore_ascii_case(have),
+                    (Some(r), None, Some(url)) => url.contains(&format!("/{r}/pull/")),
+                    _ => true,
+                }
+        })
+        .next_back()
+}
+
+/// The thread's latest card for run `run`: its own, or a dispatch's that found it.
+fn find_run(live: &crate::workspace::LiveThread, run: &str) -> Option<(usize, String, Card)> {
+    let n: u64 = run.parse().ok()?;
+    cards_with(live, &format!("\"number\":{n}"))
+        .into_iter()
+        .filter(|(_, _, c)| c.kind == Kind::Run && c.number == Some(n))
+        .next_back()
+}
+
+/// The PR card `pr` names (none: the thread's latest) goes to Checking and is followed, at hand;
+/// `true` when there's such a card. One that's over (merged, closed) only comes to hand: it's
+/// the PR's card still, not a reason for another.
 fn watch_checks(
     live: &mut crate::workspace::LiveThread,
     pr: Option<&str>,
+    repo: Option<&str>,
     fx: &mut Effects,
 ) -> bool {
     let target = match pr {
-        Some(p) => cards(live).into_iter().find(|(_, _, c)| {
-            c.kind == Kind::Pr
-                && (c.url.as_deref() == Some(p) || c.number.is_some_and(|n| n.to_string() == p))
-        }),
-        None => latest_pr(live),
+        Some(p) => find_pr(live, p, repo),
+        None => latest_pr(live).filter(|(_, _, c)| !c.phase.terminal()),
     };
-    let Some((ix, id, mut c)) = target.filter(|(_, _, c)| !c.phase.terminal()) else {
+    let Some((ix, id, mut c)) = target else {
         return false;
     };
+    let ix = surface(live, ix, fx);
+    if c.phase.terminal() {
+        return true;
+    }
     enter_phase(&mut c, Phase::Checking);
     c.step = "Watching checks".into();
     rewrite(live, ix, &c, fx);
@@ -1376,37 +1955,30 @@ fn watch_checks(
 }
 
 /// `gh run watch <run>`: the run's card (made now, or one the thread has for it, back to
-/// watching) is followed until the run is over, whatever state it's in already.
+/// watching, at hand) is followed until the run is over, whatever state it's in already.
 fn watch_run(
     live: &mut crate::workspace::LiveThread,
     call_id: &str,
     run: &str,
     dir: &Path,
+    repo: Option<String>,
     fx: &mut Effects,
 ) {
-    let key = format!("run-{run}");
-    let row = row_id(&key);
-    let existing = cards(live).into_iter().find(|(_, id, _)| *id == row);
-    match existing {
-        Some((ix, _, mut c)) => {
+    let row = match find_run(live, run) {
+        Some((ix, row, mut c)) => {
+            let ix = surface(live, ix, fx);
             enter_phase(&mut c, Phase::Checking);
             c.step = "Watching the run".into();
             rewrite(live, ix, &c, fx);
+            row
         }
         None => {
-            let card = Card {
-                kind: Kind::Run,
-                number: run.parse().ok(),
-                repo_dir: dir.to_string_lossy().into_owned(),
-                phase: Phase::Checking,
-                step: "Watching the run".into(),
-                created_ms: now_ms(),
-                ..Default::default()
-            };
-            push(live, &key, &card, fx);
+            let mut card = looked_at(Kind::Run, dir, repo, "Watching the run");
+            card.number = run.parse().ok();
+            push(live, &format!("run-{run}"), &card, fx)
         }
-    }
-    live.pr_calls.insert(call_id.to_string(), row.clone());
+    };
+    claim(live, call_id, &row);
     fx.watch.push(row);
 }
 
@@ -1450,7 +2022,7 @@ pub fn tool_finished(
     if row == row_id(RUN_UNKNOWN) {
         if let Some(run) = run_id_in(output) {
             let dir = cwd.unwrap_or_else(|| Path::new(""));
-            watch_run(live, call_id, &run, dir, &mut fx);
+            watch_run(live, call_id, &run, dir, None, &mut fx);
             live.pr_calls.remove(call_id);
         }
         return fx;
@@ -1469,6 +2041,15 @@ pub fn tool_finished(
         return fx;
     };
     match card.kind {
+        // A dispatch GitHub refused made no run to find.
+        Kind::Run if !ok && card.number.is_none() && !card.dispatch.is_empty() => {
+            enter_phase(&mut card, Phase::Failed);
+            card.step = output
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .map(|l| l.trim().chars().take(90).collect())
+                .unwrap_or_else(|| "Couldn't start the workflow".into());
+        }
         // `gh` says how the run went (the call's own status is its pipe's, `| tail`'s).
         Kind::Run => {
             fx.watch.push(row);
@@ -1701,8 +2282,8 @@ pub fn fetch_with(card: &Card, gh_path: Option<&Path>) -> Result<Card, GhFailure
     let dir = PathBuf::from(&card.repo_dir);
     match card.kind {
         Kind::Pr => fetch_pr(card, &dir, gh_path),
-        Kind::Release => fetch_release(card, &dir).ok_or(GhFailure::Other),
-        Kind::Run => fetch_run(card, &dir).ok_or(GhFailure::Other),
+        Kind::Release => fetch_release(card, &dir, gh_path).ok_or(GhFailure::Other),
+        Kind::Run => fetch_run(card, &dir, gh_path).ok_or(GhFailure::Other),
     }
 }
 
@@ -1750,9 +2331,25 @@ fn job_stages(jobs: &[JobJson]) -> Vec<Stage> {
 }
 
 /// The run `card.number` names: its workflow, jobs and how it ended.
-fn fetch_run(card: &Card, dir: &Path) -> Option<Card> {
+fn fetch_run(card: &Card, dir: &Path, gh_path: Option<&Path>) -> Option<Card> {
+    // A dispatch's run, once GitHub lists it: the first of its workflow's since the dispatch.
+    let found;
+    let card = match card.number {
+        Some(_) => card,
+        None if !card.dispatch.is_empty() => {
+            let runs = workflow_runs(card, &card.dispatch, dir, gh_path)?;
+            let run = pick_run(card, &runs)?;
+            found = Card {
+                number: Some(run.id),
+                url: Some(run.url.clone()),
+                ..card.clone()
+            };
+            &found
+        }
+        None => return None,
+    };
     let run = card.number?.to_string();
-    let out = gh(dir)?
+    let out = gh_with(gh_path, dir)?
         .args([
             "run",
             "view",
@@ -1760,6 +2357,7 @@ fn fetch_run(card: &Card, dir: &Path) -> Option<Card> {
             "--json",
             "workflowName,displayTitle,headBranch,event,status,conclusion,url,jobs,startedAt,updatedAt",
         ])
+        .args(repo_args(card))
         .output()
         .ok()?;
     if !out.status.success() {
@@ -1829,7 +2427,11 @@ fn run_card(
     if !workflow.is_empty() {
         card.title = workflow;
     }
-    card.subject = subject;
+    // A dispatch's own words ("Dry run of v0.4.64-beta.2") say more than a dispatched run's
+    // title, which is the workflow's name again.
+    if card.dispatch.is_empty() || card.subject.is_empty() {
+        card.subject = subject;
+    }
     card.head = branch;
     if !url.is_empty() {
         card.url = Some(url);
@@ -1985,6 +2587,7 @@ fn fetch_pr(card: &Card, dir: &Path, gh_path: Option<&Path>) -> Result<Card, GhF
         .args(["pr", "view"])
         .args(pr.as_slice())
         .args(["--json", PR_FIELDS])
+        .args(repo_args(card))
         .output()
         .map_err(|_| GhFailure::Other)?;
     if !out.status.success() {
@@ -2276,31 +2879,51 @@ fn release_run_card(card: &Card, run: &WorkflowRun, jobs: &[JobJson]) -> Card {
     card
 }
 
-fn fetch_release(card: &Card, dir: &Path) -> Option<Card> {
-    // Only workflow releases are followed past the command that started them.
-    if !is_workflow(card) {
-        return None;
-    }
-    let out = gh(dir)?
+/// The latest runs of `workflow` (`gh run list`), newest first.
+fn workflow_runs(
+    card: &Card,
+    workflow: &str,
+    dir: &Path,
+    gh_path: Option<&Path>,
+) -> Option<Vec<WorkflowRun>> {
+    let out = gh_with(gh_path, dir)?
         .args([
             "run",
             "list",
             "--workflow",
-            "release.yml",
+            workflow,
             "--limit",
             "20",
             "--json",
             "databaseId,status,conclusion,url,createdAt",
         ])
+        .args(repo_args(card))
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
-    let runs = serde_json::from_slice::<Vec<WorkflowRun>>(&out.stdout).ok()?;
+    serde_json::from_slice::<Vec<WorkflowRun>>(&out.stdout).ok()
+}
+
+/// `-R owner/repo` for a card the command named a repo for, which `gh` asked in the card's own
+/// folder might not be.
+fn repo_args(card: &Card) -> Vec<String> {
+    match card.repo.as_deref() {
+        Some(r) if card.kind != Kind::Pr || card.url.is_none() => vec!["-R".into(), r.into()],
+        _ => vec![],
+    }
+}
+
+fn fetch_release(card: &Card, dir: &Path, gh_path: Option<&Path>) -> Option<Card> {
+    // Only workflow releases are followed past the command that started them.
+    if !is_workflow(card) {
+        return None;
+    }
+    let runs = workflow_runs(card, "release.yml", dir, gh_path)?;
     // None yet: the dispatch is queued and the card keeps waiting.
     let run = pick_run(card, &runs)?;
-    let jobs = gh(dir)
+    let jobs = gh_with(gh_path, dir)
         .and_then(|mut c| {
             c.args(["run", "view", &run.id.to_string(), "--json", "jobs"])
                 .output()
