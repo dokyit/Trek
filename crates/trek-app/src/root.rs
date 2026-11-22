@@ -2685,6 +2685,7 @@ impl Render for TrekWindow {
             shown: panel_in,
             over: filling,
             keep: (filling && !beside_overlay).then_some(side_width),
+            leaving: !open,
         };
         let dragging = self.panel_drag.is_some();
         let sidebar_held = self.sidebar_drag.is_some();
@@ -3631,6 +3632,22 @@ impl TrekWindow {
                         .h_full()
                         .child(panel)
                 };
+                // On its way back in, what's left of it still takes the pointer (nothing under it
+                // gets a click meant for it) but does nothing with it, as a sheet or the palette
+                // leaving: a second press on its hide button doesn't bring it back, and a press
+                // on a terminal going away doesn't leave the keys in it.
+                let panel = panel.relative().when(drawn.leaving, |el| {
+                    el.child(
+                        div()
+                            .id("tools-leaving")
+                            .test_support()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .occlude(),
+                    )
+                });
                 if overlay || drawn.over {
                     el.relative()
                         .when_some(drawn.keep, |el, kept| {
@@ -3656,12 +3673,14 @@ impl TrekWindow {
 
 /// How the tools panel is drawn this frame (see `render`): how far it's out of the window's right
 /// edge, whether it's on its way to filling the window or back (drawn over the chat), and the
-/// width the chat keeps beside it meanwhile.
+/// width the chat keeps beside it meanwhile, and whether it's on its way back in (closed, still
+/// drawn as it goes).
 #[derive(Clone, Copy)]
 pub(crate) struct PanelDrawn {
     shown: f32,
     over: bool,
     keep: Option<f32>,
+    leaving: bool,
 }
 
 #[cfg(test)]

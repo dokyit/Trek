@@ -12,7 +12,9 @@ pub use trek_motion::*;
 use gpui_kit::App;
 
 /// Motion is allowed: Trek's Reduce motion is off, so is the system's, and the motion scale isn't
-/// 0. Out of a workspace (a test of one element), the system's alone.
+/// 0. Out of a workspace (a test of one element), the system's alone. The system's is macOS's
+/// Reduce motion or Windows' Animation effects; on Linux the desktop's isn't read
+/// (`system::reduce_motion`), so there it's Trek's setting and the motion scale.
 pub fn enabled(cx: &App) -> bool {
     match cx.try_global::<crate::workspace::GlobalWorkspace>() {
         Some(ws) => ws.0.read(cx).motion(cx),
