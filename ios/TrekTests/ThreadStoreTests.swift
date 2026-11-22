@@ -106,4 +106,22 @@ struct WorkingLineTests {
         #expect(!store.showsWorking && store.footerEmpty)
         #expect(ThreadStore(id: "h:t", host: "h", summary: nil).footerEmpty)
     }
+
+    /// A thread whose transcript is all in and empty says so (the list was blank); not while it
+    /// loads, has earlier items to fetch, is at work, or once something is in it.
+    @Test func anEmptyThreadSaysSo() {
+        let store = ThreadStore(id: "h:t", host: "h", summary: row(.idle))
+        #expect(!store.nothingYet, "not loaded yet: the spinner's")
+        store.applyReply(reset: true, seq: 0, items: [], more: true)
+        #expect(!store.nothingYet, "earlier items are still to come")
+        store.applyReply(reset: true, seq: 0, items: [], more: false)
+        #expect(store.nothingYet)
+        store.enqueue(item("i1", 1))
+        store.flushQueued()
+        #expect(!store.nothingYet)
+
+        let working = ThreadStore(id: "h:t", host: "h", summary: row(.working))
+        working.applyReply(reset: true, seq: 0, items: [], more: false)
+        #expect(!working.nothingYet, "the working line is under it")
+    }
 }

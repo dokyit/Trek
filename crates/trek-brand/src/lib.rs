@@ -473,9 +473,10 @@ mod tests {
 
     #[test]
     fn the_small_mark_is_drawn_on_whole_pixels() {
-        assert!(std::ptr::eq(small_grid(16.), &SMALL_1X[..]));
-        assert!(std::ptr::eq(small_grid(24.), &SMALL_1X[..]));
-        assert!(std::ptr::eq(small_grid(32.), &SMALL_2X[..]));
+        // By value: each use of a `const` may be a copy of its own, so their addresses can differ.
+        assert_eq!(small_grid(16.), &SMALL_1X[..]);
+        assert_eq!(small_grid(24.), &SMALL_1X[..]);
+        assert_eq!(small_grid(32.), &SMALL_2X[..]);
         for grid in [&SMALL_1X[..], &SMALL_2X[..]] {
             let n = grid.len();
             assert!(grid.iter().all(|row| row.len() == n));

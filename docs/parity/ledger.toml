@@ -1,7 +1,9 @@
 # What every user-facing feature does on each platform. Checked by `cargo test -p trek-parity` on
-# both platforms' CI (see docs/CROSS_PLATFORM.md); docs/PARITY.md is generated from it.
+# every platform's CI (see docs/CROSS_PLATFORM.md); docs/PARITY.md is generated from it.
 #
-#   macos / windows  "yes": works as on the other platform (`how` says where it's done another way)
+#   macos / windows / linux
+#                    "yes": works as on the others (`how` says where it's done another way; its
+#                    `linux` only where Linux differs from both);
 #                    "partial": works with less;  "no": isn't there;  "n/a": means nothing there.
 #   note             required for "partial" and "no": what's missing, why, and what would bring it.
 #   code / tests     where the platform split is, and what covers it (files that exist).
@@ -18,8 +20,9 @@ area = "App"
 what = "Agents keep working with Trek's window closed"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "pace 1", "send mock:long 10s", "wait 1500", "keep-working", "wait 2500", "show-main", "wait 1500", "count working-bar 1", "click stop", "pace 0"]
-how = { macos = "The app stays up in the Dock; the Dock icon reopens the window.", windows = "Closing the window with agents at work asks: Keep Working closes Trek's windows and quits once the work is done (after a grace for its banners), and opening Trek or the tray icon brings the window back. With nothing at work, closing quits." }
+how = { macos = "The app stays up in the Dock; the Dock icon reopens the window.", windows = "Closing the window with agents at work asks: Keep Working closes Trek's windows and quits once the work is done (after a grace for its banners), and opening Trek or the tray icon brings the window back. With nothing at work, closing quits.", linux = "As on Windows (no Dock): closing the window quits once nothing is at work, unless Settings › General keeps Trek in the tray, which needs a tray on the desktop (KDE, Ubuntu's GNOME, Xfce; other GNOMEs need the AppIndicator extension); without one it closes as with the setting off." }
 note = "Windows has no Dock, so Trek would end with its window. Settings › General › Keep Trek in the tray when its window closes, on unless turned off, matches the Mac (the first time, a banner says Trek is in the tray, as Windows tucks a new icon away behind its ^ arrow): the windows close and Trek stays up in the tray, nothing asked even with agents at work, until the tray's Quit; it needs the tray icon to come back through, so with no icon on the taskbar (not made, or not taken) the window closes as with the setting off, and a Trek in the tray whose icon the taskbar loses for 20 seconds (Explorer restarting adds it again) brings its window back. A launch while Trek quits waits for it to go and opens a new one. Its live check is in status-icon's steps on Windows, while that icon is up: the icon is made once per run, as Windows Server's taskbar hides one that comes back."
 code = ["crates/trek-app/src/root.rs", "crates/trek-app/src/lib.rs"]
 tests = ["crates/trek-app/tests/titlebar.rs", "crates/trek-app/tests/windows.rs"]
@@ -30,8 +33,9 @@ area = "App"
 what = "Trek's commands in menus"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "pace 0", "send Show a short answer", "wait idle 30000", "click thread-menu", "wait 300", "count thread-rename 1", "count thread-open-window 1"]
-how = { macos = "The system menu bar.", windows = "No menu bar (Windows apps have none of the Mac's kind): every menu command is in the palette, Settings or a context menu." }
+how = { macos = "The system menu bar.", windows = "No menu bar (Windows apps have none of the Mac's kind): every menu command is in the palette, Settings or a context menu.", linux = "No menu bar, as on Windows: the palette, Settings and context menus." }
 code = ["crates/trek-app/src/lib.rs"]
 
 [[feature]]
@@ -40,8 +44,10 @@ area = "App"
 what = "Threads waiting on you, counted on the app's icon"
 macos = "yes"
 windows = "yes"
+linux = "partial"
 live = ["route settings:notifications", "wait 300", "reveal dock-badge", "click dock-badge", "route project:{project}", "pace 0", "send Read the project, then run a command that needs permission", "wait permission 30000", "wait 1500", "badge 1+", "deny", "route settings:notifications", "wait 300", "reveal dock-badge", "click dock-badge"]
-how = { macos = "Dock badge.", windows = "Overlay badge on the main window's taskbar button." }
+how = { macos = "Dock badge.", windows = "Overlay badge on the main window's taskbar button.", linux = "The launcher icon's count through Unity's LauncherEntry signal on the session bus (`system::set_dock_badge`), for the desktop entry dev.trek.Trek.desktop." }
+note = "Linux: Ubuntu's dock, KDE's task manager, Dash to Dock and Plank show the count; GNOME's own dash and most X11 panels show none, and nothing tells Trek whether one did."
 code = ["crates/trek-app/src/system.rs"]
 
 [[feature]]
@@ -50,10 +56,12 @@ area = "App"
 what = "Idle, working and needs-you icon with a small menu"
 macos = "yes"
 windows = "yes"
+linux = "partial"
 live = ["route settings:notifications", "wait 300", "reveal menu-bar-icon", "click menu-bar-icon", "wait 800", "tray idle", "route project:{project}", "pace 1", "send mock:long 10s", "wait 1500", "tray working", "click stop", "pace 0", "wait 1000", "send Read the project, then run a command that needs permission", "wait permission 30000", "wait 800", "tray attention", "deny", "wait 800", "route settings:notifications", "wait 300", "reveal menu-bar-icon", "click menu-bar-icon", "wait 800", "tray off"]
 live_windows = ["route settings:notifications", "wait 300", "reveal menu-bar-icon", "click menu-bar-icon", "wait 800", "tray idle", "route settings:general", "wait 300", "reveal stay-in-tray", "count stay-in-tray 1", "close-main", "wait 1500", "count-all title-text 0", "tray idle", "show-main", "wait 1500", "count title-text 1", "route project:{project}", "pace 1", "send mock:long 10s", "wait 1500", "tray working", "click stop", "pace 0", "wait 1000", "send Read the project, then run a command that needs permission", "wait permission 30000", "wait 800", "tray attention", "deny", "wait 800", "route settings:notifications", "wait 300", "reveal menu-bar-icon", "click menu-bar-icon", "wait 800", "tray off"]
-how = { macos = "Menu bar icon, with Show/Hide Background Use.", windows = "System tray icon drawn per taskbar theme and scale; left-click opens Trek. No Background Use item (see computer-use-background)." }
-code = ["crates/trek-app/src/tray.rs"]
+how = { macos = "Menu bar icon, with Show/Hide Background Use.", windows = "System tray icon drawn per taskbar theme and scale; left-click opens Trek. No Background Use item (see computer-use-background).", linux = "An AppIndicator (StatusNotifierItem): Windows' white glyph at 24 px, its menu on either button, no Background Use item." }
+note = "Linux: it shows only where something hosts AppIndicators (KDE, Ubuntu's GNOME, Xfce, Cinnamon); GNOME elsewhere (Fedora Workstation) needs the AppIndicator extension. Trek asks the session bus for a host (org.kde.StatusNotifierWatcher) before closing to the tray, and makes no icon where the AppIndicator library (libayatana-appindicator3) isn't installed (the .deb recommends it)."
+code = ["crates/trek-app/src/tray.rs", "crates/trek-app/src/linux_gtk.rs"]
 tests = ["crates/trek-app/tests/windows.rs"]
 
 [[feature]]
@@ -62,10 +70,25 @@ area = "App"
 what = "A second launch hands its links and files to the running Trek"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live_macos = ["route project:{project}", "open-link trek://edit?path={project}{/}README.md&line=1", "wait 1500", "count editor-save 1", "click mode-agents"]
 live_windows = ["route project:{project}", "second-launch trek://edit?path={project}{/}README.md&line=1", "wait 1500", "count editor-save 1", "click mode-agents"]
-how = { macos = "The system hands it over (open-URL and reopen events).", windows = "Trek's own named pipe and the data folder's lock." }
+how = { macos = "The system hands it over (open-URL and reopen events).", windows = "Trek's own named pipe and the data folder's lock.", linux = "As on Windows, over a Unix socket in the data folder (`run/`, or one under /tmp when that path is too long) and the data folder's flock." }
+live_skip = "Linux: not seen live yet: it's Windows' hand-over (`single_instance.rs`) over a Unix socket, and the socket and lock code is the Mac's (trek-ipc's tests)."
 code = ["crates/trek-app/src/single_instance.rs", "crates/trek-ipc/src/instance.rs", "crates/trek-ipc/src/server.rs"]
+
+[[feature]]
+id = "delete-all-data"
+area = "App"
+what = "Delete all Trek data: everything Trek keeps for the profile goes (keys in the system's secret store included), the projects, Trek's worktrees and the agents' own data stay, and Trek quits"
+macos = "yes"
+windows = "yes"
+linux = "partial"
+note = "Linux: the data, log and cache folders and the keyring's accounts Trek's settings name go (the Secret Service can't list, as on Windows), but WebKitGTK keeps the Browser's data in a folder of its own choosing that Trek doesn't name yet; it would need the Browser to give WebKitGTK a data folder under Trek's."
+live = ["route settings:general", "wait 300", "reveal delete-all-data", "click delete-all-data", "wait 400", "count wipe-confirm 1", "count wipe-delete 1", "click wipe-cancel", "wait 300", "count wipe-confirm 0"]
+how = { macos = "The Keychain lists Trek's accounts, so every one goes; WebKit's site data, cookies and saved window state (by the bundle id) go with the rest.", windows = "Credential Manager can't list, so the accounts Trek's settings name go; the web views' profiles beside the logs (%LOCALAPPDATA%\\Trek) go with the rest. A file still open is named and tried again as Trek quits.", linux = "The keyring's accounts the settings name go through the same keyring delete (the Secret Service and its kernel-keyring cache)." }
+code = ["crates/trek-app/src/wipe.rs", "crates/trek-core/src/wipe.rs"]
+tests = ["crates/trek-app/tests/wipe.rs"]
 
 [[feature]]
 id = "trek-links"
@@ -73,8 +96,9 @@ area = "App"
 what = "trek:// links open in Trek"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "open-link trek://edit?path={project}{/}README.md&line=1", "wait 1500", "count editor-save 1", "click mode-agents"]
-how = { macos = "A URL type in the bundle.", windows = "Trek registers the HKCU key itself at launch; both uninstallers remove it (only while it opens that install) and the AppUserModelId key." }
+how = { macos = "A URL type in the bundle.", windows = "Trek registers the HKCU key itself at launch; both uninstallers remove it (only while it opens that install) and the AppUserModelId key.", linux = "The desktop entry's MimeType x-scheme-handler/trek (installed by the .deb, and by the AppImage's desktop integration); the link's launch hands it to the running Trek (single-instance)." }
 code = ["crates/trek-app/src/winsys.rs", "script/Uninstall-Trek.ps1"]
 tests = ["script/tests/uninstall-keys.Tests.ps1", "crates/trek-app/src/deep_link.rs", "crates/trek-app/tests/hardening.rs"]
 
@@ -84,8 +108,10 @@ area = "App"
 what = "Translucent window (Liquid glass)"
 macos = "yes"
 windows = "yes"
+linux = "partial"
 live = ["route settings:appearance", "wait 300", "reveal glass", "count glass 1"]
-how = { macos = "Liquid Glass on macOS 26, blur before.", windows = "DWM backdrop, Windows 11 22H2 and later; off by default and not offered in onboarding." }
+how = { macos = "Liquid Glass on macOS 26, blur before.", windows = "DWM backdrop, Windows 11 22H2 and later; off by default and not offered in onboarding.", linux = "See-through where the desktop composites windows (KDE also blurs behind it); off until turned on." }
+note = "Linux: not yet seen on a compositing desktop; without a compositor what shows through is black, which the setting's note says."
 code = ["crates/trek-app/src/system.rs", "crates/trek-core/src/settings.rs", "crates/trek-winlook/src/lib.rs", "crates/trek-app/src/onboarding/steps.rs", "crates/trek-app/src/ui.rs", "crates/trek-app/src/thread_window.rs"]
 tests = ["crates/trek-app/tests/screens.rs", "crates/trek-app/tests/scaling.rs"]
 
@@ -95,7 +121,9 @@ area = "App"
 what = "Trek themes: a whole look in one file (colours, fonts, corners, density, art, glass, motion), switched with a cross-fade; user and agent-made themes from the themes folder"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route settings:appearance", "wait 300", "reveal trek-theme-console", "count trek-theme-console 1", "count trek-theme-journal 1", "count trek-theme-alpenglow 1", "click trek-theme-console", "wait 1500", "look is console", "route project:{project}", "pace 0", "send Show a short answer", "wait idle 30000", "look journal", "wait 1500", "look is journal", "look alpenglow", "wait 1500", "look is alpenglow", "look trek", "wait 1500", "look is trek"]
+live_linux = ["route settings:appearance", "wait 300", "reveal trek-theme-console", "count trek-theme-console 1", "count trek-theme-journal 1", "count trek-theme-alpenglow 1", "click trek-theme-console", "wait 6000", "look is console", "route project:{project}", "pace 0", "send Show a short answer", "wait idle 30000", "look journal", "wait 6000", "look is journal", "look alpenglow", "wait 6000", "look is alpenglow", "look trek", "wait 6000", "look is trek"]
 how = { macos = "Shared code: the format and applying one in trek_core::themes, the look in trek-app's themes (the kit's theme, Trek's accents, GPUI's corner scale), fonts Trek bundles (Inter, JetBrains Mono, Spectral).", windows = "The same code. Windows keeps its own radii under a theme's corner scale, and its glass and art follow the settings a theme sets as they do when set by hand." }
 code = ["crates/trek-core/src/themes.rs", "crates/trek-app/src/themes.rs", "vendor/gpui-pre/src/corner_scale.rs", "crates/trek-assets/src/fonts.rs"]
 tests = ["crates/trek-app/tests/themes.rs"]
@@ -106,7 +134,9 @@ area = "App"
 what = "Plugins: a folder, usually made by an agent from one sentence, that makes Trek the user's own (a look, element trees in the composer, a thread's header, the sidebar, the new-thread screen and the title bar, a surface of its own in place of the thread list, the composer or the new-thread screen, palette commands with keys, text effects, logic that hears Trek's events and plays sounds of its own), installed with trek plugin, listed with its permissions in Settings › Plugins (which opens with sentences to ask an agent with), read again as it changes, whoever wrote the folder (an agent's plugin or look is announced, listed with who and when, switched off and on at once and deleted there; a look is on only while it's the one on screen, and loose theme files are listed beside them); six examples (Campfire, Trailhead, Pip the marmot, Soft sounds, Now playing, Focus walk)"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["plugin install example:focus-timer", "plugin install example:campfire", "plugin install example:marmot", "plugin install example:trailhead", "plugin on trailhead", "plugin install example:now-playing", "plugin on now-playing", "plugin problems 0", "route settings:plugins", "wait 300", "count plugin-ask 1", "reveal plugin-row-focus-timer", "count plugin-row-focus-timer 1", "plugin running focus-timer", "plugin running marmot", "plugin running now-playing", "route project:{project}", "new", "wait 500", "count plugin-surface-new-thread 1", "count focus-chip 1", "plugin focus at 300", "wait 300", "look campfire", "wait 1500", "look is campfire", "look trek", "wait 1500", "look is trek", "plugin off trailhead", "wait 300", "count plugin-surface-new-thread 0", "plugin focus stop", "plugin off focus-timer", "wait 300", "count focus-chip 0", "route project:{project}", "pace 0", "send mock:plugin", "wait idle 30000", "wait 2500", "plugin running trail-notes", "send mock:look", "wait idle 30000", "wait 2500", "plugin running dusk", "look is dusk", "route settings:plugins", "wait 300", "reveal plugin-row-dusk", "count plugin-row-dusk 1", "count plugin-added-dusk 1", "count plugin-look-dusk 1", "look console", "wait 1500", "look is console", "plugin stopped dusk", "plugin running trail-notes", "plugin on dusk", "wait 1500", "look is dusk", "plugin running dusk", "plugin delete dusk", "wait 1500", "plugin gone dusk", "look is trek"]
+live_linux = ["plugin install example:focus-timer", "plugin install example:campfire", "plugin install example:marmot", "plugin install example:trailhead", "plugin on trailhead", "plugin install example:now-playing", "plugin on now-playing", "plugin problems 0", "route settings:plugins", "wait 300", "count plugin-ask 1", "reveal plugin-row-focus-timer", "count plugin-row-focus-timer 1", "plugin running focus-timer", "plugin running marmot", "plugin running now-playing", "route project:{project}", "new", "wait 500", "count plugin-surface-new-thread 1", "count focus-chip 1", "plugin focus at 300", "wait 300", "look campfire", "wait 6000", "look is campfire", "look trek", "wait 6000", "look is trek", "plugin off trailhead", "wait 300", "count plugin-surface-new-thread 0", "plugin focus stop", "plugin off focus-timer", "wait 300", "count focus-chip 0", "route project:{project}", "pace 0", "send mock:plugin", "wait idle 30000", "wait 2500", "plugin running trail-notes", "send mock:look", "wait idle 30000", "wait 2500", "plugin running dusk", "look is dusk", "route settings:plugins", "wait 300", "reveal plugin-row-dusk", "count plugin-row-dusk 1", "count plugin-added-dusk 1", "count plugin-look-dusk 1", "look console", "wait 6000", "look is console", "plugin stopped dusk", "plugin running trail-notes", "plugin on dusk", "wait 6000", "look is dusk", "plugin running dusk", "plugin delete dusk", "wait 6000", "plugin gone dusk", "look is trek"]
 how = { macos = "Shared code: the manifest, the folder, the CLI and the element trees' format in trek_core::plugins; drawing with GPUI, the registry and Settings in trek-app's plugins; logic in the QuickJS trek-script already ships; line weight, shadows and square pills as scales in GPUI's quad painting. `cmd` in a plugin's key is Cmd.", windows = "The same code. `cmd` in a plugin's key is Ctrl (keys::is_mac, a runtime value). A release trek.exe is a GUI program with no output of its own: `trek plugin` typed at a console attaches to the parent's console to print (procs::parent_console), and an agent's pipe gets its output as on the Mac. A plugin file that is a link is sealed as what it points to on both; the test that makes a link runs on Unix only, since Windows makes one only in Developer Mode or as an administrator." }
 code = ["crates/trek-core/src/skills.rs", "crates/trek-core/skills/trek-plugin/SKILL.md", "crates/trek-core/skills/trek-theme/SKILL.md", "crates/trek-core/src/plugins/mod.rs", "crates/trek-core/src/plugins/grant.rs", "crates/trek-core/src/plugins/ui.rs", "crates/trek-core/src/plugins/cli.rs", "crates/trek-core/src/plugins/data.rs", "crates/trek-core/src/plugins/examples.rs", "crates/trek-app/src/plugins/mod.rs", "crates/trek-app/src/plugins/render.rs", "crates/trek-app/src/plugins/logic.rs", "crates/trek-app/src/plugins/focus.rs", "crates/trek-app/src/plugins/trail.rs", "crates/trek-app/src/settings_view/plugins.rs", "crates/trek-script/src/plugin.rs", "vendor/gpui-pre/src/corner_scale.rs"]
 tests = ["crates/trek-core/src/plugins/mod.rs", "crates/trek-core/src/plugins/ui.rs", "crates/trek-core/src/plugins/cli.rs", "crates/trek-script/src/plugin.rs", "crates/trek-app/tests/plugins.rs"]
@@ -115,61 +145,73 @@ tests = ["crates/trek-core/src/plugins/mod.rs", "crates/trek-core/src/plugins/ui
 what = "A plugin that asks for permissions waits for the user: the CLI turns on only what asks for nothing"
 macos = "crates/trek-core/src/plugins/mod.rs::an_agent_cant_grant_itself_permissions"
 windows = "crates/trek-core/src/plugins/mod.rs::an_agent_cant_grant_itself_permissions"
+linux = "crates/trek-core/src/plugins/mod.rs::an_agent_cant_grant_itself_permissions"
 
 [[feature.promise]]
 what = "A grant written into the plugins' state file by hand is ignored, and a plugin whose files or permissions changed since it was allowed asks again: grants are sealed with a key in the system's secret store"
 macos = "crates/trek-core/src/plugins/mod.rs::a_grant_written_by_hand_is_ignored_and_an_edited_plugin_asks_again"
 windows = "crates/trek-core/src/plugins/mod.rs::a_grant_written_by_hand_is_ignored_and_an_edited_plugin_asks_again"
+linux = "crates/trek-core/src/plugins/mod.rs::a_grant_written_by_hand_is_ignored_and_an_edited_plugin_asks_again"
 
 [[feature.promise]]
 what = "A plugin's logic that throws, runs away or hogs memory fails that call alone, within its budget, and reaches nothing of the machine"
 macos = "crates/trek-script/src/plugin.rs::an_exception_a_runaway_and_a_hog_fail_the_call_alone"
 windows = "crates/trek-script/src/plugin.rs::an_exception_a_runaway_and_a_hog_fail_the_call_alone"
+linux = "crates/trek-script/src/plugin.rs::an_exception_a_runaway_and_a_hog_fail_the_call_alone"
 
 [[feature.promise]]
 what = "With no plugins nothing is drawn or replaced, and a plugin draws only while it's on"
 macos = "crates/trek-app/tests/plugins.rs::no_plugins_nothing_drawn_and_a_plugin_draws_only_while_its_on"
 windows = "crates/trek-app/tests/plugins.rs::no_plugins_nothing_drawn_and_a_plugin_draws_only_while_its_on"
+linux = "crates/trek-app/tests/plugins.rs::no_plugins_nothing_drawn_and_a_plugin_draws_only_while_its_on"
 
 [[feature.promise]]
 what = "A replacement gives the surface back to Trek's own when its plugin stops or the user says so"
 macos = "crates/trek-app/tests/plugins.rs::a_plugin_that_asks_waits_and_a_replacement_gives_way_when_its_plugin_stops"
 windows = "crates/trek-app/tests/plugins.rs::a_plugin_that_asks_waits_and_a_replacement_gives_way_when_its_plugin_stops"
+linux = "crates/trek-app/tests/plugins.rs::a_plugin_that_asks_waits_and_a_replacement_gives_way_when_its_plugin_stops"
 
 [[feature.promise]]
 what = "A plugin folder written by any agent (or by hand, or the CLI) is picked up without a restart, listed in Settings › Plugins with who and when, announced to the user, switched off and on at once, and deleted with its files"
 macos = "crates/trek-app/tests/plugins.rs::a_folder_an_agent_writes_is_picked_up_listed_announced_and_switches_live"
 windows = "crates/trek-app/tests/plugins.rs::a_folder_an_agent_writes_is_picked_up_listed_announced_and_switches_live"
+linux = "crates/trek-app/tests/plugins.rs::a_folder_an_agent_writes_is_picked_up_listed_announced_and_switches_live"
 
 [[feature.promise]]
 what = "A plugin that asks for permissions is announced as asking and waits for the user's Allow, whoever wrote it and whatever the file says"
 macos = "crates/trek-app/tests/plugins.rs::a_plugin_that_asks_for_permissions_is_announced_and_waits_for_the_user"
 windows = "crates/trek-app/tests/plugins.rs::a_plugin_that_asks_for_permissions_is_announced_and_waits_for_the_user"
+linux = "crates/trek-app/tests/plugins.rs::a_plugin_that_asks_for_permissions_is_announced_and_waits_for_the_user"
 
 [[feature.promise]]
 what = "A plugin that asks for no permissions (and so runs when an agent turns it on) reaches nothing a permission gates"
 macos = "crates/trek-core/src/plugins/mod.rs::a_plugin_that_asks_for_nothing_reaches_nothing_a_permission_gates"
 windows = "crates/trek-core/src/plugins/mod.rs::a_plugin_that_asks_for_nothing_reaches_nothing_a_permission_gates"
+linux = "crates/trek-core/src/plugins/mod.rs::a_plugin_that_asks_for_nothing_reaches_nothing_a_permission_gates"
 
 [[feature.promise]]
 what = "A plugin's look is off when another look is chosen (Settings shows it off, nothing fights) and turning the plugin on brings it back, with no restart"
 macos = "crates/trek-app/tests/plugins.rs::a_plugins_look_is_off_when_another_look_is_chosen_and_comes_back_when_it_is_turned_on"
 windows = "crates/trek-app/tests/plugins.rs::a_plugins_look_is_off_when_another_look_is_chosen_and_comes_back_when_it_is_turned_on"
+linux = "crates/trek-app/tests/plugins.rs::a_plugins_look_is_off_when_another_look_is_chosen_and_comes_back_when_it_is_turned_on"
 
 [[feature.promise]]
 what = "A theme file already in the themes folder is listed with the plugins, switches by being the look on screen, and deletes"
 macos = "crates/trek-app/tests/plugins.rs::a_loose_theme_file_in_the_themes_folder_is_listed_switches_and_deletes_like_a_plugin"
 windows = "crates/trek-app/tests/plugins.rs::a_loose_theme_file_in_the_themes_folder_is_listed_switches_and_deletes_like_a_plugin"
+linux = "crates/trek-app/tests/plugins.rs::a_loose_theme_file_in_the_themes_folder_is_listed_switches_and_deletes_like_a_plugin"
 
 [[feature.promise]]
 what = "Agents are told Trek's exact plugins folder and command, and never to write into ~/.claude or Claude Code's mods"
 macos = "crates/trek-app/tests/plugins.rs::the_agents_are_told_trek_s_exact_folder_and_not_to_use_claude_codes"
 windows = "crates/trek-app/tests/plugins.rs::the_agents_are_told_trek_s_exact_folder_and_not_to_use_claude_codes"
+linux = "crates/trek-app/tests/plugins.rs::the_agents_are_told_trek_s_exact_folder_and_not_to_use_claude_codes"
 
 [[feature.promise]]
 what = "A wrong plugin says what's wrong and where, and isn't loaded"
 macos = "crates/trek-core/src/plugins/mod.rs::a_bad_plugin_says_why"
 windows = "crates/trek-core/src/plugins/mod.rs::a_bad_plugin_says_why"
+linux = "crates/trek-core/src/plugins/mod.rs::a_bad_plugin_says_why"
 
 [[feature]]
 id = "plugin-pages"
@@ -177,8 +219,9 @@ area = "App"
 what = "Plugin pages and panels: a plugin's own HTML in a fenced web view, as a page in the sidebar's Pages group or a tab beside the thread, with Trek's look as CSS variables and a bridge for its storage, the state its slots draw from and the data its permissions allow"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["plugin install example:trailhead", "plugin on trailhead", "route project:{project}", "new", "plugin page-view 0", "plugin page trailhead prompts", "wait 5000", "count plugin-page 1", "plugin page-view 1", "plugin-keys hold", "route project:{project}", "wait 500", "plugin page-view 0", "plugin-keys", "plugin off trailhead"]
-how = { macos = "WKWebView through wry, served under the plugin's own scheme (trek-plugin://<id>/) with its own files and no network it wasn't allowed; made when the page opens and dropped when it closes. Before it's hidden or dropped the keys go back to GPUI's view.", windows = "WebView2 through wry, in the profile artifacts use (WebView2-pages), served as http://trek-plugin.<id>/ (WebView2 can't load a custom scheme) with the same policy; made without focus, so it never takes the keys from Trek by itself." }
+how = { macos = "WKWebView through wry, served under the plugin's own scheme (trek-plugin://<id>/) with its own files and no network it wasn't allowed; made when the page opens and dropped when it closes. Before it's hidden or dropped the keys go back to GPUI's view.", windows = "WebView2 through wry, in the profile artifacts use (WebView2-pages), served as http://trek-plugin.<id>/ (WebView2 can't load a custom scheme) with the same policy; made without focus, so it never takes the keys from Trek by itself.", linux = "WebKitGTK inside Trek's X11 window (Trek runs under Xwayland in a Wayland session)." }
 code = ["crates/trek-core/src/plugins/page.rs", "crates/trek-app/src/plugins/page.rs", "crates/trek-app/src/plugins/data.rs", "crates/trek-app/src/shots/plugin_keys.rs"]
 tests = ["crates/trek-core/src/plugins/page.rs", "crates/trek-app/tests/plugins.rs"]
 
@@ -186,16 +229,19 @@ tests = ["crates/trek-core/src/plugins/page.rs", "crates/trek-app/tests/plugins.
 what = "A page is served its plugin's own files and nothing else: nothing above its folder, nothing through a link out of it"
 macos = "crates/trek-core/src/plugins/page.rs::only_the_plugins_own_files_are_served"
 windows = "crates/trek-core/src/plugins/page.rs::only_the_plugins_own_files_are_served"
+linux = "crates/trek-core/src/plugins/page.rs::only_the_plugins_own_files_are_served"
 
 [[feature.promise]]
 what = "A page reaches no network unless the user allowed a host"
 macos = "crates/trek-core/src/plugins/page.rs::a_page_reaches_no_network_unless_a_host_was_allowed"
 windows = "crates/trek-core/src/plugins/page.rs::a_page_reaches_no_network_unless_a_host_was_allowed"
+linux = "crates/trek-core/src/plugins/page.rs::a_page_reaches_no_network_unless_a_host_was_allowed"
 
 [[feature.promise]]
 what = "A page's web view exists only while the page is open, gives the keys back before it's hidden or dropped, and the composer takes what's typed after the page closes (the live check asks the window itself on a Mac: `plugin-keys` hands it real key-downs after a page that held the keyboard has closed)"
 macos = "crates/trek-app/tests/plugins.rs::a_page_s_view_lives_while_its_open_and_gives_the_keys_back_before_it_goes"
 windows = "crates/trek-app/tests/plugins.rs::a_page_s_view_lives_while_its_open_and_gives_the_keys_back_before_it_goes"
+linux = "crates/trek-app/tests/plugins.rs::a_page_s_view_lives_while_its_open_and_gives_the_keys_back_before_it_goes"
 
 [[feature]]
 id = "backgrounds"
@@ -203,6 +249,7 @@ area = "App"
 what = "Background art: Classic, Paintings and Light across the chat, ASCII in the sidebar"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route settings:appearance", "wait 300", "reveal bg-oxbow", "reveal bg-ramp", "count bg-oxbow 1", "click bg-oxbow", "route project:{project}", "new", "wait shown chat-art 10000", "count chat-art 1"]
 how = { macos = "Shared UI code: the art is embedded images drawn by GPUI, with a scrim worked out from each collection's extreme pixel.", windows = "The same code. \"Sidebar\" draws behind the chrome as on the Mac; the window stays opaque, as Windows' once-only clean-up (`keep_windows_opaque`) already allows." }
 code = ["crates/trek-app/src/backgrounds.rs", "crates/trek-app/src/settings_view/backgrounds.rs", "crates/trek-core/src/settings.rs"]
@@ -214,9 +261,11 @@ area = "App"
 what = "Open a project in another app"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "pace 0", "send Show a short answer", "wait idle 30000", "count hub-open 1", "count hub-open-more 1"]
-how = { macos = "Finder, Terminal, Ghostty, Zed, Cursor, VS Code, the JetBrains IDEs and Xcode, found in /Applications or the user's own ~/Applications (one list, trek_core::open_in::MAC_APPS, for both menus). Looked for once at launch and kept; looked for again off the UI thread once a minute old.", windows = "File Explorer, Windows Terminal (its default profile: PowerShell, cmd or Git Bash as the user set it), Zed, Cursor, VS Code, the JetBrains IDEs (JetBrains Toolbox's scripts on the PATH) and Visual Studio, found through App Paths and the PATH. Looked for once at launch and kept; looked for again off the UI thread once a minute old (a search of the PATH is thousands of file checks: done on each frame, it was most of each frame's time with the hub pinned open)." }
-code = ["crates/trek-core/src/open_in.rs", "crates/trek-app/src/hub.rs", "crates/trek-app/src/thread_menu.rs"]
+live_linux = ["route project:{project}", "pace 0", "send Show a short answer", "wait idle 30000", "count hub-open 1"]
+how = { macos = "Finder, Terminal, Ghostty, Zed, Cursor, VS Code, the JetBrains IDEs and Xcode, found in /Applications or the user's own ~/Applications (one list, trek_core::open_in::MAC_APPS, for both menus). Looked for once at launch and kept; looked for again off the UI thread once a minute old.", windows = "File Explorer, Windows Terminal (its default profile: PowerShell, cmd or Git Bash as the user set it), Zed, Cursor, VS Code, the JetBrains IDEs (JetBrains Toolbox's scripts on the PATH) and Visual Studio, found through App Paths and the PATH. Looked for once at launch and kept; looked for again off the UI thread once a minute old (a search of the PATH is thousands of file checks: done on each frame, it was most of each frame's time with the hub pinned open).", linux = "The file manager (xdg-open), then VS Code, Cursor, Windsurf, Zed, Sublime Text and a terminal found on the PATH (`linux_open_in`)." }
+code = ["crates/trek-core/src/open_in.rs", "crates/trek-app/src/hub.rs", "crates/trek-app/src/thread_menu.rs", "crates/trek-app/src/linux_open_in.rs"]
 tests = ["crates/trek-app/tests/hub.rs"]
 
 [[feature]]
@@ -225,10 +274,12 @@ area = "Install"
 what = "Trek updates itself"
 macos = "yes"
 windows = "yes"
+linux = "partial"
 live = ["update-demo ready", "wait 300", "count updater 1", "update-demo clear"]
-how = { macos = "The bundle swapped in one rename.", windows = "A staged folder swapped by trek-update.exe after quitting, with rollback, and guarded-folder (ransomware protection, Defender) handling." }
-code = ["crates/trek-core/src/update.rs", "crates/trek-update/src/lib.rs"]
-tests = ["crates/trek-update/tests/swap.rs", "crates/trek-app/tests/common/mod.rs"]
+how = { macos = "The bundle swapped in one rename.", windows = "A staged folder swapped by trek-update.exe after quitting, with rollback, and guarded-folder (ransomware protection, Defender) handling.", linux = "The AppImage replaces itself, checked against the same minisign key. A .deb or tarball install checks the same feed and says when a new version is out, in Settings › Updates and the sidebar's notice, with a button to the release's page (built from the feed and the version, never a link from the manifest); it downloads nothing (there's no apt repository)." }
+note = "Linux: only the AppImage updates itself; a .deb or tarball install is told of a new version and updated by hand."
+code = ["crates/trek-core/src/update.rs", "crates/trek-update/src/lib.rs", "crates/trek-updater/src/lib.rs"]
+tests = ["crates/trek-update/tests/swap.rs", "crates/trek-app/tests/common/mod.rs", "crates/trek-app/tests/update_notice.rs"]
 
 [[feature]]
 id = "native-builds"
@@ -236,9 +287,10 @@ area = "Install"
 what = "A native build for each kind of processor"
 macos = "yes"
 windows = "partial"
+linux = "yes"
 live = ["native"]
 how = { macos = "Apple silicon and Intel; an Intel build under Rosetta moves to the native one.", windows = "x64." }
-note = "No ARM64 build: Windows on Arm runs the x64 one emulated. Needs an aarch64-pc-windows-msvc release job and manifest entry."
+note = "No ARM64 build: Windows on Arm runs the x64 one emulated. Needs an aarch64-pc-windows-msvc release job and manifest entry. Linux: x86_64 and Arm (aarch64) releases, each built on a runner of its own architecture."
 code = ["crates/trek-core/src/update.rs"]
 
 [[feature]]
@@ -247,8 +299,9 @@ area = "Install"
 what = "Releases the system trusts on first launch"
 macos = "partial"
 windows = "no"
+linux = "n/a"
 live_skip = "A release's signatures: the release workflow."
-note = "macOS builds are signed but not notarized; Windows builds are unsigned, so SmartScreen warns. Needs notarization and an Authenticode certificate (docs/RELEASING.md)."
+note = "macOS builds are signed but not notarized; Windows builds are unsigned, so SmartScreen warns. Needs notarization and an Authenticode certificate (docs/RELEASING.md). Linux: nothing checks an app's signature at launch; downloads carry SHA-256 sums and the updater checks the minisign key."
 
 # ---------- Composer ----------
 
@@ -258,9 +311,10 @@ area = "Composer"
 what = "Dictate a message with the mic button, with live words and a level meter"
 macos = "yes"
 windows = "yes"
+linux = "no"
 live = ["dictate-demo the chain rule", "wait 300", "count voice-row 1", "count voice-confirm 1", "click voice-cancel"]
 how = { macos = "AVAudioEngine into Apple's Speech framework (on the device when it can).", windows = "On the PC: Whisper (whisper.cpp, the multilingual base model) over the default microphone as WASAPI records it, resampled to 16 kHz; the words are decoded about once a second as they come and once more after ✓. The model (141 MB) downloads from Hugging Face the first time the mic is clicked, with its progress in the voice row, resumed if interrupted and checked against its SHA-256; Settings › General › Dictation removes it. A muted or switched-off microphone, being offline and a full disk are said in words. A packaged Trek uses Windows' own online recognizer (Windows.Media.SpeechRecognition) instead, which Windows answers only with package identity; Win+H only where neither can run (a processor without AVX2), and the mic says so." }
-note = "Checked on a Windows 11 PC (i7-13700H): \"Trek can now take dictation on Windows\" from Windows' speech synthesizer comes back word for word through the engine's own passes (the test runs where the model is downloaded; the last pass takes 0.9 s over 3.6 s of speech). The isolated app downloaded the model on the first click of the mic with its progress in the voice row, opened the microphone (48 kHz stereo, resampled), put a recording's words in the composer, and Settings removed the model. A sentence played through the same laptop's speakers isn't heard at all (its Intel Smart Sound microphone array cancels the PC's own output and the room's noise), so a person tested it: speaking into the PC's microphone in the isolated app, their words (\"Hello? … Can you hear me?\") went into the composer as typed text after ✓, the model loaded in 0.12 s, and a second take ended with ✕ added nothing. Whisper is slower than Apple's on-device recognizer: the first words show a second or two after speaking starts. The model is kept in %LOCALAPPDATA% (not the roaming profile). Whisper left to itself writes some takes plainly, all lowercase without stops (a slow \"Use the chain rule to find the derivative of sine of x squared.\" came back as \"use the chain rule … squared\"): a take's last pass that comes back so is decoded again after a punctuated prompt, and an English take goes in with a capital and a closing stop, as the Mac's does. Only the last pass is prompted: given to every pass, the prompt changed takes that were right (\"Hello? Hello?\" lost its stops). The quick passes over the first words as they come went round and round on that sentence (\"Use the chain rule to use the chain rule to …\"), prompt or none, and a take over 20 s can settle such a pass into its text: a pass that hears more words than anyone says in its time is dropped. whisper.cpp's language guess includes Cantonese, which the base model doesn't have (its chance is the translate token's): a quick pass guessed it for plain English, and the take was decoded as Cantonese; that guess is no guess now."
+note = "Checked on a Windows 11 PC (i7-13700H): \"Trek can now take dictation on Windows\" from Windows' speech synthesizer comes back word for word through the engine's own passes (the test runs where the model is downloaded; the last pass takes 0.9 s over 3.6 s of speech). The isolated app downloaded the model on the first click of the mic with its progress in the voice row, opened the microphone (48 kHz stereo, resampled), put a recording's words in the composer, and Settings removed the model. A sentence played through the same laptop's speakers isn't heard at all (its Intel Smart Sound microphone array cancels the PC's own output and the room's noise), so a person tested it: speaking into the PC's microphone in the isolated app, their words (\"Hello? … Can you hear me?\") went into the composer as typed text after ✓, the model loaded in 0.12 s, and a second take ended with ✕ added nothing. Whisper is slower than Apple's on-device recognizer: the first words show a second or two after speaking starts. The model is kept in %LOCALAPPDATA% (not the roaming profile). Whisper left to itself writes some takes plainly, all lowercase without stops (a slow \"Use the chain rule to find the derivative of sine of x squared.\" came back as \"use the chain rule … squared\"): a take's last pass that comes back so is decoded again after a punctuated prompt, and an English take goes in with a capital and a closing stop, as the Mac's does. Only the last pass is prompted: given to every pass, the prompt changed takes that were right (\"Hello? Hello?\" lost its stops). The quick passes over the first words as they come went round and round on that sentence (\"Use the chain rule to use the chain rule to …\"), prompt or none, and a take over 20 s can settle such a pass into its text: a pass that hears more words than anyone says in its time is dropped. whisper.cpp's language guess includes Cantonese, which the base model doesn't have (its chance is the translate token's): a quick pass guessed it for plain English, and the take was decoded as Cantonese; that guess is no guess now. Linux: no mic button: no speech recognizer there yet. Windows' whisper model would run, but the recording would need Linux's own audio input (PipeWire or ALSA)."
 code = ["crates/trek-dictate/src/lib.rs", "crates/trek-dictate/src/windows/mod.rs", "crates/trek-dictate/src/windows/local.rs", "crates/trek-dictate/src/windows/model.rs", "crates/trek-app/src/composer.rs", "crates/trek-app/src/composer/voice.rs", "crates/trek-dictate/src/windows/hints.rs"]
 tests = ["crates/trek-dictate/src/windows/logic.rs", "crates/trek-dictate/src/windows/local.rs", "crates/trek-dictate/src/windows/model.rs", "crates/trek-dictate/src/windows/transcript.rs", "crates/trek-dictate/src/windows/audio.rs", "crates/trek-app/tests/composer.rs", "crates/trek-dictate/examples/winrt_probe.rs"]
 
@@ -275,8 +329,10 @@ area = "Composer"
 what = "Study mode's Talk chip"
 macos = "yes"
 windows = "yes"
+linux = "no"
 live = ["route study", "wait 300", "count study-talk 1"]
 how = { macos = "Through dictation.", windows = "Through dictation." }
+note = "Linux: no dictation (see dictation), so no Talk chip."
 code = ["crates/trek-app/src/study.rs"]
 
 [[feature]]
@@ -285,8 +341,10 @@ area = "Composer"
 what = "Dictate into a Study question card's thinking box"
 macos = "yes"
 windows = "yes"
+linux = "no"
 live_skip = "The mic is inside the card's web page, which Trek's element checks can't count, and the isolated app has no microphone; the page's take is driven through the fake dictation and the card's own script in node."
 how = { macos = "The card's mic asks Trek (`trek.dictate`) for the composer's dictation; what's heard goes back to the page as it's revised.", windows = "The same, over WebView2's message channel." }
+note = "Linux: no dictation (see dictation)."
 code = ["crates/trek-app/src/artifact/mod.rs", "crates/trek-core/src/artifact.rs", "crates/trek-core/src/study_card.html"]
 tests = ["crates/trek-app/tests/study.rs", "crates/trek-core/src/study_card_test.js", "crates/trek-core/src/artifact.rs"]
 
@@ -296,8 +354,9 @@ area = "Composer"
 what = "Keyboard shortcuts"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route settings:keyboard-shortcuts", "wait 300", "count shortcut-new-thread 1", "reveal shortcut-Send", "count shortcut-Send 1"]
-how = { macos = "⌘ chords.", windows = "Ctrl for ⌘; ⌥⌘ becomes Alt+Shift (AltGr is Ctrl+Alt)." }
+how = { macos = "⌘ chords.", windows = "Ctrl for ⌘; ⌥⌘ becomes Alt+Shift (AltGr is Ctrl+Alt).", linux = "Ctrl, as on Windows." }
 code = ["crates/trek-app/src/keys.rs"]
 tests = ["crates/trek-app/tests/keys.rs", "crates/trek-app/tests/tabs.rs", "crates/trek-app/tests/editor_polish.rs"]
 
@@ -307,6 +366,7 @@ area = "App"
 what = "Every keyboard shortcut can be changed or taken away in Settings › Keyboard Shortcuts (searchable), with conflicts shown and keys the system or text fields need refused; the menus, tooltips, the palette and plugins' commands show the user's keys, and only changes are saved"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route settings:keyboard-shortcuts", "wait 300", "reveal shortcut-keys-open-settings", "click shortcut-keys-open-settings", "key secondary-shift-,", "wait 300", "file settings.toml contains open-settings", "count shortcut-reset-open-settings 1", "route basecamp", "wait 300", "key secondary-shift-,", "wait 500", "count settings-content 1", "route settings:keyboard-shortcuts", "wait 300", "reveal shortcut-keys-open-settings", "click shortcut-keys-open-settings", "key secondary-n", "wait 300", "count shortcut-take 1", "click shortcut-cancel", "reveal shortcuts-reset-all", "click shortcuts-reset-all", "wait 300", "count shortcut-reset-open-settings 0"]
 how = { macos = "Changes are saved under [keys.mac], ⌘ chords; the menu bar shows them (it reads the keymap). macOS's own (⌘Tab, ⌘Space, ⇧⌘3–6, ⌃ arrows) and the text fields' (⌘C/V/X/A/Z) are refused.", windows = "Changes are saved under [keys.windows], apart from the Mac's (their defaults differ). A Ctrl+letter the user picks is still the shell's in the terminal panel, as Trek's own are; the Windows key, Ctrl+Alt (AltGr), Alt+Tab/F4/Space and the terminal's Ctrl+Shift+C/V are refused." }
 code = ["crates/trek-app/src/keys.rs", "crates/trek-app/src/settings_view/keyboard.rs", "crates/trek-core/src/settings.rs", "crates/trek-app/src/plugins/mod.rs"]
@@ -316,21 +376,25 @@ tests = ["crates/trek-app/src/keys.rs", "crates/trek-core/src/settings.rs"]
 what = "A changed shortcut is what's bound, and what hints, sentences and the page show; the old keys do nothing"
 macos = "crates/trek-app/src/keys.rs::a_changed_shortcut_is_bound_and_shown_everywhere"
 windows = "crates/trek-app/src/keys.rs::a_changed_shortcut_is_bound_and_shown_everywhere"
+linux = "crates/trek-app/src/keys.rs::a_changed_shortcut_is_bound_and_shown_everywhere"
 
 [[feature.promise]]
 what = "A Ctrl+letter the user chooses on Windows is still the shell's in the terminal"
 macos = "crates/trek-app/src/keys.rs::a_ctrl_letter_the_user_chose_is_the_shells_in_the_terminal"
 windows = "crates/trek-app/src/keys.rs::a_ctrl_letter_the_user_chose_is_the_shells_in_the_terminal"
+linux = "crates/trek-app/src/keys.rs::a_ctrl_letter_the_user_chose_is_the_shells_in_the_terminal"
 
 [[feature.promise]]
 what = "Only differences from Trek's defaults are saved, per platform"
 macos = "crates/trek-app/src/keys.rs::only_differences_from_the_defaults_are_saved"
 windows = "crates/trek-app/src/keys.rs::only_differences_from_the_defaults_are_saved"
+linux = "crates/trek-app/src/keys.rs::only_differences_from_the_defaults_are_saved"
 
 [[feature.promise]]
 what = "Keys the system and text fields need are refused; the same keys in the same place are a conflict"
 macos = "crates/trek-app/src/keys.rs::keys_the_system_and_text_need_are_refused"
 windows = "crates/trek-app/src/keys.rs::conflicts_are_the_same_keys_in_the_same_place"
+linux = "crates/trek-app/src/keys.rs::keys_the_system_and_text_need_are_refused"
 
 [[feature]]
 id = "zoom"
@@ -338,6 +402,7 @@ area = "App"
 what = "Zoom the whole interface (Cmd/Ctrl + and −, 0 to reset; the View menu and the palette), with Settings › Appearance › Text size's presets and a Custom size from 50% to 300%, and a Custom conversation text size"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route settings:appearance", "wait 300", "key secondary-=", "wait 300", "file settings.toml contains zoom = 1.1", "key secondary-0", "wait 300", "file settings.toml contains zoom = 1.0", "reveal zoom-size#4", "click zoom-size#4", "wait 300", "count zoom-custom 1", "reveal text-size#4", "click text-size#4", "wait 300", "count text-custom 1"]
 how = { macos = "Shared code: the window is zoomed in GPUI (Window::set_ui_zoom: laid out smaller, drawn larger), so the terminal and editor zoom with it on top of their own sizes, and web views are placed and zoomed to match. The traffic lights keep their room at any zoom. Where something has a size of its own, the same keys are its while it has the keys (bindings in its context, listed and changed on the Keyboard Shortcuts page): the terminal's text size, an image preview's actual pixels and fit, and the Browser's page.", windows = "The same code; the caption buttons are Trek's own and zoom with the rest. With the page focused, WebView2 takes Ctrl+/− for its own page zoom." }
 code = ["crates/trek-app/src/zoom.rs", "crates/trek-app/src/chrome.rs", "crates/trek-app/src/settings_view/keyboard.rs", "vendor/gpui-pre/src/window.rs", "crates/trek-core/src/settings.rs"]
@@ -347,11 +412,13 @@ tests = ["crates/trek-app/src/zoom.rs", "crates/trek-core/src/settings.rs"]
 what = "The keys step through the presets and past them, between 50% and 300%, and ⌘0 is 100% from anywhere"
 macos = "crates/trek-core/src/settings.rs::zoom_is_kept_in_range_and_steps_through_the_presets_and_past_them"
 windows = "crates/trek-core/src/settings.rs::zoom_is_kept_in_range_and_steps_through_the_presets_and_past_them"
+linux = "crates/trek-core/src/settings.rs::zoom_is_kept_in_range_and_steps_through_the_presets_and_past_them"
 
 [[feature.promise]]
 what = "A window too small for the zoom is drawn at what fits, never below 100% for that"
 macos = "crates/trek-app/src/zoom.rs::a_window_too_small_for_the_zoom_is_drawn_at_what_fits"
 windows = "crates/trek-app/src/zoom.rs::a_window_too_small_for_the_zoom_is_drawn_at_what_fits"
+linux = "crates/trek-app/src/zoom.rs::a_window_too_small_for_the_zoom_is_drawn_at_what_fits"
 
 [[feature]]
 id = "attach-files"
@@ -359,8 +426,9 @@ area = "Composer"
 what = "Attach files and folders from the + menu"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["click attach", "wait 300", "count popup-menu 1", "key escape"]
-how = { macos = "One open panel takes files and folders together.", windows = "Windows' open dialog picks files or folders, never both: \"Add photos & files\" picks files, \"Add folder\" folders." }
+how = { macos = "One open panel takes files and folders together.", windows = "Windows' open dialog picks files or folders, never both: \"Add photos & files\" picks files, \"Add folder\" folders.", linux = "The desktop portal's file chooser (GPUI's), GTK's where no portal runs." }
 code = ["crates/trek-app/src/photos.rs", "crates/trek-app/src/composer.rs"]
 tests = ["crates/trek-app/src/photos.rs"]
 
@@ -370,6 +438,7 @@ area = "Composer"
 what = "Pick from the Photos library"
 macos = "yes"
 windows = "n/a"
+linux = "n/a"
 live_macos = ["route project:{project}", "photos open", "wait 2500", "photos shown 1", "photos close", "wait 1200", "photos shown 0"]
 how = { macos = "The system's Photos picker, as a sheet.", windows = "Windows has no library picker: photos are files, picked in the open dialog." }
 code = ["crates/trek-app/src/photos.rs"]
@@ -380,7 +449,8 @@ area = "Composer"
 what = "HEIC and HEIF photos attach as images agents can read"
 macos = "yes"
 windows = "yes"
-note = "The capture build's `heic-demo` makes its test photo with the same codecs (Windows' HEIF encoder; a Mac's sips), for the live check."
+linux = "partial"
+note = "The capture build's `heic-demo` makes its test photo with the same codecs (Windows' HEIF encoder; a Mac's sips), for the live check. Linux: a HEIC or HEIF photo attaches as its file; nothing turns it into a PNG agents can read (libheif would)."
 live = ["route project:{project}", "heic-demo", "wait 2500", "count attachment#* 1+"]
 how = { macos = "Converted to PNG with sips.", windows = "Converted to PNG by Windows' own codecs (WIC), with the HEIF and HEVC extensions most Windows 11 PCs have; without them Trek names the Microsoft Store extension to get. Checked with a real 8256x5504 HEIC." }
 code = ["crates/trek-app/src/attachments.rs"]
@@ -392,8 +462,10 @@ area = "Composer"
 what = "A poster frame on an attached video's tile"
 macos = "yes"
 windows = "yes"
+linux = "partial"
 live = ["route project:{project}", "pace 0", "send mock:video", "wait idle 60000", "attach {data}{/}mock-video{/}clip.mp4", "wait 3000", "count attachment-poster* 1+"]
-how = { macos = "qlmanage's thumbnail.", windows = "Explorer's thumbnail (IShellItemImageFactory), 256 px, from whatever thumbnailer Windows has for the video." }
+how = { macos = "qlmanage's thumbnail.", windows = "Explorer's thumbnail (IShellItemImageFactory), 256 px, from whatever thumbnailer Windows has for the video.", linux = "A frame a second in, by ffmpeg where it's installed." }
+note = "Linux: without ffmpeg on the PATH an attached video's tile has no poster."
 code = ["crates/trek-app/src/attachments.rs"]
 tests = ["crates/trek-app/src/attachments.rs"]
 
@@ -403,9 +475,10 @@ area = "Composer"
 what = "Snapshot a window, an area or the screen into the message"
 macos = "yes"
 windows = "partial"
+linux = "no"
 live = ["route settings:app-snapshots", "wait 300", "reveal snap-keep*", "count snap-keep* 2+"]
 how = { macos = "screencapture: window, area or screen; hide Trek; shadow; sound; PNG or JPG.", windows = "Snipping Tool's overlay, its result read from the clipboard." }
-note = "Snipping Tool overwrites the clipboard, a cancelled snip can't be told apart from a slow one (Trek gives up after 60 s), and it's PNG only. Windows.Graphics.Capture with Trek's own area overlay would match the Mac. The Mac's own path (screencapture, Trek hidden while it runs, the shadow/sound/format settings) has no fake and no test; only Windows' Snipping Tool path is tested."
+note = "Snipping Tool overwrites the clipboard, a cancelled snip can't be told apart from a slow one (Trek gives up after 60 s), and it's PNG only. Windows.Graphics.Capture with Trek's own area overlay would match the Mac. The Mac's own path (screencapture, Trek hidden while it runs, the shadow/sound/format settings) has no fake and no test; only Windows' Snipping Tool path is tested. Linux: no capture tool Trek drives, so the + menu's snapshot rows, the shortcut and Settings › App Snapshots aren't there. The desktop portal's Screenshot would bring it."
 code = ["crates/trek-screenclip/src/lib.rs"]
 tests = ["crates/trek-app/tests/snapshots.rs"]
 
@@ -415,9 +488,11 @@ area = "Composer"
 what = "Preview files Trek doesn't draw itself (PDF, SVG, HEIC)"
 macos = "yes"
 windows = "partial"
+linux = "partial"
 live_macos = ["route project:{project}", "attach {project}{/}preview.trekcheck", "wait 600", "click attachment-file#0", "wait 3000", "programs qlmanage 1", "programs-stop", "hover attachment-file#0", "wait 300", "click att-file-x#0"]
 live_windows = ["file-app trekcheck on", "route project:{project}", "attach {project}{/}preview.trekcheck", "wait 600", "click attachment-file#0", "wait 3000", "file opened.trekcheck", "file-app trekcheck off", "hover attachment-file#0", "wait 300", "click att-file-x#0"]
-note = "Quick Look on the Mac; Windows opens the file's default app. The editor's WebView2 preview could show PDFs and SVGs in place."
+note = "Quick Look on the Mac; Windows opens the file's default app. The editor's WebView2 preview could show PDFs and SVGs in place. Linux: the file's default app (xdg-open), as on Windows."
+live_skip = "Linux: not seen live yet: the default app opens through xdg-open, which the headless runs have no desktop for; `viewer` is tested on every platform."
 code = ["crates/trek-app/src/image_preview.rs"]
 
 [[feature]]
@@ -426,6 +501,7 @@ area = "Threads"
 what = "Every sub-agent at work shows in its thread with its state, as the sidebar counts it, and its row stops it (and sends one of the agent's own a message where its agent takes one)"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "pace 1", "send mock:task 8s", "wait 2500", "count subagent#* 1", "count subagent-stop#* 1", "count subagent-message#* 1", "click stop", "pace 0", "send mock:resume 30s", "wait 2500", "count subagent-onward#* 1", "count sub-agents-at-work 1"]
 how = { macos = "The same on both: a row per sub-agent, Trek's own after its delegate_task call (or within moments when its call never shows in the transcript, as when a sub-agent of the agent's own made it), the agent's own on its call, and one woken again (Claude Code's SendMessage) on the call that woke it, its earlier row pointing there. The sidebar, the working bar and its list, the hub and the phone read one list (Workspace::sub_agents_at_work).", windows = "The same on both." }
 code = ["crates/trek-app/src/workspace.rs", "crates/trek-app/src/workspace/sub_agents.rs", "crates/trek-app/src/workspace/orchestrate.rs", "crates/trek-app/src/thread_view.rs", "crates/trek-app/src/working_bar.rs", "crates/trek-app/src/sidebar.rs", "crates/trek-agents/src/lib.rs", "crates/trek-agents/src/claude.rs"]
@@ -435,36 +511,43 @@ tests = ["crates/trek-app/tests/orchestrate.rs", "crates/trek-app/tests/sub_agen
 what = "Every sub-agent the sidebar counts shows in the thread while its turn runs, Trek's own after its call, even when a sub-agent of the agent's own started it"
 macos = "crates/trek-app/tests/orchestrate.rs::every_sub_agent_the_sidebar_counts_shows_in_the_thread_while_the_turn_runs"
 windows = "crates/trek-app/tests/orchestrate.rs::every_sub_agent_the_sidebar_counts_shows_in_the_thread_while_the_turn_runs"
+linux = "crates/trek-app/tests/orchestrate.rs::every_sub_agent_the_sidebar_counts_shows_in_the_thread_while_the_turn_runs"
 
 [[feature.promise]]
 what = "A sub-agent row placed with no call to follow holds back no later one"
 macos = "crates/trek-app/tests/orchestrate.rs::a_row_with_no_call_in_an_earlier_turn_holds_back_no_later_row"
 windows = "crates/trek-app/tests/orchestrate.rs::a_row_with_no_call_in_an_earlier_turn_holds_back_no_later_row"
+linux = "crates/trek-app/tests/orchestrate.rs::a_row_with_no_call_in_an_earlier_turn_holds_back_no_later_row"
 
 [[feature.promise]]
 what = "A sub-agent of the agent's own still out in the background after its turn shows at work"
 macos = "crates/trek-app/tests/orchestrate.rs::a_background_sub_agent_listed_after_its_turn_shows_at_work"
 windows = "crates/trek-app/tests/orchestrate.rs::a_background_sub_agent_listed_after_its_turn_shows_at_work"
+linux = "crates/trek-app/tests/orchestrate.rs::a_background_sub_agent_listed_after_its_turn_shows_at_work"
 
 [[feature.promise]]
 what = "A sub-agent woken again by a message works on a row where it was woken, Done only on its notification, its earlier row pointing there; after every line of the session, the transcript's working rows are what the sidebar counts"
 macos = "crates/trek-app/tests/sub_agents.rs::a_sub_agent_woken_by_a_message_works_on_a_row_where_it_was_woken"
 windows = "crates/trek-app/tests/sub_agents.rs::a_sub_agent_woken_by_a_message_works_on_a_row_where_it_was_woken"
+linux = "crates/trek-app/tests/sub_agents.rs::a_sub_agent_woken_by_a_message_works_on_a_row_where_it_was_woken"
 
 [[feature.promise]]
 what = "A sub-agent woken twice ends on its latest row, failed or stopped, never Done"
 macos = "crates/trek-app/tests/sub_agents.rs::a_sub_agent_woken_twice_ends_on_its_latest_row_failed_or_stopped"
 windows = "crates/trek-app/tests/sub_agents.rs::a_sub_agent_woken_twice_ends_on_its_latest_row_failed_or_stopped"
+linux = "crates/trek-app/tests/sub_agents.rs::a_sub_agent_woken_twice_ends_on_its_latest_row_failed_or_stopped"
 
 [[feature.promise]]
 what = "A thread read back from the store mid-run keeps its woken sub-agent at work; once Trek starts again it isn't at work anywhere"
 macos = "crates/trek-app/tests/sub_agents.rs::a_thread_loaded_again_mid_run_keeps_its_woken_sub_agent_at_work"
 windows = "crates/trek-app/tests/sub_agents.rs::a_thread_loaded_again_mid_run_keeps_its_woken_sub_agent_at_work"
+linux = "crates/trek-app/tests/sub_agents.rs::a_thread_loaded_again_mid_run_keeps_its_woken_sub_agent_at_work"
 
 [[feature.promise]]
 what = "A sub-agent woken in a session started since (after the idle reap) still finds its earlier row"
 macos = "crates/trek-app/tests/sub_agents.rs::a_sub_agent_woken_in_a_session_started_since_still_finds_its_earlier_row"
 windows = "crates/trek-app/tests/sub_agents.rs::a_sub_agent_woken_in_a_session_started_since_still_finds_its_earlier_row"
+linux = "crates/trek-app/tests/sub_agents.rs::a_sub_agent_woken_in_a_session_started_since_still_finds_its_earlier_row"
 
 [[feature]]
 id = "share-sheet"
@@ -472,9 +555,10 @@ area = "Threads"
 what = "Share a thread through the system (AirDrop, Messages, Mail)"
 macos = "yes"
 windows = "yes"
+linux = "no"
 live_windows = ["route project:{project}", "pace 0", "send Show a short answer", "wait idle 30000", "window front", "click thread-menu", "wait 300", "click thread-share", "wait 600", "click share-tab#2", "wait 300", "click share-to-system", "wait 200", "window front", "click share-primary", "wait 3000", "share asked 1+", "share close", "wait 300", "key escape"]
 live_ci = "Windows shows its share window only over the window in front, so the check brings Trek there (with a press of Alt, the input Windows wants first) and closes the share window with Escape: on someone's own computer, both would land in their way."
-note = "Its steps were shown working on the user's Windows 11 PC on 2026-11-13 (parity-live --ci, with their go-ahead): Trek in front, Send to › More… › Share…, Windows asking Trek for the thread, Escape closing its window."
+note = "Its steps were shown working on the user's Windows 11 PC on 2026-11-13 (parity-live --ci, with their go-ahead): Trek in front, Send to › More… › Share…, Windows asking Trek for the thread, Escape closing its window. Linux: no system share sheet, so More… isn't offered; links, export and Send to are."
 live_skip = "On a Mac the share sheet is the system's picker, a menu of AppKit's own that says nothing to the app until a service is chosen: the share tests check what a share offers."
 how = { macos = "The system share sheet (AirDrop, Messages, Mail).", windows = "Windows' share window (Nearby Sharing, Outlook, Teams and the apps that take a share), opened over Trek's window with the thread as text under its title." }
 code = ["crates/trek-app/src/share.rs", "crates/trek-app/src/share/windows.rs"]
@@ -486,9 +570,10 @@ area = "Agent tools"
 what = "watch_video gives agents a transcript of a video's audio"
 macos = "yes"
 windows = "yes"
+linux = "no"
 live = ["route project:{project}", "pace 0", "send mock:video", "wait idle 60000", "wait 800", "count trek-artifact-* 1+"]
 how = { macos = "whisper when it's installed, else the Speech framework.", windows = "whisper when it's installed, else Whisper in Trek itself: trek-mcp transcribes on the PC with dictation's engine (trek-dictate) and the speech model the mic downloaded, whose folder Trek names in TREK_DICTATION_DIR. It never downloads the model for a video: without it, the agent is told the composer's mic gets it (141 MB) or to install whisper." }
-note = "Checked on a Windows 11 PC (i7-13700H): a generated clip with a sentence spoken a second in, watched from 0:01, comes back word for word as [0:01.0–0:06.0] on the video's clock, in 2.7 s for the whole call (trek-mcp's video tests, where the model is present; they pass as skipped where it isn't, as on CI). A first-time Windows user gets transcripts once dictation has been used once, where a Mac asks for Speech Recognition the first time. A winget install of ffmpeg (what Settings' \"Use winget\" runs where Trek's own download failed) without Developer Mode puts the package's own folder on the user's Path rather than in its Links: Settings (detect::which_now) and watch_video (trek-mcp's find_executable) read the registry's Path as it is now, so it's found without restarting Trek."
+note = "Checked on a Windows 11 PC (i7-13700H): a generated clip with a sentence spoken a second in, watched from 0:01, comes back word for word as [0:01.0–0:06.0] on the video's clock, in 2.7 s for the whole call (trek-mcp's video tests, where the model is present; they pass as skipped where it isn't, as on CI). A first-time Windows user gets transcripts once dictation has been used once, where a Mac asks for Speech Recognition the first time. A winget install of ffmpeg (what Settings' \"Use winget\" runs where Trek's own download failed) without Developer Mode puts the package's own folder on the user's Path rather than in its Links: Settings (detect::which_now) and watch_video (trek-mcp's find_executable) read the registry's Path as it is now, so it's found without restarting Trek. Linux: no video watcher: `trek-mcp video` runs on macOS and Windows, and Settings › Tools hides it."
 code = ["crates/trek-mcp/src/video.rs", "crates/trek-dictate/src/lib.rs", "crates/trek-dictate/src/windows/local.rs", "crates/trek-app/src/workspace.rs", "crates/trek-mcp/src/util.rs", "crates/trek-core/src/detect.rs", "crates/trek-integrations/src/lib.rs"]
 tests = ["crates/trek-mcp/src/video.rs", "crates/trek-dictate/src/windows/local.rs", "crates/trek-app/src/workspace.rs", "crates/trek-mcp/src/util.rs", "crates/trek-core/src/detect.rs"]
 
@@ -498,9 +583,10 @@ area = "Agent tools"
 what = "ffmpeg and yt-dlp for the video watcher come from Trek itself where Homebrew or winget isn't there to install them"
 macos = "yes"
 windows = "yes"
+linux = "no"
 live = ["route settings:tools", "wait 300", "media-demo failed yt-dlp", "wait 300", "reveal yt-dlp-media-status", "count yt-dlp-media-status 1", "count install-yt-dlp 1"]
 how = { macos = "Martin Riedl's static ffmpeg and ffprobe 9.0.2 (ffmpeg.martin-riedl.de: one zip each for Apple silicon and for Intel, signed with his Developer ID, a .sha256 beside each), pinned by URL and SHA-256 in trek_core::media_tools; yt-dlp's own `yt-dlp_macos` from its latest GitHub release, checked against that release's SHA2-256SUMS.", windows = "Gyan Doshi's \"essentials\" ffmpeg 8.1.2 for x86-64 (GitHub GyanD/codexffmpeg, the same file and SHA-256 gyan.dev publishes), whose ffmpeg.exe and ffprobe.exe are taken out of the zip; yt-dlp's own `yt-dlp.exe`, checked against its release's SHA2-256SUMS. There is no ARM64 build: a Windows on ARM falls back to winget's line." }
-note = "The first `watch_video` (and Settings › Tools › Video's Install ffmpeg / Install yt-dlp, with progress) downloads what's missing into the folder `media_tools::dir` names (local app data on Windows, the data folder on a Mac), checks it against its SHA-256, starts it once with -version, and only then puts it in place; PATH and the package managers' folders come first, so an ffmpeg that's already there is used. Where a download can't be made Settings says why and offers Homebrew or winget when it's here. A file Trek downloads itself isn't quarantined, so Gatekeeper never asks about it (and the Mac builds are signed and notarized anyway). Checked on a Mac: with Homebrew's ffmpeg hidden from trek-mcp (a sandbox profile), the first watch_video of a generated clip downloaded both programs in 3 s and watched it, a second call used them at once, and with the network blocked it said why and left nothing behind; and the isolated app downloaded ffmpeg for real into its data folder from Settings' row (capture build: media-demo), with its progress shown. The Windows download isn't run on a PC here: its URL, size and SHA-256 are the ones the two sources publish, and the unpacking is tested with a made-up zip laid out as theirs is."
+note = "The first `watch_video` (and Settings › Tools › Video's Install ffmpeg / Install yt-dlp, with progress) downloads what's missing into the folder `media_tools::dir` names (local app data on Windows, the data folder on a Mac), checks it against its SHA-256, starts it once with -version, and only then puts it in place; PATH and the package managers' folders come first, so an ffmpeg that's already there is used. Where a download can't be made Settings says why and offers Homebrew or winget when it's here. A file Trek downloads itself isn't quarantined, so Gatekeeper never asks about it (and the Mac builds are signed and notarized anyway). Checked on a Mac: with Homebrew's ffmpeg hidden from trek-mcp (a sandbox profile), the first watch_video of a generated clip downloaded both programs in 3 s and watched it, a second call used them at once, and with the network blocked it said why and left nothing behind; and the isolated app downloaded ffmpeg for real into its data folder from Settings' row (capture build: media-demo), with its progress shown. The Windows download isn't run on a PC here: its URL, size and SHA-256 are the ones the two sources publish, and the unpacking is tested with a made-up zip laid out as theirs is. Linux: no video watcher (see video-transcripts)."
 code = ["crates/trek-core/src/media_tools.rs", "crates/trek-core/src/detect.rs", "crates/trek-mcp/src/video.rs", "crates/trek-integrations/src/lib.rs", "crates/trek-app/src/workspace/media_setup.rs", "crates/trek-app/src/settings_view.rs"]
 tests = ["crates/trek-core/src/media_tools.rs", "crates/trek-mcp/src/video.rs", "crates/trek-app/tests/settings_pages.rs", "crates/trek-app/src/workspace.rs"]
 
@@ -530,6 +616,7 @@ area = "Agents"
 what = "An agent's sign-in shows in Settings as soon as it's true, whether or not its terminal ends, and says the terminal can be closed"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["sign-in-demo start", "wait 600", "sign-in-demo done", "wait 2500", "count terminal-login-note 1"]
 how = { macos = "The same on both: while a login terminal is open for an agent that wasn't signed in, Trek asks that agent every few seconds; when its terminal ends, what Trek knows of the agent is read again at once.", windows = "The same on both." }
 note = "A login that's the agent's whole TUI (droid, qwen, pi) never exits, and the one that does (claude auth login, codex login) was read again only when the usual spacing allowed (30 s, Claude Code's 120 s, or once a run for the others), so a user saw \"Not signed in\" until a restart. Now a toast, the terminal's tab, a strip beside it in the dock and the agent's row in Settings say \"Signed in to Droid. You can close the terminal.\""
@@ -540,16 +627,19 @@ tests = ["crates/trek-app/tests/sign_in.rs", "crates/trek-core/src/catalog.rs"]
 what = "A login whose terminal never ends is noticed while it's open, and said once, in plain words"
 macos = "crates/trek-app/tests/sign_in.rs::a_login_that_never_exits_is_noticed_while_its_terminal_is_open"
 windows = "crates/trek-app/tests/sign_in.rs::a_login_that_never_exits_is_noticed_while_its_terminal_is_open"
+linux = "crates/trek-app/tests/sign_in.rs::a_login_that_never_exits_is_noticed_while_its_terminal_is_open"
 
 [[feature.promise]]
 what = "A login that ends has its agent read again at once, whatever was read a moment ago"
 macos = "crates/trek-app/tests/sign_in.rs::a_login_that_ends_has_its_agent_read_again_at_once"
 windows = "crates/trek-app/tests/sign_in.rs::a_login_that_ends_has_its_agent_read_again_at_once"
+linux = "crates/trek-app/tests/sign_in.rs::a_login_that_ends_has_its_agent_read_again_at_once"
 
 [[feature.promise]]
 what = "Switching account while signed in isn't announced as a sign-in"
 macos = "crates/trek-app/tests/sign_in.rs::switching_account_while_signed_in_is_not_announced"
 windows = "crates/trek-app/tests/sign_in.rs::switching_account_while_signed_in_is_not_announced"
+linux = "crates/trek-app/tests/sign_in.rs::switching_account_while_signed_in_is_not_announced"
 
 [[feature]]
 id = "local-models-in-picker"
@@ -557,6 +647,7 @@ area = "Agents"
 what = "A local model server that's running with no models yet is in the model menu, and says how to get one"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["click model-pill", "wait 300", "click mm-model", "wait 300", "count model-menu-body 1"]
 how = { macos = "The same on both: Ollama, LM Studio or llama.cpp answering with no models is on the rail; its panel says \"No models yet. In a terminal: ollama pull qwen3-coder\" and links to Settings › Local Models. The menu asks the server again each time it opens, so a model pulled since shows without restarting Trek.", windows = "The same on both." }
 note = "The list dropped a running server with no models (`ready_agents` wants a model to pick), so the menu's own empty state could never show, and a user who had just installed Ollama saw no sign that Trek had seen it. The rail now lists it (`picker_agents`); the agents a session can use (`ready_agents`) are as they were until it has a model."
@@ -567,6 +658,7 @@ tests = ["crates/trek-app/tests/composer.rs", "crates/trek-app/src/composer/pick
 what = "A running Ollama with no models is on the model menu's rail with a way to get one, and a model pulled afterwards is listed"
 macos = "crates/trek-app/tests/composer.rs::a_running_ollama_with_no_models_is_on_the_rail_and_a_pulled_model_shows"
 windows = "crates/trek-app/tests/composer.rs::a_running_ollama_with_no_models_is_on_the_rail_and_a_pulled_model_shows"
+linux = "crates/trek-app/tests/composer.rs::a_running_ollama_with_no_models_is_on_the_rail_and_a_pulled_model_shows"
 
 # ---------- Notifications ----------
 
@@ -576,9 +668,10 @@ area = "Notifications"
 what = "A banner when a thread needs you or finishes; clicking it opens the thread"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live_windows = ["route settings:notifications", "wait 300", "reveal notify-mode#1", "click notify-mode#1", "reveal notify-unfocused", "click notify-unfocused", "banners mark", "route project:{project}", "pace 1", "send mock:long 3s", "wait 600", "route basecamp", "wait idle 30000", "wait 2000", "pace 0", "banners new 1+", "route settings:notifications", "wait 300", "reveal notify-unfocused", "click notify-unfocused", "reveal notify-mode#3", "click notify-mode#3"]
-live_skip = "On a Mac a banner needs the installed app: an unbundled build has no notification center to post to (the notification tests cover it)."
-how = { macos = "The notification center.", windows = "Toasts under the AppUserModelID Trek registers, protocol-activated with the thread's trek:// link: a click starts Trek if it has quit, or hands the link to the running one." }
+live_skip = "On a Mac a banner needs the installed app: an unbundled build has no notification center to post to (the notification tests cover it). Linux: the headless runs have no notification service; banners are shown on a desktop."
+how = { macos = "The notification center.", windows = "Toasts under the AppUserModelID Trek registers, protocol-activated with the thread's trek:// link: a click starts Trek if it has quit, or hands the link to the running one.", linux = "Desktop notifications over the freedesktop D-Bus interface (GPUI's); clicking one opens the thread while Trek runs." }
 code = ["crates/trek-app/src/root.rs", "vendor/gpui-pre-windows/src/system_notifications.rs"]
 tests = ["crates/trek-app/tests/alerts.rs"]
 
@@ -588,9 +681,10 @@ area = "Notifications"
 what = "Trek knows whether its banners are allowed, and says how to allow them"
 macos = "yes"
 windows = "yes"
+linux = "n/a"
 live_windows = ["route settings:notifications", "wait 300", "reveal notify-mode#1", "click notify-mode#1", "banner-permission off", "route settings:general", "wait 200", "route settings:notifications", "wait 400", "count open-notification-settings 1", "banner-permission restore", "route settings:general", "wait 200", "route settings:notifications", "wait 400", "count open-notification-settings 0", "reveal notify-mode#3", "click notify-mode#3"]
 live_skip = "On a Mac the answer is the notification center's, which only the installed app can ask (an unbundled build has no bundle to ask for): the notification tests."
-how = { macos = "The notification center's authorization; onboarding asks, and Settings › Notifications says when banners are off.", windows = "Windows' own switches (every app's, and Trek's app id's) read from the registry; Settings › Notifications says when banners are off and opens Windows' page. Do Not Disturb holds banners back without refusing them." }
+how = { macos = "The notification center's authorization; onboarding asks, and Settings › Notifications says when banners are off.", windows = "Windows' own switches (every app's, and Trek's app id's) read from the registry; Settings › Notifications says when banners are off and opens Windows' page. Do Not Disturb holds banners back without refusing them.", linux = "No permission to ask: a notification service shows them, or none runs." }
 code = ["crates/trek-app/src/permissions.rs", "crates/trek-app/src/settings_view/pages.rs"]
 tests = ["crates/trek-app/tests/words.rs"]
 
@@ -602,10 +696,11 @@ area = "Tools"
 what = "The iPhone tool: your real iPhone for you and agents"
 macos = "yes"
 windows = "yes"
+linux = "no"
 live_macos = ["phone touch", "wait 800", "count phone-mirror 1"]
 live_windows = ["phone ready", "wait 600", "count phone-apps 1", "count phone-install 1", "phone files", "wait 600", "count phone-files 1", "phone screen", "wait 600", "click phone-tab#2", "wait 1500", "count phone-screen 1", "count phone-home 1", "count phone-type 1", "click phone-screen", "wait 800", "phone tapped 1", "phone disk-image", "wait 600", "click phone-tab#2", "wait 800", "count phone-screen-choose 1"]
 how = { macos = "Live screen over USB, keyboard and mouse over Bluetooth, iPhone Mirroring or Trek Driver for taps, apps and files.", windows = "Through Apple Devices (Apple Mobile Device Service, from the Microsoft Store): the phone's details, its screen (CoreDevice's screenshot service; a click a tap and a drag a swipe, typing, keys and Home through the HID back channel while the display service's stream runs; apps opened by name through its app service; once its developer disk image is installed from Xcode's iOS_DDI folder, as a cryptex on newer iOS), its apps (list, install an .ipa) and files (media, and apps' Documents: add, save, remove), AssistiveTouch, and agents' phone tools for them (phone_screenshot and phone_tap included), one agent at a time, with installs and file changes asked first. The panel says what's missing: Apple Devices, its service, a phone, Trust, unlocking, the disk image." }
-note = "The screen and taps on a PC come from CoreDevice's own services, the ones Xcode's Device Hub uses (trek_phone::coredevice: a screenshot service, the display service's media stream, and the HID back channel), over the phone's tunnel, with no Trek Driver to build or sign: the iPhone tool's Screen tab (a still about every second, a click a tap) and agents' phone_screenshot, phone_elements, phone_tap, phone_wait, phone_swipe, phone_type, phone_key, phone_home and phone_open_app. They need the phone's developer disk image, which the tool installs from Xcode's iOS_DDI folder copied from a Mac: newer iOS takes it as a cryptex (cryptexd), older through the image mounter (the image its manifest names for the phone). The tool notes the folder and installs the image from it again when the phone comes back without it (a restart takes it off), as Xcode does. Run from Windows on an iPhone 16 Pro Max with iOS 27.2: the image Xcode had put there was found, taken off and installed again from the folder (signed for the phone by Apple, in about 4 seconds), the screen showed in the Screen tab at 1320×2868, and taps landed: one opened a folder on the home screen and the next closed it. That run found three things a made-up phone couldn't. iOS 27 refuses the image mounter's image. Every picture stayed in memory (15 MB each, one a second); each is now decoded off the UI thread into a copy no bigger than it's drawn, and let go of when the next comes. And a tap did nothing, with no error: the stream that lets touches in was stopped as soon as the tap was sent, before its lift landed, so it now stays 0.7 s after. On the same phone a swipe paged the Home Screen and back, 12+30= typed into Calculator gave 42 (Shift held for +), and Home left an app and closed a folder. Opening an app by name hung, as iOS 27 lists apps only as a stream; it now streams the list (233 apps, Apple's included), and Calculator opened by name. The screen is read as elements through the phone's accessibility daemon (axauditd's remoteAXService, as Xcode 27's Device Hub reads it: trek_phone::ax), in the shape Trek Driver lists them on a Mac, so trek-mcp's outline, refs, tap by ref and phone_wait are the same: on the same phone the frames lined up with the screenshot, with nothing shown on the phone while it read. The difference left is the Mac's live picture (Trek Driver's stream) against a PC's still about every second."
+note = "The screen and taps on a PC come from CoreDevice's own services, the ones Xcode's Device Hub uses (trek_phone::coredevice: a screenshot service, the display service's media stream, and the HID back channel), over the phone's tunnel, with no Trek Driver to build or sign: the iPhone tool's Screen tab (a still about every second, a click a tap) and agents' phone_screenshot, phone_elements, phone_tap, phone_wait, phone_swipe, phone_type, phone_key, phone_home and phone_open_app. They need the phone's developer disk image, which the tool installs from Xcode's iOS_DDI folder copied from a Mac: newer iOS takes it as a cryptex (cryptexd), older through the image mounter (the image its manifest names for the phone). The tool notes the folder and installs the image from it again when the phone comes back without it (a restart takes it off), as Xcode does. Run from Windows on an iPhone 16 Pro Max with iOS 27.2: the image Xcode had put there was found, taken off and installed again from the folder (signed for the phone by Apple, in about 4 seconds), the screen showed in the Screen tab at 1320×2868, and taps landed: one opened a folder on the home screen and the next closed it. That run found three things a made-up phone couldn't. iOS 27 refuses the image mounter's image. Every picture stayed in memory (15 MB each, one a second); each is now decoded off the UI thread into a copy no bigger than it's drawn, and let go of when the next comes. And a tap did nothing, with no error: the stream that lets touches in was stopped as soon as the tap was sent, before its lift landed, so it now stays 0.7 s after. On the same phone a swipe paged the Home Screen and back, 12+30= typed into Calculator gave 42 (Shift held for +), and Home left an app and closed a folder. Opening an app by name hung, as iOS 27 lists apps only as a stream; it now streams the list (233 apps, Apple's included), and Calculator opened by name. The screen is read as elements through the phone's accessibility daemon (axauditd's remoteAXService, as Xcode 27's Device Hub reads it: trek_phone::ax), in the shape Trek Driver lists them on a Mac, so trek-mcp's outline, refs, tap by ref and phone_wait are the same: on the same phone the frames lined up with the screenshot, with nothing shown on the phone while it read. The difference left is the Mac's live picture (Trek Driver's stream) against a PC's still about every second. Linux: no iPhone tool or tab: no Apple Mobile Device Service to reach the phone through (usbmuxd from libimobiledevice would be the way)."
 code = ["crates/trek-phone/src/lib.rs", "crates/trek-phone/src/pc.rs", "crates/trek-app/src/panels/mod.rs", "crates/trek-app/src/panels/phone/windows.rs", "crates/trek-mcp/src/phone.rs", "crates/trek-phone/src/driver.rs", "crates/trek-phone/src/device.rs", "crates/trek-app/src/panels/phone.rs", "crates/trek-app/src/workspace/phone_use.rs", "crates/trek-app/src/settings_view.rs"]
 tests = ["crates/trek-app/tests/iphone.rs", "crates/trek-phone/src/pc.rs", "crates/trek-phone/examples/driver_bench.rs", "crates/trek-phone/examples/driver_run.rs", "crates/trek-phone/examples/driver_get.rs", "crates/trek-phone/examples/mirror.rs", "crates/trek-phone/examples/devices.rs", "crates/trek-phone/examples/pc_screen.rs", "crates/trek-phone/src/coredevice.rs"]
 
@@ -615,6 +710,7 @@ area = "Tools"
 what = "The iOS Simulator tool"
 macos = "yes"
 windows = "n/a"
+linux = "n/a"
 live_macos = ["route project:{project}", "tools simulator", "wait shown sim-devices 180000", "count sim-devices 1"]
 how = { macos = "simctl and AXe. Agents are handed its tools (trek-mcp simulator) only where Xcode's simctl is there (detect::has_simulator): with just the command line tools they'd be names in every request that do nothing.", windows = "The Simulator comes with Xcode, which is Mac-only: Settings says so. An Android emulator tool would be the Windows counterpart." }
 code = ["crates/trek-app/src/workspace.rs", "crates/trek-app/src/panels/simulator.rs"]
@@ -626,8 +722,11 @@ area = "Browser"
 what = "Popups that keep their opener (sign-ins that answer the opening page)"
 macos = "yes"
 windows = "yes"
+linux = "partial"
 live = ["route project:{project}", "tools browser", "wait 600", "browser go https://example.com", "wait 2500", "browser eval window.open('https://example.com/', 'pop', 'width=420,height=320'); 1", "wait 2500", "count browser-sheet-tab 1", "click browser-sheet-close"]
-how = { macos = "A real view made from WebKit's configuration.", windows = "WebView2's NewWindowRequested hands the page a view of Trek's (SetNewWindow) made from its opener's environment; WindowCloseRequested closes it. Ctrl-click and middle-click tabs keep an opener there (wry doesn't pass the click's details)." }
+live_linux = ["route project:{project}", "tools browser", "wait 600", "browser go https://example.com", "wait 2500", "browser eval window.open('https://example.com/', 'pop', 'width=420,height=320'); 1", "wait 2500", "count browser-tab#* 2"]
+how = { macos = "A real view made from WebKit's configuration.", windows = "WebView2's NewWindowRequested hands the page a view of Trek's (SetNewWindow) made from its opener's environment; WindowCloseRequested closes it. Ctrl-click and middle-click tabs keep an opener there (wry doesn't pass the click's details).", linux = "A page's popup opens in a tab of its own, without window.opener." }
+note = "Linux: a sign-in popup that answers its opener doesn't work (WebKitGTK's popup isn't made from the opener's configuration yet)."
 code = ["crates/trek-app/src/panels/browser.rs", "crates/trek-app/src/panels/browser/webview2.rs"]
 tests = ["crates/trek-app/src/panels/browser/fixtures/check.py"]
 
@@ -637,9 +736,11 @@ area = "Browser"
 what = "A page's dialogs and permission asks in Trek's bar; answered for an agent at work"
 macos = "yes"
 windows = "yes"
+linux = "partial"
 live = ["route project:{project}", "tools browser", "wait 600", "browser go https://example.com", "wait 2500", "browser eval setTimeout(() => alert('Live check'), 10); 1", "wait 1200", "count browser-ask-yes 1", "click browser-ask-yes"]
 how = { macos = "WebKit's UI delegate into Trek's bar.", windows = "WebView2's ScriptDialogOpening, PermissionRequested and LaunchingExternalUriScheme into the same bar (camera and microphone as one ask; an app link names the app Windows has for it); while an agent drives, Trek answers dialogs for it (Ask::for_agent, shared)." }
-code = ["crates/trek-app/src/panels/browser/asks.rs", "crates/trek-app/src/panels/browser/webview2.rs"]
+note = "Linux: a page's alert, confirm and prompt go to Trek's bar (WebKitGTK's script-dialog, kept until the bar answers, `webkitgtk.rs`); WebKitGTK's permission requests (camera, location) aren't routed to it yet, so it asks them in the page."
+code = ["crates/trek-app/src/panels/browser/asks.rs", "crates/trek-app/src/panels/browser/webview2.rs", "crates/trek-app/src/panels/browser/webkitgtk.rs"]
 tests = ["crates/trek-app/src/panels/browser/asks.rs"]
 
 [[feature]]
@@ -648,8 +749,10 @@ area = "Browser"
 what = "Downloads said in Trek's toasts"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "tools browser", "wait 600", "browser go https://example.com", "wait 2500", "browser eval (() => { const a = document.createElement('a'); a.href = 'data:text/plain,live%20check'; a.download = 'live-check.txt'; document.body.appendChild(a); a.click(); return 1; })()", "wait 2500", "file downloads{/}live-check.txt"]
 how = { macos = "WebKit's downloads, through wry.", windows = "WebView2's, through wry; taking them hides WebView2's own flyout, so Trek's toasts say it." }
+note = "Linux: WebKitGTK's downloads go through wry's handler as on the Mac, and its live check passes there."
 code = ["crates/trek-app/src/panels/browser.rs"]
 
 [[feature]]
@@ -658,8 +761,10 @@ area = "Browser"
 what = "A crashed page reloads, and a failed load says why"
 macos = "yes"
 windows = "yes"
+linux = "partial"
 live = ["route project:{project}", "tools browser", "wait 600", "browser go https://example.com", "wait 3000", "browser expect loaded", "browser crash", "wait 3000", "browser expect crashed loaded", "browser crash", "wait 3000", "browser expect crashed failed:example.com", "browser go http://127.0.0.1:39999/", "wait 3000", "browser expect failed:127.0.0.1:39999 why:running", "browser go http://127.0.0.1:9/", "wait 3000", "browser expect failed:127.0.0.1:9 why:kept"]
-note = "Checked against a real WebView2 on Windows 11: a refused connection (127.0.0.1:39999) gets Trek's \"Can't reach this page\" with its reason, and port 9 \"Can't open this page\", saying why, and links handed to another app (mailto:, a custom scheme) leave the page as it was; the six real-WebView2 tests pass. The mapping is plain code, so the Mac's CI checks the Windows words too. The crash page now points to \"Open in default browser\", which both platforms' ⋯ menus have (it said Safari). A port browsers keep pages off (the Fetch standard's list: 9, 22, 25…) is said as that on both platforms (\"Port 9 is kept for another kind of service…\"), not as a server that isn't running: WebView2 shows its own page for it with a status it calls unknown, and WebKit stops it before it starts. A newer WebKit reports that as its \"restricted port\" error (103, which Trek called its ad blocker's), and an older one, macOS 15's in CI, showed an empty page and reported nothing, leaving the tab blank; Trek's delegate now says it before WebKit is asked. The live check loads a closed port and port 9, and reads the reason Trek's page gives for each."
+live_linux = ["route project:{project}", "tools browser", "wait 600", "browser go https://example.com", "wait 3000", "browser expect loaded", "browser crash", "wait 3000", "browser expect crashed loaded", "browser crash", "wait 3000", "browser expect crashed failed:example.com", "browser go http://127.0.0.1:39999/", "wait 3000", "browser expect failed:127.0.0.1:39999 why:running"]
+note = "Checked against a real WebView2 on Windows 11: a refused connection (127.0.0.1:39999) gets Trek's \"Can't reach this page\" with its reason, and port 9 \"Can't open this page\", saying why, and links handed to another app (mailto:, a custom scheme) leave the page as it was; the six real-WebView2 tests pass. The mapping is plain code, so the Mac's CI checks the Windows words too. The crash page now points to \"Open in default browser\", which both platforms' ⋯ menus have (it said Safari). A port browsers keep pages off (the Fetch standard's list: 9, 22, 25…) is said as that on both platforms (\"Port 9 is kept for another kind of service…\"), not as a server that isn't running: WebView2 shows its own page for it with a status it calls unknown, and WebKit stops it before it starts. A newer WebKit reports that as its \"restricted port\" error (103, which Trek called its ad blocker's), and an older one, macOS 15's in CI, showed an empty page and reported nothing, leaving the tab blank; Trek's delegate now says it before WebKit is asked. The live check loads a closed port and port 9, and reads the reason Trek's page gives for each. Linux: a failed load and a page whose web process ended say so on Trek's page (WebKitGTK's load-failed and web-process-terminated, its GLib errors given as the Mac's codes, `webkitgtk.rs`); a port browsers keep pages off (9) shows a blank page, as WebKitGTK reports nothing for it, so its live check is left out there."
 how = { macos = "WebKit's errors (NSURLErrorDomain, WebKitErrorDomain) and its web content process ending.", windows = "WebView2's: a load it put its own error page up for (ContentLoading's IsErrorPage), with NavigationCompleted's WebErrorStatus in Trek's words (an unknown status, as for a refused connection, said as unreachable); a load only stopped (a link handed to another app, a download) and a server's own 404 page are left alone. ProcessFailed for the page's own process (exited, or unresponsive) is a crash: reloaded, then explained if it ends again." }
 tests = ["crates/trek-app/src/panels/browser/asks.rs", "crates/trek-app/src/panels/browser.rs", "crates/trek-app/tests/browser.rs"]
 code = ["crates/trek-app/src/panels/browser.rs", "crates/trek-app/src/panels/browser/webview2.rs", "crates/trek-app/src/panels/browser/asks.rs"]
@@ -670,8 +775,10 @@ area = "Browser"
 what = "Block trackers"
 macos = "yes"
 windows = "yes"
+linux = "no"
 live = ["route project:{project}", "tools browser", "wait 600", "click browser-more-button", "wait 300", "count browser-block-trackers 1", "key escape"]
 how = { macos = "Block ad and tracker networks: the big ad and tracker networks, as WebKit content rules (a site's own ads, YouTube's, are the ad blocker's: browser-extensions).", windows = "Block trackers: Edge's Strict tracking prevention, the WebView2 profile's level (ads are the imported ad blocker's)." }
+note = "Linux: WebKitGTK has no tracking prevention or content rules Trek drives; the Browser's menu has no such row."
 code = ["crates/trek-app/src/panels/browser.rs"]
 
 [[feature]]
@@ -680,9 +787,10 @@ area = "Browser"
 what = "Import your uBlock Origin as the ad blocker"
 macos = "yes"
 windows = "partial"
+linux = "no"
 live = ["route project:{project}", "tools browser", "wait 600", "click browser-more-button", "wait 300", "count browser-adblock-import 1", "key escape"]
 how = { macos = "Its rules converted to content rules; a folder, .zip or .crx; Allow ads on this site.", windows = "Installed as a Manifest V2 extension, from its folder." }
-note = "No per-site allow on Windows, and it stops working when Edge drops Manifest V2 (planned for 2027). The Mac's rule conversion through WebView2's request filtering would replace it."
+note = "No per-site allow on Windows, and it stops working when Edge drops Manifest V2 (planned for 2027). The Mac's rule conversion through WebView2's request filtering would replace it. Linux: WebKitGTK takes neither content rules nor extensions, so there's no uBlock Origin to import (Settings and the Browser's menu leave the rows out)."
 code = ["crates/trek-app/src/panels/browser_adblock.rs"]
 
 [[feature]]
@@ -691,9 +799,10 @@ area = "Browser"
 what = "Browser extensions with their button, popup and options"
 macos = "yes"
 windows = "partial"
+linux = "no"
 live = ["route project:{project}", "tools browser", "wait 600", "click browser-more-button", "wait 300", "count browser-extensions-open 1", "key escape"]
 how = { macos = "WebKit's WKWebExtension, with Trek's shim for APIs it lacks (compat.rs). Block ads on every site: the Extensions page's first card (and the ⋯ menu) installs uBlock Origin Lite with one confirmation, at its Optimal mode everywhere; YouTube's search ads, pre-roll and feed tiles go (checked 2026-11-20). Dark Reader and Vimium work too; Grammarly needs a sign-in; React Developer Tools partly; Bitwarden, 1Password, Privacy Badger don't (chrome.notifications, webRequest header options).", windows = "WebView2's profile extensions: the same page and Block ads card, content scripts and rules only." }
-note = "WebView2 runs unpacked extensions' content scripts only: no toolbar button, popup or options page. Those pages hosted in a Trek-made view would close it. The starters say so on Windows (catalog.rs's webview2 fit): Bitwarden and 1Password can't work (the vault is the popup), Grammarly, Dark Reader and uBlock Origin Lite partly. The ⋯ menu's Block ads row is the Mac's alone (WebView2 lists its extensions only from a view); the page's card is on both."
+note = "WebView2 runs unpacked extensions' content scripts only: no toolbar button, popup or options page. Those pages hosted in a Trek-made view would close it. The starters say so on Windows (catalog.rs's webview2 fit): Bitwarden and 1Password can't work (the vault is the popup), Grammarly, Dark Reader and uBlock Origin Lite partly. The ⋯ menu's Block ads row is the Mac's alone (WebView2 lists its extensions only from a view); the page's card is on both. Linux: WebKitGTK runs no web extensions."
 code = ["crates/trek-app/src/panels/browser_extensions.rs", "crates/trek-app/src/panels/browser_extensions/catalog.rs", "crates/trek-app/src/panels/browser_extensions/compat.rs"]
 
 [[feature]]
@@ -702,21 +811,24 @@ area = "Tools"
 what = "Terminal, editor previews and interactive artifacts"
 macos = "yes"
 windows = "yes"
+linux = "partial"
 live = ["route project:{project}", "tools terminal", "wait 1500", "count terminal 1"]
-how = { macos = "A PTY and WebKit.", windows = "ConPTY and WebView2 (artifacts InPrivate)." }
-note = "On Windows a live inline artifact's clipping window ignores round_bottom, so its square bottom corners cover the card's rounded ones, and every web-view failure there says the WebView2 runtime is needed, dropping the real reason the Mac shows (artifact/native.rs, artifact/mod.rs)."
-code = ["crates/trek-app/src/panels/terminal.rs", "crates/trek-app/src/artifact/native.rs", "crates/trek-app/src/artifact/mod.rs"]
+how = { macos = "A PTY and WebKit.", windows = "ConPTY and WebView2 (artifacts InPrivate).", linux = "A PTY and WebKitGTK, its views in X11 child windows of Trek's; a card's page stands on the card's colour." }
+note = "On Windows a live inline artifact's clipping window ignores round_bottom, so its square bottom corners cover the card's rounded ones, and every web-view failure there says the WebView2 runtime is needed, dropping the real reason the Mac shows (artifact/native.rs, artifact/mod.rs). Linux: a card's page can't show through (no see-through X11 child windows), and a card covered by a menu isn't swapped for a picture of its page (no snapshot is taken)."
+code = ["crates/trek-app/src/panels/terminal.rs", "crates/trek-app/src/artifact/native.rs", "crates/trek-app/src/artifact/mod.rs", "crates/trek-app/src/linux_gtk.rs"]
 tests = ["crates/trek-app/tests/ide.rs", "crates/trek-app/tests/terminal.rs", "crates/trek-app/tests/artifacts.rs"]
 
 [[feature.promise]]
 what = "An inline page or player that had the keys gives them back to Trek before its view hides or goes, so typing reaches the composer again"
 macos = "crates/trek-app/tests/artifacts.rs::a_page_with_the_keys_gives_them_back_before_its_card_hides_or_goes"
 windows = "crates/trek-app/tests/artifacts.rs::a_page_with_the_keys_gives_them_back_before_its_card_hides_or_goes"
+linux = "crates/trek-app/tests/artifacts.rs::a_page_with_the_keys_gives_them_back_before_its_card_hides_or_goes"
 
 [[feature.promise]]
 what = "A page that had the keys and scrolled far up, past the views a window keeps, leaves the keys with Trek"
 macos = "crates/trek-app/tests/artifacts.rs::keys_come_back_when_a_page_that_had_them_scrolls_away_and_its_view_is_let_go"
 windows = "crates/trek-app/tests/artifacts.rs::keys_come_back_when_a_page_that_had_them_scrolls_away_and_its_view_is_let_go"
+linux = "crates/trek-app/tests/artifacts.rs::keys_come_back_when_a_page_that_had_them_scrolls_away_and_its_view_is_let_go"
 
 # ---------- Agent tools ----------
 
@@ -726,8 +838,10 @@ area = "Agent tools"
 what = "Computer use in front: screenshots, clicks, keys and typing"
 macos = "yes"
 windows = "yes"
+linux = "no"
 live = ["route settings:tools", "wait 300", "count computer-use 1"]
 how = { macos = "Asks for Accessibility and Screen Recording; `open_app` is `open -a`, which brings a running app forward. Keys: the keypad and F1-F20.", windows = "Asks for nothing; can't type into apps running as administrator. `open_app` brings a running app's window forward (restored if minimized) before it would launch another. Keys: the keypad, F1-F24, and the PC's own (Insert, Print Screen, Pause, the lock keys, the menu key, the Windows key alone); a key one keyboard lacks is refused there by name." }
+note = "Linux: no computer use: `trek-mcp computer` runs on macOS and Windows, and Settings › Tools hides it. X11's XTest and screenshots, or the desktop portal's RemoteDesktop, would bring it."
 code = ["crates/trek-mcp/src/desktop.rs", "crates/trek-mcp/src/desktop/windows.rs", "crates/trek-mcp/src/computer.rs", "crates/trek-mcp/src/keys.rs"]
 tests = ["crates/trek-mcp/src/keys.rs", "crates/trek-mcp/src/desktop/windows.rs", "crates/trek-app/tests/upkeep.rs"]
 
@@ -737,10 +851,12 @@ area = "Agent tools"
 what = "Computer use by element (an outline with refs; click, type and wait by ref)"
 macos = "yes"
 windows = "yes"
+linux = "no"
 live_windows = ["computer open notepad.exe", "wait 1500", "computer elements Notepad expect File", "computer close"]
 live_macos = ["computer open /System/Applications/TextEdit.app/Contents/MacOS/TextEdit", "wait 2500", "computer elements TextEdit expect button", "computer close"]
 live_ci = "It opens another app (Notepad, which on someone's own PC opens as a tab of theirs; TextEdit), and on a Mac it needs the Accessibility permission, which the Live workflow gives on CI's own Mac only."
 how = { macos = "The Accessibility tree.", windows = "UI Automation: the same outline and refs, press (Invoke, Toggle, SelectionItem, ExpandCollapse), click and type by ref, wait for an element; classic menu bars read whole. Apps running as administrator can't be read, and menus an app draws itself have no words." }
+note = "Linux: no computer use (see computer-use); AT-SPI would give the outline."
 code = ["crates/trek-mcp/src/desktop.rs", "crates/trek-mcp/src/desktop/uia.rs", "crates/trek-mcp/src/outline.rs"]
 tests = ["crates/trek-mcp/src/desktop/uia.rs", "crates/trek-app/src/shots/computer_use.rs"]
 
@@ -750,8 +866,9 @@ area = "Agent tools"
 what = "Computer use in the background, with a floating live picture"
 macos = "yes"
 windows = "no"
+linux = "no"
 live_macos = ["route project:{project}", "pace 0", "send mock:background 1 800x600 Safari", "wait 3000", "count-all background-use 1", "background-use stop"]
-note = "Input goes to a window behind yours on the Mac. Windows would need per-window capture (Windows.Graphics.Capture) and input through UI Automation; idle and lock detection are there already."
+note = "Input goes to a window behind yours on the Mac. Windows would need per-window capture (Windows.Graphics.Capture) and input through UI Automation; idle and lock detection are there already. Linux: no computer use (see computer-use)."
 code = ["crates/trek-mcp/src/desktop.rs", "crates/trek-app/src/background_use.rs"]
 
 # ---------- Agents ----------
@@ -762,6 +879,7 @@ area = "Agents"
 what = "API-key and local-model agents run shell commands"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "pace 0", "send Read the project, then run a command that needs permission", "wait permission 30000", "approve", "wait idle 30000", "wait 1000", "count tool-group* 1+"]
 how = { macos = "bash.", windows = "Git for Windows' bash (never WSL's), the script handed over whole; background tasks end with the session through a job object. cmd.exe where Git for Windows isn't installed." }
 code = ["crates/trek-agents/src/direct.rs", "crates/trek-agents/src/direct/executor.rs", "crates/trek-agents/src/direct/search.rs"]
@@ -773,6 +891,7 @@ area = "Agents"
 what = "Agent CLIs kept up to date, the way each was installed"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route settings:agents", "wait 300", "reveal check-agent-updates", "count check-agent-updates 1", "count agent-updates-auto 1"]
 how = { macos = "npm, Bun, pnpm, Volta, Homebrew, and vendors' own updaters; agents added from the ACP Registry against the registry's index, installed by Trek beside the version in use (SHA-256 checked, started once to answer ACP's initialize) and used only then. Agents of the user's own command aren't checked, and Settings says so.", windows = "npm, Volta, WinGet, Scoop, Chocolatey (one administrator prompt for all), PowerShell installers and vendors' own updaters; registry agents as on the Mac, with the registry's Windows build. A CLI that replaces its own files (Copilot) updates itself even when WinGet installed it; the version probes end with what they started; an update waits for the agent's running copies to end." }
 code = ["crates/trek-core/src/agent_update.rs", "crates/trek-core/src/registry.rs", "crates/trek-core/src/detect.rs", "crates/trek-core/src/elevated.rs", "crates/trek-core/src/procs.rs", "crates/trek-app/src/agent_updates.rs"]
@@ -782,11 +901,13 @@ tests = ["crates/trek-core/src/agent_update.rs", "crates/trek-core/src/registry.
 what = "An update waits for its agent's running turn"
 macos = "crates/trek-app/tests/agent_updates.rs::an_update_waits_for_its_agents_running_turn"
 windows = "crates/trek-app/tests/agent_updates.rs::an_update_waits_for_its_agents_running_turn"
+linux = "crates/trek-app/tests/agent_updates.rs::an_update_waits_for_its_agents_running_turn"
 
 [[feature.promise]]
 what = "An agent from the ACP Registry is checked and updated like the CLIs, and its models are asked again"
 macos = "crates/trek-app/tests/agent_updates.rs::a_registry_agents_update_runs_its_new_version_and_its_models_are_asked_again"
 windows = "crates/trek-app/tests/agent_updates.rs::a_registry_agents_update_runs_its_new_version_and_its_models_are_asked_again"
+linux = "crates/trek-app/tests/agent_updates.rs::a_registry_agents_update_runs_its_new_version_and_its_models_are_asked_again"
 
 [[feature]]
 id = "model-names"
@@ -794,6 +915,7 @@ area = "Agents"
 what = "The model picker names models as their CLIs do"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["click model-pill", "wait 300", "click mm-model", "wait 300", "count model-menu-body 1", "count m-direct:mock-mock-swift 1", "count m-direct:mock-mock-deep 1"]
 how = { macos = "The same on both.", windows = "The same on both: a Claude Code without its downloaded model list is named from the model ids (Opus 5.5, not opus)." }
 code = ["crates/trek-core/src/catalog.rs"]
@@ -803,6 +925,7 @@ tests = ["crates/trek-core/src/catalog.rs", "crates/trek-agents/src/status.rs"]
 what = "A Claude model is named by its version (\"Opus 5.5\") before Claude Code's own catalog is in"
 macos = "crates/trek-agents/src/status.rs::claude_models_without_their_catalog_are_named_by_version"
 windows = "crates/trek-agents/src/status.rs::claude_models_without_their_catalog_are_named_by_version"
+linux = "crates/trek-agents/src/status.rs::claude_models_without_their_catalog_are_named_by_version"
 
 [[feature]]
 id = "accounts"
@@ -810,6 +933,7 @@ area = "Agents"
 what = "Several accounts for one agent, sharing your setup"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["accounts-demo", "route settings:agents", "wait 400", "reveal account-more-*", "count account-more-* 2+"]
 how = { macos = "Symlinks to your setup.", windows = "Symbolic links where Developer Mode allows them. Without it, folders become junctions and files (CLAUDE.md, settings.json, config.toml) hard links: an edit made in place is the other side's too, and a save that replaces the original whole (written beside it, then renamed over it) is followed the next time the account opens. A file the account's agent puts in its place stays its own, as on a Mac. Only a file on another drive than Trek's data is a copy." }
 code = ["crates/trek-core/src/accounts.rs"]
@@ -821,6 +945,7 @@ area = "Agents"
 what = "Skills keep the symlinks inside them when copied or moved"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route settings:skills", "wait 300", "count skill-add 1", "count skill-new 1"]
 how = { macos = "Symlinks kept.", windows = "Symlinks where Windows allows them (Developer Mode, or an administrator); otherwise a junction for a linked folder (if Windows will go through it) and a copy for a linked file. One that can't be kept stops the copy and says why." }
 code = ["crates/trek-core/src/skills.rs"]
@@ -834,6 +959,7 @@ area = "iPhone"
 what = "The iPhone app follows and steers your threads (Devices)"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["pair-phone Live check iPhone", "wait 1500", "route settings:phone", "wait 400", "count mobile-on 1", "reveal mobile-revoke-stand-in-iphone", "count mobile-revoke-stand-in-iphone 1", "pair-phone leave"]
 code = ["crates/trek-app/src/remote.rs"]
 tests = ["crates/trek-app/src/remote/notes.rs", "crates/trek-app/tests/interactions.rs"]
@@ -844,6 +970,7 @@ area = "iPhone"
 what = "A phone's browser (an Android phone first of all) pairs and follows and steers your threads: Trek's web remote at trekdesktop.com/remote, connected straight to this computer"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["pair-web", "wait 800", "route settings:phone", "wait 400", "reveal mobile-web", "count mobile-web 1", "reveal mobile-pair-for#1", "click mobile-pair-for#1", "wait 400", "reveal pair-web-link", "count mobile-pairing-web 1", "count pair-web-link 1"]
 how = { macos = "Shared code: trek_remote::web serves WebTransport (HTTP/3 over QUIC) beside the phone server's WebSocket, at the same addresses and port over UDP, its certificate a series of 13-day ECDSA ones the page pins by hash; the page is site/remote, deployed with the site.", windows = "The same code. Windows Firewall's question for Trek writes a rule for UDP as well as TCP, so an answer of Allow lets both in." }
 note = "Checked on a Windows 11 PC: headless Chrome opened the pairing link the capture build wrote (`pair-web`, the page served from site/ by script/site/serve.mjs), paired over WebTransport with the certificate pinned from the link, listed the threads, allowed a scripted agent's command (the agent carried on), and sent a follow-up the agent answered; Trek's devices.json had the browser as a `web` device, connected (script/site/remote-e2e.mjs)."
@@ -854,11 +981,13 @@ tests = ["crates/trek-remote/tests/web.rs", "crates/trek-app/src/settings_view/m
 what = "A page pairs and says hello over WebTransport, the certificate pinned by the hashes in its pairing link, and learns the whole series of certificates"
 macos = "crates/trek-remote/tests/web.rs::a_page_pairs_and_says_hello_over_webtransport_with_the_certificate_pinned"
 windows = "crates/trek-remote/tests/web.rs::a_page_pairs_and_says_hello_over_webtransport_with_the_certificate_pinned"
+linux = "crates/trek-remote/tests/web.rs::a_page_pairs_and_says_hello_over_webtransport_with_the_certificate_pinned"
 
 [[feature.promise]]
 what = "Only Trek's own page, at its path, gets a session; another origin, none, or another path is refused"
 macos = "crates/trek-remote/tests/web.rs::only_the_remotes_page_gets_in"
 windows = "crates/trek-remote/tests/web.rs::only_the_remotes_page_gets_in"
+linux = "crates/trek-remote/tests/web.rs::only_the_remotes_page_gets_in"
 
 [[feature]]
 id = "phone-look"
@@ -866,6 +995,7 @@ area = "iPhone"
 what = "The iPhone app draws the computer's look: its Trek theme (built-in, the user's or an agent's) and background art, when the phone matches it"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live_skip = "What changes is drawn on the phone: the snapshot's look is checked by trek-app's remote::look tests and trek-remote's protocol tests, and the iPhone's LookTests draw it (screenshots of each theme and collection in the simulator)."
 how = { macos = "Shared code: the snapshot carries `look` (trek_remote::MacLook), made from the theme Settings names and the art (remote/look.rs); the phone draws it natively (ios/Trek/Design/Looks.swift, Backgrounds.swift).", windows = "The same code: a PC's phone server sends the same look." }
 code = ["crates/trek-app/src/remote/look.rs", "crates/trek-remote/src/protocol/look.rs"]
@@ -877,6 +1007,7 @@ area = "iPhone"
 what = "On the iPhone, a sub-agent's row opens it: Trek's own as its thread, the agent's own as its transcript (prompt, calls and output, live), with Stop and a message where its agent takes one"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live_skip = "The sub-agent's sheet is the iPhone app's: the isolated app can't show it. What the Mac sends (the rows' links, `sub_agent` and `sub_agent_action`) is driven over the phone protocol in crates/trek-app/tests/remote.rs, and the sheet in ios/TrekTests on the simulator."
 how = { macos = "The same on both: the phone server's `sub_agent_view` feature.", windows = "The same on both." }
 code = ["crates/trek-app/src/remote/sub_agent_view.rs", "crates/trek-remote/src/protocol/sub_agent_view.rs", "crates/trek-core/src/store/sub_logs.rs"]
@@ -886,21 +1017,25 @@ tests = ["crates/trek-app/tests/remote.rs", "crates/trek-remote/tests/protocol.r
 what = "The agent's own sub-agent reads as a transcript of its own on the phone, and takes Stop and a message there"
 macos = "crates/trek-app/tests/remote.rs::a_phone_opens_a_sub_agent_from_its_row_and_steers_it"
 windows = "crates/trek-app/tests/remote.rs::a_phone_opens_a_sub_agent_from_its_row_and_steers_it"
+linux = "crates/trek-app/tests/remote.rs::a_phone_opens_a_sub_agent_from_its_row_and_steers_it"
 
 [[feature.promise]]
 what = "A sub-agent woken again by a message is in the phone's group and opens from its row there: the message that woke it, and its steps since"
 macos = "crates/trek-app/tests/sub_agents.rs::the_phone_opens_a_woken_sub_agent_from_its_row"
 windows = "crates/trek-app/tests/sub_agents.rs::the_phone_opens_a_woken_sub_agent_from_its_row"
+linux = "crates/trek-app/tests/sub_agents.rs::the_phone_opens_a_woken_sub_agent_from_its_row"
 
 [[feature.promise]]
 what = "One of Trek's own sub-agents at work tells the phone when its clock started, so its row counts up there as on the Mac"
 macos = "crates/trek-app/tests/orchestrate.rs::trek_s_own_sub_agent_at_work_tells_the_phone_when_it_started"
 windows = "crates/trek-app/tests/orchestrate.rs::trek_s_own_sub_agent_at_work_tells_the_phone_when_it_started"
+linux = "crates/trek-app/tests/orchestrate.rs::trek_s_own_sub_agent_at_work_tells_the_phone_when_it_started"
 
 [[feature.promise]]
 what = "The agent's own sub-agent's steps are kept with its thread, a step at a time and bounded as in memory, and read back on the phone after a restart"
 macos = "crates/trek-app/tests/orchestrate.rs::the_agent_s_own_sub_agent_s_steps_outlive_a_restart"
 windows = "crates/trek-app/tests/orchestrate.rs::the_agent_s_own_sub_agent_s_steps_outlive_a_restart"
+linux = "crates/trek-app/tests/orchestrate.rs::the_agent_s_own_sub_agent_s_steps_outlive_a_restart"
 
 [[feature]]
 id = "phone-failed-checks"
@@ -908,6 +1043,7 @@ area = "iPhone"
 what = "On the iPhone, a pull request a thread opened failing CI shows over its composer (CI failed, Send to agent, View on GitHub, Dismiss) and in Needs you, and each project's sending failed checks by itself is switched there, off unless turned on"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live_skip = "What's drawn is the iPhone app's: the isolated app can't show it. What the Mac sends and does is driven over the phone protocol in crates/trek-app/tests/remote.rs, the wire in crates/trek-remote/tests/protocol.rs, and the phone's side in ios/TrekTests (ComposerBarsTests) on the simulator."
 how = { macos = "The same on both: the phone server's `failed_checks` feature.", windows = "The same on both." }
 code = ["crates/trek-app/src/remote/bars.rs", "crates/trek-remote/src/protocol/composer_bars.rs"]
@@ -917,6 +1053,7 @@ tests = ["crates/trek-app/tests/remote.rs", "crates/trek-remote/tests/protocol.r
 what = "The phone sees the failing checks, sends them to the agent or dismisses them, and turns a project's sending by itself on and off"
 macos = "crates/trek-app/tests/remote.rs::the_failing_checks_bar_from_the_phone"
 windows = "crates/trek-app/tests/remote.rs::the_failing_checks_bar_from_the_phone"
+linux = "crates/trek-app/tests/remote.rs::the_failing_checks_bar_from_the_phone"
 
 [[feature]]
 id = "phone-permission-rules"
@@ -924,6 +1061,7 @@ area = "iPhone"
 what = "On the iPhone, the permission rules are listed and tried, and added, removed or written from an approval's Always allow… only where the computer's Settings › Phone lets it (off by default)"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live_skip = "What's drawn is the iPhone app's: the isolated app can't show it. What the Mac sends and does is driven over the phone protocol in crates/trek-app/tests/remote.rs, the wire in crates/trek-remote/tests/protocol.rs, and the phone's side in ios/TrekTests (ComposerBarsTests) on the simulator."
 how = { macos = "The same on both: the phone server's `rules` feature.", windows = "The same on both." }
 code = ["crates/trek-app/src/remote/rules.rs", "crates/trek-remote/src/protocol/rules.rs"]
@@ -933,6 +1071,7 @@ tests = ["crates/trek-app/tests/remote.rs", "crates/trek-remote/tests/protocol.r
 what = "Writing a rule from the phone is refused until the computer allows it, and an Always allow covers the card it came from"
 macos = "crates/trek-app/tests/remote.rs::the_phone_reads_and_tries_the_rules_and_writes_them_only_where_the_mac_lets_it"
 windows = "crates/trek-app/tests/remote.rs::the_phone_reads_and_tries_the_rules_and_writes_them_only_where_the_mac_lets_it"
+linux = "crates/trek-app/tests/remote.rs::the_phone_reads_and_tries_the_rules_and_writes_them_only_where_the_mac_lets_it"
 
 [[feature]]
 id = "phone-continue-on-account"
@@ -940,6 +1079,7 @@ area = "iPhone"
 what = "On the iPhone, the limit bar offers Continue on another account of the agent with room, and carries on there"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live_skip = "What's drawn is the iPhone app's: the isolated app can't show it. What the Mac sends and does is driven over the phone protocol in crates/trek-app/tests/remote.rs, the wire in crates/trek-remote/tests/protocol.rs, and the phone's side in ios/TrekTests (ComposerBarsTests) on the simulator."
 how = { macos = "The same on both: the phone server's `continue_on_account` feature.", windows = "The same on both." }
 code = ["crates/trek-app/src/remote/bars.rs", "crates/trek-remote/src/protocol/composer_bars.rs"]
@@ -949,6 +1089,7 @@ tests = ["crates/trek-app/tests/remote.rs", "crates/trek-remote/tests/protocol.r
 what = "The paused thread moves to the account the bar names, and only that one"
 macos = "crates/trek-app/tests/remote.rs::the_limit_bar_offers_another_account_and_the_phone_goes_there"
 windows = "crates/trek-app/tests/remote.rs::the_limit_bar_offers_another_account_and_the_phone_goes_there"
+linux = "crates/trek-app/tests/remote.rs::the_limit_bar_offers_another_account_and_the_phone_goes_there"
 
 [[feature]]
 id = "phone-compact-chip"
@@ -956,6 +1097,7 @@ area = "iPhone"
 what = "On the iPhone, a large idle thread whose prompt cache has gone offers Compact over its composer"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live_skip = "What's drawn is the iPhone app's: the isolated app can't show it. What the Mac sends and does is driven over the phone protocol in crates/trek-app/tests/remote.rs, the wire in crates/trek-remote/tests/protocol.rs, and the phone's side in ios/TrekTests (ComposerBarsTests) on the simulator."
 how = { macos = "The same on both: the phone server's `compact_offer` feature.", windows = "The same on both." }
 code = ["crates/trek-app/src/remote/bars.rs", "crates/trek-remote/src/protocol/composer_bars.rs"]
@@ -965,6 +1107,7 @@ tests = ["crates/trek-app/tests/remote.rs", "crates/trek-remote/tests/protocol.r
 what = "A large idle thread's row says when its cache goes and why, and a small or working one offers nothing"
 macos = "crates/trek-app/tests/remote.rs::a_large_idle_thread_offers_compact_in_its_row"
 windows = "crates/trek-app/tests/remote.rs::a_large_idle_thread_offers_compact_in_its_row"
+linux = "crates/trek-app/tests/remote.rs::a_large_idle_thread_offers_compact_in_its_row"
 
 [[feature]]
 id = "phone-switch-preview"
@@ -972,6 +1115,7 @@ area = "iPhone"
 what = "On the iPhone, picking another agent waits for the next message, with what goes with it and Stay on, as on the computer"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live_skip = "What's drawn is the iPhone app's: the isolated app can't show it. What the Mac sends and does is driven over the phone protocol in crates/trek-app/tests/remote.rs, the wire in crates/trek-remote/tests/protocol.rs, and the phone's side in ios/TrekTests (ComposerBarsTests) on the simulator."
 how = { macos = "The same on both: the phone server's `switch_preview` feature.", windows = "The same on both." }
 code = ["crates/trek-app/src/remote/bars.rs", "crates/trek-remote/src/protocol/composer_bars.rs"]
@@ -981,6 +1125,7 @@ tests = ["crates/trek-app/tests/remote.rs", "crates/trek-remote/tests/protocol.r
 what = "A held switch shows in the row, previews its handover, is dropped by Stay on, and happens with the phone's next message"
 macos = "crates/trek-app/tests/remote.rs::a_phone_holds_a_switch_for_the_next_message_and_previews_it"
 windows = "crates/trek-app/tests/remote.rs::a_phone_holds_a_switch_for_the_next_message_and_previews_it"
+linux = "crates/trek-app/tests/remote.rs::a_phone_holds_a_switch_for_the_next_message_and_previews_it"
 
 [[feature]]
 id = "phone-diff-viewed"
@@ -988,6 +1133,7 @@ area = "iPhone"
 what = "On the iPhone, files are ticked viewed in a diff review, the computer's Git panel's own marks, and come back unviewed when they change"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live_skip = "What's drawn is the iPhone app's: the isolated app can't show it. What the Mac sends and does is driven over the phone protocol in crates/trek-app/tests/remote.rs, the wire in crates/trek-remote/tests/protocol.rs, and the phone's side in ios/TrekTests (ComposerBarsTests) on the simulator."
 how = { macos = "The same on both: the phone server's `diff_viewed` feature.", windows = "The same on both." }
 code = ["crates/trek-app/src/remote/git.rs", "crates/trek-remote/src/protocol/viewed.rs"]
@@ -997,6 +1143,7 @@ tests = ["crates/trek-app/tests/remote.rs", "crates/trek-remote/tests/protocol.r
 what = "A file ticked on the phone is the panel's mark, and a file that changed since comes back unviewed"
 macos = "crates/trek-app/tests/remote.rs::files_marked_viewed_from_the_phone_are_the_panels_and_come_back_when_they_change"
 windows = "crates/trek-app/tests/remote.rs::files_marked_viewed_from_the_phone_are_the_panels_and_come_back_when_they_change"
+linux = "crates/trek-app/tests/remote.rs::files_marked_viewed_from_the_phone_are_the_panels_and_come_back_when_they_change"
 
 [[feature]]
 id = "phone-discovery"
@@ -1004,8 +1151,10 @@ area = "iPhone"
 what = "The phone finds the computer again when its address changes (Bonjour)"
 macos = "yes"
 windows = "yes"
+linux = "no"
 live = ["bonjour on", "wait 1500", "bonjour found", "bonjour off"]
 how = { macos = "Its mDNS responder (dns_sd's DNSServiceRegister).", windows = "Windows' own DNS-SD (DnsServiceRegister, Windows 10 1809 and later), with the same _trek._tcp name and record the Mac publishes." }
+note = "Linux: no Bonjour record (`bonjour.rs`; Avahi's would bring it): a phone reaches the computer at the address it paired with, and pairs again when that changes."
 code = ["crates/trek-app/src/remote/bonjour.rs"]
 tests = ["crates/trek-app/src/remote/bonjour.rs", "crates/trek-app/src/shots/dns_sd.rs"]
 
@@ -1015,9 +1164,10 @@ area = "iPhone"
 what = "The phone server is reachable on the local network"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["phone-server network", "wait 4000", "phone-server reach", "phone-server off"]
 live_ci = "It turns the phone server on, listening on the network as it does for phones: on someone's own computer, Windows Firewall would ask about it (and the answer would last)."
-how = { macos = "macOS asks for Local Network access.", windows = "Windows Firewall asks the first time Trek listens, and writes rules for the kinds of network ticked then, so on a network of another kind (a Wi-Fi marked public, Tailscale's private one) phones stay out and nothing asks again. Settings says so before the server runs, and while it runs reads the firewall's rules for Trek on each network this PC is on: where they keep phones out it names the network and the way in (Allow Trek on that kind of network, or make a public one private), with the firewall's settings a click away." }
+how = { macos = "macOS asks for Local Network access.", windows = "Windows Firewall asks the first time Trek listens, and writes rules for the kinds of network ticked then, so on a network of another kind (a Wi-Fi marked public, Tailscale's private one) phones stay out and nothing asks again. Settings says so before the server runs, and while it runs reads the firewall's rules for Trek on each network this PC is on: where they keep phones out it names the network and the way in (Allow Trek on that kind of network, or make a public one private), with the firewall's settings a click away.", linux = "No firewall prompt: Settings › Phone says to let the port through where ufw or firewalld runs." }
 note = "Found on the PC this was written on: Trek allowed on its public Wi-Fi and kept out on Tailscale, a private network, which nothing had said."
 code = ["crates/trek-app/src/settings_view/mobile.rs", "crates/trek-remote/src/server.rs", "crates/trek-app/src/remote/firewall.rs"]
 tests = ["crates/trek-remote/tests/server.rs", "crates/trek-app/src/remote/firewall.rs"]
@@ -1028,8 +1178,9 @@ area = "iPhone"
 what = "Get the iPhone app, and update it from the computer"
 macos = "yes"
 windows = "no"
+linux = "no"
 live_skip = "The iPhone app is built with Xcode on a Mac."
-note = "Built and installed with Xcode, which is Mac-only, so a Windows-only user can't get it. TestFlight or App Store distribution would. On a PC, a phone's ask to update and the driver's install say so in one line (`trek_phone::setup::Missing::Mac`: the driver is installed from a Mac; the PC's iPhone tool shows the apps and files, and the screen once its developer disk image is mounted)."
+note = "Built and installed with Xcode, which is Mac-only, so a Windows-only user can't get it. TestFlight or App Store distribution would. On a PC, a phone's ask to update and the driver's install say so in one line (`trek_phone::setup::Missing::Mac`: the driver is installed from a Mac; the PC's iPhone tool shows the apps and files, and the screen once its developer disk image is mounted). Linux: the iPhone app is built with Xcode, which needs a Mac."
 code = ["crates/trek-app/src/remote.rs", "crates/trek-app/src/remote/phone_update.rs", "crates/trek-phone/src/setup.rs"]
 tests = ["crates/trek-phone/src/setup.rs", "crates/trek-app/src/remote/phone_update.rs"]
 
@@ -1039,6 +1190,7 @@ area = "iPhone"
 what = "Uploads from the phone check for free space first"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["pair-phone Live check iPhone", "wait 1500", "pair-phone upload live-check.txt", "wait 2500", "file uploads{/}*live-check.txt", "pair-phone leave"]
 how = { macos = "statvfs.", windows = "GetDiskFreeSpaceExW (this user's share of it, a quota counted)." }
 code = ["crates/trek-app/src/remote/uploads.rs"]
@@ -1050,6 +1202,7 @@ area = "iPhone"
 what = "The pairing TLS key is readable by its owner alone"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["pair-phone Live check iPhone", "wait 1500", "pair-phone leave", "private mobile{/}identity.key"]
 how = { macos = "0600.", windows = "An access list with the owner alone, nothing inherited, set before the key is written (and an older key's fixed when it's loaded)." }
 code = ["crates/trek-remote/src/tls.rs"]
@@ -1061,9 +1214,10 @@ area = "Machines"
 what = "Run threads on this computer from another one"
 macos = "yes"
 windows = "partial"
+linux = "partial"
 live = ["route settings:phone", "wait 300", "reveal machine-add", "count machine-add 1"]
-how = { macos = "An ignored file copied to the other machine keeps its permission bits.", windows = "Windows has none to read: an ignored file copied to the other machine goes as 0644, one that starts with #! (a script) as 0755." }
-note = "A PC as the target answers the other computer as a Mac does, tested on both CIs (tests/remote.rs: machine_info, a clone registered as a project, put_files never through a link). No run between two real computers has had a PC as the target yet (docs/MULTI-MACHINE.md)."
+how = { macos = "An ignored file copied to the other machine keeps its permission bits.", windows = "Windows has none to read: an ignored file copied to the other machine goes as 0644, one that starts with #! (a script) as 0755.", linux = "A file's permission bits go as on a Mac." }
+note = "A PC as the target answers the other computer as a Mac does, tested on both CIs (tests/remote.rs: machine_info, a clone registered as a project, put_files never through a link). No run between two real computers has had a PC as the target yet (docs/MULTI-MACHINE.md). Linux: the same code as the Mac's, tested by the Linux CI; no run between two real computers has had a Linux one yet."
 code = ["crates/trek-app/src/machines.rs", "crates/trek-app/src/machines/clone.rs"]
 tests = ["crates/trek-app/tests/remote.rs", "crates/trek-app/src/machines/clone.rs"]
 
@@ -1073,11 +1227,25 @@ area = "Machines"
 what = "Files and pictures attached here go with a thread on another machine"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route no-project", "pair-self", "wait 4000", "machine-draft", "attach {project}{/}README.md", "type What does the README say?", "key enter", "wait 4000", "file uploads{/}*README.md contains Live project", "count user-file* 1", "pair-self leave", "wait 800", "count machine-head* 0"]
 how = { macos = "The other machine keeps them in its data folder's uploads/ and the message names its path to each: a Mac's or a PC's, as that machine writes it.", windows = "The same code: a PC sends its own paths' files and is given the other machine's paths (backslashes on a PC, slashes on a Mac), and takes files into %APPDATA%'s uploads/ as a Mac does." }
 note = "Shared code on both platforms, tested on both CIs against a loopback machine (tests/machines.rs, tests/remote.rs, trek-remote's client tests). No run between two real computers has sent files yet, a PC on either end least of all (docs/MULTI-MACHINE.md). A folder can't go yet (it would need packing up), nor a file over 2 GB; a machine before Trek 0.4.61 takes pictures alone, inline."
 code = ["crates/trek-app/src/machines/files.rs", "crates/trek-app/src/composer/machine_upload.rs", "crates/trek-app/src/remote/uploads.rs", "crates/trek-remote/src/protocol/uploads.rs", "crates/trek-remote/src/client.rs"]
 tests = ["crates/trek-app/tests/machines.rs", "crates/trek-app/tests/remote.rs", "crates/trek-app/src/machines/files.rs", "crates/trek-remote/tests/client.rs", "crates/trek-remote/src/protocol/uploads.rs"]
+
+[[feature]]
+id = "machine-sub-agents"
+area = "Machines"
+what = "A thread on another machine shows its sub-agents' rows, the working bar waiting on them, and its background commands, as at home"
+macos = "yes"
+windows = "yes"
+linux = "yes"
+live = ["route no-project", "pair-self", "wait 4000", "machine-draft", "type Scout with subagents 60s", "key enter", "wait 4000", "count subagent#* 2", "count waiting-on 1", "pair-self leave", "wait 800", "count machine-head* 0"]
+how = { macos = "The same code on both: rows from the machine's `sub_agent` links, the bar and hub from its row's `sub_agents`, the strip from `background_tasks`; Stop and messages go to the machine.", windows = "The same code: a PC viewing a Mac's thread (the owner's case, 0.4.63) draws what the Mac sends as a Mac viewing it does." }
+note = "Shared code, tested on both CIs against a loopback machine (tests/machines.rs: an agent's own sub-agents, Trek's own with its own nested, background commands). Not yet seen between two real computers. A machine before 0.4.64 sends no `activity` (an opened row lists no calls there) and no `continued`."
+code = ["crates/trek-app/src/machines.rs", "crates/trek-app/src/machines/sub_agents.rs", "crates/trek-app/src/workspace/sub_agents.rs", "crates/trek-app/src/remote/sub_agent_view.rs", "crates/trek-remote/src/protocol/sub_agent_view.rs"]
+tests = ["crates/trek-app/tests/machines.rs", "crates/trek-remote/tests/protocol.rs"]
 
 # ---------- The rest of the census (November 2026 audit): at parity, Windows-only, and polish ----------
 
@@ -1087,8 +1255,10 @@ area = "App"
 what = "Choose Trek's app icon"
 macos = "yes"
 windows = "yes"
+linux = "partial"
 live = ["route settings:appearance", "wait 300", "reveal app-icon-Night", "count app-icon-* 3+"]
-how = { macos = "The Dock tile while Trek runs; Finder and the Dock keep Night when it's closed.", windows = "The windows' icons (taskbar, Alt+Tab) while Trek runs; Trek's file and its shortcuts keep Night." }
+how = { macos = "The Dock tile while Trek runs; Finder and the Dock keep Night when it's closed.", windows = "The windows' icons (taskbar, Alt+Tab) while Trek runs; Trek's file and its shortcuts keep Night.", linux = "The choice is kept, but the launcher and window list show the desktop entry's icon." }
+note = "Linux: Night always shows: X11 windows don't take the chosen icon yet (_NET_WM_ICON would)."
 code = ["crates/trek-app/src/system.rs", "crates/trek-app/build.rs"]
 
 [[feature]]
@@ -1097,8 +1267,10 @@ area = "App"
 what = "Keep the computer awake while agents work, follow reduced motion and transparency, and move files to the trash"
 macos = "yes"
 windows = "yes"
+linux = "partial"
 live = ["route settings:general", "wait 300", "reveal prevent-sleep", "count prevent-sleep 1", "route settings:appearance", "wait 300", "reveal reduce-motion", "count reduce-motion 1"]
-how = { macos = "macOS's own.", windows = "Windows' own: SetThreadExecutionState, its animation and transparency settings, the Recycle Bin." }
+how = { macos = "macOS's own.", windows = "Windows' own: SetThreadExecutionState, its animation and transparency settings, the Recycle Bin.", linux = "Keep-awake through the desktop portal's Inhibit; deleted files to the freedesktop Trash." }
+note = "Linux: reduced motion and transparency aren't read from the desktop (GTK's settings would say them)."
 code = ["crates/trek-app/src/system.rs", "crates/trek-core/src/paths.rs"]
 
 [[feature]]
@@ -1107,8 +1279,10 @@ area = "App"
 what = "Looks at home on its platform"
 macos = "yes"
 windows = "yes"
+linux = "partial"
 live = ["count title-text 1", "count toggle-sidebar 1", "count mode-switch 1"]
-how = { macos = "macOS styling.", windows = "Windows 11 styling (fluent.rs): 4 and 8 px corners, flat cards with a stroke, flyout shadows, selection bars, accent buttons, caption buttons." }
+how = { macos = "macOS styling.", windows = "Windows 11 styling (fluent.rs): 4 and 8 px corners, flat cards with a stroke, flyout shadows, selection bars, accent buttons, caption buttons.", linux = "The Mac's styling, in a window the desktop frames (Trek runs under Xwayland, where the desktop draws the title bar)." }
+note = "Linux: no styling of its own: the Mac's, with the desktop's title bar above Trek's own row."
 code = ["crates/trek-app/src/fluent.rs", "crates/trek-core/src/artifact.rs", "crates/trek-assets/src/assets.rs", "crates/trek-assets/src/file_icon.rs", "crates/trek-app/src/panels/browser/prompts.rs", "crates/trek-app/src/ui.rs", "crates/trek-app/src/editor.rs", "crates/trek-app/src/toast.rs", "crates/trek-app/src/command_palette.rs", "crates/trek-app/src/notes.rs", "crates/trek-app/src/visualization/mod.rs", "crates/trek-app/src/panels/branch_graph.rs", "crates/trek-app/src/thread_view/permission_cards.rs"]
 tests = ["crates/trek-app/tests/scaling.rs"]
 
@@ -1118,8 +1292,9 @@ area = "App"
 what = "Hide Trek or minimize its window from the keyboard"
 macos = "yes"
 windows = "n/a"
+linux = "n/a"
 live_macos = ["route settings:keyboard-shortcuts", "wait 300", "reveal shortcut-hide-app", "count shortcut-hide-app 1", "count shortcut-minimize 1"]
-how = { macos = "⌘H and ⌘M.", windows = "Hiding an app isn't a Windows idea; Win+Down minimizes any window." }
+how = { macos = "⌘H and ⌘M.", windows = "Hiding an app isn't a Windows idea; Win+Down minimizes any window.", linux = "Hiding an app isn't a Linux idea; the desktop's own key minimizes." }
 code = ["crates/trek-app/src/keys.rs"]
 tests = ["crates/trek-app/tests/keys.rs"]
 
@@ -1129,8 +1304,9 @@ area = "App"
 what = "Onboarding asks for the permissions Trek uses"
 macos = "yes"
 windows = "n/a"
+linux = "n/a"
 live_macos = ["onboarding permissions", "wait 600", "count ob-perm-* 2+", "click ob-skip"]
-how = { macos = "A step with each permission, and Trek's icon to drag into the lists that take one.", windows = "Windows asks for none of the Mac's: the step is left out, and Settings › Notifications says when banners are off." }
+how = { macos = "A step with each permission, and Trek's icon to drag into the lists that take one.", windows = "Windows asks for none of the Mac's: the step is left out, and Settings › Notifications says when banners are off.", linux = "Linux asks for no permissions Trek uses." }
 code = ["crates/trek-app/src/onboarding.rs", "crates/trek-integrations/src/lib.rs"]
 tests = ["crates/trek-app/tests/screens.rs"]
 
@@ -1140,6 +1316,7 @@ area = "Install"
 what = "Trek moves out of a folder it can't update in, and fixes its shortcuts"
 macos = "n/a"
 windows = "yes"
+linux = "n/a"
 live_windows = ["toasts clear", "wait 300", "toast guarded Documents", "wait 500", "toasts 1", "toasts clear"]
 note = "The live check shows the launch's offer as Trek makes it from a guarded Documents folder (its words and Move Trek); where the running Trek is can't change mid-run, so finding the guard (Controlled folder access on, Trek in a folder it guards) is update.rs's and tests/hardening.rs's."
 how = { macos = "Nothing guards a Mac's folders that way.", windows = "Controlled folder access and Defender can block an update in Documents or Desktop: Trek says so and can move itself." }
@@ -1152,11 +1329,12 @@ area = "Install"
 what = "Trek updated while it's closed"
 macos = "yes"
 windows = "yes"
+linux = "no"
 live_windows = ["route settings:updates", "wait 300", "reveal update-while-closed", "click update-while-closed", "wait 3000", "update-task registered", "click update-while-closed", "wait 3000", "update-task gone"]
 live_ci = "It sets up a task in Task Scheduler (the capture build's own, never the installed Trek's) and takes it away again: on someone's own PC that's a change to their Task Scheduler."
 live_skip = "On a Mac it's the phone updater's LaunchAgent that runs `trek-mcp mac-update` (ios/scripts/phone-update.sh), set up with the iPhone app from a Mac: its tests cover the update."
 how = { macos = "The phone updater's LaunchAgent runs `trek-mcp mac-update` every half hour: with Trek closed and a newer release out, it's checked, downloaded and installed over the app.", windows = "Settings › Updates › Update while Trek is closed: a task in Task Scheduler (Trek › Update while closed) runs `trek-mcp win-update` beside Trek every half hour while the user is signed in. With Trek closed and a newer release out, it's checked, downloaded and staged as Trek's own updater does, and trek-update swaps it in as that run ends; never while Trek is open." }
-note = "Windows' is Trek's own setting, off until it's turned on: a PC has no phone updater to set it up."
+note = "Windows' is Trek's own setting, off until it's turned on: a PC has no phone updater to set it up. Linux: nothing updates Trek while it's closed; the AppImage updates itself while it runs."
 code = ["crates/trek-core/src/update/closed.rs", "crates/trek-mcp/src/main.rs"]
 
 [[feature]]
@@ -1165,6 +1343,7 @@ area = "Composer"
 what = "Windows' own dictation (Win+H) types into Trek's text fields"
 macos = "n/a"
 windows = "yes"
+linux = "n/a"
 live_person = "2026-11-11, on Windows 11: the user dictated a message into Trek's composer with Win+H, and it arrived as typed. Voice typing is the system's own panel, listening to a person: no machine can speak to it."
 note = "Checked live on 2026-11-11: the user dictated a message into Trek's composer with Win+H and it arrived as typed (GPUI's IMM32 input takes voice typing's text). Trek's own mic (dictation) is the main way in."
 code = ["vendor/gpui-pre-windows/src/events.rs"]
@@ -1175,6 +1354,7 @@ area = "Threads"
 what = "An opened timeline row stays in view while following the end; the context bar's slivers stay within it; Compact now stays until the summary is done"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "pace 0", "send Show a short answer", "wait idle 30000", "click hub-context", "wait 800", "within context-bar-* context-bar", "key escape"]
 how = { macos = "The same on both.", windows = "The same on both: made for Windows first, behind its styling switch (fluent::WINDOWS), so the Mac had none of them until this audit." }
 code = ["crates/trek-app/src/thread_view.rs", "crates/trek-app/src/context_popover.rs"]
@@ -1185,8 +1365,9 @@ area = "Threads"
 what = "The thought streaming in after a group of tool calls, in the timeline and the working bar"
 macos = "partial"
 windows = "yes"
+linux = "partial"
 live = ["route project:{project}", "pace 1", "send mock:long 6s", "wait 2500", "count working-bar 1", "click stop", "pace 0"]
-note = "Shown by Windows' timeline design only (fluent::WINDOWS). Whether the Mac's timeline shows it too is a design decision, not a bug: kept apart until it's made."
+note = "Shown by Windows' timeline design only (fluent::WINDOWS). Whether the Mac's timeline shows it too is a design decision, not a bug: kept apart until it's made. Linux: as on the Mac (Windows' timeline design only)."
 code = ["crates/trek-app/src/thread_view.rs", "crates/trek-app/src/working_bar.rs"]
 
 [[feature]]
@@ -1195,6 +1376,7 @@ area = "Editor"
 what = "The preview opens files that live only in the cloud"
 macos = "n/a"
 windows = "yes"
+linux = "n/a"
 live_windows = ["cloud-file {project}{/}OneDrive{/}notes.txt Fetched from the cloud", "cloud-file {project}{/}OneDrive{/}away.txt Never fetched", "route project:{project}", "editor on", "editor open {project}{/}OneDrive{/}notes.txt", "wait 800", "editor note Fetching notes.txt from OneDrive", "wait 4000", "editor has Fetched from the cloud", "cloud-file fetched 1", "cloud-file away", "editor open {project}{/}OneDrive{/}away.txt", "wait 1500", "editor note OneDrive isn't running", "cloud-file off", "editor off"]
 how = { macos = "iCloud Drive's files open as any others.", windows = "OneDrive's online-only files are fetched first, and the button names the default app." }
 code = ["crates/trek-app/src/ide/preview.rs"]
@@ -1205,8 +1387,10 @@ area = "Notifications"
 what = "An alert sound, a push to the phone (the web remote's notifications, or ntfy), and knowing when you're away"
 macos = "yes"
 windows = "yes"
+linux = "partial"
 live = ["route settings:phone", "wait 300", "reveal push-on", "count push-on 1", "route settings:notifications", "wait 300", "reveal notify-mode*", "count notify-mode* 2+"]
-how = { macos = "macOS's idle time and screen lock.", windows = "Windows' idle time and session lock." }
+how = { macos = "macOS's idle time and screen lock.", windows = "Windows' idle time and session lock.", linux = "No idle time or screen lock read: always taken as away." }
+note = "Linux: Trek can't tell whether you're at the computer, so a push goes to the phone every time (a note you didn't need over one you never got, as Windows does when it can't tell)."
 code = ["crates/trek-app/src/push.rs"]
 
 [[feature]]
@@ -1215,6 +1399,7 @@ area = "Notifications"
 what = "Banners on a phone's web remote, sent by the computer itself through the browser's push service (Web Push), with no account or other app"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route settings:phone", "wait 300", "reveal push-on", "count push-on 1"]
 how = { macos = "Shared code: the computer's own key pair and RFC 8291 encryption (trek_remote::webpush), sent with reqwest.", windows = "The same." }
 code = ["crates/trek-remote/src/webpush.rs", "crates/trek-app/src/push.rs"]
@@ -1226,9 +1411,11 @@ area = "Agent tools"
 what = "Agents' Simulator, iPhone and Trek-update tools"
 macos = "yes"
 windows = "yes"
+linux = "no"
 live_macos = ["route project:{project}", "tools simulator", "wait shown sim-devices 180000", "count sim-devices 1"]
 live_windows = ["phone agent", "wait 600", "count phone-agent-strip 1", "count phone-agent-stop 1"]
 how = { macos = "`trek-mcp simulator` (simctl and AXe), `trek-mcp phone` through Trek's iPhone tool, and `trek-mcp mac-update`, which the phone updater runs to update Trek while it's closed.", windows = "`trek-mcp phone` through the PC's iPhone tool, with every phone tool a Mac has (iphone-tool), and `trek-mcp win-update`, which its scheduled task runs to update Trek while it's closed (update-while-closed). There's no `trek-mcp simulator`: the iOS Simulator needs Xcode (simulator, the Mac's alone)." }
+note = "Linux: none of these: no iOS Simulator, iPhone tool or update-while-closed there."
 code = ["crates/trek-mcp/src/main.rs", "crates/trek-mcp/src/rpc.rs"]
 
 [[feature]]
@@ -1237,9 +1424,10 @@ area = "Agents"
 what = "API keys kept in the system's credential store, and Node.js for npm-only agents"
 macos = "yes"
 windows = "yes"
+linux = "partial"
 live = ["route settings:api-keys", "wait 300", "count save-anthropic 1", "count save-openai 1"]
-how = { macos = "The Keychain; Node from Homebrew or Trek's own.", windows = "Credential Manager; Trek's own Node." }
-note = "npm's warnings and notices are quiet for Trek's own Node on both platforms now (they were on Windows only). An installed Node is found first on Windows too (Program Files, nvm-windows, Volta, fnm, Scoop, Chocolatey), as on the Mac."
+how = { macos = "The Keychain; Node from Homebrew or Trek's own.", windows = "Credential Manager; Trek's own Node.", linux = "The desktop's keyring through the Secret Service (GNOME Keyring, KWallet); Node found on the PATH (nvm, fnm, Volta) or Trek's own." }
+note = "npm's warnings and notices are quiet for Trek's own Node on both platforms now (they were on Windows only). An installed Node is found first on Windows too (Program Files, nvm-windows, Volta, fnm, Scoop, Chocolatey), as on the Mac. Linux: a session with no Secret Service running (a bare window manager, a server) can't save keys: Settings says so rather than write them to a file."
 code = ["crates/trek-core/src/keychain.rs", "crates/trek-app/src/workspace/node_setup.rs", "crates/trek-core/src/node.rs"]
 tests = ["crates/trek-app/tests/settings_pages.rs"]
 
@@ -1249,6 +1437,7 @@ area = "iPhone"
 what = "The sidebar's Devices: the paired iPhone (connected, or when it was last seen) and other machines' threads"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["pair-phone Live check iPhone", "wait 1500", "count phone-stand-in-iphone 1", "pair-phone leave", "wait 800", "count phone-seen-stand-in-iphone 1"]
 how = { macos = "The same on both.", windows = "The same on both: seen on a Windows PC's installed Trek (Devices › iPhone, last seen 33 minutes before)." }
 code = ["crates/trek-app/src/sidebar.rs"]
@@ -1260,8 +1449,9 @@ area = "Machines"
 what = "This computer goes by one name, to the iPhone and to other machines"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["count hub-where 1"]
-how = { macos = "Sharing's computer name.", windows = "The DNS host name for both: machine pairing used COMPUTERNAME, the upper-case NetBIOS name (T-BOOK for T-Book), until this audit." }
+how = { macos = "Sharing's computer name.", windows = "The DNS host name for both: machine pairing used COMPUTERNAME, the upper-case NetBIOS name (T-BOOK for T-Book), until this audit.", linux = "systemd's pretty host name (/etc/machine-info), else the host name." }
 code = ["crates/trek-app/src/remote.rs", "crates/trek-app/src/machines.rs"]
 
 # ---------- Found by the 2026-11 sweep of unclaimed platform gates ----------
@@ -1272,8 +1462,9 @@ area = "Tools"
 what = "New files and renames in the Explorer stay in their folder, with names the platform allows"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "tools explorer", "wait 700", "count {project}{/}README.md 1", "count {project}{/}src 1"]
-how = { macos = "No `..`, no leading `/`; `/` makes folders only where nesting is allowed.", windows = "The same, and Windows' own rules: `\\` separates too, no drive or share (`C:`, `\\\\server`), no `:` (a hidden stream), no `<>\"|?*` or control characters, no device names (CON, NUL, COM0-9, LPT0-9) or names ending in a dot or space. The rules are a value, so the Mac's CI checks Windows' too." }
+how = { macos = "No `..`, no leading `/`; `/` makes folders only where nesting is allowed.", windows = "The same, and Windows' own rules: `\\` separates too, no drive or share (`C:`, `\\\\server`), no `:` (a hidden stream), no `<>\"|?*` or control characters, no device names (CON, NUL, COM0-9, LPT0-9) or names ending in a dot or space. The rules are a value, so the Mac's CI checks Windows' too.", linux = "The Mac's rules." }
 note = "Found by the 2026-11 sweep and fixed: before, `..\\x` and `C:\\x` made or moved an item outside the folder on Windows, and `todo:v2.md` wrote a hidden stream of `todo`. Left: a case-only rename in a case-sensitive (WSL) folder is judged by size and time (same_file)."
 code = ["crates/trek-app/src/panels/explorer.rs"]
 tests = ["crates/trek-app/src/panels/explorer.rs"]
@@ -1284,9 +1475,10 @@ area = "Threads"
 what = "File paths in an answer show as chips: the file's name and type, a preview or the file manager on a click"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "pace 0", "send mock:write", "wait idle 30000", "wait 1000", "count path-* 1+"]
-how = { macos = "`/Users/…` and `~/…` paths.", windows = "Drive paths (`C:\\…`, `C:/…`), network ones (`\\\\server\\…`), `~\\…` and `.\\…`, with either separator, and `file:///C:/…` links (an image drawn inline); a `:line` after one is cut off, the drive's `C:` kept." }
-code = ["crates/trek-app/src/md.rs"]
+how = { macos = "`/Users/…` and `~/…` paths. One under the automounter's `/net/<host>/` isn't looked up (looking mounts that computer), unless the thread's folder is on that host. A link to a file that runs a program when opened (an app, a script, one marked executable) asks first.", windows = "Drive paths (`C:\\…`, `C:/…`), network ones (`\\\\server\\…`), `~\\…` and `.\\…`, with either separator, and `file:///C:/…` links (an image drawn inline); a `:line` after one is cut off, the drive's `C:` kept. A network path (`\\\\server\\…`, `\\\\?\\UNC\\…`) or a device one isn't looked up (looking connects to that server and offers it the user's sign-in), unless the thread's folder is on that server. A link to a file that runs a program when opened (`.exe`, `.bat`, `.ps1`, `.lnk`, … by its extension: Windows marks nothing executable) asks first.", linux = "`/home/…` and `~/…` paths. One under autofs's `/net/<host>/` (as on the Mac), or in a share the file manager mounted (GVFS's `/run/user/<uid>/gvfs/smb-share:server=<host>,…`, `sftp:host=…`, `dav:host=…`; not a phone's `mtp:`), isn't looked up unless the thread's folder is on that host: looking waits on that server. A link to a file that runs a program when opened (one marked executable, an `.AppImage`, a `.desktop` entry, a `.deb`, `.rpm`, `.snap` or `.flatpakref` whose installer it starts) asks first, as does a link of a scheme another app takes (`ssh:`, `smb:`, `sftp:`, anything else `xdg-open` hands on)." }
+code = ["crates/trek-app/src/md.rs", "crates/trek-core/src/paths.rs"]
 tests = ["crates/trek-app/src/md.rs"]
 
 [[feature]]
@@ -1295,6 +1487,7 @@ area = "Agents"
 what = "Agents get the MCP servers set up in Trek"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route settings:tools", "wait 300", "reveal mcp-add", "count mcp-add 1", "count mcp-command 1"]
 how = { macos = "The server's command, as it is.", windows = "Node won't start a `.cmd`, so for Claude Code and ACP agents a server started through a batch script (npx.cmd) runs under `cmd /c`; when cmd.exe can't carry its arguments (`& | < > ^ %`, a quote, a line break, a space in its folder) and the script is npm's shim (Node's own npx.cmd, a global package's), it goes to Node and the script the shim would run, global npm included. Codex is given the script, which it quotes itself. A batch script of the user's own can't be given such arguments: it's left out, with a notice saying why." }
 code = ["crates/trek-agents/src/lib.rs", "crates/trek-agents/src/acp.rs", "crates/trek-agents/src/mcp_check.rs", "crates/trek-core/src/mcp.rs"]
@@ -1306,6 +1499,7 @@ area = "Agents"
 what = "Each request carries only the tools an agent can use"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route settings:tools", "wait 300", "reveal claude-extra-tools", "count claude-extra-tools 1"]
 how = { macos = "The same on both.", windows = "The same on both: Claude Code without its Workflow, ScheduleWakeup, EnterWorktree, ExitWorktree and ReportFindings tools unless Settings › Tools turns them on, with its tool search on for Anthropic's own API, and the iPhone's server offering phone_status alone until a phone has been connected (an iPhone on the PC's cable counts, through Apple Mobile Device Service)." }
 note = "Measured against a local stand-in for Anthropic's API (docs/PROMPT_BUDGET.md, \"2026-11-14\"): Trek's request for \"hi\" through Claude Code 2.1.325 went from 14,857 to 11,543 o200k tokens, below the bare CLI's 12,386."
@@ -1316,21 +1510,25 @@ tests = ["crates/trek-agents/src/claude.rs", "crates/trek-mcp/src/phone.rs", "cr
 what = "Claude Code's tools that Trek does its own way are left out unless the setting keeps them"
 macos = "crates/trek-agents/src/claude.rs::the_tools_trek_replaces_are_left_out_unless_the_setting_keeps_them"
 windows = "crates/trek-agents/src/claude.rs::the_tools_trek_replaces_are_left_out_unless_the_setting_keeps_them"
+linux = "crates/trek-agents/src/claude.rs::the_tools_trek_replaces_are_left_out_unless_the_setting_keeps_them"
 
 [[feature.promise]]
 what = "Claude Code's tool search is turned on only for Anthropic's own API, never past a gateway or a choice of the user's"
 macos = "crates/trek-agents/src/claude.rs::tool_search_is_forced_only_for_anthropics_own_api"
 windows = "crates/trek-agents/src/claude.rs::tool_search_is_forced_only_for_anthropics_own_api"
+linux = "crates/trek-agents/src/claude.rs::tool_search_is_forced_only_for_anthropics_own_api"
 
 [[feature.promise]]
 what = "Until an iPhone has been connected, agents get phone_status alone, and the iPhone's other tools once it finds one"
 macos = "crates/trek-mcp/src/phone.rs::until_a_phone_is_connected_only_phone_status_is_served"
 windows = "crates/trek-mcp/src/phone.rs::until_a_phone_is_connected_only_phone_status_is_served"
+linux = "crates/trek-mcp/src/phone.rs::until_a_phone_is_connected_only_phone_status_is_served"
 
 [[feature.promise]]
 what = "Tools a server adds as it goes reach a Direct model after the call that added them"
 macos = "crates/trek-agents/src/direct/mcp.rs::tools_a_server_adds_are_listed_after_it_says_so"
 windows = "crates/trek-agents/src/direct/mcp.rs::tools_a_server_adds_are_listed_after_it_says_so"
+linux = "crates/trek-agents/src/direct/mcp.rs::tools_a_server_adds_are_listed_after_it_says_so"
 
 [[feature]]
 id = "codex-sandbox"
@@ -1338,6 +1536,7 @@ area = "Agents"
 what = "Codex runs a thread's commands in its own sandbox under Supervised and Auto"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live_windows = ["route project:{project}", "pace 0", "send mock:sandbox", "wait idle 30000", "count notice-fix* 1"]
 live_skip = "On a Mac, Seatbelt needs nothing set up and says nothing: Codex's sandbox is the real Codex CLI's, which an isolated run never starts (trek-agents' codex tests, and rules_live.rs against the real CLI)."
 how = { macos = "Seatbelt, with nothing to set up.", windows = "Codex's Windows sandbox, which needs a one-time setup: until it's done, commands in a Supervised or Auto thread fail before they start, with one notice whose Set up in Terminal runs `codex` in Trek's terminal to do it (or the thread can be set to Full access)." }
@@ -1350,7 +1549,8 @@ area = "Agents"
 what = "A verification skill: the agent checks its work with the project's own CLI, and the turn is marked Verified"
 macos = "yes"
 windows = "yes"
-live = ["route project:{project}", "route settings:project", "wait 400", "count verify-setup 1"]
+linux = "yes"
+live = ["project {project}", "route settings:project", "wait 400", "count verify-setup 1"]
 how = { macos = "The skill's CLI found by its `cli:` line or its execute bit; runs read as shell commands.", windows = "The skill's CLI found by its `cli:` line, a program's extension or a `#!` line; runs read as PowerShell, cmd.exe and Git Bash write them (a backslash before a name a folder separator, `app` for `app.cmd`, any case, `pwsh -c`, `cmd /c`). The mock agent's CLI is a batch file it runs through cmd.exe." }
 code = ["crates/trek-core/src/verification.rs", "crates/trek-agents/src/mock.rs"]
 tests = ["crates/trek-core/src/verification.rs", "crates/trek-agents/src/mock.rs", "crates/trek-app/tests/pstack.rs", "crates/trek-agents/src/claude.rs"]
@@ -1361,6 +1561,7 @@ area = "App"
 what = "Trek's secrets, machine list, paired phones, agents' MCP config and uploaded files are readable by the user alone"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["pair-phone Live check iPhone", "wait 1500", "pair-phone leave", "private mobile{/}devices.json", "private mobile{/}identity.key"]
 how = { macos = "Mode 0600 (a folder 0700), through trek-private.", windows = "An access list of one entry, the user's, inheriting nothing, that each file is made with (trek-private), so it's never readable by others in between, however its folder's list reads (a data folder moved to a second drive, a %TEMP% others share); a folder's entry passes to what's made in it." }
 code = ["crates/trek-private/src/lib.rs", "crates/trek-core/src/session_secrets.rs", "crates/trek-app/src/machines.rs", "crates/trek-app/src/remote/machines.rs", "crates/trek-remote/src/tls.rs", "crates/trek-remote/src/pairing.rs", "crates/trek-agents/src/claude.rs"]
@@ -1370,6 +1571,7 @@ tests = ["crates/trek-private/src/lib.rs", "crates/trek-core/src/session_secrets
 what = "A file of secrets is the user's alone from the moment it's made, and when written again"
 macos = "crates/trek-private/src/lib.rs::a_file_is_the_users_alone_from_the_start_and_when_written_again"
 windows = "crates/trek-private/src/lib.rs::a_file_is_the_users_alone_from_the_start_and_when_written_again"
+linux = "crates/trek-private/src/lib.rs::a_file_is_the_users_alone_from_the_start_and_when_written_again"
 
 [[feature]]
 id = "contrast-fixes"
@@ -1377,6 +1579,7 @@ area = "App"
 what = "Chips, segmented controls, the completion ghost and the CI graph's labels are legible, Night included"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "count model-pill 1", "count consult-pill 1", "count plan-pill 1"]
 how = { macos = "The same fixes, now on both: a chip's hover and pressed fills (the kit's ghost hover all but vanished in Night), Night's selected segment lighter than its track, the completion ghost against the typed text (not a caret-width past it), and the CI graph's grey text held to 4.5:1.", windows = "The same; made for Windows first, behind fluent::WINDOWS, which they no longer are." }
 code = ["crates/trek-app/src/composer/look.rs", "crates/trek-app/src/composer/pickers.rs", "crates/trek-app/src/pr_card.rs"]
@@ -1387,6 +1590,7 @@ area = "Editor"
 what = "A tab in the editor is the editor's tab size wide, and a selection over it matches"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "click mode-editor", "wait 900", "editor open {project}{/}src{/}main.rs", "wait 900", "count ide-workbench 1", "click mode-agents"]
 how = { macos = "CoreText lays a tab out to its own stops, every 28 points whatever the tab size: with_tab_stops puts its glyph's place at the editor's stop instead.", windows = "DirectWrite leaves a tab out of its glyphs: with_tab_stops puts a blank in its place, at the editor's stop." }
 code = ["vendor/gpui-base/src/input/base/tab_stops.rs"]
@@ -1396,6 +1600,7 @@ tests = ["crates/trek-app/tests/tab_stops.rs", "crates/trek-app/tests/common/mod
 what = "A tab is as wide as the editor's tab stop"
 macos = "crates/trek-app/tests/tab_stops.rs::a_tab_is_as_wide_as_its_tab_stop_not_nothing"
 windows = "crates/trek-app/tests/tab_stops.rs::a_tab_is_as_wide_as_its_tab_stop_not_nothing"
+linux = "crates/trek-app/tests/tab_stops.rs::a_tab_is_as_wide_as_its_tab_stop_not_nothing"
 
 [[feature]]
 id = "process-cleanup"
@@ -1403,9 +1608,11 @@ area = "Agents"
 what = "Stopping a thread, quitting Trek or a crash ends every program Trek and its agents started"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live_macos = ["route project:{project}", "pace 0", "send mock:hold", "wait 2500", "programs sleep 1", "click stop", "wait 4000", "programs-ended"]
 live_windows = ["route project:{project}", "pace 0", "send mock:hold", "wait 2500", "programs ping 1", "click stop", "wait 4000", "programs-ended"]
-how = { macos = "Agents, language servers and probes each run in a process group of their own: TERM, a grace period, then KILL to the whole group. The groups are written down, and the next launch ends those a crashed Trek left.", windows = "Each runs in a job object that ends all of it when Trek's handle closes, so a crash takes them along. Windows has no TERM: the gentle stop is the end of the agent's input, then the job is ended after the grace period. A child that couldn't be put in a job is ended by its process tree, found by parent ids and start times." }
+how = { macos = "Agents, language servers and probes each run in a process group of their own: TERM, a grace period, then KILL to the whole group. The groups are written down, and the next launch ends those a crashed Trek left.", windows = "Each runs in a job object that ends all of it when Trek's handle closes, so a crash takes them along. Windows has no TERM: the gentle stop is the end of the agent's input, then the job is ended after the grace period. A child that couldn't be put in a job is ended by its process tree, found by parent ids and start times.", linux = "As on the Mac: process groups, TERM, a grace period, then KILL; the groups are found in /proc." }
+live_skip = "Linux: not seen live yet; procs.rs's own tests (groups ended, children listed, a group that ignores TERM killed after its grace) run on Linux."
 code = ["crates/trek-core/src/procs.rs", "crates/trek-job/src/lib.rs", "crates/trek-agents/src/lib.rs"]
 tests = ["crates/trek-core/src/procs.rs", "crates/trek-agents/src/tests_stop.rs", "crates/trek-app/tests/hardening.rs"]
 
@@ -1415,6 +1622,7 @@ area = "App"
 what = "Trek, and the programs it and its agents start, open no console windows"
 macos = "n/a"
 windows = "yes"
+linux = "n/a"
 live_windows = ["console-windows mark", "route project:{project}", "pace 0", "send mock:hold", "wait 2500", "programs ping 1", "console-windows new 0", "click stop", "wait 4000", "programs-ended", "console-windows new 0"]
 how = { macos = "A Mac app and the programs it starts have no console window to show.", windows = "A release trek.exe is a GUI program (a dev build keeps its console, where the log goes), and every program Trek starts goes through trek_core::procs::command (CREATE_NO_WINDOW), so a .cmd wrapper's node and git's helpers share one hidden console. A lint test holds every spawn to it, and another watches for console windows from a process with no console, as Trek is." }
 code = ["crates/trek-core/src/procs.rs", "crates/trek-app/src/main.rs"]
@@ -1426,6 +1634,7 @@ area = "Agent tools"
 what = "Agents use Trek's own tools (sub-agents, new threads, handoffs, asking you for a secret, their transcript, the Browser and iPhone tools) over a channel only your own programs can open"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "pace 0", "send Show a short answer", "wait idle 30000", "secret-demo", "wait 400", "count secret-value 1", "click secret-decline"]
 how = { macos = "A Unix socket (0600) in a folder only you can enter (the data folder, or /tmp/trek-<uid> when that path is too long for a socket); the other end's user is checked, and sockets of Treks that have gone are swept.", windows = "A named pipe per Trek that only you may open or add to, refusing other machines, its name random in part and taken exclusively. The other end's user is checked, and before sending its token an agent's side checks the pipe is served by you and by the Trek its name carries." }
 code = ["crates/trek-ipc/src/lib.rs", "crates/trek-ipc/src/server.rs", "crates/trek-ipc/src/windows.rs", "crates/trek-ipc-ui/src/lib.rs"]
@@ -1437,6 +1646,7 @@ area = "Agents"
 what = "Add an agent from the ACP Registry, or one of your own by its command"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["agent-install codex 40", "route settings:agents", "wait 400", "reveal add-agent", "count add-agent 1"]
 how = { macos = "The registry's macOS build (HTTPS only, redirects included), else its npm package through npx, else its Python one through uvx; an unpacked build is made executable. Your own command is a name on the PATH, a /… path or ~/….", windows = "The registry's Windows build, else npx or uvx; symlinks in a .tar build are skipped, as making one needs a privilege. Your own command is a name on the PATH (any PATHEXT extension), a drive or network path (C:\\…, \\\\server\\…) or ~\\…." }
 code = ["crates/trek-core/src/registry.rs"]
@@ -1448,6 +1658,7 @@ area = "Threads"
 what = "Trek's Git features (changes, reviews, rewinds, worktrees, pull requests, commits that run the project's hooks) use the Git you have, and say how to get one"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "pace 0", "send Show a short answer", "wait idle 30000", "tools git", "wait 700", "count git-commit 1", "count git-push 1"]
 how = { macos = "The git on the login PATH; with none, Trek names the Xcode command line tools or Homebrew. Its own read-only calls run no hooks (core.hooksPath=/dev/null). A file's executable bit is read from the disk; a hook runs when it's executable.", windows = "The git on the PATH; with none, Trek names Git for Windows or WinGet. Trek's own calls point hooks at an empty folder (git won't take /dev/null for one), and a hook that starts with #! runs through Git's own sh. A file's executable bit, which Windows files lack, comes from git's index, so a checkpoint or a hunk taken back out keeps a script executable." }
 code = ["crates/trek-core/src/git.rs", "crates/trek-core/src/checkpoint.rs"]
@@ -1459,6 +1670,7 @@ area = "Threads"
 what = "Threads you had with Claude Code, Codex and OpenCode outside Trek, and worktrees from Conductor, T3 Code and Orca, show up in Trek"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["import-demo", "route settings:import-threads", "wait 900", "count imp-claude 1", "count worktree-app-conductor 1", "count worktree-app-t3-code 1"]
 how = { macos = "Read where the agents keep them (~/.claude, $CODEX_HOME or ~/.codex, OpenCode's folder), and Conductor's database in ~/Library/Application Support.", windows = "The same folders in the user's profile, CODEX_HOME as a drive path, and folders compared with their links resolved and without the \\\\?\\ that resolving adds. Conductor's database is looked for only where its Mac app keeps it." }
 code = ["crates/trek-core/src/import/worktree_apps.rs", "crates/trek-core/src/import/codex.rs", "crates/trek-core/src/store/adopted.rs"]
@@ -1470,6 +1682,7 @@ area = "Agents"
 what = "Rules in Settings › Permissions allow, ask about or refuse an agent's commands, file edits and fetches, however they're spelled"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route settings:permissions", "wait 300", "reveal rule-test", "count rule-add 1", "count rule-test 1"]
 how = { macos = "Shell lines read as sh reads them (quotes, escapes, substitutions, nested shells); paths with their links followed.", windows = "The same, and what cmd.exe runs (after `cmd /c`, and Trek's own agent's lines on a PC without Git Bash) as cmd.exe reads it: `^` an escape, `%VAR%` known only when it runs, a command's name ending at `/`. PowerShell's backtick reads as a substitution, which fails closed; C:\\… and the \\\\?\\ long form are one place; links and junctions followed." }
 note = "The rule through a link is tested with a symlink on macOS only; a junction would test it on Windows."
@@ -1480,6 +1693,7 @@ tests = ["crates/trek-core/src/permission_rules/tests.rs", "crates/trek-agents/s
 what = "A deny sees a command however the platform's shell would run it"
 macos = "crates/trek-core/src/permission_rules/tests.rs::a_deny_sees_a_command_the_way_a_shell_would"
 windows = "crates/trek-core/src/permission_rules/tests.rs::cmd_lines_are_read_as_cmd_exe_reads_them"
+linux = "crates/trek-core/src/permission_rules/tests.rs::a_deny_sees_a_command_the_way_a_shell_would"
 
 [[feature]]
 id = "logs-and-reports"
@@ -1487,9 +1701,23 @@ area = "App"
 what = "Trek keeps a week of logs; after a crash the next launch says so, and a bug or crash report can send the recent log with paths and secrets taken out"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route settings:about", "wait 300", "count copy-diag 1", "count about-feedback 1"]
-how = { macos = "~/Library/Logs/Trek.", windows = "%LOCALAPPDATA%\\Trek\\logs (not the roaming profile), where the updater writes its update.log too." }
+how = { macos = "~/Library/Logs/Trek.", windows = "%LOCALAPPDATA%\\Trek\\logs (not the roaming profile), where the updater writes its update.log too.", linux = "~/.local/share/trek/logs (the XDG data folder)." }
 code = ["crates/trek-logging/src/lib.rs"]
+
+[[feature]]
+id = "freeze-evidence"
+area = "App"
+what = "A frozen Trek leaves evidence: when the main thread makes no progress for 5 seconds the log says so, and again with how long once it's back; nothing is sent anywhere"
+macos = "yes"
+windows = "partial"
+linux = "partial"
+live = ["freeze 10", "wait 6000", "freeze told"]
+how = { macos = "Observers on the main run loop (its common modes, so a modal panel, a menu or a window drag keeps passing) mark each pass; a watcher thread sleeps while the loop is idle, so an idle Trek has nothing more ticking. A freeze runs /usr/bin/sample for 2 seconds into freeze-<time>.txt in ~/Library/Logs/Trek (three a run at most, the newest ten kept), and logs the main thread's heaviest stack.", windows = "The watcher asks the main thread to answer every 2 seconds, through GPUI's posted message, which the system's modal loops (a window moved or sized, a dialog) dispatch too. The WARN lines and how long, no stacks.", linux = "As on Windows, through GPUI's posted message: the WARN lines and how long, with the main thread's state and the kernel function it waits in (/proc/self/task/<pid>/stat and wchan), no stacks." }
+note = "Windows takes no stacks: the in-process way (suspend the main thread, walk it with dbghelp, as script/sampler does from outside) needs the PDB beside the executable to name anything, which a release doesn't ship, and hasn't been tried there. Linux adds the main thread's state and the kernel function it waits in to the WARN line. On both, the computer sleeping, a debugger, a quit and the launch are left out as on the Mac. A release build is stripped, so Trek's own frames are addresses in the binary and the system's and std's are named; the file ends with the build's version, architecture, UUID and load address, and `bin/agent-cli symbolicate` names Trek's frames from the dSYM each release keeps beside it (docs/RELEASING.md, Symbols): checked with a stripped release build, its saved dSYM and a freeze it sampled."
+code = ["crates/trek-logging/src/freeze.rs", "crates/trek-app/src/lib.rs"]
+tests = ["crates/trek-logging/src/freeze.rs"]
 
 [[feature]]
 id = "basecamp"
@@ -1497,6 +1725,7 @@ area = "Threads"
 what = "Basecamp: a recap of the prompts, turns, models, projects and tokens of today, this week or all along"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route basecamp", "wait 300", "count basecamp-totals 1", "count basecamp-chart 1"]
 code = ["crates/trek-core/src/basecamp.rs"]
 tests = ["crates/trek-core/src/basecamp.rs"]
@@ -1507,6 +1736,7 @@ area = "Editor"
 what = "Format document runs the file's formatter (rustfmt, prettier, black, gofmt, shfmt) from your PATH"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "click mode-editor", "wait 900", "editor open {project}{/}src{/}main.rs", "wait 900", "key alt-shift-f", "wait 3000", "key secondary-s", "wait 800", "file {project}{/}src{/}main.rs contains     println", "click mode-agents"]
 how = { macos = "The formatter as the PATH has it, stopped after 30 s.", windows = "The same; a .cmd shim (prettier.cmd) runs in a job object, so giving up ends the node behind it too, and its cmd.exe is told not to look in the file's folder for programs (NoDefaultCurrentDirectoryInExePath)." }
 code = ["crates/trek-format/src/lib.rs"]
@@ -1518,6 +1748,7 @@ area = "Browser"
 what = "Agents use Trek's Browser while you watch: open pages, read them as an outline with refs, click, type and press keys by ref, and take screenshots"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "tools browser", "wait 600", "browser go https://example.com", "wait 3000", "browser state", "count browser-url 1", "count browser-back 1"]
 how = { macos = "WebKit's view, through wry: a screenshot is WebKit's snapshot of the page, and a key's Mod is Command.", windows = "WebView2's, through wry: a screenshot is WebView2's CapturePreview (PNG), and a key's Mod is Control. Without the WebView2 runtime each call says it's needed." }
 code = ["crates/trek-app/src/panels/browser/agent.rs", "crates/trek-app/src/panels/browser/agent_core.rs", "crates/trek-app/src/workspace/browser_use.rs"]
@@ -1529,6 +1760,7 @@ area = "App"
 what = "Trek's words name the platform's own things: File Explorer or Finder, the taskbar or the Dock, Credential Manager or the Keychain, the Recycle Bin or the Trash, this PC or this Mac"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route settings:phone", "wait 300", "count mobile-on 1"]
 how = { macos = "The Mac's table in trek-words: the wording as it always was.", windows = "Windows' table, a sentence held whole where more than a word differs. Tests check neither table names the other's things and that no visible string in trek-app spells a Mac word outside the table; `pretend` lets one run read both." }
 code = ["crates/trek-words/src/lib.rs"]
@@ -1540,6 +1772,7 @@ area = "Composer"
 what = "Find a project's files by name: @ in the composer, the palette's files and the editor's search"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "wait 300", "key secondary-a", "key backspace", "type @READ", "wait 700", "count picker-list 1", "key escape"]
 how = { macos = "Paths as the Mac's file system gives them.", windows = "Paths written with `/`, as on the Mac and as git writes them: a `\\` becomes `/` when the folder is read, so matching, recent files and what @ inserts are the same on both." }
 code = ["crates/trek-mentions/src/lib.rs"]
@@ -1550,6 +1783,7 @@ area = "App"
 what = "The left sidebar's width: drag its edge (resize cursor, a highlight, a wide grab strip) between a minimum and a maximum, pulled narrower than a snap it folds away as the toggle leaves it, and it comes back at the width it had; a double-click on the edge resets the width; the width is kept"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "wait 500", "sidebar width 272", "drag sidebar-resize 380", "wait 300", "sidebar width 380", "drag sidebar-resize 240", "wait 300", "sidebar width 240", "drag sidebar-resize 100", "wait 800", "sidebar folded 1", "key secondary-b", "wait 800", "sidebar folded 0", "sidebar width 240", "drag sidebar-resize 272", "wait 300", "sidebar width 272", "count sidebar-resize 1"]
 how = { macos = "Shared code: the width, its range and the snap in trek_core::settings (Layout::sidebar_width), the drag and the grab strip in trek-app's root (the strip is ui::column_grab, the one the tools panel's edge uses).", windows = "The same code, with no platform branch: the cursor and the strip are GPUI's. The title bar's left cluster takes the sidebar's width on both." }
 code = ["crates/trek-core/src/settings.rs", "crates/trek-app/src/root.rs", "crates/trek-app/src/ui.rs"]
@@ -1559,6 +1793,7 @@ tests = ["crates/trek-app/tests/sidebar.rs", "crates/trek-core/src/settings.rs"]
 what = "A sidebar pulled narrower than the snap folds away and the toggle brings it back at the width it had; the width stays within its range and is kept"
 macos = "crates/trek-app/tests/sidebar.rs::pulled_narrower_than_the_snap_the_sidebar_folds_and_the_toggle_brings_back_its_width"
 windows = "crates/trek-app/tests/sidebar.rs::pulled_narrower_than_the_snap_the_sidebar_folds_and_the_toggle_brings_back_its_width"
+linux = "crates/trek-app/tests/sidebar.rs::pulled_narrower_than_the_snap_the_sidebar_folds_and_the_toggle_brings_back_its_width"
 
 [[feature]]
 id = "title-bar"
@@ -1566,9 +1801,11 @@ area = "App"
 what = "The title bar: the window's own buttons, Trek's buttons beside them, and moving the window by it"
 macos = "yes"
 windows = "yes"
+linux = "partial"
 live = ["count toggle-sidebar 1", "count toggle-tools 1", "count mode-switch 1"]
 live_windows = ["count toggle-sidebar 1", "count toggle-tools 1", "hittest toggle-sidebar HTCLIENT", "hittest title-text HTCAPTION"]
-how = { macos = "The system's traffic lights at the left (Trek leaves 80 px for them), always above the window's content; Trek moves the window from the bar's empty strip.", windows = "Trek's caption buttons (minimize, maximize or restore, close) at the right, on the theme's flat title bar colour, drawn again over the palette or Quick Look while those cover the bar. Windows asks before every press whether it's on the window's handle (WM_NCHITTEST): each of Trek's controls in the row takes its own press, while the gaps and the empty strip stay the handle. A pointer that leaves the window lets go of what it hovered, which Windows tells the window without a move (chrome::let_go_of_hover); the Mac's GPUI does that itself." }
+how = { macos = "The system's traffic lights at the left (Trek leaves 80 px for them), always above the window's content; Trek moves the window from the bar's empty strip.", windows = "Trek's caption buttons (minimize, maximize or restore, close) at the right, on the theme's flat title bar colour, drawn again over the palette or Quick Look while those cover the bar. Windows asks before every press whether it's on the window's handle (WM_NCHITTEST): each of Trek's controls in the row takes its own press, while the gaps and the empty strip stay the handle. A pointer that leaves the window lets go of what it hovered, which Windows tells the window without a move (chrome::let_go_of_hover); the Mac's GPUI does that itself.", linux = "The desktop's own title bar and buttons above Trek's row (Trek runs as an X11 window, under Xwayland in a Wayland session); Trek's row doesn't move the window." }
+note = "Linux: two rows at the top, the desktop's and Trek's; with TREK_WAYLAND=1 on GNOME, which leaves decorations to the app, the window has no title bar or close button at all (client-side decorations would bring them)."
 code = ["crates/trek-app/src/chrome.rs"]
 tests = ["crates/trek-app/tests/titlebar.rs", "crates/trek-app/tests/scaling.rs", "crates/trek-app/tests/reentry.rs", "crates/trek-app/tests/sidebar.rs"]
 
@@ -1578,9 +1815,10 @@ area = "Development"
 what = "The capture build (`shots`): an isolated Trek that trek-dev drives with commands and captures, to verify a change"
 macos = "yes"
 windows = "partial"
+linux = "partial"
 live = ["count title-text 1", "signed-out"]
-how = { macos = "trek-dev. No Dock tile, and every window opens on a display of the run's own (Trek Test Display), so nothing is on the owner's screens and macOS keeps drawing it; `windows` and `screenshot --real` capture its real pixels. Pages and previews are snapped by WebKit or cropped from a capture of the window (Screen Recording); `browser press` sends a page real keys through AppKit; extensions' popups and options pages can be driven.", windows = "trek-dev.ps1. The window opens behind the owner's (TREK_BACKGROUND), where Windows keeps drawing it, so it needs no display of its own (`--real` is refused); pages and previews are snapped by WebView2. `hittest`, `realclick`, `realmove` and `realleave` check what the window answers WM_NCHITTEST and send its own handle a real click or a leave." }
-note = "On Windows: no `browser press` (a key into a page that WebView2 handles itself; WebView2's DevTools Input.dispatchKeyEvent would do it), and no capture of a whole window's real pixels with its web views (PrintWindow with PW_RENDERFULLCONTENT, or Windows.Graphics.Capture, would). `checks-demo`'s stand-in `gh` is a batch file there (`gh.cmd`; a Mac's is a `#!/bin/sh` script), so the failing checks' bar is shown on both. Extensions' popups and options pages are the Mac's alone because WebView2 has none (browser-extensions). Its terminal starts a real shell for a live check on Windows alone (`TREK_VERIFY_SHELL`: PowerShell with -NoProfile, cmd with /d, never a job's command); an isolated run on a Mac keeps its stand-in, as a Mac's login shells have no one flag that skips their start-up files. Its stand-in iPhone (`pair-phone`) pairs over the real protocol with a phone server on the loopback alone, on both. Its `second-launch` (Trek started again, handing a link over through `single_instance`) is Windows' alone: a Mac hands a second launch to the running app itself, which its `open-link` stands for."
+how = { macos = "trek-dev. No Dock tile, and every window opens on a display of the run's own (Trek Test Display), so nothing is on the owner's screens and macOS keeps drawing it; `windows` and `screenshot --real` capture its real pixels. Pages and previews are snapped by WebKit or cropped from a capture of the window (Screen Recording); `browser press` sends a page real keys through AppKit; extensions' popups and options pages can be driven.", windows = "trek-dev.ps1. The window opens behind the owner's (TREK_BACKGROUND), where Windows keeps drawing it, so it needs no display of its own (`--real` is refused); pages and previews are snapped by WebView2. `hittest`, `realclick`, `realmove` and `realleave` check what the window answers WM_NCHITTEST and send its own handle a real click or a leave.", linux = "trek-dev on a display of its own (script/linux/headless.sh: Xvfb, a session bus, Mesa's software renderer); `shot` reads the window's pixels from the X server, web views included." }
+note = "On Windows: no `browser press` (a key into a page that WebView2 handles itself; WebView2's DevTools Input.dispatchKeyEvent would do it), and no capture of a whole window's real pixels with its web views (PrintWindow with PW_RENDERFULLCONTENT, or Windows.Graphics.Capture, would). `checks-demo`'s stand-in `gh` is a batch file there (`gh.cmd`; a Mac's is a `#!/bin/sh` script), so the failing checks' bar is shown on both. Extensions' popups and options pages are the Mac's alone because WebView2 has none (browser-extensions). Its terminal starts a real shell for a live check on Windows alone (`TREK_VERIFY_SHELL`: PowerShell with -NoProfile, cmd with /d, never a job's command); an isolated run on a Mac keeps its stand-in, as a Mac's login shells have no one flag that skips their start-up files. Its stand-in iPhone (`pair-phone`) pairs over the real protocol with a phone server on the loopback alone, on both. Its `second-launch` (Trek started again, handing a link over through `single_instance`) is Windows' alone: a Mac hands a second launch to the running app itself, which its `open-link` stands for. Linux: no hittest/realclick, `browser press` or page snapshots; X11 only (a Wayland window can't be read from outside)."
 code = ["crates/trek-app/src/shots.rs", "crates/trek-app/src/test_display.rs"]
 tests = ["crates/trek-app/src/test_display.rs"]
 
@@ -1590,6 +1828,7 @@ area = "Editor"
 what = "Hover, completion, go to definition and problems in the editor, from the language's server when it's installed"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "click mode-editor", "wait 900", "editor open {project}{/}lsp{/}src{/}lib.rs", "wait shown ide-status-lsp 30000", "click ide-status-problems", "wait shown ide-problem#0 120000", "count ide-problem#0 1", "count ide-status-lsp 1"]
 how = { macos = "The server found on the login shell's PATH, in a process group of its own that's ended with it.", windows = "The server found on PATH as PATHEXT names it (npm's `.cmd` shims run through cmd.exe), in a job object that's ended with it; files on a drive or a share go to the server as `file:///C:/…` and `file://host/share/…`." }
 code = ["crates/trek-app/src/lsp_client.rs"]
@@ -1602,6 +1841,7 @@ area = "Editor"
 what = "The editor opens a file without hanging on a pipe, a device or a huge one, says why one can't be read (with Retry), and saves a file whole, keeping its permissions and links"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "click mode-editor", "wait 900", "count ide-workbench 1", "count ide-view-explorer 1", "click mode-agents"]
 how = { macos = "A pipe is opened without waiting for a writer, and turned away; a save keeps the file's mode, the executable bit included.", windows = "Windows has no FIFOs in folders: a device or a pipe is turned away by what its handle says, and a folder before it's opened (Windows refuses to open one as a file); a save keeps the file's attributes (no mode bits), and a read-only file is made writable for the move over it and read-only again after, which Windows needs and the Mac doesn't." }
 code = ["crates/trek-app/src/editor.rs"]
@@ -1614,6 +1854,7 @@ area = "Threads"
 what = "What an agent left running (a dev server, a watcher) above the composer: its last line, the end of its output, Stop, and its whole output in a text editor"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "pace 0", "send mock:server", "wait 2500", "count background-strip 1", "count bg-task* 1+", "click bg-stop#0"]
 how = { macos = "Full output opens in the default text editor (open -t).", windows = "Full output opens in the editor that opens .txt files (the output files have no extension Windows knows, so they are opened as a .txt would be), Notepad if the shell can't; a path the agent names with spaces in it (C:\\Users\\Toby J\\…) is read whole." }
 code = ["crates/trek-app/src/background_strip.rs"]
@@ -1625,6 +1866,7 @@ area = "App"
 what = "Anonymous usage counts and crash reports, asked about once and changed in Settings › Privacy"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["privacy-demo", "wait 300", "count consent-card 1", "click consent-no", "route settings:privacy", "wait 300", "count privacy-consent 1"]
 how = { macos = "The OS version sent is sw_vers's (26.1).", windows = "The OS version sent is Windows' own, from the registry (11 (26100))." }
 code = ["crates/trek-app/src/privacy.rs"]
@@ -1635,6 +1877,7 @@ area = "Editor"
 what = "Keep or Undo what a thread's agent changed, file by file and hunk by hunk"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "pace 10", "send mock:write", "wait idle 60000", "wait 3000", "pace 0", "count changes-review* 1", "count changes-undo* 1"]
 how = { macos = "The thread's folder and git's top folder are matched as the file system names them.", windows = "They're matched regardless of case and of `/` or `\\`, with the `\\\\?\\` that resolving a path adds taken off, so git's `C:/…` meets the thread's `C:\\…`." }
 code = ["crates/trek-app/src/workspace/review.rs"]
@@ -1646,6 +1889,7 @@ area = "Threads"
 what = "Share a thread as a link: a secret GitHub gist that Trek remembers, updates and deletes"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "pace 0", "send Show a short answer", "wait idle 30000", "click thread-menu", "wait 300", "count thread-share 1"]
 code = ["crates/trek-app/src/share/gist.rs"]
 tests = ["crates/trek-app/src/share/gist.rs", "crates/trek-app/tests/share.rs", "crates/test-fixtures/src/fixture.rs"]
@@ -1656,6 +1900,7 @@ area = "Threads"
 what = "A pull request's failing checks show on its thread and go back to the agent, by Send to agent or by themselves"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "pace 0", "send Show a short answer", "wait idle 30000", "checks-demo failed", "wait 1500", "count hub-pr 1", "wait shown checks-bar 15000", "count checks-bar 1"]
 how = { macos = "gh from the login PATH.", windows = "gh found through PATHEXT, started as itself (no cmd.exe, so `--jq`'s `|` reaches it as written)." }
 tests = ["crates/trek-app/tests/pr_checks.rs", "crates/test-fixtures/src/fixture.rs"]
@@ -1666,6 +1911,7 @@ area = "Agents"
 what = "OpenCode asks before edits and commands as the thread's access level says, and its 1.x and 2 share one history"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["opencode-history 4"]
 how = { macos = "An administrator's OpenCode config is read from /Library/Application Support/opencode.", windows = "An administrator's is read from %ProgramData%\\opencode. The user's own is ~/.config/opencode on both: OpenCode finds it from the home folder, not %APPDATA%." }
 note = "Its scratch run of 1.x reads nothing of the user's on either platform (HOME, USERPROFILE and the XDG folders all point into it). The live check reads a database 1.x and 2 both wrote (trek-core's fixture) through the app, on both platforms: 4 threads, a session in both once. OpenCode's asks are its own CLI's, which an isolated run never starts: rules_live.rs drives it against a stand-in."
@@ -1678,6 +1924,7 @@ area = "Notes"
 what = "Notes save as you type, and one that can't be saved stays unsaved and is tried again"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route notes", "wait 300", "note text Live check: a note saved as it is typed", "wait 600", "count note-toolbar 1", "count note-new 1"]
 how = { macos = "The can't-be-saved test makes the notes folder read-only.", windows = "The can't-be-saved test holds the note open unshared, as a sync client or a backup would, so it can't be replaced." }
 tests = ["crates/trek-app/tests/notes.rs"]
@@ -1688,8 +1935,10 @@ area = "Install"
 what = "Trek starts on a computer with nothing else installed"
 macos = "yes"
 windows = "yes"
+linux = "partial"
 live = ["self-contained"]
-how = { macos = "What it links comes with macOS or with the app.", windows = "The Visual C++ runtime is built into Trek's programs (script/static_vcruntime.rs), whisper.cpp's C++ too (/MT, vendor/whisper-rs-sys/build.rs), so no redistributable is needed; the Universal CRT is Windows' own. tests/hardening.rs and release.ps1 refuse a trek.exe that names the redistributable's DLLs." }
+how = { macos = "What it links comes with macOS or with the app.", windows = "The Visual C++ runtime is built into Trek's programs (script/static_vcruntime.rs), whisper.cpp's C++ too (/MT, vendor/whisper-rs-sys/build.rs), so no redistributable is needed; the Universal CRT is Windows' own. tests/hardening.rs and release.ps1 refuse a trek.exe that names the redistributable's DLLs.", linux = "The .deb names its libraries (WebKitGTK, GTK 3, libayatana-appindicator) for apt to install; the AppImage carries Trek alone, and its start script names any of them missing and the package to install." }
+note = "Linux: Trek links the desktop's WebKitGTK and GTK, so a computer without them (a minimal server) needs them installed first."
 code = ["script/static_vcruntime.rs", "vendor/whisper-rs-sys/build.rs", "script/release.ps1"]
 tests = ["crates/trek-app/tests/hardening.rs"]
 
@@ -1699,6 +1948,7 @@ area = "App"
 what = "Trek stays light while agents work: the working bar, streamed text and typing redraw only what changed, and a long thread opens quickly"
 macos = "yes"
 windows = "yes"
+linux = "yes"
 live = ["route project:{project}", "motion on", "pace 1", "send mock:long 10s", "wait 3000", "renders mark", "wait 2000", "renders WorkingBar 5+ ThreadView <=WorkingBar WindowTitle 0- Sidebar 3-", "click stop", "pace 0", "motion system"]
 tests = ["crates/trek-app/tests/render.rs"]
 
@@ -1706,12 +1956,14 @@ tests = ["crates/trek-app/tests/render.rs"]
 what = "The hub pinned open looks for no programs on disk and walks no thread on a frame that changes nothing it shows"
 macos = "crates/trek-app/tests/hub.rs::the_pinned_hub_looks_for_nothing_on_frames_that_change_nothing"
 windows = "crates/trek-app/tests/hub.rs::the_pinned_hub_looks_for_nothing_on_frames_that_change_nothing"
+linux = "crates/trek-app/tests/hub.rs::the_pinned_hub_looks_for_nothing_on_frames_that_change_nothing"
 
 [[feature.promise]]
 what = "The composer's chips hold still whether it's drawn from its cache or laid out again, over its top and on a new thread between two device pixels"
 macos = "crates/trek-app/tests/placement.rs::a_new_threads_composer_holds_its_chip_labels_still_in_and_out_of_its_cache"
 windows = "crates/trek-app/tests/placement.rs::a_new_threads_composer_holds_its_chip_labels_still_in_and_out_of_its_cache"
+linux = "crates/trek-app/tests/placement.rs::a_new_threads_composer_holds_its_chip_labels_still_in_and_out_of_its_cache"
 
 [[feature.promise]]
 what = "A window lets its spare drawing buffers go a second after it stops drawing"
-untested = { macos = "The Metal layer keeps a third drawable only while frames come close together, and a second after the last frame its spare drawables are let go of (vendor/gpui-pre-apple/src/drawables.rs). Measured with footprint on the isolated app, 1600 x 1000: 97 MB at rest and 122 MB after a stream, against 135 and 171 before; no test reads a layer's drawables.", windows = "Not on Windows: the DirectX swap chain's buffers (three, vendor/gpui-pre-windows/src/directx_renderer.rs) change only through ResizeBuffers, which needs every reference to them released and redraws the window; not tried." }
+untested = { macos = "The Metal layer keeps a third drawable only while frames come close together, and a second after the last frame its spare drawables are let go of (vendor/gpui-pre-apple/src/drawables.rs). Measured with footprint on the isolated app, 1600 x 1000: 97 MB at rest and 122 MB after a stream, against 135 and 171 before; no test reads a layer's drawables.", windows = "Not on Windows: the DirectX swap chain's buffers (three, vendor/gpui-pre-windows/src/directx_renderer.rs) change only through ResizeBuffers, which needs every reference to them released and redraws the window; not tried.", linux = "Not on Linux: the wgpu surface (gpui-pre-wgpu, from crates.io) keeps the swap chain's images its present mode asks for, and Trek doesn't carry a patch to that crate; not tried." }

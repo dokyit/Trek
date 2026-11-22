@@ -275,6 +275,77 @@ fn phone_notifications_say_a_phones_browser_needs_the_phone_server() {
     });
 }
 
+/// With "Let your phone connect" off, the paired phones (and the machines paired with this one)
+/// are still listed, and Unpair takes one off the devices file the phone server reads when it
+/// starts, so a lost phone can be unpaired without letting phones in first. With none paired, the
+/// page says what pairing is and how to start.
+#[test]
+fn paired_phones_are_listed_and_unpaired_with_the_phone_server_off() {
+    run(async |cx| {
+        let file = trek_core::paths::data_dir()
+            .join("mobile")
+            .join("devices.json");
+        let _ = std::fs::remove_file(&file);
+        let trek = common::open_with(cx, |s| s.mobile.enabled = false);
+        trek.update(cx, |ws, cx| {
+            ws.navigate(Route::Settings(SettingsPage::Mobile), cx)
+        });
+        trek_app::settings_view::shown::take();
+        trek.render(cx);
+        let said = trek_app::settings_view::shown::take();
+        scroll_settings(&trek, cx, 600.);
+        assert!(
+            trek.visible(cx, "mobile-paired-none"),
+            "says what pairing is"
+        );
+        assert!(said.iter().any(
+            |t| t.contains("None yet. A paired phone shows your threads")
+                && t.contains("turn on Let your phone connect above")
+        ));
+
+        // Two devices paired while the server ran: a phone, and a Mac that drives this one.
+        let mut registry = trek_remote::DeviceRegistry::load(&file).unwrap();
+        registry
+            .register("lost-phone", "Lost iPhone", 1_700_000_000_000)
+            .unwrap();
+        registry
+            .register("studio", "Studio", 1_700_000_000_000)
+            .unwrap();
+        drop(registry);
+        let mut saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        saved["devices"][0]["platform"] = "ios".into();
+        saved["devices"][1]["platform"] = "macos".into();
+        std::fs::write(&file, serde_json::to_vec(&saved).unwrap()).unwrap();
+        trek.update(cx, |ws, cx| {
+            *ws.saved_devices.borrow_mut() = None;
+            cx.notify()
+        });
+        trek.render(cx);
+        scroll_settings(&trek, cx, 600.);
+        assert!(trek.visible(cx, "mobile-revoke-lost-phone"));
+        assert!(trek.visible(cx, "mobile-revoke-studio"), "machines too");
+        assert!(
+            trek.visible(cx, "mobile-unpair-offline"),
+            "says it can't tell it"
+        );
+        assert!(!trek.visible(cx, "mobile-paired-none"));
+
+        trek.click(cx, "mobile-revoke-lost-phone");
+        trek.render(cx);
+        let left = trek_remote::DeviceRegistry::load(&file).unwrap().list();
+        assert_eq!(
+            left.iter()
+                .map(|d| d.device_id.as_str())
+                .collect::<Vec<_>>(),
+            ["studio"],
+            "its token is gone from the file the server reads"
+        );
+        assert!(!trek.visible(cx, "mobile-revoke-lost-phone"));
+        assert!(trek.visible(cx, "mobile-revoke-studio"));
+    });
+}
+
 #[test]
 fn the_settings_scroll_container_can_be_found_by_the_driver() {
     run(async |cx| {
@@ -293,6 +364,10 @@ fn the_settings_scroll_container_can_be_found_by_the_driver() {
 fn the_video_tools_say_what_trek_downloads_and_how_far_it_has_got() {
     use trek_app::workspace::MediaSetup;
     use trek_core::media_tools::{Progress, Tool};
+    // Linux has no video watcher (`trek-mcp video` isn't built there), so nothing to download.
+    if trek_app::words::is_linux() {
+        return;
+    }
     run(async |cx| {
         let trek = open(cx);
         trek.update(cx, |ws, cx| {
@@ -387,8 +462,8 @@ fn a_saved_key_can_be_copied_and_says_where_it_lives() {
 
 #[test]
 fn a_trek_replaced_on_disk_offers_a_restart_in_place_of_allow() {
-    // The Mac's permission rows; Windows asks for none.
-    if trek_app::words::is_windows() {
+    // The Mac's permission rows; Windows asks for none, and Linux has no computer use.
+    if !trek_app::words::is_mac() {
         return;
     }
     run(async |cx| {

@@ -224,6 +224,76 @@ impl Group {
             .into_any_element()
     }
 
+    /// The group as another Trek following the thread gets it, on the sub-agent's row
+    /// (`trek_remote::SubAgentLink::activity`): what it draws there is this group again.
+    pub fn wire(&self) -> trek_remote::SubAgentActivity {
+        use trek_remote::ToolKind as W;
+        trek_remote::SubAgentActivity {
+            summary: self.summary.clone(),
+            phrase: self.phrase.clone(),
+            kind: match self.kind {
+                ToolKind::Command => W::Command,
+                ToolKind::Edit => W::Edit,
+                ToolKind::Read => W::Read,
+                ToolKind::Search => W::Search,
+                ToolKind::WebSearch | ToolKind::Fetch => W::Web,
+                ToolKind::Agent => W::Agent,
+                ToolKind::Other | ToolKind::Thought => W::Other,
+            },
+            earlier: self.earlier.min(u32::MAX as usize) as u32,
+            steps: self
+                .rows
+                .iter()
+                .map(|r| trek_remote::SubAgentStep {
+                    verb: r.op.verb.chars().take(200).collect(),
+                    text: r.op.text.chars().take(1000).collect(),
+                    file: r.op.file.clone(),
+                    running: r.running,
+                    failed: r.failed,
+                })
+                .collect(),
+        }
+    }
+
+    /// `wire`'s group again, on the other side.
+    pub fn from_wire(a: &trek_remote::SubAgentActivity) -> Group {
+        use trek_remote::ToolKind as W;
+        Group {
+            summary: a.summary.clone(),
+            kind: match a.kind {
+                W::Command => ToolKind::Command,
+                W::Edit => ToolKind::Edit,
+                W::Read => ToolKind::Read,
+                W::Search => ToolKind::Search,
+                W::Web => ToolKind::WebSearch,
+                W::Agent => ToolKind::Agent,
+                W::Other => ToolKind::Other,
+            },
+            phrase: a.phrase.clone(),
+            rows: a
+                .steps
+                .iter()
+                .enumerate()
+                .map(|(n, s)| LiveRow {
+                    id: format!("step-{}", a.earlier as usize + n),
+                    op: activity::Op {
+                        verb: s.verb.clone(),
+                        text: s.text.clone(),
+                        file: s.file.clone(),
+                    },
+                    lines: None,
+                    running: s.running,
+                    failed: s.failed,
+                    search: false,
+                    activity: None,
+                })
+                .collect(),
+            earlier: a.earlier as usize,
+            opens_turn: false,
+            thinking: None,
+        }
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn describe(&self) -> Vec<String> {
         let mut out = vec![format!("{} · {}", self.summary, self.phrase)];

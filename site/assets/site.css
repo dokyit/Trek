@@ -28,6 +28,12 @@
   --text: "Hanken Grotesk", ui-sans-serif, system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, monospace;
   --out: cubic-bezier(0.16, 1, 0.3, 1);
+  /* One entrance for everything that arrives: a short rise out of a light blur. */
+  --enter: 400ms;
+  --rise: 12px;
+  --blur: 4px;
+  /* The 1 px edge of a capture: a dark ring by day, a light one at night, where a dark one vanishes. */
+  --ring: 0 0 0 1px rgb(0 0 0 / 0.06);
   --gutter: clamp(16px, 5vw, 72px);
   --wide: 1180px;
 }
@@ -50,6 +56,7 @@
     --board-ink: #1D1A2C;
     --post: #F6F1EA;
     --shade: 0 0 0;
+    --ring: 0 0 0 1px rgb(255 255 255 / 0.08);
   }
 }
 
@@ -68,10 +75,11 @@ p { text-wrap: pretty; }
 :focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; border-radius: 8px; }
 html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transparent; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.skip { position: absolute; z-index: 30; left: 16px; top: -64px; padding: 10px 14px; border-radius: 10px; background: var(--ink); color: var(--ground); font-weight: 500; transition: top 150ms var(--out); }
-.skip:focus { top: 12px; }
+.skip { position: absolute; z-index: 30; left: 16px; top: 12px; translate: 0 -76px; padding: 10px 14px; border-radius: 10px; background: var(--ink); color: var(--ground); font-weight: 500; transition: translate 150ms var(--out); }
+.skip:focus { translate: 0; }
 .text-link { text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 36%, transparent); text-underline-offset: 3px; transition: text-decoration-color 150ms var(--out); }
-.text-link:hover { text-decoration-color: currentColor; }
+/* Hover only where there is a pointer that hovers: on a touch screen :hover sticks after a tap. */
+@media (hover: hover) { .text-link:hover { text-decoration-color: currentColor; } }
 
 /* ---------- The mark: one post, two boards, from /assets/img/mark.svg?v=7cbb7d26 ---------- */
 .mark { overflow: visible; }
@@ -79,22 +87,31 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
 .mark .board { fill: var(--board); }
 
 /* ---------- Buttons ---------- */
-.btn { display: inline-flex; align-items: center; justify-content: center; gap: 10px; border-radius: 14px; font: 600 16px/1 var(--text); white-space: nowrap;
-  transition: background-color 180ms var(--out), color 180ms var(--out), box-shadow 220ms var(--out), transform 220ms var(--out), border-color 180ms var(--out); }
-.btn svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 10px; border-radius: 14px; font: 600 16px/1 var(--text); white-space: nowrap; -webkit-tap-highlight-color: transparent;
+  transition: background-color 180ms var(--out), color 180ms var(--out), box-shadow 220ms var(--out), transform 220ms var(--out), scale 150ms ease-out; }
+/* The arrow's stroke is 2 px as drawn, whatever its size, to match the 600 label beside it. */
+.btn svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.btn svg path { vector-effect: non-scaling-stroke; }
 .btn small { font: 500 13px/1 var(--text); color: inherit; opacity: 0.72; font-variant-numeric: tabular-nums; }
+/* A press gives way a little. Its own property, so it never fights the hover's lift. */
+.btn:not(:disabled):active { scale: 0.96; }
 .btn-big { height: 56px; padding: 0 24px 0 20px; font-size: 17px; }
 .btn-small { height: 40px; padding: 0 16px; font-size: 15px; border-radius: 11px; }
 .btn-ember { background: var(--board); color: var(--board-ink); box-shadow: 0 1px 0 rgb(255 255 255 / 0.28) inset, 0 10px 24px -12px rgb(var(--shade) / 0.55); }
-.btn-ember:hover { background: var(--board-hover); transform: translateY(-1px); box-shadow: 0 1px 0 rgb(255 255 255 / 0.28) inset, 0 16px 30px -14px rgb(var(--shade) / 0.6); }
-.btn-ember:active { transform: translateY(0); }
 .btn-ink { background: var(--ink); color: var(--ground); }
-.btn-ink:hover { background: color-mix(in srgb, var(--ink) 86%, var(--board)); }
 .btn-quiet { padding: 0 20px; color: var(--ink); background: color-mix(in srgb, var(--raised) 42%, transparent); box-shadow: 0 0 0 1px var(--line) inset; }
-.btn-quiet:hover { background: color-mix(in srgb, var(--raised) 75%, transparent); }
 .btn-line { color: var(--ink); background: var(--raised); box-shadow: 0 0 0 1px var(--line) inset, 0 1px 2px rgb(var(--shade) / 0.06); }
-.btn-line:hover { box-shadow: 0 0 0 1px color-mix(in srgb, var(--ink) 30%, transparent) inset, 0 6px 14px -8px rgb(var(--shade) / 0.3); }
 .btn-line.is-yours { box-shadow: 0 0 0 2px var(--board) inset; }
+@media (hover: hover) {
+  .btn-ember:hover { background: var(--board-hover); transform: translateY(-1px); box-shadow: 0 1px 0 rgb(255 255 255 / 0.28) inset, 0 16px 30px -14px rgb(var(--shade) / 0.6); }
+  .btn-ember:active { transform: translateY(0); }
+  .btn-ink:hover { background: color-mix(in srgb, var(--ink) 86%, var(--board)); }
+  .btn-quiet:hover { background: color-mix(in srgb, var(--raised) 75%, transparent); }
+  .btn-line:hover { box-shadow: 0 0 0 1px color-mix(in srgb, var(--ink) 30%, transparent) inset, 0 6px 14px -8px rgb(var(--shade) / 0.3); }
+  .btn-line.is-yours:hover { box-shadow: 0 0 0 2px var(--board) inset, 0 6px 14px -8px rgb(var(--shade) / 0.3); }
+}
+/* On a touch screen the small buttons grow to a finger's 44 px. */
+@media (pointer: coarse) { .btn-small { height: 44px; } }
 
 /* ---------- The bar ---------- */
 .bar { position: fixed; inset: 0 0 auto; z-index: 20; transition: background-color 260ms var(--out), box-shadow 260ms var(--out), backdrop-filter 260ms var(--out); }
@@ -103,9 +120,11 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
 .lockup { display: inline-flex; align-items: center; gap: 9px; margin-right: auto; font: 700 27px/1 var(--display); letter-spacing: -0.035em; color: var(--ink); }
 .lockup .mark { width: 30px; height: 30px; }
 .lockup span { transform: translateY(-1px); }
+.bar .lockup { padding-block: 7px; margin-block: -7px; } /* a 44 px target, the bar no taller */
 .bar-links { display: flex; gap: 26px; }
 .bar-links a { font-weight: 500; font-size: 15px; color: var(--ink-2); transition: color 150ms var(--out); }
-.bar-links a:hover { color: var(--ink); }
+@media (hover: hover) { .bar-links a:hover { color: var(--ink); } }
+@media (pointer: coarse) { .bar-links a { display: inline-flex; align-items: center; min-height: 44px; } }
 
 /* ---------- First screen ---------- */
 .hero { --below: clamp(240px, 30vw, 400px); position: relative; padding: clamp(100px, 13vh, 128px) var(--gutter) 72px; text-align: center; overflow: clip;
@@ -113,55 +132,73 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
 .hero::after { content: ""; position: absolute; inset: auto 0 calc(var(--below) - 1px); height: 1px; background: color-mix(in srgb, var(--ink) 10%, transparent); }
 .hero-copy { position: relative; z-index: 1; display: grid; justify-items: center; }
 .mark-hero { width: 76px; height: 76px; margin-bottom: 22px; }
-.hero h1 { font-size: clamp(2.9rem, 7.4vw, 5.75rem); line-height: 0.96; letter-spacing: -0.038em; font-weight: 680; }
+.hero h1 { font-size: clamp(2.9rem, 7.4vw, 5.75rem); line-height: 1.02; letter-spacing: -0.022em; font-weight: 680; }
 .lede { margin-top: 22px; max-width: 30ch; font-size: clamp(18px, 1.6vw, 21px); line-height: 1.45; color: var(--ink-2); }
 .cta { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin-top: 34px; }
-.fine { margin-top: 16px; font-size: 14px; color: var(--ink-2); max-width: 56ch; }
+/* The line under the buttons gets the version and size once GitHub answers: its digits keep one
+   width and it keeps room for two lines, so nothing below it moves when the answer lands. */
+.fine { margin-top: 16px; min-height: 3.1em; font-size: 14px; color: var(--ink-2); max-width: 56ch; font-variant-numeric: tabular-nums; }
+[data-release] { font-variant-numeric: tabular-nums; }
 .fine .text-link { color: var(--ink); }
 .hero-window { position: relative; z-index: 1; width: min(1086px, 100%); margin: clamp(40px, 5vw, 56px) auto 0; perspective: 2200px; perspective-origin: 50% 0%; }
-.hero-window picture { display: block; transform-origin: 50% 100%; transform: rotateX(var(--tilt, 0deg)) translate3d(0, var(--lift, 0px), 0) scale(var(--zoom, 1)); will-change: transform; }
+.hero-window picture { position: relative; display: block; transform-origin: 50% 100%; transform: rotateX(var(--tilt, 0deg)) translate3d(0, var(--lift, 0px), 0) scale(var(--zoom, 1)); will-change: transform; }
 .hero-window img { width: 100%; }
 .hero-window figcaption { position: relative; margin-top: 26px; font-size: 13px; color: var(--mute); }
 /* The window's own shadow is in the capture; this is where it meets the ground. */
-.hero-window::before { content: ""; position: absolute; inset: auto 6% -18px; height: 60px; border-radius: 50%; background: radial-gradient(closest-side, rgb(var(--shade) / 0.32), transparent); filter: blur(10px); transform: translateY(8px); }
+.hero-window picture::before { content: ""; position: absolute; z-index: -1; inset: auto 6% calc(4.1% - 30px); height: 60px; border-radius: 50%; background: radial-gradient(closest-side, rgb(var(--shade) / 0.32), transparent); filter: blur(10px); }
 
-/* The boards come round the post once and settle. */
+/* The first screen builds once, in about a second and a half, then holds still: the post stands,
+   the headline, line and buttons rise 100 ms apart, the window follows, and the boards come round
+   the post and settle last. */
 @media (prefers-reduced-motion: no-preference) {
-  .mark-hero .board { transform-box: fill-box; animation: board 1.5s var(--out) both; }
-  .mark-hero .board-a { transform-origin: 36.5% 50%; animation-delay: 0.25s; }
-  .mark-hero .board-b { transform-origin: 65.3% 50%; animation-delay: 0.42s; animation-name: board-b; }
-  .mark-hero .post { animation: post 0.7s var(--out) both; transform-box: fill-box; transform-origin: 50% 100%; }
-  .hero h1, .hero .lede, .hero .cta, .hero .fine { animation: rise 1s var(--out) both; }
-  .hero h1 { animation-delay: 0.1s; }
+  .mark-hero .board { transform-box: fill-box; animation: board 1.1s var(--out) both; }
+  .mark-hero .board-a { transform-origin: 36.5% 50%; animation-delay: 0.15s; }
+  .mark-hero .board-b { transform-origin: 65.3% 50%; animation-delay: 0.27s; animation-name: board-b; }
+  .mark-hero .post { animation: post 0.45s var(--out) both; transform-box: fill-box; transform-origin: 50% 100%; }
+  .hero h1, .hero .lede, .hero .cta { animation: rise var(--enter) var(--out) both; }
+  .hero h1 { animation-delay: 0.1s; animation-duration: 450ms; }
   .hero .lede { animation-delay: 0.2s; }
   .hero .cta { animation-delay: 0.3s; }
-  .hero .fine { animation-delay: 0.38s; }
-  .hero-window { animation: rise-far 1.3s var(--out) 0.35s both; }
+  .hero .fine { animation: fade var(--enter) var(--out) 0.4s both; }
+  .hero-window { animation: rise-far 600ms var(--out) 0.4s both; }
+}
+/* With Reduce Motion the first screen fades in where it stands. */
+@media (prefers-reduced-motion: reduce) {
+  .hero-copy, .hero-window { animation: fade 300ms ease-out both; }
 }
 @media (prefers-reduced-motion: no-preference) {
   .mark-hero .board { transition: rotate 0.6s var(--out); }
-  .hero-copy:has(.btn-ember:hover, .btn-ember:focus-visible) .board-b { rotate: 5deg; }
-  .hero-copy:has(.btn-quiet:hover, .btn-quiet:focus-visible) .board-a { rotate: -5deg; }
+  .hero-copy:has(.btn-ember:focus-visible) .board-b { rotate: 5deg; }
+  .hero-copy:has(.btn-quiet:focus-visible) .board-a { rotate: -5deg; }
+}
+@media (prefers-reduced-motion: no-preference) and (hover: hover) {
+  .hero-copy:has(.btn-ember:hover) .board-b { rotate: 5deg; }
+  .hero-copy:has(.btn-quiet:hover) .board-a { rotate: -5deg; }
 }
 @keyframes post { from { transform: scaleY(0.4); opacity: 0; } to { transform: none; opacity: 1; } }
 @keyframes board { 0% { transform: scaleX(0.08) rotate(-14deg); opacity: 0; } 22% { opacity: 1; } 58% { transform: scaleX(1.04) rotate(3deg); } 78% { transform: scaleX(0.99) rotate(-1deg); } 100% { transform: none; } }
 @keyframes board-b { 0% { transform: scaleX(0.08) rotate(12deg); opacity: 0; } 22% { opacity: 1; } 58% { transform: scaleX(1.04) rotate(-2.5deg); } 78% { transform: scaleX(0.99) rotate(0.8deg); } 100% { transform: none; } }
-@keyframes rise { from { opacity: 0; transform: translateY(14px); filter: blur(6px); } to { opacity: 1; transform: none; filter: none; } }
-@keyframes rise-far { from { opacity: 0; transform: translateY(60px); } to { opacity: 1; transform: none; } }
+@keyframes rise { from { opacity: 0; transform: translateY(var(--rise)); filter: blur(var(--blur)); } to { opacity: 1; transform: none; filter: none; } }
+@keyframes rise-far { from { opacity: 0; transform: translateY(32px); } to { opacity: 1; transform: none; } }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 
-/* ---------- Things that come in as they are reached ---------- */
+/* ---------- Things that come in as they are reached ----------
+   One entrance per row: the row arrives whole, its words with its picture. With Reduce Motion it
+   only fades. */
+.js .reveal { opacity: 0; transition: opacity 200ms ease-out; transition-delay: var(--delay, 0s); }
+.js .reveal.is-in { opacity: 1; }
 @media (prefers-reduced-motion: no-preference) {
-  .js .reveal { opacity: 0; transform: translateY(28px); filter: blur(6px); transition: opacity 0.9s var(--out), transform 1.1s var(--out), filter 0.9s var(--out); transition-delay: var(--delay, 0s); }
-  .js .reveal.is-in { opacity: 1; transform: none; filter: none; }
+  .js .reveal { transform: translateY(var(--rise)); filter: blur(var(--blur)); transition: opacity var(--enter) var(--out), transform var(--enter) var(--out), filter var(--enter) var(--out); transition-delay: var(--delay, 0s); }
+  .js .reveal.is-in { transform: none; filter: none; }
 }
 
 /* ---------- Features ---------- */
 .features { max-width: calc(var(--wide) + 2 * var(--gutter)); margin: 0 auto; padding: clamp(96px, 12vw, 160px) var(--gutter) 0; }
 .features-head { max-width: 760px; }
-.features-head h2, .phone-text h2, .get-head h2 { font-size: clamp(2.3rem, 4.6vw, 3.9rem); line-height: 1; letter-spacing: -0.032em; }
+.features-head h2, .phone-text h2, .get-head h2 { font-size: clamp(2.3rem, 4.6vw, 3.9rem); line-height: 1.04; }
 .features-head p { margin-top: 18px; font-size: 19px; color: var(--ink-2); max-width: 46ch; }
 .feat { margin-top: clamp(72px, 9vw, 120px); }
-.feat h3 { font-size: clamp(1.55rem, 2.3vw, 2rem); line-height: 1.08; letter-spacing: -0.024em; }
+.feat h3 { font-size: clamp(1.55rem, 2.3vw, 2rem); line-height: 1.1; }
 .feat-text p { margin-top: 10px; color: var(--ink-2); max-width: 40ch; }
 .feat-split { display: grid; grid-template-columns: 4fr 8fr; gap: clamp(28px, 4vw, 64px); align-items: center; }
 .feat-split-flip { grid-template-columns: 7fr 5fr; }
@@ -182,8 +219,9 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
 .panel-bleed { padding-bottom: 0; place-items: end center; }
 .panel-bleed .shot { border-radius: 12px 12px 0 0; }
 .panel-mid { min-height: clamp(280px, 30vw, 380px); }
-.shot { border-radius: 12px; background: var(--raised); box-shadow: 0 0 0 1px rgb(0 0 0 / 0.07), 0 2px 4px rgb(var(--shade) / 0.06), 0 24px 48px -20px rgb(var(--shade) / 0.42);
-  transform: translate3d(0, var(--drift, 0px), 0); will-change: transform; }
+.shot { border-radius: 12px; background: var(--raised); box-shadow: var(--ring), 0 2px 4px rgb(var(--shade) / 0.06), 0 24px 48px -20px rgb(var(--shade) / 0.42); }
+/* Only the captures that drift with the scroll move, so only they get a layer of their own. */
+[data-drift] .shot { transform: translate3d(0, var(--drift, 0px), 0); will-change: transform; }
 .feat-inbox .shot { width: 380px; }
 .shot-worktree { width: 330px; }
 .shot-study { width: min(560px, 100%); }
@@ -208,6 +246,12 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
 .menubar li { display: grid; justify-items: center; gap: 12px; font-size: 14px; font-weight: 500; color: var(--ink-2); white-space: nowrap; }
 .menubar img { width: 44px; height: 44px; padding: 14px; box-sizing: content-box; border-radius: 16px; background: var(--raised); box-shadow: 0 0 0 1px var(--line) inset, 0 10px 24px -16px rgb(var(--shade) / 0.5); }
 @media (prefers-color-scheme: dark) { .menubar img { filter: invert(1); background: #E6E0EE; } }
+
+/* Forced colours drop every shadow, and with them the edges drawn as rings: draw them as lines. */
+@media (forced-colors: active) {
+  .panel, .btn { border: 1px solid CanvasText; }
+  .shot, .menubar img, .phone { outline: 1px solid CanvasText; outline-offset: -1px; }
+}
 
 /* ---------- iPhone ---------- */
 .phone-band { margin-top: clamp(96px, 12vw, 160px); background: linear-gradient(180deg, var(--ground), var(--sky-2) 22%, var(--sky)); overflow: clip; }
@@ -234,7 +278,12 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
 .get-head p { margin-top: 16px; font-size: 19px; color: var(--ink-2); }
 .builds { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0 clamp(20px, 3vw, 40px); margin-top: 52px; }
 .build { display: flex; flex-direction: column; padding-top: 22px; border-top: 1px solid color-mix(in srgb, var(--ink) 22%, transparent); }
+.build[hidden] { display: none; }
+/* With Linux there: the three computers on a row, the two phone ways under them. */
+.builds.has-linux { grid-template-columns: repeat(3, 1fr); row-gap: 44px; }
 .build h3 { font-size: 1.35rem; }
+/* A word beside a platform's name (Linux's "Preview"): quieter than the name, on its line. */
+.build-note { margin-left: 8px; font-family: var(--text); font-size: 13px; font-weight: 600; color: var(--mute); vertical-align: 2px; }
 .build p { margin-top: 10px; font-size: 15px; color: var(--ink-2); flex: 1; }
 .build .links { display: flex; flex-wrap: nowrap; gap: 8px; margin-top: 18px; }
 .build .links .btn { padding: 0 13px; }
@@ -245,15 +294,19 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
 .foot .lockup { font-size: 22px; }
 .foot .lockup .mark { width: 24px; height: 24px; }
 .foot .who { margin-left: auto; color: var(--mute); }
+@media (pointer: coarse) {
+  .foot-in { row-gap: 0; }
+  .foot-in a { display: inline-flex; align-items: center; min-height: 44px; }
+}
 
 /* ---------- Privacy and the page that isn't there ---------- */
 .page { padding: 132px 0 120px; }
 .page .wrap { width: min(760px, 100% - 48px); margin-inline: auto; }
-.page h1 { font-size: clamp(2.25rem, 4vw, 3.25rem); line-height: 1.05; letter-spacing: -0.03em; }
+.page h1 { font-size: clamp(2.25rem, 4vw, 3.25rem); line-height: 1.05; }
 .page .lede { margin: 20px 0 0; max-width: none; font-size: 19px; }
 .doc { margin-top: 56px; }
 .doc h2 { margin-top: 52px; font-size: 1.5rem; line-height: 1.2; letter-spacing: -0.015em; }
-.doc p, .doc ul, .doc ol { margin-top: 14px; color: var(--ink-2); }
+.doc p, .doc ul, .doc ol { margin-top: 14px; color: var(--ink-2); max-width: 70ch; }
 .doc ul { padding-left: 1.2em; list-style: disc; }
 .doc ol { padding-left: 1.4em; list-style: decimal; }
 .doc li + li { margin-top: 6px; }
@@ -264,7 +317,7 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
 .doc th, .doc td { padding: 10px 14px 10px 0; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
 .doc th { font-weight: 500; color: var(--ink); }
 .updated { margin-top: 44px; font-size: 14px; color: var(--mute); }
-.page-sky { background: linear-gradient(180deg, var(--sky), var(--ground) 420px); }
+.page-sky { background: var(--ground) linear-gradient(180deg, var(--sky), var(--ground) 420px) no-repeat; } /* once: a short page must not show the sky again below it */
 .lost { min-height: 72svh; display: grid; align-content: center; justify-items: start; }
 .lost .mark { width: 64px; height: 64px; margin-bottom: 28px; }
 .lost .cta { justify-content: flex-start; }
@@ -278,7 +331,7 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
   .phone-in { grid-template-columns: 1fr; }
   .phone-text { padding-bottom: 0; }
   .phones { height: 600px; }
-  .builds { grid-template-columns: repeat(2, 1fr); gap: 40px 32px; }
+  .builds, .builds.has-linux { grid-template-columns: repeat(2, 1fr); gap: 40px 32px; }
 }
 @media (max-width: 767px) {
   .bar-links { display: none; }
@@ -289,13 +342,13 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
   .strip { grid-template-columns: minmax(0, 1fr); gap: 48px; }
   .hero-window figcaption { width: calc(100vw - 2 * var(--gutter)); text-align: left; }
   .feat-mini .mini-media { height: auto; }
-  .panel { border-radius: 22px; padding: 22px; }
+  .panel { border-radius: 28px; padding: 16px; } /* the capture's 12 px plus 16 px: concentric */
   .feat-inbox .shot { width: min(342px, 100%); }
   .panel-tall { min-height: 0; }
   .phones { height: 520px; }
   .phone-front { --w: 220px; margin-left: -64px; }
   .phone-back { --w: 190px; margin-left: -176px; }
-  .builds { grid-template-columns: 1fr; }
+  .builds, .builds.has-linux { grid-template-columns: 1fr; }
   .foot .who { margin-left: 0; width: 100%; order: 2; }
   .page { padding: 108px 0 88px; }
   .page .wrap { width: calc(100% - 32px); }
@@ -303,3 +356,115 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
 @media (max-width: 420px) {
   .cta .btn { width: 100%; }
 }
+
+/* ---------- The home page: one afternoon, while the agents work ----------
+   Scrolling the page is an afternoon passing: it opens in daylight on a grass hill, the light warms
+   to gold and then rose as you read down, and it closes at dusk down in the grass, the hour the work
+   is handed over and left running. By Night: blue hour at the top, full night at the end. The two
+   photographs are in assets/img/backdrop/ (script/site/make_backdrops.py); between them the page's
+   own light, with grain over everything so no field is ever flat, and the drawings stand in it. */
+.home { --g0: #EFEDF4; --g1: #F2EEF1; --g2: #F6EBE1; --g3: #F5DFCF; --g4: #EBCDC5; --g5: #C9A3AE;
+  --glass-1: rgb(255 255 255 / 0.42); --glass-2: rgb(120 96 110 / 0.07);
+  background: url("/assets/img/backdrop/grain.svg?v=cd9bb9f6") repeat, linear-gradient(180deg, var(--g0) 0%, var(--g1) 24%, var(--g2) 46%, var(--g3) 70%, var(--g4) 88%, var(--g5) 100%) no-repeat;
+  background-size: 240px 240px, 100% 100%; background-blend-mode: soft-light, normal; }
+@media (prefers-color-scheme: dark) {
+  /* Night deepens and cools down the page: indigo blue hour, then navy, then near black */
+  .home { --g0: #15132A; --g1: #1A1C3A; --g2: #141936; --g3: #0D1227; --g4: #080B19; --g5: #05070F;
+    --glass-1: rgb(214 200 255 / 0.07); --glass-2: rgb(214 200 255 / 0.025); }
+}
+.home .panel { background: linear-gradient(170deg, var(--glass-1), var(--glass-2) 70%); }
+
+/* The first screen stands on the hill; the app's window stands in front of it. */
+.home .hero { background: none; }
+.home .hero::after { display: none; }
+.scene { position: absolute; inset: 0 0 var(--below); z-index: 0; pointer-events: none;
+  /* the land fades along the hill's fall (lower on the left, where it falls away), slowly and in
+     two overlapping ramps, so no level line shows */
+  -webkit-mask-image: linear-gradient(171deg, #000 52%, rgb(0 0 0 / 0.55) 70%, transparent 96%), linear-gradient(180deg, #000 60%, transparent); -webkit-mask-composite: source-in;
+  mask-image: linear-gradient(171deg, #000 52%, rgb(0 0 0 / 0.55) 70%, transparent 96%), linear-gradient(180deg, #000 60%, transparent); mask-composite: intersect; }
+.scene img, .closing-land img { width: 100%; height: 100%; object-fit: cover; object-position: 50% 100%; }
+.scene::after, .closing-land::after { content: ""; position: absolute; inset: 0; background: url("/assets/img/backdrop/grain.svg?v=cd9bb9f6") repeat; background-size: 240px 240px; mix-blend-mode: soft-light; }
+/* the words over the picture: the small print and the caption in stronger ink, the quiet button on
+   its own frosted ground */
+.home .hero .fine { color: var(--ink); }
+.home .hero-window figcaption { color: var(--ink-2); }
+.home .hero .btn-quiet { background: color-mix(in srgb, var(--raised) 72%, transparent); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
+@media (hover: hover) { .home .hero .btn-quiet:hover { background: color-mix(in srgb, var(--raised) 90%, transparent); } }
+
+/* The phones stand whole in the light, no band of colour of their own. */
+.home .phone-band { position: relative; background: none; overflow: visible; }
+.home .phone { bottom: 0; }
+.home .phone-band { margin-top: clamp(56px, 7vw, 96px); }
+.home .phone-in { padding-top: clamp(32px, 4vw, 64px); }
+.home .phone-back { bottom: 34px; }
+
+/* The end: the page closes at dusk in the grass, the footer standing on its dark ground. */
+.home .get { padding-bottom: clamp(200px, 26vw, 380px); }
+.home .foot { position: relative; border-top: 0; color: var(--ink-2);
+  --ink: #F4EFF7; --ink-2: #D9D1E3; --mute: #BDB4C9; --post: #F6F1EA; --board: #FF7A3D; }
+.home .foot-in { position: relative; z-index: 1; padding-top: 40px; }
+.closing-land { position: absolute; inset: auto 0 0; height: calc(100% + clamp(240px, 30vw, 420px)); z-index: 0; overflow: hidden; pointer-events: none;
+  -webkit-mask-image: linear-gradient(180deg, transparent, #000 58%); mask-image: linear-gradient(180deg, transparent, #000 58%); }
+
+/* ---------- Drawings ----------
+   A small object beside a feature, in one language (script/site/make_illustrations.py): line
+   drawings of blocks in isometric projection, one ink line on the page's own light, and one ember
+   line for the thing that needs you. Each face is filled with the page's light at its place
+   (--tint, a stop of the page's afternoon), so a block in front hides what is behind it and the
+   drawing reads as line alone. At Night the same lines in light ink on the dark. They stand under
+   their words, never behind them. */
+.ill { --tint: var(--g1); display: block; overflow: visible; max-width: 100%; height: auto; margin-top: 40px; }
+.ill path { fill: var(--tint); stroke: var(--ill-ink); stroke-width: 1.3; stroke-linejoin: round; stroke-linecap: round; }
+.ill .ae { stroke: var(--board); stroke-width: 1.6; }
+.ill .dash { fill: none; stroke: var(--board); stroke-width: 1.5; stroke-dasharray: 3 3.5; }
+.home { --ill-ink: #3B3040; }
+@media (prefers-color-scheme: dark) { .home { --ill-ink: #C9C0DD; } }
+/* the page's light where each one stands (the stops with their grain, as measured on the page) */
+.ill-inbox { --tint: #F5F2F3; }
+.ill-worktrees { --tint: #F8F0E8; }
+.ill-study { --tint: #F7E6DA; }
+@media (prefers-color-scheme: dark) {
+  .ill-inbox { --tint: #313457; }
+  .ill-worktrees { --tint: #283054; }
+  .ill-study { --tint: #1C2543; }
+}
+/* On a phone each drawing stands small beside its heading, so the page grows no longer. */
+@media (max-width: 767px) {
+  .feat-text:has(.ill) { display: grid; grid-template-columns: 1fr auto; grid-template-areas: "h i" "p p"; column-gap: 16px; align-items: end; }
+  .feat-text:has(.ill) h3 { grid-area: h; }
+  .feat-text:has(.ill) p { grid-area: p; }
+  .feat-text .ill { grid-area: i; width: auto; max-width: none; height: 88px; margin: 0; }
+}
+/* Each drawing draws itself in once as its row arrives. */
+@media (prefers-reduced-motion: no-preference) {
+  .js .reveal .ill path { stroke-dasharray: 1; stroke-dashoffset: 1; transition: stroke-dashoffset 450ms var(--out) 150ms; }
+  .js .reveal .ill .dash { stroke-dasharray: 3 3.5; stroke-dashoffset: 0; opacity: 0; transition: opacity 300ms ease-out 500ms; }
+  .js .reveal.is-in .ill path { stroke-dashoffset: 0; }
+  .js .reveal.is-in .ill .dash { opacity: 1; }
+}
+
+/* ---------- The phones come together ----------
+   As the iPhone section arrives, the two phones move in from apart, the back one from the left and
+   the front one from the right, turning a little, and settle in the place they keep: tied to the
+   scroll over a short stretch where the browser can do that, played once as they arrive where it
+   can't (site.js adds is-apart, then is-met). With Reduce Motion they are simply there. */
+@media (prefers-reduced-motion: no-preference) {
+  @supports (animation-timeline: view()) {
+    .home .phones .phone { animation: linear both; animation-timeline: view(); animation-range: entry 20% cover 34%; }
+    .home .phones .phone-back { animation-name: phone-back-in; }
+    .home .phones .phone-front { animation-name: phone-front-in; animation-range: entry 26% cover 40%; }
+  }
+  .home .phones.is-apart .phone { transition: translate 650ms var(--out), rotate 650ms var(--out); }
+  .home .phones.is-apart .phone-front { transition-delay: 90ms; }
+  .home .phones.is-apart:not(.is-met) .phone-back { translate: var(--back-from); rotate: -5deg; }
+  .home .phones.is-apart:not(.is-met) .phone-front { translate: var(--front-from); rotate: 6deg; }
+}
+/* where each phone starts: wide apart and a little low on a desktop; on a phone mostly sideways,
+   toward each other, and the back one kept inside the screen once it lands */
+.home .phones { --back-from: -90px 46px; --front-from: 110px 70px; }
+@media (max-width: 767px) {
+  .home .phones { --back-from: -80px 8px; --front-from: 90px 14px; }
+  .home .phone-back { margin-left: -166px; }
+}
+@keyframes phone-back-in { from { translate: var(--back-from); rotate: -5deg; animation-timing-function: cubic-bezier(0.33, 1, 0.68, 1); } to { translate: 0 0; rotate: 0deg; } }
+@keyframes phone-front-in { from { translate: var(--front-from); rotate: 6deg; animation-timing-function: cubic-bezier(0.33, 1, 0.68, 1); } to { translate: 0 0; rotate: 0deg; } }

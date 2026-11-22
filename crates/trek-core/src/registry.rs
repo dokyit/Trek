@@ -653,7 +653,7 @@ impl AddedAgent {
 
 /// The Keychain account of added agent `agent`'s variable `var`, under the service Trek keeps
 /// every secret under (`keychain::SERVICE`, API keys too).
-fn secret_account(agent: &str, var: &str) -> String {
+pub fn secret_account(agent: &str, var: &str) -> String {
     format!("agent-env:{agent}:{var}")
 }
 

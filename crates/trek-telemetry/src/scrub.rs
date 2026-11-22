@@ -1,6 +1,6 @@
 //! What's taken out of a log line, a panic message or a backtrace before it leaves: secrets
 //! agents were given (`trek_core::session_secrets`), anything shaped like a key or token, email
-//! addresses, and paths. The home folder is `~`; a project's folder and what's in it, and any
+//! addresses, web addresses, and paths. The home folder is `~`; a project's folder and what's in it, and any
 //! other path that could name the user's files, is `[path]`. Trek's own folders and the system's
 //! stay readable, as they name nothing of the user's.
 
@@ -79,6 +79,10 @@ impl Scrubber {
     pub fn scrub(&self, text: &str) -> String {
         let mut text = trek_core::session_secrets::scrub(text, &self.secrets).into_owned();
         text = (self.shapes)(&text);
+        // Web addresses before emails, so a login in one (`https://me:pw@host`) goes with it.
+        text = URL
+            .replace_all(&text, |c: &regex::Captures| web_address(&c[1], &c[2]))
+            .into_owned();
         text = EMAIL.replace_all(&text, "[email]").into_owned();
         for project in &self.projects {
             text = project.replace_all(&text, "[path]").into_owned();
@@ -133,6 +137,56 @@ const SYSTEM: &[&str] = &[
     "/dev/",
 ];
 
+/// Hosts Trek itself, or the providers its agents talk to, contact: a web address on one of them
+/// keeps its scheme and host (so "the update check to github.com failed" stays readable) and
+/// loses everything after it. Any other web address is somewhere the user went, which is theirs.
+const KNOWN_HOSTS: &[&str] = &[
+    "github.com",
+    "api.github.com",
+    "raw.githubusercontent.com",
+    "objects.githubusercontent.com",
+    "registry.npmjs.org",
+    "formulae.brew.sh",
+    "cdn.agentclientprotocol.com",
+    "downloads.claude.ai",
+    "nodejs.org",
+    "huggingface.co",
+    "us.i.posthog.com",
+    "ntfy.sh",
+    "trekdesktop.com",
+    "api.anthropic.com",
+    "api.openai.com",
+    "generativelanguage.googleapis.com",
+    "openrouter.ai",
+    "api.deepseek.com",
+    "api.x.ai",
+    "api.mistral.ai",
+    "api.groq.com",
+    // This computer's own servers (a model server, a dev server): no name of anyone's.
+    "localhost",
+    "127.0.0.1",
+];
+
+/// A web address cut down to `[url]`, or to `https://host` when the host is a known one. What
+/// ends a sentence after it (`.`, `,`, `:`) stays after it.
+fn web_address(scheme: &str, rest: &str) -> String {
+    let body = rest.trim_end_matches(['.', ',', ';', ':', '!', '?']);
+    let tail = &rest[body.len()..];
+    let authority = body.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let plain = scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https");
+    // `user:pass@host` is never kept, even on a known host.
+    if plain && !authority.contains('@') && KNOWN_HOSTS.contains(&host.as_str()) {
+        format!("{}://{authority}{tail}", scheme.to_ascii_lowercase())
+    } else {
+        format!("[url]{tail}")
+    }
+}
+
 fn unix_path(path: &str, home: Option<&str>) -> String {
     if SYSTEM.iter().any(|s| path.starts_with(s)) {
         return path.to_string();
@@ -155,6 +209,32 @@ fn windows_path(path: &str, home: Option<&str>) -> String {
         _ => "[path]".into(),
     }
 }
+
+/// A web address: a scheme, `://`, and up to a space, a quote or a bracket (a log line's own
+/// `({url})`). It takes in `file://` addresses too, which hold paths.
+static URL: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r#"([A-Za-z][A-Za-z0-9+.\-]*)://([^\s"'`<>\[\]()]+)"#).unwrap()
+});
+
+/// A crash's message without the text a panic quotes: Rust's own messages quote what they were
+/// working on between backticks (``byte index 9 is not a char boundary; … of `<the text>` ``, up to
+/// 256 characters of it), which may be what the user wrote or a file of theirs. What a report
+/// needs is where and why, so a quoted span with a space in it or longer than a name is written
+/// `[text]`; a name (`Option::unwrap()`, `None`) stays.
+pub fn without_quoted_text(message: &str) -> String {
+    QUOTED
+        .replace_all(message, |c: &regex::Captures| {
+            let inner = &c[1];
+            if inner.chars().count() > 48 || inner.chars().any(char::is_whitespace) {
+                "`[text]`".to_string()
+            } else {
+                c[0].to_string()
+            }
+        })
+        .into_owned()
+}
+
+static QUOTED: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"`([^`]*)`").unwrap());
 
 static EMAIL: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}")
@@ -267,6 +347,45 @@ mod tests {
     }
 
     #[test]
+    fn web_addresses_keep_at_most_a_known_host() {
+        let s = scrubber();
+        // Where the user went is theirs: the whole address goes, path, query and all.
+        assert_eq!(
+            s.scrub("browser: https://bank.example/accounts/4417?tab=cards failed: NSURLErrorDomain -1003"),
+            "browser: [url] failed: NSURLErrorDomain -1003"
+        );
+        assert_eq!(
+            s.scrub("the page's process ended (https://intranet.acme-secret.com/wiki/Plan#top)"),
+            "the page's process ended ([url])"
+        );
+        // A sentence going on after one is kept.
+        assert_eq!(s.scrub("see https://example.org/a/b."), "see [url].");
+        assert_eq!(
+            s.scrub("went to http://192.168.1.20:8080/admin, then"),
+            "went to [url], then"
+        );
+        // A file address holds a path, and goes whole.
+        assert_eq!(s.scrub("open file:///Users/me/taxes.pdf"), "open [url]");
+        // Trek's own hosts and the providers' APIs keep the host, never the path or query.
+        assert_eq!(
+            s.scrub("update check: https://github.com/dokyit/Trek/releases/latest/download/stable.json: 503"),
+            "update check: https://github.com: 503"
+        );
+        assert_eq!(
+            s.scrub("POST https://api.anthropic.com/v1/messages?beta=1 -> 401"),
+            "POST https://api.anthropic.com -> 401"
+        );
+        assert_eq!(
+            s.scrub("model server http://localhost:11434/api/tags refused"),
+            "model server http://localhost:11434 refused"
+        );
+        // A look-alike host is not a known one, and neither is one with a login in front.
+        assert_eq!(s.scrub("https://github.com.evil.example/x"), "[url]");
+        assert_eq!(s.scrub("https://me:pw@github.com/x"), "[url]");
+        assert_eq!(s.scrub("ws://localhost:3000/socket"), "[url]");
+    }
+
+    #[test]
     fn windows_paths_too() {
         let s = Scrubber::new(
             Some(r"C:\Users\me".into()),
@@ -288,6 +407,24 @@ mod tests {
             s.scrub(r"C:\Windows\System32\cmd.exe"),
             r"C:\Windows\System32\cmd.exe"
         );
+    }
+
+    /// A panic that quotes the user's text says where and why, not what the text was.
+    #[test]
+    fn a_crash_says_why_without_the_text_it_quoted() {
+        // What `&s[..n]` says when `n` falls inside a character.
+        let message = "byte index 9 is not a char boundary; it is inside 'é' (bytes 8..10) of `Dear Sam, the merger closes Friday`";
+        assert_eq!(
+            without_quoted_text(message),
+            "byte index 9 is not a char boundary; it is inside 'é' (bytes 8..10) of `[text]`"
+        );
+        let long = format!("index out of bounds of `{}`[...]", "x".repeat(200));
+        assert_eq!(
+            without_quoted_text(&long),
+            "index out of bounds of `[text]`[...]"
+        );
+        let named = "called `Option::unwrap()` on a `None` value";
+        assert_eq!(without_quoted_text(named), named);
     }
 
     #[test]

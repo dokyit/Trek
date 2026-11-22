@@ -505,10 +505,10 @@ fn the_bell_flashes_the_title_names_the_shell_and_the_text_sizes() {
         assert!(trek.visible(cx, "terminal-dock-title"));
 
         let rows = term.read_with(cx, |t, _| t.visible_rows().len());
-        let (bigger, actual) = if cfg!(windows) {
-            ("ctrl-=", "ctrl-0")
-        } else {
+        let (bigger, actual) = if cfg!(target_os = "macos") {
             ("cmd-=", "cmd-0")
+        } else {
+            ("ctrl-=", "ctrl-0")
         };
         trek.press(cx, bigger);
         trek.press(cx, bigger);

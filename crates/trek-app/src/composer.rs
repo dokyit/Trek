@@ -47,6 +47,8 @@ pub struct Composer {
     workspace: Entity<Workspace>,
     /// The main window's composer follows its route; a thread window's is bound to one thread.
     scope: Scope,
+    /// The approval card of the transcript above, which Tab goes to while it's up (`reach_card`).
+    card: Option<crate::thread_view::CardReach>,
     input: Entity<TextareaState>,
     /// The model and access menus, and the `/`, `@` and `$` picker (shared with the editor's AI
     /// input, `pickers`).
@@ -421,6 +423,7 @@ impl Composer {
             screenclip: None,
             window: window.window_handle(),
             cmd_enter,
+            card: None,
             width: std::rc::Rc::new(std::cell::Cell::new(px(760.))),
             height: std::rc::Rc::new(std::cell::Cell::new(px(0.))),
             editing: None,
@@ -892,6 +895,12 @@ impl Composer {
 
     /// Share what's put away with `other`'s composer (a split's two), and take up what's there for
     /// the thread on screen.
+    /// Tab goes to `card` (the approval card of the transcript above) while one is up, instead
+    /// of round the window: one press to its first button, Deny.
+    pub fn reach_card(&mut self, card: crate::thread_view::CardReach) {
+        self.card = Some(card);
+    }
+
     pub fn share_drafts_with(
         &mut self,
         other: &Entity<Composer>,
@@ -2660,7 +2669,17 @@ impl Composer {
 
     /// Take a screenshot with macOS's own picker and attach it. `mode`: "window", "area" or "screen".
     /// The snapshot ⌘⇧S takes (Settings → App Snapshots).
+    /// Whether this platform takes snapshots: macOS (`screencapture`) and Windows (Snipping Tool).
+    /// Linux has no capture tool Trek drives (the desktop portal's Screenshot would bring one), so
+    /// the + menu, the shortcut and Settings offer none there.
+    pub fn snapshots_offered() -> bool {
+        !crate::words::is_linux()
+    }
+
     pub fn snapshot_default(&mut self, cx: &mut Context<Self>) {
+        if !Self::snapshots_offered() {
+            return;
+        }
         let mode = match self.workspace.read(cx).settings.snapshots.default_mode {
             trek_core::settings::SnapshotMode::Window => "window",
             trek_core::settings::SnapshotMode::Area => "area",
@@ -3001,9 +3020,17 @@ impl Composer {
                         },
                     ));
                 }
-                let menu = menu.separator();
+                // No snapshot rows (Linux): no line of their own either.
+                let menu = if Self::snapshots_offered() {
+                    menu.separator()
+                } else {
+                    menu
+                };
                 // Snipping Tool has the window, area and screen choice in its own toolbar.
-                let menu = if cfg!(windows) {
+                let menu = if !Self::snapshots_offered() {
+                    let _ = (b, c, d);
+                    menu
+                } else if cfg!(windows) {
                     menu.item(
                         PopupMenuItem::new("Take a snapshot")
                             .icon(crate::assets::Lucide::Camera)
@@ -5184,6 +5211,14 @@ impl Render for Composer {
                 }),
             )
             .capture_action(cx.listener(|this, _: &IndentInline, window, cx| {
+                // No picker or menu open: an approval card that's up is the next stop.
+                if this.pickers.trigger.is_none()
+                    && !this.pickers.model_open
+                    && this.card.as_ref().is_some_and(|c| c.take_focus(window, cx))
+                {
+                    cx.stop_propagation();
+                    return;
+                }
                 this.picker_action("tab", window, cx)
             }))
             .capture_action(

@@ -63,6 +63,7 @@ struct NewThreadSheet: View {
                         .scaledToFit()
                         .frame(width: 50, height: 50)
                         .shadow(color: Color(hex: 0xFF8A3D).opacity(0.45), radius: 18)
+                        .accessibilityHidden(true)
                     Text("What are we building?")
                         .font(.ui(size: 28, weight: .semibold))
                         .tracking(-0.5)
@@ -92,6 +93,7 @@ struct NewThreadSheet: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { dismiss() } label: { Image(systemName: "xmark") }
+                        .accessibilityLabel("Close")
                 }
             }
         }

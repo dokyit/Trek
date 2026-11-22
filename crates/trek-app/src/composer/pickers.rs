@@ -1774,6 +1774,9 @@ pub fn picker<H: PickerHost>(host: &H, cx: &mut Context<H>) -> Option<AnyElement
         .opacity(if theme.mode.is_dark() { 0.06 } else { 0.035 });
     Some(
         look::surface(cx)
+            // It lies over the transcript (and on Study over the strip under the card): a click
+            // on a row is the row's alone, never also a turn's copy, undo or retry under it.
+            .occlude()
             .w(px(if files { 420. } else { 326. }))
             .max_w_full()
             .rounded(px(fluent::surface(radius::CARD)))
@@ -1806,6 +1809,7 @@ pub fn picker<H: PickerHost>(host: &H, cx: &mut Context<H>) -> Option<AnyElement
                         let detail = item.detail.clone();
                         h_flex()
                             .id(("pick", i))
+                            .test_support()
                             .px(px(11.))
                             .py(px(6.))
                             .min_h(px(if files { 30. } else { 47. }))

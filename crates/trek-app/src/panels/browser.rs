@@ -22,7 +22,7 @@ use gpui_wry::WebView;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -37,6 +37,8 @@ mod asks;
 mod prompts;
 #[cfg(target_os = "macos")]
 mod webkit;
+#[cfg(target_os = "linux")]
+mod webkitgtk;
 #[cfg(windows)]
 mod webview2;
 use asks::{Ask, AskKind, Reply};
@@ -853,11 +855,15 @@ struct Tab {
 pub(crate) struct ParentWindow(raw_window_handle::RawWindowHandle);
 
 impl ParentWindow {
-    /// `None` where there's no native window (GPUI's test windows).
+    /// `None` where there's no native window (GPUI's test windows), and on Linux where a web view
+    /// can't go (`linux_gtk::web_view_parent`).
     pub(crate) fn of(window: &Window) -> Option<Self> {
-        raw_window_handle::HasWindowHandle::window_handle(window)
+        let raw = raw_window_handle::HasWindowHandle::window_handle(window)
             .ok()
-            .map(|h| Self(h.as_raw()))
+            .map(|h| h.as_raw())?;
+        #[cfg(target_os = "linux")]
+        let raw = crate::linux_gtk::web_view_parent(raw)?;
+        Some(Self(raw))
     }
 }
 
@@ -1080,14 +1086,66 @@ fn open_in_safari(url: &str) {
         .spawn();
 }
 
-/// Answer what waits on ask `id`: WebKit's handler (`webkit.rs`) or WebView2's deferral
-/// (`webview2.rs`); nothing waits elsewhere.
+/// Where an isolated run saves a download wry named `name` (`file (2).txt`: numbered against
+/// another folder): `dir`, under the name the page gave, numbered against `dir` alone.
+fn isolated_download(dir: &Path, name: &str) -> PathBuf {
+    let (stem, ext) = match name.rfind('.') {
+        Some(dot) if dot > 0 => (&name[..dot], &name[dot..]),
+        _ => (name, ""),
+    };
+    // wry's numbering: " (n)" at the end of the name's stem.
+    let stem = stem
+        .strip_suffix(')')
+        .and_then(|s| s.rsplit_once(" ("))
+        .filter(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .map_or(stem, |(base, _)| base);
+    let mut path = dir.join(format!("{stem}{ext}"));
+    let mut n = 1;
+    while path.exists() {
+        path = dir.join(format!("{stem} ({n}){ext}"));
+        n += 1;
+    }
+    path
+}
+
+#[cfg(test)]
+mod isolated_download_tests {
+    use super::isolated_download;
+
+    #[test]
+    fn an_isolated_download_is_numbered_against_its_own_folder() {
+        let dir = std::env::temp_dir().join(format!("trek-isolated-dl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(
+            isolated_download(&dir, "live-check (3).txt"),
+            dir.join("live-check.txt")
+        );
+        std::fs::write(dir.join("live-check.txt"), "").unwrap();
+        assert_eq!(
+            isolated_download(&dir, "live-check (3).txt"),
+            dir.join("live-check (1).txt")
+        );
+        assert_eq!(isolated_download(&dir, "notes"), dir.join("notes"));
+        assert_eq!(
+            isolated_download(&dir, "report (final).pdf"),
+            dir.join("report (final).pdf"),
+            "only wry's numbers go"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Answer what waits on ask `id`: WebKit's handler (`webkit.rs`), WebView2's deferral
+/// (`webview2.rs`) or WebKitGTK's dialog (`webkitgtk.rs`).
 fn reply_to_page(id: u64, reply: &Reply) {
     #[cfg(target_os = "macos")]
     webkit::answer(id, reply);
     #[cfg(windows)]
     webview2::answer(id, reply);
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    webkitgtk::answer(id, reply);
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     let _ = (id, reply);
 }
 
@@ -1103,6 +1161,23 @@ fn origin_of(url: &str) -> Option<&str> {
     let (scheme, rest) = url.split_once("://")?;
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     Some(&url[..scheme.len() + 3 + end])
+}
+
+/// `url` as the log names it: without its query or fragment, where sign-in codes and tokens travel
+/// (`?code=…`, `#access_token=…`), nor a name and password before its host. The log may go with
+/// feedback.
+fn for_log(url: &str) -> String {
+    let url = &url[..url.find(['?', '#']).unwrap_or(url.len())];
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let end = rest.find('/').unwrap_or(rest.len());
+            let host = rest[..end]
+                .rsplit_once('@')
+                .map_or(&rest[..end], |(_, h)| h);
+            format!("{scheme}://{host}{}", &rest[end..])
+        }
+        None => url.to_string(),
+    }
 }
 
 /// `a` and `b` are on one origin: what a page can move between by the history API, and no more.
@@ -1728,19 +1803,22 @@ impl BrowserPanel {
             // Downloads (a link's `download`, a response the view can't show, a redirect to a
             // file) go to Downloads, as wry would put them, and the panel says so. On Windows,
             // taking them hides WebView2's own download flyout: Trek's toasts say it instead.
-            #[cfg(any(target_os = "macos", windows))]
+            // WebKitGTK's go through the same handlers.
+            #[cfg(any(target_os = "macos", target_os = "linux", windows))]
             let builder = {
                 let (t5, t6) = (tx.clone(), tx.clone());
                 builder
                     .with_download_started_handler(move |url, path| {
                         // An isolated run (tests, the capture build) keeps what it downloads in
-                        // its own data folder: the user's Downloads isn't its to write in.
+                        // its own data folder: the user's Downloads isn't its to write in. The
+                        // name is numbered against that folder, not the one wry looked in (on
+                        // Linux it numbers against Downloads, else the working folder).
                         if trek_core::paths::isolated()
-                            && let Some(name) = path.file_name().map(ToOwned::to_owned)
+                            && let Some(name) = path.file_name().and_then(|n| n.to_str())
                         {
                             let dir = trek_core::paths::data_dir().join("downloads");
                             let _ = std::fs::create_dir_all(&dir);
-                            *path = dir.join(name);
+                            *path = isolated_download(&dir, name);
                         }
                         let _ = t5.try_send(Msg::Download {
                             tab: id,
@@ -1836,6 +1914,9 @@ impl BrowserPanel {
                 let _ = built.load_url(&to_view(url));
             }
         }
+        // Linux: the page's dialogs, failed loads and crashes (`webkitgtk.rs`).
+        #[cfg(target_os = "linux")]
+        webkitgtk::hook(&built, id, tx);
         #[cfg(not(any(target_os = "macos", windows)))]
         let _ = dark;
         Some(built)
@@ -2341,7 +2422,7 @@ impl BrowserPanel {
                     url
                 };
                 if let Some((heading, why)) = asks::load_failure(&domain, code, &url) {
-                    tracing::info!("browser: {url} failed: {domain} {code}");
+                    tracing::info!("browser: {} failed: {domain} {code}", for_log(&url));
                     self.show_load_failure(id, url, Some((heading, &why)), cx);
                 }
             }
@@ -2352,7 +2433,7 @@ impl BrowserPanel {
                     .is_some_and(|at| at.elapsed() < Duration::from_secs(60));
                 tab.crashed = Some(Instant::now());
                 let url = tab.page.address();
-                tracing::warn!("browser: the page's process ended ({url})");
+                tracing::warn!("browser: the page's process ended ({})", for_log(&url));
                 if again || url.is_empty() {
                     self.show_load_failure(id, url, Some(asks::CRASHED), cx);
                 } else {
@@ -2972,7 +3053,9 @@ impl BrowserPanel {
 
     /// Block trackers in every tab, or stop, and load the page in front again so it shows: on
     /// macOS the big ad and tracker networks (`browser_extensions::blocker`), on Windows as
-    /// Edge's Strict tracking prevention does (`native::block_trackers`).
+    /// Edge's Strict tracking prevention does (`native::block_trackers`). Linux's WebKitGTK has
+    /// neither, and its menu has no such row.
+    #[cfg(any(target_os = "macos", windows))]
     fn toggle_block_trackers(&mut self, cx: &mut Context<Self>) {
         let on = self.workspace.update(cx, |ws, cx| {
             ws.settings.browser.block_trackers = !ws.settings.browser.block_trackers;
@@ -3078,6 +3161,7 @@ impl BrowserPanel {
     }
 
     /// Load the web page in front again (not one of Trek's own).
+    #[cfg(any(target_os = "macos", windows))]
     fn reload_page_in_front(&self, cx: &App) {
         if let Some(tab) = self
             .active_tab()
@@ -3180,6 +3264,10 @@ impl BrowserPanel {
     /// The ⋯ menu's ad blocker rows: import, or on/off and the site in front let through
     /// (macOS); on Windows the import, the extension then managed on the Extensions page.
     fn adblock_rows(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        // Linux: WebKitGTK takes no content rules or extensions, so there's no blocker to import.
+        if crate::words::is_linux() {
+            return vec![];
+        }
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let check = |on: bool| {
@@ -3687,6 +3775,8 @@ impl BrowserPanel {
                     })),
             )
             .on_click(cx.listener(move |this, _, _, cx| this.activate(id, cx)))
+            // Counted by the capture build's checks (a page's popup is a tab of its own on Linux).
+            .test_support()
             .into_any_element()
     }
 
@@ -4014,6 +4104,13 @@ impl BrowserPanel {
     pub fn shots_crash(&self, cx: &App) -> Result<usize, String> {
         let tab = self.active_tab().ok_or("no page")?;
         native::end_page_process(tab.view.read(cx).raw())
+    }
+
+    /// Linux: `browser crash` through WebKitGTK's own way to end a page's process.
+    #[cfg(all(feature = "shots", target_os = "linux"))]
+    pub fn shots_crash(&self, cx: &App) -> Result<usize, String> {
+        let tab = self.active_tab().ok_or("no page")?;
+        webkitgtk::end_page_process(tab.view.read(cx).raw())
     }
 
     /// The page as `screenshot` would capture it.
@@ -4477,11 +4574,34 @@ mod tests {
     use super::{Captures, Msg, PAGES_SCHEME, native, webview2};
     use super::{
         DRAWN_DARK_JS, ERROR_URL, FAVICON_MAX_BYTES, Page, SAFARI_FALLBACK, START_URL,
-        decode_favicon, download_favicon, error_page_why, extract_title, favicon_url,
+        decode_favicon, download_favicon, error_page_why, extract_title, favicon_url, for_log,
         force_dark_js, from_view, from_webview2, host_of, normalize, plist_version,
         safari_user_agent, same_origin, scheme_lags_a_load, snap_frame, to_view, to_webview2,
     };
     use gpui_kit::ImageFormat;
+
+    /// The log names a page without what sign-ins put in its address: the query, the fragment, a
+    /// name and password.
+    #[test]
+    fn the_log_names_a_page_without_its_codes() {
+        assert_eq!(
+            for_log("http://localhost:8123/callback?code=4/0Ab_secret&state=x"),
+            "http://localhost:8123/callback"
+        );
+        assert_eq!(
+            for_log("https://app.example/#access_token=abc"),
+            "https://app.example/"
+        );
+        assert_eq!(
+            for_log("https://me:hunter2@host.example/x"),
+            "https://host.example/x"
+        );
+        assert_eq!(
+            for_log("https://example.com/a/b"),
+            "https://example.com/a/b"
+        );
+        assert_eq!(for_log("about:blank"), "about:blank");
+    }
 
     #[test]
     fn a_page_can_only_name_an_address_on_its_own_origin() {

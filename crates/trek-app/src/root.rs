@@ -10,7 +10,7 @@ use crate::panels::terminal::Job;
 use crate::scale::{radius, text, to_rems};
 use crate::settings_view::{SettingsNav, SettingsView};
 use crate::sidebar::Sidebar;
-use crate::thread_view::ThreadView;
+use crate::thread_view::{CardKey, ThreadView};
 use crate::working_bar::WorkingBar;
 use crate::workspace::{
     EditorCommand, Route, Scope, SettingsPage, UndoAction, Workspace, WorkspaceEvent,
@@ -201,6 +201,8 @@ impl TrekWindow {
         let sidebar = cx.new(|cx| Sidebar::new(workspace.clone(), window, cx));
         let composer = cx.new(|cx| Composer::new(workspace.clone(), Scope::Main, window, cx));
         let thread_view = cx.new(|cx| ThreadView::new(workspace.clone(), Scope::Main, window, cx));
+        let card = thread_view.read(cx).card_reach();
+        composer.update(cx, |c, _| c.reach_card(card));
         let working_bar = cx.new(|cx| WorkingBar::new(workspace.clone(), Scope::Main, window, cx));
         let background_strip = cx.new(|cx| {
             crate::background_strip::BackgroundStrip::new(
@@ -1468,12 +1470,20 @@ pub fn open_main(workspace: Entity<Workspace>, focus: bool, cx: &mut App) -> any
     Ok(())
 }
 
+/// What the dialog says when the database at `file` couldn't be opened: why, that nothing is
+/// saved now, and what to do, for a damaged file too (it used to speak only of another Trek).
+pub fn database_error_detail(error: &str, file: &std::path::Path) -> String {
+    let first = error.lines().next().unwrap_or(error).trim();
+    format!(
+        "{first}\n\nAnything you do now won't be saved. Quit, close any other copy of Trek, and open it again. If it still can't open it, the file may be damaged: it's {}. Moving it somewhere else lets Trek start with a new, empty one, and keeps the old one for help getting your threads back.",
+        trek_core::paths::tildify(file)
+    )
+}
+
 /// Trek's database couldn't be opened (another Trek holding it, a damaged file): this session
 /// saves nothing, so ask before the user starts working in it.
 fn database_error(error: &str, window: &mut Window, cx: &mut App) {
-    let detail = format!(
-        "{error}\n\nAnything you do now won't be saved. Quit, close any other copy of Trek, and open it again."
-    );
+    let detail = database_error_detail(error, &trek_core::paths::database_file());
     let answer = window.prompt(
         gpui_kit::PromptLevel::Critical,
         "Trek couldn't open its database",
@@ -1996,11 +2006,14 @@ pub fn quit(cx: &mut App) {
 
 /// `quit`, once nothing unsaved is in the way.
 fn quit_now(cx: &mut App) {
+    // The way out may hold the main thread a while (every thread saved, an update installed,
+    // the windows let go of first on Windows): that's no freeze.
+    crate::logging::freeze::stop();
     crate::workspace::workspace_global(cx).update(cx, |ws, _| {
         ws.quitting = true;
         ws.shutdown_sessions()
     });
-    if cfg!(windows) || crate::test_display::id().is_some() {
+    if !cfg!(target_os = "macos") || crate::test_display::id().is_some() {
         cx.defer(|cx| {
             for window in cx.windows() {
                 let _ = window.update(cx, |_, window, _| window.remove_window());
@@ -2406,6 +2419,7 @@ pub fn toast_button_label(action: &UndoAction) -> &'static str {
         UndoAction::OpenPlugins => "Manage",
         UndoAction::RevealFile(_) => crate::words::words().show_in_file_manager,
         UndoAction::OpenPrivacy(_) => "Open Settings",
+        UndoAction::SendFeedback => "Send feedback…",
         UndoAction::RestartToUpdate => "Restart",
         UndoAction::InstallWhenFree => "When they finish",
         _ => "Undo",
@@ -2932,6 +2946,22 @@ impl Render for TrekWindow {
                         ws.interrupt(&id, cx);
                     }
                 })
+            }))
+            .on_action(cx.listener(|this, _: &crate::AllowRequest, window, cx| {
+                this.answer_card(CardKey::Allow, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &crate::AllowRequestForSession, window, cx| {
+                    this.answer_card(CardKey::AllowForSession, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::AlwaysAllowRequest, window, cx| {
+                    this.answer_card(CardKey::AlwaysAllow, window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &crate::DenyRequest, window, cx| {
+                this.answer_card(CardKey::Deny, window, cx)
             }))
             .on_action(cx.listener(|this, _: &CycleHandHolding, _, cx| {
                 this.workspace.update(cx, |ws, cx| {
@@ -3531,6 +3561,8 @@ impl TrekWindow {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                            // It lies a little over the chat's edge: the press is the grab's alone.
+                            cx.stop_propagation();
                             if e.click_count >= 2 {
                                 this.right_panel.update(cx, |p, cx| {
                                     p.set_width(trek_core::settings::DEFAULT_RIGHT_PANEL_WIDTH, cx)
@@ -3543,7 +3575,6 @@ impl TrekWindow {
                                 ws.overlay_open = true;
                                 cx.notify();
                             });
-                            cx.stop_propagation();
                             cx.notify();
                         }),
                     );
@@ -3553,6 +3584,10 @@ impl TrekWindow {
                     .w(px(right_width))
                     .flex_none()
                     .h_full()
+                    // The pointer over the panel is the panel's, margins included: over the chat
+                    // (a narrow window) or the whole window (filling it), a click on its header or
+                    // a tool must not also reach the tab strip's + or a sidebar row lying under it.
+                    .occlude()
                     .pr_2()
                     .pb_2()
                     // Filling the window it has nothing beside it to be dragged against.

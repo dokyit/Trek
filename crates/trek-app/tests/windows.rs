@@ -378,11 +378,11 @@ fn quitting_closes_the_windows_first_on_windows() {
         cx.update(|cx| trek_app::root::quit(cx));
         cx.run_until_parked();
         // Where a window's native state is let go by a task that a quitting loop never runs, the
-        // windows are closed before the app ends (see `root::quit`); the Mac ends the app and its
-        // windows with it.
+        // windows are closed before the app ends (see `root::quit`: Windows and Linux); the Mac
+        // ends the app and its windows with it.
         assert_eq!(
             cx.update(|cx| cx.windows().len()),
-            if cfg!(windows) { 0 } else { 1 }
+            if cfg!(target_os = "macos") { 1 } else { 0 }
         );
         drop(trek);
     });

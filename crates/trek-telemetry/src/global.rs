@@ -38,7 +38,20 @@ struct Global {
 
 static GLOBAL: OnceLock<Global> = OnceLock::new();
 
+/// Telemetry is over for this process (`stop`).
+static STOPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// End telemetry for the rest of this process: nothing more is counted, saved or sent. For
+/// "Delete all Trek data", which deletes the install id and the queue, so they aren't saved
+/// again on the way out.
+pub fn stop() {
+    STOPPED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 fn with<R>(f: impl FnOnce(&mut Telemetry) -> R) -> Option<R> {
+    if STOPPED.load(std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
     let global = GLOBAL.get()?;
     let mut telemetry = global
         .telemetry

@@ -55,6 +55,19 @@ export function parsePairing(fragment) {
   };
 }
 
+/**
+ * Whether a pairing just made may take the place of `stored`, the machine already kept under the
+ * id the computer answered with: when none is kept there, or when every certificate the pairing
+ * trusted (`pinned`, from its link) is one that machine has shown before, so the computer that
+ * answered is that one. Anyone can write a pairing link naming another computer's id; only that
+ * computer holds its certificates, so a link pinning others doesn't replace it.
+ */
+export function mayReplace(stored, pinned) {
+  if (!stored) return true;
+  const known = new Set((stored.certs || []).map((c) => c && c.hash));
+  return Array.isArray(pinned) && pinned.length > 0 && pinned.every((c) => c && known.has(c.hash));
+}
+
 /** A SHA-256 hash in base64: 32 bytes. */
 export function isHash(text) {
   try {

@@ -637,6 +637,63 @@ async fn reconnects_after_the_server_drops_and_subscribes_again_after_welcome() 
     assert_eq!(client.machine_info().await.unwrap().name, "Studio");
 }
 
+/// Unpaired while the phone server is off (Settings › Phone & Machines with "Let your phone
+/// connect" off): nothing can tell the device then, so its token goes from the devices file, and
+/// the server started again on that file turns it away. Another device paired the same way still
+/// gets in.
+#[tokio::test]
+async fn a_device_unpaired_while_the_server_was_off_is_turned_away_when_it_comes_back() {
+    let m = machine().await;
+    let (lost, _events, lost_paired) = paired_client(&m, "lost-phone").await;
+    let (kept, _kept_events, kept_paired) = paired_client(&m, "other-phone").await;
+    lost.close();
+    kept.close();
+    m.handle.shutdown();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let file = m.dir.join("devices.json");
+    assert!(DeviceRegistry::revoke_saved(&file, "lost-phone").unwrap());
+    assert!(
+        !DeviceRegistry::revoke_saved(&file, "lost-phone").unwrap(),
+        "already gone"
+    );
+    let saved = std::fs::read_to_string(&file).unwrap();
+    assert!(!saved.contains("lost-phone") && saved.contains("other-phone"));
+
+    let back = serve(
+        "127.0.0.1:0".parse().unwrap(),
+        m.identity.clone(),
+        m.dir.clone(),
+    )
+    .await;
+    let lost_again = Paired {
+        routes: back.routes(),
+        ..lost_paired
+    };
+    let refused = Client::resume(&lost_again).unwrap();
+    let stopped = state(&mut refused.state(), |s| matches!(s, State::Stopped(_))).await;
+    assert!(
+        matches!(stopped, State::Stopped(StopReason::Unauthorized(_))),
+        "{stopped:?}"
+    );
+    assert!(
+        !back
+            .handle
+            .devices()
+            .iter()
+            .any(|d| d.device_id == "lost-phone")
+    );
+
+    let kept_again = Paired {
+        routes: back.routes(),
+        ..kept_paired
+    };
+    let welcome = Client::resume(&kept_again).unwrap();
+    let mut events = welcome.events().unwrap();
+    let (_, newly) = connected(&mut events).await;
+    assert!(!newly, "its own token, as before");
+}
+
 #[tokio::test]
 async fn stops_on_unauthorized_and_on_another_certificate() {
     let m = machine().await;

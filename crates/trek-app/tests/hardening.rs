@@ -138,6 +138,36 @@ fn a_link_that_cant_be_followed_says_why() {
     });
 }
 
+/// A link to a path outside the user's projects isn't looked at until they agree to open it, even
+/// to say the file is gone: any web page can open a link, and looking at a `\\server\share` path
+/// (or the Mac's `/net/<host>`) connects to that computer, on Windows offering it the user's
+/// sign-in. Once they agree, a file that isn't there is said to be gone.
+#[test]
+fn a_link_outside_the_projects_is_not_looked_at_before_asking() {
+    run(async |cx| {
+        let trek = open(cx);
+        let seen = common::toasts(&trek, cx);
+        let elsewhere = new_project("never-opened");
+        let missing = elsewhere.join("missing.rs");
+        let url = format!("trek://edit?path={}", missing.display());
+        cx.update(|cx| trek_app::deep_link::open(&url, cx));
+        trek.render(cx);
+        assert!(cx.has_pending_prompt(), "asked before looking");
+        assert!(seen.borrow().is_empty(), "{:?}", seen.borrow());
+        cx.simulate_prompt_answer("Open");
+        trek.render(cx);
+        let said: Vec<String> = seen.borrow().iter().map(|(m, _)| m.clone()).collect();
+        assert_eq!(
+            said,
+            [format!(
+                "There's no file at {} any more.",
+                missing.display()
+            )]
+        );
+        assert!(!trek.read(cx, |ws, _| editing(&missing)(&ws.route)));
+    });
+}
+
 #[test]
 fn a_link_into_a_project_opens_without_asking() {
     run(async |cx| {

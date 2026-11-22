@@ -36,6 +36,7 @@ env:
   # How many jobs trek-app's tests are split across, per runner (the matrices below match).
   APP_SHARDS_MACOS: 3
   APP_SHARDS_WINDOWS: 9
+  APP_SHARDS_LINUX: 4
   # (Job timeouts leave room for a cold cache: a new dependency, a new toolchain.)
 
 jobs:
@@ -61,6 +62,7 @@ jobs:
         run: |
           bash script/tests/release-notes.sh
           bash script/tests/merge-manifest.sh
+          bash script/tests/release-manifests.sh
           bash script/tests/release-finish.sh
           zsh ios/scripts/tests/phone-update.sh
           zsh script/capture.sh check
@@ -500,6 +502,261 @@ jobs:
       - name: Cache contents
         if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
         run: python script/ci-cache.py prune
+
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
+
+  # Linux, on Ubuntu 22.04: the oldest glibc (2.35) Trek's Linux builds support, so what passes
+  # here runs on it and everything newer. The same suite as the other two, with the system
+  # libraries Trek links installed first (script/linux/packages.sh: GTK 3, WebKitGTK 4.1, xkbcommon
+  # and the rest). trek-app's UI tests run on GPUI's headless platform with the Linux text system;
+  # the app itself starts on a display of its own in live.yml.
+  test-linux:
+    name: Test (Linux)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # The Linux scripts (the Mac's job parses the zsh ones): seconds, before the toolchain.
+      - name: Scripts parse
+        run: |
+          bash -n script/bundle-linux.sh script/release-linux.sh
+          for f in script/linux/*.sh script/linux/AppRun; do sh -n "$f"; done
+
+      - name: System packages
+        run: sudo sh script/linux/packages.sh --with-packaging
+
+      # The manifest merge the Linux release runs (and the whole chain of them, dry and real), and
+      # the web remote's plain code, as on the others.
+      - name: Script tests
+        run: |
+          bash script/tests/merge-manifest.sh
+          bash script/tests/release-manifests.sh
+          node script/site/test/run.mjs
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
+        with:
+          toolchain: '1.99.0'
+
+      - name: trek-app shards
+        run: python3 script/ci-shard.py --check "$APP_SHARDS_LINUX"
+
+      - name: Cache key
+        id: key
+        run: python3 script/ci-cache.py key test-workspace
+
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: ${{ steps.key.outputs.restore }}
+
+      - name: Cache freshness
+        run: python3 script/ci-cache.py restore
+
+      - name: Test (workspace, except trek-app)
+        run: cargo test --config "$CI_PROFILE" --workspace --exclude trek-app --locked --no-fail-fast
+
+      - name: Doc tests (trek-app)
+        run: cargo test --config "$CI_PROFILE" -p trek-app --locked --doc
+
+      - name: Cache contents
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        run: python3 script/ci-cache.py prune
+
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
+
+  # As on the Mac. The 1st shard also packages the debug build the tests leave (an AppImage, a
+  # .deb and a tarball, script/bundle-linux.sh) and opens each, so a change that breaks the
+  # packaging shows here rather than at release time.
+  test-linux-app:
+    name: Test (Linux, trek-app ${{ matrix.shard }}/4)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: System packages
+        run: sudo sh script/linux/packages.sh --with-packaging --with-test-fonts
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
+        with:
+          toolchain: '1.99.0'
+
+      - name: Cache key
+        id: key
+        run: python3 script/ci-cache.py key test-app
+
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: ${{ steps.key.outputs.restore }}
+
+      - name: Cache freshness
+        run: python3 script/ci-cache.py restore
+
+      - name: Test (trek-app)
+        run: |
+          targets=$(python3 script/ci-shard.py ${{ matrix.shard }} "$APP_SHARDS_LINUX")
+          echo "targets: $targets"
+          cargo test --config "$CI_PROFILE" -p trek-app --locked --no-fail-fast $targets
+
+      - name: Packages
+        if: matrix.shard == 1
+        run: |
+          cargo build --config "$CI_PROFILE" -p trek-app -p trek-mcp --locked
+          script/bundle-linux.sh --bin-dir target/debug --out dist/ci
+          cd dist/ci
+          dpkg-deb --info trek_*.deb
+          dpkg-deb --contents trek_*.deb | grep -E ' ./usr/(lib/trek/trek(-mcp)?|bin/trek|share/applications/dev.trek.Trek.desktop)'
+          tar -tzf Trek-*-linux-x86_64.tar.gz | grep -E '/(trek|trek-mcp|dev.trek.Trek.desktop)$'
+          image=$(ls Trek-*-linux-x86_64.AppImage)
+          "./$image" --appimage-extract >/dev/null
+          test -x squashfs-root/AppRun && test -x squashfs-root/usr/bin/trek && test -x squashfs-root/usr/bin/trek-mcp
+          desktop-file-validate squashfs-root/dev.trek.Trek.desktop
+
+      - name: Cache contents
+        if: github.ref == 'refs/heads/main' && matrix.shard == 1 && steps.cache.outputs.cache-hit != 'true'
+        run: python3 script/ci-cache.py prune
+
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: github.ref == 'refs/heads/main' && matrix.shard == 1 && steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
+
+  # The lints on Linux: neither of the others reads a `#[cfg(target_os = "linux")]` line. Then the
+  # Arm build, which release.yml makes on an Arm runner: checked here so a change that breaks only
+  # that target shows before release time.
+  lint-linux:
+    name: Clippy (Linux)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: System packages
+        run: sudo sh script/linux/packages.sh
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
+        with:
+          toolchain: '1.99.0'
+          components: clippy
+
+      - name: Cache key
+        id: key
+        run: python3 script/ci-cache.py key clippy
+
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: ${{ steps.key.outputs.restore }}
+
+      - name: Cache freshness
+        run: python3 script/ci-cache.py restore
+
+      - name: Clippy (trek-app)
+        run: cargo clippy -p trek-app --all-targets --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
+
+      - name: Clippy (workspace lib and bins)
+        run: cargo clippy --workspace --lib --bins --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
+
+      - name: Check the capture build
+        run: cargo check -p trek-app --features shots --locked
+
+      - name: Cache contents
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        run: python3 script/ci-cache.py prune
+
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
+
+  check-linux-arm:
+    name: Check (Linux, Arm)
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: System packages
+        run: sudo sh script/linux/packages.sh
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
+        with:
+          toolchain: '1.99.0'
+
+      - name: Cache key
+        id: key
+        run: python3 script/ci-cache.py key check
+
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: ${{ steps.key.outputs.restore }}
+
+      - name: Cache freshness
+        run: python3 script/ci-cache.py restore
+
+      - name: Check (trek-app, trek-mcp)
+        run: cargo check -p trek-app -p trek-mcp --locked
+
+      - name: Cache contents
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        run: python3 script/ci-cache.py prune
 
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'

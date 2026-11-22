@@ -594,6 +594,18 @@ impl SettingsView {
                             })),
                         cx,
                     )),
+                    Some(Self::row(
+                        "Delete all Trek data",
+                        "Threads, settings, notes, keys, pairings, logs and everything else Trek keeps on this computer, then Trek quits. Your projects and their files stay. It lists what goes and what stays before anything is deleted.",
+                        Button::new("delete-all-data")
+                            .small()
+                            .outline()
+                            .label("Delete all Trek data…")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                crate::wipe::confirm(this.workspace.clone(), window, cx)
+                            })),
+                        cx,
+                    )),
                 ]
                 .into_iter()
                 .flatten()
@@ -882,6 +894,14 @@ impl SettingsView {
                 // the keyring crate makes `<account>.<service>`.
                 (SavedKey::Saved, _) if cfg!(windows) => format!(
                     "Saved in {} (Windows Credentials › {id}.{})",
+                    crate::words::words().your_credential_store,
+                    trek_core::keychain::SERVICE
+                )
+                .into(),
+                // The Secret Service keeps it under the attributes the keyring crate gives it:
+                // what Passwords and Keys (Seahorse) or `secret-tool search service …` find.
+                (SavedKey::Saved, _) if cfg!(target_os = "linux") => format!(
+                    "Saved in {} (service {}, account {id})",
                     crate::words::words().your_credential_store,
                     trek_core::keychain::SERVICE
                 )

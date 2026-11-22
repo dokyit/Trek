@@ -68,9 +68,23 @@ fn a_pasted_config_adds_its_servers_checks_them_and_edits_keep_their_tokens() {
             ),
             ("Authorization", true)
         );
+        // The values and arguments only: the fixture's path is the checkout's, which may hold
+        // the letters "abc" (a worktree named agent-ababc…).
+        let kept: Vec<&str> = saved
+            .iter()
+            .flat_map(|s| {
+                s.env
+                    .iter()
+                    .map(|e| e.value.as_str())
+                    .chain(s.headers.iter().map(|h| h.value.as_str()))
+                    .chain(s.args.iter().map(String::as_str))
+            })
+            .collect();
         assert!(
-            !format!("{saved:?}").contains("abc") && !format!("{saved:?}").contains("Bearer"),
-            "no token in the settings"
+            !kept
+                .iter()
+                .any(|v| v.contains("abc") || v.contains("Bearer")),
+            "no token in the settings: {kept:?}"
         );
         // A session gets them back from the Keychain.
         let servers = trek.read(cx, |ws, _| ws.mcp_servers());

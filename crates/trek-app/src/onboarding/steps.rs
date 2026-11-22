@@ -1152,8 +1152,7 @@ impl Onboarding {
                 let key = agent.key();
                 let (detail, trail): (String, AnyElement) = if s.running {
                     let detail = match s.models.len() {
-                        0 => "Running, with no models yet. Pull one, e.g. ollama pull qwen3-coder"
-                            .to_string(),
+                        0 => s.no_models_yet(),
                         1 => "Running · 1 model".to_string(),
                         n => format!("Running · {n} models"),
                     };

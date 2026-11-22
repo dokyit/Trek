@@ -142,6 +142,12 @@ pub fn served_by(address: &Path) -> Option<u32> {
     crate::windows::named_for(address)
 }
 
+/// A socket's name says nothing a second launch needs: Linux has no foreground right to pass on.
+#[cfg(unix)]
+pub fn served_by(_address: &Path) -> Option<u32> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

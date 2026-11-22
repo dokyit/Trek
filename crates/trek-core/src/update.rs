@@ -18,6 +18,9 @@
 //! version a channel doesn't carry (by its pre-release, `changelog::channel_of`) is never offered
 //! on it, whichever feed has it.
 //!
+//! Linux (`linux::`): the artifact (`linux-x86_64`, `linux-aarch64`) is the AppImage itself, which
+//! replaces itself; a `.deb` or the tarball doesn't update itself, and says so.
+//!
 //! Windows: the artifact (`windows-x86_64`) is a flat zip of `TREK_FILES`, and Trek is installed
 //! as the folder holding them. Trek can't replace the folder it runs from, so `install` only gets
 //! the staged copy ready and `trek-update.exe` (crates/trek-update) swaps it in once Trek has quit.
@@ -158,6 +161,11 @@ pub enum Blocker {
     /// access) guards. Defender lets only programs it trusts write there and judges each one on
     /// its own, so the `trek-update.exe` an update brings is turned away even when Trek isn't.
     GuardedFolder(KnownFolder),
+    /// Linux: a package manager installed Trek (the `.deb`), and Trek never writes over what it
+    /// installed: the next version is the next package.
+    Packaged,
+    /// Linux: the tarball, which nothing updates; the AppImage updates itself.
+    NotAppImage,
 }
 
 impl Blocker {
@@ -170,6 +178,26 @@ impl Blocker {
             Blocker::SharedFolder => "Trek's folder has other files in it, and an update replaces the whole folder, so Trek can't update itself there. Put Trek's three files in a folder of their own to get updates.".into(),
             Blocker::LinkedFolder => "Trek is running from a link to its folder, so it can't update itself. Start Trek from the folder itself to get updates.".into(),
             Blocker::GuardedFolder(folder) => guarded_message(folder, std::env::var_os("USERPROFILE").map(PathBuf::from).filter(|p| p.is_absolute()).as_deref()),
+            Blocker::Packaged => "Trek was installed from a .deb package, so it doesn't update itself. It says here when a new version is out, for you to download and install.".into(),
+            Blocker::NotAppImage => "This copy of Trek doesn't update itself. It says here when a new version is out, for you to download; the AppImage updates itself.".into(),
+        }
+    }
+
+    /// Linux's `.deb` and tarball: Trek can't replace itself there, but it still looks for a newer
+    /// version and says where to download it (`out_message`, `download_page`). Nothing downloads.
+    pub fn notify_only(self) -> bool {
+        matches!(self, Blocker::Packaged | Blocker::NotAppImage)
+    }
+
+    /// What a copy that only notifies (`notify_only`) says when `version` is out.
+    pub fn out_message(self, version: &str) -> String {
+        match self {
+            Blocker::Packaged => format!(
+                "Trek {version} is out. This copy came from a .deb, so download the new .deb and install it to update."
+            ),
+            _ => format!(
+                "Trek {version} is out. This copy doesn't update itself: download the new version, or use the AppImage, which does."
+            ),
         }
     }
 
@@ -271,10 +299,14 @@ const RELEASE_KEY: &str = "TrekRelease";
 /// Lets a bundle built locally update itself anyway (testing the updater).
 pub const LOCAL_UPDATES_ENV: &str = "TREK_UPDATE_LOCAL_BUNDLE";
 
+// Linux returns before the macOS half, which still compiles there (as Windows' halves do).
+#[cfg_attr(target_os = "linux", allow(unreachable_code))]
 pub fn blocker() -> Option<Blocker> {
     if cfg!(windows) {
         return windows_blocker(false);
     }
+    #[cfg(target_os = "linux")]
+    return linux::blocker();
     static RELEASE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let Some(bundle) = running_bundle() else {
         return Some(Blocker::DevBuild);
@@ -393,6 +425,8 @@ pub fn running_bundle() -> Option<PathBuf> {
 }
 
 pub mod closed;
+#[cfg(target_os = "linux")]
+pub mod linux;
 pub mod relocate;
 
 // ---------- a bundle replaced under a running Trek ----------
@@ -476,7 +510,12 @@ pub fn restart(foreground: bool) -> Result<()> {
     )
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+pub fn restart(foreground: bool) -> Result<()> {
+    linux::restart(foreground, &crate::paths::updates_dir())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn restart(_foreground: bool) -> Result<()> {
     bail!("only a Mac Trek starts itself again")
 }
@@ -923,6 +962,21 @@ fn channel_key(c: Channel) -> &'static str {
 /// URL (`https://github.com/<owner>/<repo>/releases`), a template with `{channel}`, or one
 /// manifest URL ending in `.json` used for every channel (each takes only the versions it offers:
 /// `check`).
+/// Where a copy that only notifies (`Blocker::notify_only`) sends the user for `version`: its
+/// release on GitHub (a stable one's own tag, a beta's or nightly's moving one), which has the
+/// .deb, the AppImage and the tarball. Built from the feed Trek reads and the version, never a
+/// link the manifest gives. A feed that isn't GitHub's: the site's downloads.
+pub fn download_page(updates: &Updates, version: &semver::Version) -> String {
+    let Some(repo) = crate::changelog::github_repo(updates) else {
+        return "https://trekdesktop.com/#install".into();
+    };
+    let tag = match crate::changelog::channel_of(version) {
+        Channel::Stable => format!("v{version}"),
+        c => channel_key(c).to_string(),
+    };
+    format!("https://github.com/{repo}/releases/tag/{tag}")
+}
+
 pub fn manifest_urls(updates: &Updates) -> Vec<String> {
     let feed = updates.feed_url.trim().trim_end_matches('/');
     let feed = if feed.is_empty() { OFFICIAL_FEED } else { feed };
@@ -1199,10 +1253,13 @@ pub async fn download(
     Ok(dest)
 }
 
-/// What the download is saved as: the macOS app is a `.tar.gz`, the Windows folder a `.zip`.
+/// What the download is saved as: the macOS app is a `.tar.gz`, the Windows folder a `.zip`,
+/// and on Linux it's the AppImage itself.
 fn archive_name(version: &semver::Version) -> String {
     if cfg!(windows) {
         format!("Trek-{version}.zip")
+    } else if cfg!(target_os = "linux") {
+        format!("Trek-{version}.AppImage")
     } else {
         format!("Trek-{version}.tar.gz")
     }
@@ -1283,10 +1340,15 @@ pub fn discard(staged: &Path) {
 /// Unpack a verified archive next to itself and inspect the bundle inside: the same app, exactly
 /// `expected`, newer than this one, intact code signature, no quarantine. Returns the staged
 /// `.app`; the archive is removed, and on failure the whole download folder. Blocking.
+// Linux returns before the macOS half, which still compiles there (as Windows' halves do).
+#[cfg_attr(target_os = "linux", allow(unreachable_code))]
 pub fn stage(archive: &Path, expected: &semver::Version, cancel: &AtomicBool) -> Result<PathBuf> {
     if cfg!(windows) {
         return stage_zip(archive, expected, &current_version(), cancel, exe_version);
     }
+    // The signature `download` checked names `expected`: the AppImage is that version.
+    #[cfg(target_os = "linux")]
+    return linux::stage(archive);
     stage_for(
         archive,
         expected,
@@ -1575,11 +1637,15 @@ pub struct Installed {
 /// Swap the staged bundle in for the running one and keep the old one as the single backup.
 /// If anything fails before the swap, nothing has changed.
 /// On Windows nothing moves yet: see `prepare_swap`.
+// Linux returns before the macOS half, which still compiles there (as Windows' halves do).
+#[cfg_attr(target_os = "linux", allow(unreachable_code))]
 pub fn install(staged: &Path) -> Result<Installed> {
     if cfg!(windows) {
         let root = install_root().context("Trek can't tell which folder it runs from")?;
         return prepare_swap(staged, &root, &crate::paths::updates_dir(), exe_version);
     }
+    #[cfg(target_os = "linux")]
+    return linux::install(staged, &crate::paths::updates_dir());
     let bundle = running_bundle().context("not running from an app bundle (dev build)")?;
     let backup = install_into(staged, &bundle, &crate::paths::updates_dir())?;
     Ok(Installed {
@@ -1935,11 +2001,15 @@ fn relaunch_command(
 /// Start the installed bundle once this process has exited. If it can't be opened, the version
 /// it replaced goes back in its place and that is opened instead; a bundle this update didn't
 /// replace is never rolled back. The caller quits right after.
+// Linux returns before the macOS half, which still compiles there (as Windows' halves do).
+#[cfg_attr(target_os = "linux", allow(unreachable_code))]
 pub fn relaunch(installed: &Installed, foreground: bool) -> Result<()> {
     if cfg!(windows) {
         // Windows swaps the folder only now, once this process has exited (`hand_over`).
         return hand_over(installed, Some(foreground));
     }
+    #[cfg(target_os = "linux")]
+    return linux::relaunch(installed, foreground, &crate::paths::updates_dir());
     let mut open_args: Vec<String> = vec!["-n".into()];
     if !foreground {
         open_args.push("-g".into());
@@ -2005,7 +2075,8 @@ fn relaunch_env_from(
 /// Clear what interrupted updates left behind (download folders of processes that are gone) and
 /// report the version this launch replaced, once, if it just updated. Only for a bundled Trek:
 /// a dev build sharing the data folder must not take another copy's update or its message.
-/// On Windows, also the folders an update left next to the install (`clean_old_installs`).
+/// On Windows, also the folders an update left next to the install (`clean_old_installs`); on
+/// Linux, the AppImage's desktop entry (`linux::integrate_desktop`).
 pub fn after_launch() -> Option<String> {
     note_running_exe();
     if cfg!(windows)
@@ -2017,6 +2088,9 @@ pub fn after_launch() -> Option<String> {
     if let Some(bundle) = running_bundle() {
         remove_old_bundle_links(&bundle);
     }
+    // The AppImage's desktop entry and `trek://` handler, where it is now.
+    #[cfg(target_os = "linux")]
+    linux::integrate_desktop();
     after_launch_in(&crate::paths::updates_dir())
 }
 
@@ -2079,7 +2153,7 @@ fn started_after(started: i64, made: i64) -> bool {
     started > made + 1
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn process_alive(pid: u32) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
@@ -2111,7 +2185,7 @@ fn process_alive(pid: u32) -> bool {
     }
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(unix, windows)))]
 fn process_alive(_: u32) -> bool {
     true
 }
@@ -2247,7 +2321,13 @@ mod tests {
         };
         let mut m = manifest("0.3.0");
         m.platforms.clear();
-        for key in ["darwin-aarch64", "darwin-x86_64", "windows-x86_64"] {
+        for key in [
+            "darwin-aarch64",
+            "darwin-x86_64",
+            "windows-x86_64",
+            "linux-x86_64",
+            "linux-aarch64",
+        ] {
             m.platforms.insert(key.into(), artifact(key));
         }
         let Found::Update(u) = newer_than(m, &current).unwrap() else {
@@ -2319,6 +2399,58 @@ mod tests {
             )
             .0,
             "nothing"
+        );
+    }
+
+    /// A .deb or tarball install is told of a new version and sent to its release's page, which
+    /// Trek builds from its own feed (never a link from the manifest); the others either update
+    /// themselves or say why they can't.
+    #[test]
+    fn a_copy_that_only_notifies_is_sent_to_the_release_page() {
+        let v = |s: &str| semver::Version::parse(s).unwrap();
+        let mut u = Updates::default();
+        assert_eq!(
+            download_page(&u, &v("0.4.64")),
+            "https://github.com/dokyit/Trek/releases/tag/v0.4.64"
+        );
+        assert_eq!(
+            download_page(&u, &v("0.4.64-beta.2")),
+            "https://github.com/dokyit/Trek/releases/tag/beta"
+        );
+        assert_eq!(
+            download_page(&u, &v("0.4.64-nightly.20261122")),
+            "https://github.com/dokyit/Trek/releases/tag/nightly"
+        );
+        u.feed_url = "https://github.com/someone/fork/releases/".into();
+        assert_eq!(
+            download_page(&u, &v("1.0.0")),
+            "https://github.com/someone/fork/releases/tag/v1.0.0"
+        );
+        u.feed_url = "https://example.com/trek.json".into();
+        assert_eq!(
+            download_page(&u, &v("1.0.0")),
+            "https://trekdesktop.com/#install"
+        );
+
+        assert!(Blocker::Packaged.notify_only() && Blocker::NotAppImage.notify_only());
+        for b in [
+            Blocker::DevBuild,
+            Blocker::Translocated,
+            Blocker::ReadOnlyLocation,
+            Blocker::ProtectedFolder,
+            Blocker::SharedFolder,
+            Blocker::LinkedFolder,
+        ] {
+            assert!(!b.notify_only(), "{b:?}");
+        }
+        assert_eq!(
+            Blocker::Packaged.out_message("0.4.64"),
+            "Trek 0.4.64 is out. This copy came from a .deb, so download the new .deb and install it to update."
+        );
+        assert!(
+            Blocker::NotAppImage
+                .out_message("0.4.64")
+                .starts_with("Trek 0.4.64 is out.")
         );
     }
 

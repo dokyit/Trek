@@ -15,6 +15,7 @@
 pub mod clone;
 pub mod files;
 pub mod sheets;
+pub mod sub_agents;
 
 use crate::workspace::{PendingPermission, Route, Scope, Workspace, WorkspaceEvent};
 use gpui_kit::{Context, Task};
@@ -328,6 +329,16 @@ pub enum Reach {
     Stopped(String),
 }
 
+/// Whether a machine's row is of a thread whose turn is over while work it started is still out:
+/// as the machine says (`busy_in_background`, its sidebar's "Waiting"), or for a machine too old
+/// to say, while it has sub-agents out.
+fn waits(r: &tr::ThreadSummary) -> bool {
+    r.run_state == tr::RunState::Idle
+        && r.needs.is_none()
+        && r.busy_in_background
+            .unwrap_or_else(|| !r.sub_agents.is_empty())
+}
+
 /// A transcript open here: B's items as last sent, in order.
 #[derive(Debug, Default)]
 struct Followed {
@@ -503,9 +514,22 @@ impl Machines {
 
     /// The machine of thread `id` and its row there, while the machine can be reached: a row
     /// from before it went says nothing of what runs now.
-    fn reachable_row(&self, id: &str) -> Option<&tr::ThreadSummary> {
+    pub(crate) fn reachable_row(&self, id: &str) -> Option<&tr::ThreadSummary> {
         let (host, _) = split_id(id)?;
         self.get(host).filter(|m| m.reachable())?.row(id)
+    }
+
+    /// Whether machine thread `id`'s turn is over while work it started is still out, as its
+    /// machine's sidebar says "Waiting" (`waiting`).
+    pub fn waiting_one(&self, id: &str) -> bool {
+        self.reachable_row(id).is_some_and(waits)
+    }
+
+    /// Whether machine `host` (of thread `id`, or the machine's id) serves `feature`.
+    pub fn serves(&self, id: &str, feature: &str) -> bool {
+        let host = split_id(id).map_or(id, |(h, _)| h);
+        self.get(host)
+            .is_some_and(|m| m.entry.paired.serves(feature))
     }
 
     /// What machine thread `id`'s row says it waits for, while the machine can be reached.
@@ -588,11 +612,7 @@ impl Machines {
                 let host = m.id();
                 m.rows
                     .iter()
-                    .filter(|r| {
-                        r.run_state == tr::RunState::Idle
-                            && r.needs.is_none()
-                            && !r.sub_agents.is_empty()
-                    })
+                    .filter(|r| r.parent_id.is_none() && waits(r))
                     .map(move |r| local_id(host, &r.id))
             })
             .collect()
@@ -602,9 +622,10 @@ impl Machines {
     /// the sidebar's clocks count by the second meanwhile.
     pub fn any_at_work(&self) -> bool {
         self.list.iter().filter(|m| m.reachable()).any(|m| {
-            m.rows
-                .iter()
-                .any(|r| r.run_state == tr::RunState::Working || !r.sub_agents.is_empty())
+            m.rows.iter().any(|r| {
+                r.parent_id.is_none()
+                    && (r.run_state == tr::RunState::Working || !r.sub_agents.is_empty())
+            })
         })
     }
 
@@ -738,6 +759,22 @@ pub struct Mapped {
     pub rows: Vec<(String, Item)>,
     pub requests: Vec<PendingPermission>,
     pub streaming: Option<usize>,
+    /// Its sub-agents' rows as the machine reads them, by the row each stands for (the call the
+    /// agent's own works under, `orchestrate::task_row` of Trek's).
+    pub subs: HashMap<String, tr::SubAgentLink>,
+}
+
+/// A row the machine worded from one of Trek's own spawning calls (`activity::op` words them
+/// all as their failure would read): the call again, so it hides as a call here does, its
+/// sub-agent's or thread's row standing for it, unless it failed.
+fn spawn_call(title: &str) -> Option<String> {
+    let tool = match title {
+        "Couldn't start a sub-agent" => "delegate_task",
+        "Couldn't start a thread" => "start_thread",
+        "Couldn't hand off" => "handoff",
+        _ => return None,
+    };
+    Some(format!("mcp__{}__{tool}", trek_core::orchestrate::SERVER))
 }
 
 /// A tool call that was running when its machine went out of reach: nothing here can say it
@@ -766,6 +803,7 @@ pub fn map_items_with(items: &[tr::Item], sent: &[files::SentCopy]) -> Mapped {
         rows: Vec::with_capacity(items.len()),
         requests: vec![],
         streaming: None,
+        subs: HashMap::new(),
     };
     for it in items {
         let item = match &it.body {
@@ -803,27 +841,54 @@ pub fn map_items_with(items: &[tr::Item], sent: &[files::SentCopy]) -> Mapped {
             tr::ItemBody::Reasoning { text } => Item::Reasoning { text: text.clone() },
             tr::ItemBody::Tool {
                 call_id,
+                tool,
                 title,
                 detail,
                 status,
                 output,
+                sub_agent,
                 ..
-            } => Item::Tool {
-                id: if call_id.is_empty() {
+            } => {
+                let id = if call_id.is_empty() {
                     it.id.clone()
                 } else {
                     call_id.clone()
-                },
-                title: title.clone(),
-                detail: detail.clone(),
-                output: output.clone(),
-                status: match status {
-                    tr::ToolStatus::Running => ToolStatus::Running,
-                    tr::ToolStatus::Done => ToolStatus::Done,
-                    tr::ToolStatus::Failed => ToolStatus::Failed,
-                    tr::ToolStatus::Denied => ToolStatus::Denied,
-                },
-            },
+                };
+                let trek_own = trek_core::orchestrate::task_of_row(&id).is_some();
+                // A sub-agent's row is one here too: the agent's own is titled as its call is
+                // here (`Subagent`), and each reads what the machine says of it (`machine_subs`).
+                let (title, detail) = match sub_agent {
+                    Some(link) => {
+                        out.subs.insert(id.clone(), link.clone());
+                        let title = if trek_own {
+                            title.clone()
+                        } else {
+                            "Subagent".to_string()
+                        };
+                        (title, link.label.clone())
+                    }
+                    // A machine before `sub_agent_view` says only that it's one.
+                    None if *tool == tr::ToolKind::Agent && !trek_own => {
+                        ("Subagent".to_string(), detail.clone())
+                    }
+                    None => (
+                        spawn_call(title).unwrap_or_else(|| title.clone()),
+                        detail.clone(),
+                    ),
+                };
+                Item::Tool {
+                    id,
+                    title,
+                    detail,
+                    output: output.clone(),
+                    status: match status {
+                        tr::ToolStatus::Running => ToolStatus::Running,
+                        tr::ToolStatus::Done => ToolStatus::Done,
+                        tr::ToolStatus::Failed => ToolStatus::Failed,
+                        tr::ToolStatus::Denied => ToolStatus::Denied,
+                    },
+                }
+            }
             tr::ItemBody::TurnEnd { took_secs, .. } => Item::TurnEnd {
                 at: it.at.unwrap_or_else(now_ms),
                 took_secs: *took_secs,
@@ -918,6 +983,51 @@ pub fn map_items_with(items: &[tr::Item], sent: &[files::SentCopy]) -> Mapped {
         out.rows.push((it.id.clone(), item));
     }
     out
+}
+
+/// What a machine's thread runs in the background (its row's `background_tasks`), as the strip
+/// above the composer takes it here (`was`: as it took it last). Each task's last line stands for
+/// its output until the end of the output has been read from the machine (`read_background`),
+/// which then stays until it's read again; the clock runs from when the machine first heard of it.
+pub fn background_of(
+    tasks: &[tr::BackgroundTask],
+    was: &[crate::workspace::Background],
+) -> Vec<crate::workspace::Background> {
+    tasks
+        .iter()
+        .map(|t| {
+            let before = was.iter().find(|b| b.task.id == t.id);
+            let started = before.map(|b| b.started).unwrap_or_else(|| {
+                let ago = t.since.map_or(0, |s| (now_ms() - s).max(0) as u64);
+                Instant::now()
+                    .checked_sub(Duration::from_millis(ago))
+                    .unwrap_or_else(Instant::now)
+            });
+            let (output, output_rev) = match before {
+                Some(b) if b.output_rev > 0 => (b.output.clone(), b.output_rev),
+                _ => (t.line.clone(), 0),
+            };
+            crate::workspace::Background {
+                task: trek_agents::BackgroundTask {
+                    id: t.id.clone(),
+                    kind: match t.kind {
+                        tr::BackgroundKind::Shell => trek_agents::BackgroundKind::Shell,
+                        tr::BackgroundKind::Monitor => trek_agents::BackgroundKind::Monitor,
+                        tr::BackgroundKind::Other => trek_agents::BackgroundKind::Other,
+                    },
+                    title: t.title.clone(),
+                    // Its call's output names a file there, which can't be opened here.
+                    call: None,
+                    readable: t.readable,
+                    stoppable: t.stoppable,
+                },
+                started,
+                output,
+                output_rev,
+                stopping: t.stopping,
+            }
+        })
+        .collect()
 }
 
 /// Put `item` in `items`: in its place when its id is there, else at the end.
@@ -1358,12 +1468,20 @@ impl Workspace {
         let mut touched: Vec<String> = vec![];
         match msg {
             tr::ServerMessage::Snapshot(s) => {
+                // Its sub-agents' threads come unlisted (they show under their parent only,
+                // there as here): kept, so one opens from its row like any other thread.
                 m.rows = s.threads;
+                for row in s.unlisted {
+                    match m.rows.iter_mut().find(|r| r.id == row.id) {
+                        Some(slot) => *slot = row,
+                        None => m.rows.push(row),
+                    }
+                }
                 m.projects = s.projects;
                 m.agents = s.agents;
                 touched.extend(m.followed.keys().cloned());
             }
-            tr::ServerMessage::Thread { thread } => {
+            tr::ServerMessage::Thread { thread } | tr::ServerMessage::Unlisted { thread } => {
                 touched.push(thread.id.clone());
                 match m.rows.iter_mut().find(|r| r.id == thread.id) {
                     Some(row) => *row = thread,
@@ -1450,11 +1568,30 @@ impl Workspace {
             settle_running_tools(&mut mapped.rows);
         }
         let loaded = f.loaded;
+        // What its agent runs in the background, as the strip above its composer lists it there.
+        let background: Vec<tr::BackgroundTask> = row
+            .filter(|_| !offline)
+            .map(|r| r.background_tasks.clone())
+            .unwrap_or_default();
         let live = self.live.entry(local.clone()).or_default();
         let reasoning = (working
             && matches!(mapped.rows.last(), Some((_, Item::Reasoning { .. }))))
         .then(|| mapped.rows.len() - 1);
         live.items = Transcript::stored(mapped.rows);
+        live.machine_subs = mapped.subs;
+        if offline {
+            // Nothing it runs can be seen from here: no sub-agent of its is at work.
+            for link in live.machine_subs.values_mut() {
+                if matches!(
+                    link.state,
+                    tr::SubAgentState::Running | tr::SubAgentState::NeedsYou
+                ) {
+                    link.state = tr::SubAgentState::Stopped;
+                    link.activity = None;
+                }
+            }
+        }
+        live.background = background_of(&background, &live.background);
         live.permissions = mapped.requests;
         live.streaming = mapped.streaming.filter(|_| !offline);
         live.reasoning = reasoning;

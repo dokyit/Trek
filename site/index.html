@@ -3,23 +3,23 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Trek: every agent, one trail</title>
+<title>Trek: one inbox for your coding agents on Mac and Windows</title>
 <meta name="description" content="Trek is a free, open-source Mac and Windows app that runs your coding agents from one inbox: Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models.">
 <link rel="canonical" href="https://trekdesktop.com/">
-<meta name="theme-color" content="#C9C1DE" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#1D1A2C" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#B3B3C7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0E1227" media="(prefers-color-scheme: dark)">
 
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Trek">
 <meta property="og:url" content="https://trekdesktop.com/">
-<meta property="og:title" content="Trek: every agent, one trail">
+<meta property="og:title" content="Trek: one inbox for your coding agents on Mac and Windows">
 <meta property="og:description" content="A native desktop app that runs your coding agents from one inbox. Free and open source.">
 <meta property="og:image" content="https://trekdesktop.com/assets/img/og.jpg?v=1af0dde6">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="Trek's signpost and the line Every agent. One trail.">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Trek: every agent, one trail">
+<meta name="twitter:title" content="Trek: one inbox for your coding agents on Mac and Windows">
 <meta name="twitter:description" content="A native desktop app that runs your coding agents from one inbox. Free and open source.">
 <meta name="twitter:image" content="https://trekdesktop.com/assets/img/og.jpg?v=1af0dde6">
 <meta name="twitter:image:alt" content="Trek's signpost and the line Every agent. One trail.">
@@ -30,8 +30,12 @@
 <link rel="manifest" href="/site.webmanifest?v=3e8b1bb9">
 <link rel="preload" href="/assets/fonts/BricolageGrotesque.woff2?v=a79fdb52" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/assets/fonts/HankenGrotesk.woff2?v=e9201edd" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="/assets/site.css?v=94b5c324">
-<script src="/assets/site.js?v=347cc48e" defer></script>
+<link rel="stylesheet" href="/assets/site.css?v=0f30d46e">
+<link rel="preload" as="image" type="image/avif" media="(prefers-color-scheme: dark) and (max-width: 700px)" imagesrcset="/assets/img/backdrop/hill-tall-night-720.avif?v=3666a866 720w, /assets/img/backdrop/hill-tall-night-1080.avif?v=0dd51b57 1080w" imagesizes="100vw">
+<link rel="preload" as="image" type="image/avif" media="(prefers-color-scheme: dark) and (min-width: 701px)" imagesrcset="/assets/img/backdrop/hill-wide-night-1280.avif?v=206d57c3 1280w, /assets/img/backdrop/hill-wide-night-1920.avif?v=68704ba7 1920w, /assets/img/backdrop/hill-wide-night-2560.avif?v=c8c15de1 2560w" imagesizes="100vw">
+<link rel="preload" as="image" type="image/avif" media="(prefers-color-scheme: light) and (max-width: 700px)" imagesrcset="/assets/img/backdrop/hill-tall-day-720.avif?v=40330573 720w, /assets/img/backdrop/hill-tall-day-1080.avif?v=a8ec99af 1080w" imagesizes="100vw">
+<link rel="preload" as="image" type="image/avif" media="(prefers-color-scheme: light) and (min-width: 701px)" imagesrcset="/assets/img/backdrop/hill-wide-day-1280.avif?v=4627ced9 1280w, /assets/img/backdrop/hill-wide-day-1920.avif?v=32312d78 1920w, /assets/img/backdrop/hill-wide-day-2560.avif?v=eef707f4 2560w" imagesizes="100vw">
+<script src="/assets/site.js?v=bb63d57b" defer></script>
 
 <script type="application/ld+json">
 {
@@ -64,7 +68,7 @@
 }
 </script>
 </head>
-<body>
+<body class="home">
 <a class="skip" href="#main">Skip to the page</a>
 <header class="bar"><div class="bar-in">
   <a class="lockup" href="/" aria-label="Trek, home"><svg class="mark" viewBox="13 13 70 70" aria-hidden="true"><use class="post" href="/assets/img/mark.svg?v=7cbb7d26#post"/><use class="board" href="/assets/img/mark.svg?v=7cbb7d26#board-a"/><use class="board" href="/assets/img/mark.svg?v=7cbb7d26#board-b"/></svg><span>trek</span></a>
@@ -77,6 +81,16 @@
 
 <main id="main">
 <section class="hero" data-hero>
+<picture class="scene" aria-hidden="true">
+  <source media="(prefers-color-scheme: dark) and (max-width: 700px)" type="image/avif" srcset="/assets/img/backdrop/hill-tall-night-720.avif?v=3666a866 720w, /assets/img/backdrop/hill-tall-night-1080.avif?v=0dd51b57 1080w" sizes="100vw">
+  <source media="(prefers-color-scheme: dark) and (min-width: 701px)" type="image/avif" srcset="/assets/img/backdrop/hill-wide-night-1280.avif?v=206d57c3 1280w, /assets/img/backdrop/hill-wide-night-1920.avif?v=68704ba7 1920w, /assets/img/backdrop/hill-wide-night-2560.avif?v=c8c15de1 2560w" sizes="100vw">
+  <source media="(prefers-color-scheme: dark) and (max-width: 700px)" srcset="/assets/img/backdrop/hill-tall-night-1080.jpg?v=ca49303a">
+  <source media="(prefers-color-scheme: dark) and (min-width: 701px)" srcset="/assets/img/backdrop/hill-wide-night-1920.jpg?v=c5478f23">
+  <source media="(prefers-color-scheme: light) and (max-width: 700px)" type="image/avif" srcset="/assets/img/backdrop/hill-tall-day-720.avif?v=40330573 720w, /assets/img/backdrop/hill-tall-day-1080.avif?v=a8ec99af 1080w" sizes="100vw">
+  <source media="(prefers-color-scheme: light) and (min-width: 701px)" type="image/avif" srcset="/assets/img/backdrop/hill-wide-day-1280.avif?v=4627ced9 1280w, /assets/img/backdrop/hill-wide-day-1920.avif?v=32312d78 1920w, /assets/img/backdrop/hill-wide-day-2560.avif?v=eef707f4 2560w" sizes="100vw">
+  <source media="(prefers-color-scheme: light) and (max-width: 700px)" srcset="/assets/img/backdrop/hill-tall-day-1080.jpg?v=98e42c0b">
+  <img src="/assets/img/backdrop/hill-wide-day-1920.jpg?v=f0934671" width="2560" height="1600" alt="" fetchpriority="high" decoding="async">
+</picture>
   <div class="hero-copy">
     <svg class="mark mark-hero" viewBox="13 13 70 70" aria-hidden="true"><use class="post" href="/assets/img/mark.svg?v=7cbb7d26#post"/><use class="board board-a" href="/assets/img/mark.svg?v=7cbb7d26#board-a"/><use class="board board-b" href="/assets/img/mark.svg?v=7cbb7d26#board-b"/></svg>
     <h1>Every agent. One trail.</h1>
@@ -102,62 +116,64 @@
     <p>Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models. With the logins you already have.</p>
   </header>
 
-  <article class="feat feat-split feat-inbox">
-    <div class="feat-text reveal">
+  <article class="feat feat-split feat-inbox reveal">
+    <div class="feat-text">
       <h3>One inbox</h3>
       <p>Running and waiting threads on top. One stops to ask, goes to the top, and gets back to work once you answer.</p>
+      <!-- ill:inbox --><svg class="ill ill-inbox" viewBox="-105 -150 268 297" width="268" height="297" aria-hidden="true" focusable="false"><path class="e" d="M0.0 -13.0 L144.1 70.2 L45.0 127.4 L-99.1 44.2 Z" pathLength="1"/><path class="e" d="M45.0 140.4 L-99.1 57.2 L-99.1 44.2 L45.0 127.4 Z" pathLength="1"/><path class="e" d="M144.1 83.2 L45.0 140.4 L45.0 127.4 L144.1 70.2 Z" pathLength="1"/><path class="e" d="M0.0 -26.0 L144.1 57.2 L45.0 114.4 L-99.1 31.2 Z" pathLength="1"/><path class="e" d="M45.0 127.4 L-99.1 44.2 L-99.1 31.2 L45.0 114.4 Z" pathLength="1"/><path class="e" d="M144.1 70.2 L45.0 127.4 L45.0 114.4 L144.1 57.2 Z" pathLength="1"/><path class="e" d="M0.0 -39.0 L144.1 44.2 L45.0 101.4 L-99.1 18.2 Z" pathLength="1"/><path class="e" d="M45.0 114.4 L-99.1 31.2 L-99.1 18.2 L45.0 101.4 Z" pathLength="1"/><path class="e" d="M144.1 57.2 L45.0 114.4 L45.0 101.4 L144.1 44.2 Z" pathLength="1"/><path class="e" d="M0.0 -52.0 L144.1 31.2 L45.0 88.4 L-99.1 5.2 Z" pathLength="1"/><path class="e" d="M45.0 101.4 L-99.1 18.2 L-99.1 5.2 L45.0 88.4 Z" pathLength="1"/><path class="e" d="M144.1 44.2 L45.0 101.4 L45.0 88.4 L144.1 31.2 Z" pathLength="1"/><path class="e" d="M0.0 -65.0 L144.1 18.2 L45.0 75.4 L-99.1 -7.8 Z" pathLength="1"/><path class="e" d="M45.0 88.4 L-99.1 5.2 L-99.1 -7.8 L45.0 75.4 Z" pathLength="1"/><path class="e" d="M144.1 31.2 L45.0 88.4 L45.0 75.4 L144.1 18.2 Z" pathLength="1"/><path class="ae" d="M15.5 -144.3 L157.4 -33.4 L58.3 23.8 L-83.6 -87.1 Z" pathLength="1"/><path class="ae" d="M56.4 35.4 L-85.6 -75.4 L-83.6 -87.1 L58.3 23.8 Z" pathLength="1"/><path class="ae" d="M155.4 -21.8 L56.4 35.4 L58.3 23.8 L157.4 -33.4 Z" pathLength="1"/></svg><!-- /ill:inbox -->
     </div>
-    <div class="panel panel-tall reveal" data-drift>
+    <div class="panel panel-tall" data-drift>
       <picture><source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/inbox-night-poster.webp?v=d4e72c69"><img class="shot" data-loop="/assets/img/features/inbox.mp4?v=f4103dd4" data-loop-dark="/assets/img/features/inbox-night.mp4?v=d1aa43dd" src="/assets/img/features/inbox-poster.webp?v=740d08fe" width="274" height="330" loading="lazy" decoding="async" alt="Trek's sidebar: threads at work, and one that stops to ask goes to the top of the Inbox with its question."></picture>
     </div>
   </article>
 
-  <article class="feat feat-wide">
-    <div class="feat-text feat-text-row reveal">
+  <article class="feat feat-wide reveal">
+    <div class="feat-text feat-text-row">
       <h3>Agents consult agents</h3>
-      <p>Codex reviews Claude's plan, and back. Here Claude Code asks GPT-5.6 Luna for a second opinion and waits for it.</p>
+      <p>Codex reviews Claude’s plan, and back. Here Claude Code asks GPT-5.6 Luna for a second opinion and waits for it.</p>
     </div>
-    <div class="panel panel-wide panel-bleed reveal">
+    <div class="panel panel-wide panel-bleed">
       <img class="shot" data-loop="/assets/img/features/consult.mp4?v=052c6e6c" src="/assets/img/features/consult-poster.webp?v=f081344d" width="900" height="450" loading="lazy" decoding="async" alt="A thread in Trek: Claude Code is asked for a second opinion, hands the review to GPT-5.6 Luna, and waits on it while it runs.">
     </div>
   </article>
 
   <div class="feat-pair">
-    <article class="feat feat-card feat-7">
-      <div class="panel panel-mid reveal" data-drift>
+    <article class="feat feat-card feat-7 reveal">
+      <div class="panel panel-mid" data-drift>
         <picture>
           <source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/access-night.webp?v=7a3f086c">
           <img class="shot" src="/assets/img/features/access-paper.webp?v=ffe0e94f" width="346" height="328" loading="lazy" decoding="async" alt="The access menu: Supervised, Auto-accept edits, Auto, and Full access, with the Plan button beside it.">
         </picture>
       </div>
-      <div class="feat-text reveal">
+      <div class="feat-text">
         <h3>You stay in charge</h3>
         <p>Four hand-holding levels, plus Plan mode.</p>
       </div>
     </article>
-    <article class="feat feat-card feat-5">
-      <div class="panel panel-mid reveal" data-drift>
+    <article class="feat feat-card feat-5 reveal">
+      <div class="panel panel-mid" data-drift>
         <picture>
           <source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/worktree-night.webp?v=877a0b73">
           <img class="shot shot-worktree" src="/assets/img/features/worktree-paper.webp?v=dd0750d2" width="250" height="130" loading="lazy" decoding="async" alt="The menu for where a new thread runs: Local, the project folder, or New worktree, a branch of its own.">
         </picture>
       </div>
-      <div class="feat-text reveal">
+      <div class="feat-text">
         <h3>Worktrees</h3>
         <p>Give a thread its own branch.</p>
+        <!-- ill:worktrees --><svg class="ill ill-worktrees" viewBox="-30 -26 296 226" width="296" height="226" aria-hidden="true" focusable="false"><path class="e" d="M0.0 -20.0 L259.8 130.0 L235.6 144.0 L-24.2 -6.0 Z" pathLength="1"/><path class="e" d="M235.6 164.0 L-24.2 14.0 L-24.2 -6.0 L235.6 144.0 Z" pathLength="1"/><path class="e" d="M259.8 150.0 L235.6 164.0 L235.6 144.0 L259.8 130.0 Z" pathLength="1"/><path class="ae" d="M31.2 78.0 L207.8 180.0 L207.8 160.0 L31.2 58.0 Z" pathLength="1"/><path class="ae" d="M183.6 194.0 L-17.3 78.0 L-17.3 58.0 L183.6 174.0 Z" pathLength="1"/><path class="ae" d="M207.8 180.0 L183.6 194.0 L183.6 174.0 L207.8 160.0 Z" pathLength="1"/><path class="ae" d="M34.6 28.0 L58.9 42.0 L31.2 58.0 L207.8 160.0 L183.6 174.0 L-17.3 58.0 Z" pathLength="1"/></svg><!-- /ill:worktrees -->
       </div>
     </article>
   </div>
 </section>
 
 <section class="phone-band" id="iphone">
-  <div class="phone-in">
-    <div class="phone-text reveal">
+  <div class="phone-in reveal">
+    <div class="phone-text">
       <h2>Trek for iPhone</h2>
       <p>Answer approvals away from your desk. The agents keep running on your computer.</p>
-      <p class="note">Built from source for now. No iPhone? Any phone's browser gets <a class="text-link" href="/remote/">the remote</a>.</p>
+      <p class="note">Built from source for now. No iPhone? Any phone’s browser gets <a class="text-link" href="/remote/">the remote</a>.</p>
     </div>
-    <div class="phones reveal">
+    <div class="phones">
       <figure class="phone phone-back" data-drift="-1">
         <picture><source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/iphone-threads-night.webp?v=a91d0bf3"><img class="phone-screen" src="/assets/img/features/iphone-threads-paper.webp?v=a7ee221d" width="295" height="638" loading="lazy" decoding="async" alt="Trek for iPhone: Threads, with the ones that need you on top."></picture>
       </figure>
@@ -169,10 +185,10 @@
 </section>
 
 <section class="features features-more">
-  <div class="strip">
-    <article class="feat feat-mini reveal">
+  <div class="strip reveal">
+    <article class="feat feat-mini">
       <div class="mini-media">
-        <ul class="menubar" aria-label="Trek's menu bar icon in its three states">
+        <ul class="menubar" role="list" aria-label="Trek's menu bar icon in its three states">
           <li><img src="/assets/img/features/menubar-idle.svg?v=05e09857" width="44" height="44" alt="">Idle</li>
           <li><img src="/assets/img/features/menubar-working.svg?v=f959e5fd" width="44" height="44" alt="">Working</li>
           <li><img src="/assets/img/features/menubar-attention.svg?v=469af26b" width="44" height="44" alt="">Needs you</li>
@@ -181,14 +197,14 @@
       <h3>Menu bar and tray</h3>
       <p>Idle, working or needs you. A Dock or taskbar badge, and notifications.</p>
     </article>
-    <article class="feat feat-mini reveal">
+    <article class="feat feat-mini">
       <div class="mini-media">
         <picture><source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/undo-night.webp?v=6128bafa"><img class="shot" src="/assets/img/features/undo-paper.webp?v=9fcdf9b5" width="410" height="110" loading="lazy" decoding="async" alt="The end of an agent's turn, with its buttons: copy, undo, retry, retry with another model, and fork."></picture>
       </div>
       <h3>Undo any turn</h3>
       <p>Edit, retry or fork. Files roll back too.</p>
     </article>
-    <article class="feat feat-mini reveal">
+    <article class="feat feat-mini">
       <div class="mini-media">
         <img class="shot" src="/assets/img/features/plugins.webp?v=97fa6052" width="420" height="115" loading="lazy" decoding="async" alt="A plugin at work: a focus timer on the composer, with the hiker walking along its edge.">
       </div>
@@ -197,53 +213,59 @@
     </article>
   </div>
 
-  <article class="feat feat-split feat-split-flip">
-    <div class="panel panel-mid reveal" data-drift>
+  <article class="feat feat-split feat-split-flip reveal">
+    <div class="panel panel-mid" data-drift>
       <img class="shot shot-study" src="/assets/img/features/study.webp?v=e5332ba9" width="790" height="550" loading="lazy" decoding="async" alt="Study in Trek: a question it set, What does the derivative f prime of x tell you, with four answers, a box for your thinking and how sure you are.">
     </div>
-    <div class="feat-text reveal">
+    <div class="feat-text">
       <h3>Study</h3>
       <p>Learn or practise with an agent. It starts from what you already know.</p>
+      <!-- ill:study --><svg class="ill ill-study" viewBox="-93 -100 185 206" width="185" height="206" aria-hidden="true" focusable="false"><path class="e" d="M0.0 -52.0 L86.6 -2.0 L0.0 48.0 L-86.6 -2.0 Z" pathLength="1"/><path class="e" d="M86.6 50.0 L0.0 100.0 L0.0 48.0 L86.6 -2.0 Z" pathLength="1"/><path class="e" d="M0.0 100.0 L-86.6 50.0 L-86.6 -2.0 L0.0 48.0 Z" pathLength="1"/><path class="e" d="M0.0 -72.0 L52.0 -42.0 L0.0 -12.0 L-52.0 -42.0 Z" pathLength="1"/><path class="e" d="M52.0 -2.0 L0.0 28.0 L0.0 -12.0 L52.0 -42.0 Z" pathLength="1"/><path class="e" d="M0.0 28.0 L-52.0 -2.0 L-52.0 -42.0 L0.0 -12.0 Z" pathLength="1"/><path class="dash" d="M27.7 -42.0 L0.0 -26.0 L0.0 -62.0 L27.7 -78.0 Z"/><path class="dash" d="M0.0 -26.0 L-27.7 -42.0 L-27.7 -78.0 L0.0 -62.0 Z"/><path class="dash" d="M0.0 -94.0 L27.7 -78.0 L0.0 -62.0 L-27.7 -78.0 Z"/></svg><!-- /ill:study -->
     </div>
   </article>
 
-  <article class="feat feat-wide feat-themes">
-    <div class="feat-text feat-text-row reveal">
+  <article class="feat feat-wide feat-themes reveal">
+    <div class="feat-text feat-text-row">
       <h3>Themes and backgrounds</h3>
       <p>Four themes, Paper or Night, glass. Painted and ASCII art.</p>
     </div>
-    <div class="panel panel-wide panel-bleed reveal">
-      <img class="shot" data-loop="/assets/img/features/themes.mp4?v=5e969fb2" src="/assets/img/features/themes-poster.webp?v=31b8e307" width="1000" height="625" loading="lazy" decoding="async" alt="One Trek window changing through its themes, glass and painted backgrounds.">
+    <div class="panel panel-wide panel-bleed">
+      <img class="shot" data-loop="/assets/img/features/themes.mp4?v=cb1030e8" src="/assets/img/features/themes-poster.webp?v=b4be0ee5" width="1000" height="625" loading="lazy" decoding="async" alt="One Trek window changing through its themes, glass and painted backgrounds.">
     </div>
   </article>
-  <p class="staged reveal">The real app, with staged threads.</p>
+  <p class="staged">The real app, with staged threads.</p>
 </section>
 
 <section class="get" id="install">
-  <div class="get-in">
-    <header class="get-head reveal">
+  <div class="get-in reveal">
+    <header class="get-head">
       <h2>Get Trek.</h2>
       <p>Free and open source. <span data-release></span></p>
     </header>
     <ul class="builds">
-      <li class="build reveal">
+      <li class="build">
         <h3>macOS</h3>
         <p>13 or later. The first launch needs one extra step: open System Settings, Privacy &amp; Security, and choose Open Anyway.</p>
         <div class="links"><a class="btn btn-line btn-small" data-build="mac-arm" href="https://github.com/dokyit/Trek/releases/latest">Apple silicon <small data-size></small></a><a class="btn btn-line btn-small" data-build="mac-intel" href="https://github.com/dokyit/Trek/releases/latest">Intel <small data-size></small></a></div>
       </li>
-      <li class="build reveal">
+      <li class="build">
         <h3>Windows</h3>
         <p>11, x64. SmartScreen asks once: choose More info, then Run anyway.</p>
         <div class="links"><a class="btn btn-line btn-small" data-build="win-setup" href="https://github.com/dokyit/Trek/releases/latest/download/Trek-Setup-x86_64.exe">Installer <small data-size></small></a><a class="btn btn-line btn-small" data-build="win-zip" href="https://github.com/dokyit/Trek/releases/latest">Zip <small data-size></small></a></div>
       </li>
-      <li class="build reveal">
+      <li class="build" data-linux hidden>
+        <h3>Linux <span class="build-note">Preview</span></h3>
+        <p>Ubuntu 22.04, Debian 12, Fedora 36 or later. A first version, with fewer features than on a Mac. The AppImage updates itself.</p>
+        <div class="links"><a class="btn btn-line btn-small" data-build="linux-appimage" href="https://github.com/dokyit/Trek/releases/latest">AppImage <small data-size></small></a><a class="btn btn-line btn-small" data-build="linux-deb" href="https://github.com/dokyit/Trek/releases/latest">.deb</a><a class="btn btn-line btn-small" data-build="linux-arm" href="https://github.com/dokyit/Trek/releases/latest">Arm</a></div>
+      </li>
+      <li class="build">
         <h3>iPhone</h3>
         <p>iOS 26. Built from source for now.</p>
         <div class="links"><a class="btn btn-line btn-small" href="https://github.com/dokyit/Trek/blob/main/ios/README.md">How to build it</a></div>
       </li>
-      <li class="build reveal">
-        <h3>Any phone's browser</h3>
-        <p>The remote, with nothing to install. Open it on the phone, then in Trek choose Settings, Phone &amp; Machines, Show pairing code, A phone's browser.</p>
+      <li class="build">
+        <h3>Any phone’s browser</h3>
+        <p>The remote, with nothing to install. Open it on the phone, then in Trek choose Settings, Phone &amp; Machines, Show pairing code, A phone’s browser.</p>
         <div class="links"><a class="btn btn-line btn-small" href="/remote/">Open the remote</a></div>
       </li>
     </ul>
@@ -252,12 +274,23 @@
 </main>
 
 <footer class="foot">
+<picture class="closing-land" aria-hidden="true">
+  <source media="(prefers-color-scheme: dark) and (max-width: 700px)" type="image/avif" srcset="/assets/img/backdrop/dusk-tall-night-720.avif?v=926ca1f4 720w, /assets/img/backdrop/dusk-tall-night-1080.avif?v=2eb3325b 1080w" sizes="100vw">
+  <source media="(prefers-color-scheme: dark) and (min-width: 701px)" type="image/avif" srcset="/assets/img/backdrop/dusk-wide-night-1280.avif?v=8e728d93 1280w, /assets/img/backdrop/dusk-wide-night-1920.avif?v=750b1dd2 1920w, /assets/img/backdrop/dusk-wide-night-2560.avif?v=f562c9e3 2560w" sizes="100vw">
+  <source media="(prefers-color-scheme: dark) and (max-width: 700px)" srcset="/assets/img/backdrop/dusk-tall-night-1080.jpg?v=cbbf3170">
+  <source media="(prefers-color-scheme: dark) and (min-width: 701px)" srcset="/assets/img/backdrop/dusk-wide-night-1920.jpg?v=193b906d">
+  <source media="(prefers-color-scheme: light) and (max-width: 700px)" type="image/avif" srcset="/assets/img/backdrop/dusk-tall-dusk-720.avif?v=7e244da2 720w, /assets/img/backdrop/dusk-tall-dusk-1080.avif?v=8709420f 1080w" sizes="100vw">
+  <source media="(prefers-color-scheme: light) and (min-width: 701px)" type="image/avif" srcset="/assets/img/backdrop/dusk-wide-dusk-1280.avif?v=9d9837bd 1280w, /assets/img/backdrop/dusk-wide-dusk-1920.avif?v=6c78dbb0 1920w, /assets/img/backdrop/dusk-wide-dusk-2560.avif?v=04dffbb9 2560w" sizes="100vw">
+  <source media="(prefers-color-scheme: light) and (max-width: 700px)" srcset="/assets/img/backdrop/dusk-tall-dusk-1080.jpg?v=85bbdc85">
+  <img src="/assets/img/backdrop/dusk-wide-dusk-1920.jpg?v=23e28aba" width="2560" height="1600" alt="" loading="lazy" decoding="async">
+</picture>
   <div class="foot-in">
     <a class="lockup" href="/" aria-label="Trek, home"><svg class="mark" viewBox="13 13 70 70" aria-hidden="true"><use class="post" href="/assets/img/mark.svg?v=7cbb7d26#post"/><use class="board" href="/assets/img/mark.svg?v=7cbb7d26#board-a"/><use class="board" href="/assets/img/mark.svg?v=7cbb7d26#board-b"/></svg><span>trek</span></a>
     <span class="who">© 2026 Toby Dokyi</span>
     <a class="text-link" href="https://github.com/dokyit/Trek">GitHub</a>
     <a class="text-link" href="https://github.com/dokyit/Trek/releases">Releases</a>
     <a class="text-link" href="/privacy/">Privacy</a>
+    <a class="text-link" href="/terms/">Terms</a>
     <!--email_off--><a class="text-link" href="mailto:support@trekdesktop.com">support@trekdesktop.com</a><!--/email_off-->
   </div>
 </footer>

@@ -120,6 +120,77 @@ mod missing;
     Ok(dir)
 }
 
+/// The capture build the verify driver started for a command folder: its process (the driver's
+/// `state.json` beside the folder names it) and its log (`trek.log` there). Both drivers, the Mac
+/// and Linux one and `trek-dev.ps1`, keep them so.
+struct App {
+    pid: Option<u32>,
+    log: PathBuf,
+}
+
+impl App {
+    fn beside(shot_dir: &Path) -> App {
+        let home = shot_dir.parent().unwrap_or(shot_dir);
+        let pid = std::fs::read_to_string(home.join("state.json"))
+            .ok()
+            .and_then(|state| pid_in(&state));
+        App {
+            pid,
+            log: home.join("trek.log"),
+        }
+    }
+
+    /// Whether its process still runs (`None`: no process to ask about).
+    fn alive(&self) -> Option<bool> {
+        let pid = self.pid?;
+        #[cfg(target_os = "linux")]
+        let alive = std::path::Path::new(&format!("/proc/{pid}")).exists();
+        #[cfg(all(unix, not(target_os = "linux")))]
+        let alive = std::process::Command::new("/bin/kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .ok()?
+            .success();
+        #[cfg(windows)]
+        let alive = std::process::Command::new("tasklist") // spawn: trek-parity has no trek-core, and runs in a console already
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))?;
+        Some(alive)
+    }
+
+    /// The end of its log, for a run that stops because the app did.
+    fn log_tail(&self, lines: usize) -> String {
+        let text = std::fs::read_to_string(&self.log).unwrap_or_default();
+        let all: Vec<&str> = text.lines().collect();
+        all[all.len().saturating_sub(lines)..].join("\n")
+    }
+}
+
+/// The `"pid": <n>` of the driver's state file (JSON, read without a JSON parser: one number).
+fn pid_in(state: &str) -> Option<u32> {
+    let after = &state[state.find("\"pid\"")? + 5..];
+    let after = after.trim_start().strip_prefix(':')?.trim_start();
+    let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// After how many features in a row the app didn't answer the run stops: by then it has frozen,
+/// and every later feature would only wait out its own timeout (a frozen app cost a Linux run
+/// its two hours).
+const SILENT_IN_A_ROW: usize = 2;
+
+/// How a feature's batch went, as the app answered it (or didn't).
+enum Answer {
+    Said(Outcome),
+    /// No answer within the feature's time, the app still running.
+    Silent(Outcome),
+    /// The app's process ended while it waited.
+    Gone(Outcome),
+}
+
 enum Outcome {
     Passed,
     Failed(Vec<String>),
@@ -217,6 +288,10 @@ fn run() -> i32 {
     features.sort_by(|a, b| a.area.cmp(&b.area).then(a.id.cmp(&b.id)));
 
     let started = Instant::now();
+    let app = App::beside(&shot_dir);
+    // Features in a row the app didn't answer, and why the run stopped sending, once it has.
+    let mut silent = 0;
+    let mut stopped: Option<String> = None;
     let mut results = vec![];
     for f in features {
         let outcome = match f.support(platform) {
@@ -232,8 +307,33 @@ fn run() -> i32 {
             {
                 Outcome::Skipped(format!("On CI only: {why}"))
             }
+            Support::Yes | Support::Partial
+                if !f.live_on(platform).is_empty()
+                    && let Some(why) = &stopped =>
+            {
+                Outcome::Failed(vec![format!("not run: {why}")])
+            }
             Support::Yes | Support::Partial if !f.live_on(platform).is_empty() => {
-                send(&shot_dir, &project, f, platform, timeout)
+                match send(&shot_dir, &project, f, platform, timeout, &app) {
+                    Answer::Said(outcome) => {
+                        silent = 0;
+                        outcome
+                    }
+                    Answer::Silent(outcome) => {
+                        silent += 1;
+                        if silent >= SILENT_IN_A_ROW {
+                            stopped = Some(format!(
+                                "the app stopped answering ({silent} features in a row, from before {})",
+                                f.id
+                            ));
+                        }
+                        outcome
+                    }
+                    Answer::Gone(outcome) => {
+                        stopped = Some(format!("the app's process ended during {}", f.id));
+                        outcome
+                    }
+                }
             }
             Support::Yes | Support::Partial if let Some(who) = &f.live_person => {
                 Outcome::Person(who.clone())
@@ -252,6 +352,17 @@ fn run() -> i32 {
         };
         println!("{:<28} {said}", f.id);
         results.push((f, outcome));
+        if let Some(why) = &stopped
+            && silent != usize::MAX
+        {
+            // Said once, with what the app last wrote: the rest only say they weren't run.
+            silent = usize::MAX;
+            println!(
+                "--- {why}; the rest aren't run. The app's log ({}), last lines:\n{}\n---",
+                app.log.display(),
+                app.log_tail(40)
+            );
+        }
     }
     let failed = results
         .iter()
@@ -280,8 +391,15 @@ fn run() -> i32 {
     i32::from(failed > 0)
 }
 
-/// Send `f`'s steps as one batch and wait for the app's answer.
-fn send(dir: &Path, project: &Path, f: &Feature, platform: Platform, timeout: Duration) -> Outcome {
+/// Send `f`'s steps as one batch and wait for the app's answer, as long as its process runs.
+fn send(
+    dir: &Path,
+    project: &Path,
+    f: &Feature,
+    platform: Platform,
+    timeout: Duration,
+    app: &App,
+) -> Answer {
     let mut lines: Vec<String> = FROM_THE_START.iter().map(|s| s.to_string()).collect();
     lines.extend(f.live_on(platform).iter().map(|s| fill(s, project)));
     lines.push(format!("shot live-{}", f.id));
@@ -294,9 +412,12 @@ fn send(dir: &Path, project: &Path, f: &Feature, platform: Platform, timeout: Du
     if let Err(e) = std::fs::write(&staged, lines.join("\n") + "\n")
         .and_then(|()| std::fs::rename(&staged, dir.join("cmd")))
     {
-        return Outcome::Failed(vec![format!("couldn't send the steps: {e}")]);
+        return Answer::Said(Outcome::Failed(vec![format!(
+            "couldn't send the steps: {e}"
+        )]));
     }
     let start = Instant::now();
+    let mut asked = Instant::now();
     loop {
         // `done` is written in one go but not renamed into place: read it until it holds still.
         if let Ok(first) = std::fs::read_to_string(&done) {
@@ -304,7 +425,7 @@ fn send(dir: &Path, project: &Path, f: &Feature, platform: Platform, timeout: Du
             if std::fs::read_to_string(&done).is_ok_and(|again| again == first) && !first.is_empty()
             {
                 let _ = std::fs::remove_file(&done);
-                return if first.trim() == "ok" {
+                return Answer::Said(if first.trim() == "ok" {
                     Outcome::Passed
                 } else {
                     Outcome::Failed(
@@ -313,23 +434,34 @@ fn send(dir: &Path, project: &Path, f: &Feature, platform: Platform, timeout: Du
                             .map(|l| l.strip_prefix("err ").unwrap_or(l).to_string())
                             .collect(),
                     )
-                };
+                });
+            }
+        }
+        // Once a second: an app whose process ended answers nothing, however long it's given.
+        if asked.elapsed() > Duration::from_secs(1) {
+            asked = Instant::now();
+            if app.alive() == Some(false) {
+                return Answer::Gone(Outcome::Failed(vec![format!(
+                    "the app's process ({}) ended after {:.0} s of this feature's steps",
+                    app.pid.unwrap_or_default(),
+                    start.elapsed().as_secs_f32()
+                )]));
             }
         }
         if start.elapsed() > timeout {
             // Its answer may yet come: waited out and dropped, or it would be taken for the next
             // feature's.
             let late = Instant::now();
-            while late.elapsed() < timeout && !done.exists() {
+            while late.elapsed() < timeout && !done.exists() && app.alive() != Some(false) {
                 std::thread::sleep(Duration::from_millis(200));
             }
             std::thread::sleep(Duration::from_millis(200));
             let _ = std::fs::remove_file(&done);
-            return Outcome::Failed(vec![format!(
+            return Answer::Silent(Outcome::Failed(vec![format!(
                 "no answer from the app in {} s (is the capture build running from {}?)",
                 timeout.as_secs(),
                 dir.display()
-            )]);
+            )]));
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -421,6 +553,20 @@ fn render(results: &[(&Feature, Outcome)], platform: Platform, root: &Path) -> S
 mod tests {
     use super::waits;
     use std::time::Duration;
+
+    #[test]
+    fn the_app_is_found_by_the_pid_the_driver_keeps() {
+        use super::pid_in;
+        // As trek-dev writes it (indented) and as trek-dev.ps1's ConvertTo-Json does.
+        assert_eq!(
+            pid_in("{\n  \"root\": \"/x\",\n  \"pid\": 4242,\n  \"isolated\": true\n}"),
+            Some(4242)
+        );
+        assert_eq!(pid_in("{\"pid\":17,\"binary\":\"x\"}"), Some(17));
+        // Stopped: the driver keeps the state with no pid.
+        assert_eq!(pid_in("{\"pid\": null}"), None);
+        assert_eq!(pid_in("{}"), None);
+    }
 
     /// A feature is given its steps' own waits on top of the base time.
     #[test]

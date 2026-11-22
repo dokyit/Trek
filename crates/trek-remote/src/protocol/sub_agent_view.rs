@@ -13,8 +13,15 @@
 //!
 //! An older Mac sends no `sub_agent` on tool items and lists no `sub_agent_view`: the phone shows
 //! the row as before. An older phone ignores the field.
+//!
+//! Another Trek following the thread (`docs/MULTI-MACHINE.md`) draws the row as the Mac does from
+//! the same link: since Trek 0.4.64 it also carries what the sub-agent is doing while it works
+//! ([`SubAgentLink::activity`], the calls its row lists opened) and, for an earlier run of one
+//! woken again, the row it works on now ([`SubAgentLink::continued`]). A Mac before that sends
+//! neither, and the row then reads as its label and status line alone; anything reading the
+//! link ignores what it doesn't know.
 
-use super::{AgentRef, Item, SubAgentState};
+use super::{AgentRef, Item, SubAgentState, ToolKind};
 use serde::{Deserialize, Serialize};
 
 /// On a tool item: the sub-agent it stands for.
@@ -37,6 +44,48 @@ pub struct SubAgentLink {
     /// Its thread, for one Trek runs: opened with `subscribe`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
+    /// What it's doing, while it works: its latest calls, as its row on the Mac lists them
+    /// opened (Trek 0.4.64).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<SubAgentActivity>,
+    /// For an earlier run of one of the agent's own woken again since (`SendMessage`): the call
+    /// it works under now, whose row stands for it from then on (Trek 0.4.64).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continued: Option<String>,
+}
+
+/// A sub-agent's latest calls, worded as the Mac's working bar words them: the summary line
+/// ("Ran 2 commands and read 1 file"), what it's about, and a row per call, the newest last.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SubAgentActivity {
+    pub summary: String,
+    #[serde(default)]
+    pub phrase: String,
+    /// The latest call's kind (the summary line's icon).
+    #[serde(default)]
+    pub kind: ToolKind,
+    /// Calls before those in `steps` ("+3 earlier").
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub earlier: u32,
+    #[serde(default)]
+    pub steps: Vec<SubAgentStep>,
+}
+
+/// One call in [`SubAgentActivity`]: a muted verb ("Read") and what it acted on, verbatim.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SubAgentStep {
+    #[serde(default)]
+    pub verb: String,
+    #[serde(default)]
+    pub text: String,
+    /// The file it read or changed, for the file-type badge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// Under way now.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub running: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub failed: bool,
 }
 
 /// `sub_agent`: what the agent's own sub-agent started by call `call_id` of thread `thread_id`

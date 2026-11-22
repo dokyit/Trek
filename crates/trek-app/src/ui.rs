@@ -1061,9 +1061,27 @@ impl gpui_kit::component::Selectable for Pill {
     }
 }
 
+/// The ring a keyboard-focused control wears: a 2 px band just inside its edge. Inset, so only
+/// the band is painted, over the control's own fill and under its label.
+pub fn focus_ring(cx: &App) -> Vec<BoxShadow> {
+    ring_of(cx.theme().ring)
+}
+
+fn ring_of(ring: Hsla) -> Vec<BoxShadow> {
+    vec![BoxShadow {
+        color: ring.alpha(0.5),
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(2.),
+        inset: true,
+    }]
+}
+
 /// A hand-built control the keyboard can reach: a Tab stop that Enter and Space press (GPUI
 /// clicks a focused element on both) and a ring while it has focus from the keyboard. A click
-/// doesn't take focus (as the kit's Button's doesn't), so the text field keeps it.
+/// doesn't take focus (as the kit's Button's doesn't), so the text field keeps it. The ring is
+/// drawn inside the edge (`focus_ring`): GPUI fills an outer shadow's whole rectangle, which on a
+/// control with no fill, or a translucent one, washed over its label and hid it.
 pub trait KeyboardReachable: Sized {
     fn keyboard_reachable(self, cx: &App) -> Self;
     /// Up and Down move to the control before and after, so a list can be walked by arrow keys.
@@ -1072,19 +1090,11 @@ pub trait KeyboardReachable: Sized {
 
 impl KeyboardReachable for Stateful<Div> {
     fn keyboard_reachable(self, cx: &App) -> Self {
-        let ring = cx.theme().ring.alpha(0.5);
+        let ring = focus_ring(cx);
         self.focusable()
             .tab_stop(true)
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-            .focus_visible(move |s| {
-                s.shadow(vec![BoxShadow {
-                    color: ring,
-                    offset: point(px(0.), px(0.)),
-                    blur_radius: px(0.),
-                    spread_radius: px(2.),
-                    inset: false,
-                }])
-            })
+            .focus_visible(move |s| s.shadow(ring.clone()))
     }
 
     fn arrow_walk(self) -> Self {
@@ -1582,6 +1592,19 @@ mod tests {
     }
 
     /// Clear is clear: nothing's blurred at the slider's Clear end, and everything after it is.
+    /// A keyboard-focused chip or sidebar row keeps its label readable: the ring is an inset band,
+    /// not an outer shadow (GPUI fills an outer shadow's whole shape, which hid a ghost chip's label
+    /// under a grey pill when Tab reached it).
+    #[test]
+    fn the_focus_ring_is_a_band_inside_the_edge() {
+        let ring = super::ring_of(rgb(0x8899aa).into());
+        assert_eq!(ring.len(), 1);
+        assert!(ring[0].inset, "an outer shadow fills the control");
+        assert_eq!(ring[0].blur_radius, gpui_kit::px(0.));
+        assert_eq!(ring[0].spread_radius, gpui_kit::px(2.));
+        assert!(ring[0].color.a < 1.);
+    }
+
     #[test]
     fn only_the_clear_end_is_unblurred() {
         assert!(!frosted(0.2));

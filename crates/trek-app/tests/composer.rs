@@ -2023,3 +2023,89 @@ fn the_slash_menu_lists_a_command_once() {
         assert_eq!(picks, ["/consult"]);
     });
 }
+
+/// The / picker lies over the end of the transcript's last turn: its copy, undo and retry
+/// buttons, its changes. A click on a picker row picks that row and presses nothing under it (it
+/// went through: a pick over the copy button copied the turn too).
+#[test]
+fn a_click_on_the_picker_stays_off_the_transcript_under_it() {
+    use gpui_kit::ElementId;
+    use gpui_kit::base::test_support::{ElementSnapshot, snapshots};
+    use trek_core::{Effort, HandHolding};
+    run(async |cx| {
+        let trek = open(cx);
+        let project = trek.project.clone();
+        trek.update(cx, |ws, cx| {
+            let t = ws
+                .store
+                .create_thread(
+                    Some(&project),
+                    mock(),
+                    None,
+                    Effort::Medium,
+                    HandHolding::Auto,
+                )
+                .expect("thread");
+            store_items(&ws.store, &t.id, transcript(12));
+            ws.reload(cx);
+            ws.navigate(Route::Thread(t.id.clone()), cx);
+        });
+        trek.render(cx);
+        trek.type_text(cx, "/");
+        trek.render(cx);
+        assert!(trek.visible(cx, "picker-list"), "the / picker");
+        let named = |s: &ElementSnapshot, name: &str| {
+            s.visible()
+                && matches!(
+                    s.path().last(),
+                    Some(ElementId::NamedInteger(n, _)) if n.as_ref() == name
+                )
+        };
+        // The files the last turn changed, listed in its card while the card is open.
+        let listed = |trek: &Trek, cx: &mut gpui_kit::TestAppContext| {
+            trek.window(cx, |window, _| {
+                snapshots(window).iter().any(|s| {
+                    s.visible()
+                        && matches!(s.path().last(), Some(ElementId::Name(n)) if n.starts_with("changed-"))
+                })
+            })
+        };
+        let open = listed(&trek, cx);
+        // A picker row with a button of the last turn under it: copy, or its changes' header.
+        let (under, pick, at) = trek
+            .window(cx, |window, _| {
+                let all = snapshots(window);
+                ["copy-turn", "changes-head"].into_iter().find_map(|name| {
+                    let b = all.iter().find(|s| named(s, name))?.bounds();
+                    all.iter().filter(|s| named(s, "pick")).find_map(|p| {
+                        let both = p.bounds().intersect(&b);
+                        let room = gpui_kit::px(4.);
+                        (both.size.width > room && both.size.height > room).then(|| {
+                            (
+                                name,
+                                p.path().last().cloned().expect("id"),
+                                both.center() - p.bounds().origin,
+                            )
+                        })
+                    })
+                })
+            })
+            .expect("a button of the last turn under a picker row");
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("before".into()));
+        trek.window(cx, |window, cx| {
+            gpui_kit::test::TestWindowExt::click_at(window, pick, at, cx)
+        });
+        trek.render(cx);
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+            Some("before"),
+            "the turn under it wasn't copied"
+        );
+        assert_eq!(listed(&trek, cx), open, "{under}: its changes didn't fold");
+        let text = trek.composer_text(cx);
+        assert!(
+            text.starts_with('/') && text.trim().len() > 1,
+            "the row was picked: {text:?}"
+        );
+    });
+}

@@ -325,6 +325,9 @@ pub struct LiveThread {
     /// and its own sub-agents. They outlive the turn that started them; the session ending ends
     /// them.
     pub background: Vec<Background>,
+    /// For a thread on another machine (`machines`): its sub-agents' rows as that machine reads
+    /// them, by the row each stands for (`SubAgentRow::read` takes them from here).
+    pub machine_subs: HashMap<String, trek_remote::SubAgentLink>,
     /// When the user last stopped its agent's own sub-agents between turns. Claude Code takes a
     /// turn of its own to say they were stopped; that turn is no news (`quiet_turn`).
     stopped_out: Option<Instant>,
@@ -614,6 +617,41 @@ impl NoCheckpoint {
 /// Whether `t` runs in a worktree whose folder is gone.
 pub fn worktree_missing(t: &Thread) -> bool {
     t.worktree.as_ref().is_some_and(|w| w.is_missing())
+}
+
+/// How often a failing save is told of, at most.
+pub const SAVE_WARNING_EVERY: Duration = Duration::from_secs(120);
+
+/// What the user is told when Trek couldn't save, from what went wrong (`error`).
+pub fn save_failure_message(error: &str) -> String {
+    let lower = error.to_lowercase();
+    let why = if lower.contains("disk is full")
+        || lower.contains("no space left")
+        || lower.contains("os error 28")
+        || lower.contains("os error 112")
+    {
+        "the disk is full. Free some space and Trek saves again as you go".to_string()
+    } else if lower.contains("readonly")
+        || lower.contains("read-only")
+        || lower.contains("permission denied")
+    {
+        format!(
+            "it can't write to its data folder ({}). Check that the folder is yours and not read-only",
+            trek_core::paths::tildify(&trek_core::paths::data_dir())
+        )
+    } else {
+        let first = error.lines().next().unwrap_or(error).trim();
+        format!("{first}. Until it can, what changes now may be gone after a restart")
+    };
+    format!("Trek couldn't save your work: {why}.")
+}
+
+/// What a turn says when the folder its thread works in isn't there.
+pub fn folder_gone_message(folder: &std::path::Path) -> String {
+    format!(
+        "The folder this thread works in isn't there any more: {}. If it was moved or renamed, put it back and send again, or start a new thread in the folder where it is now.",
+        trek_core::paths::tildify(folder)
+    )
 }
 
 /// Whether `cwd` is in a git repository (as checkpoints see it).
@@ -1585,7 +1623,11 @@ impl PanelTool {
     /// The tools this platform has, in `ALL`'s order: the iOS Simulator needs Xcode's tools, so
     /// Windows has no Simulator tab. Its iPhone tab reaches the phone another way (CoreDevice's
     /// services and Apple Mobile Device Service), with the same tools.
+    /// Linux has neither: no Xcode, and no Apple Mobile Device Service to reach a phone through.
     pub fn offered() -> Vec<PanelTool> {
+        if crate::words::is_linux() {
+            return Self::offered_on_linux();
+        }
         Self::offered_on(crate::words::is_windows())
     }
 
@@ -1593,6 +1635,13 @@ impl PanelTool {
         Self::ALL
             .into_iter()
             .filter(|t| !(windows && *t == PanelTool::Simulator))
+            .collect()
+    }
+
+    pub fn offered_on_linux() -> Vec<PanelTool> {
+        Self::ALL
+            .into_iter()
+            .filter(|t| !matches!(t, PanelTool::Simulator | PanelTool::Phone))
             .collect()
     }
     pub fn label(self) -> &'static str {
@@ -1820,6 +1869,8 @@ pub enum UndoAction {
     RevealFile(PathBuf),
     /// Not an undo: open the system's pane where `Permission` is turned on for Trek.
     OpenPrivacy(crate::permissions::Permission),
+    /// Not an undo: open Send feedback (the last run ended in an internal error).
+    SendFeedback,
     /// Not an undo: restart into the update that's staged (`Workspace::restart_to_update`).
     RestartToUpdate,
     /// Not an undo: chats are running, so the same restart, once they finish.
@@ -2083,6 +2134,13 @@ pub struct Workspace {
     /// Other machines running Trek that this one drives, and their threads (`machines`).
     pub machines: crate::machines::Machines,
     pub remote_starting: bool,
+    /// The paired devices as the devices file has them, read while the phone server is off (so
+    /// Settings can list them and unpair one); `None` until read again (`remote::paired_devices`).
+    pub saved_devices: std::cell::RefCell<Option<Vec<trek_remote::DeviceInfo>>>,
+    /// Devices unpaired while the server was starting: the server it started takes them off too.
+    pub unpaired_while_starting: Vec<String>,
+    /// What "Delete all Trek data" planned and what it couldn't delete, once it has run (`wipe`).
+    pub wiped: Option<(trek_core::wipe::Plan, trek_core::wipe::Outcome)>,
     /// Why the phone server last failed to start; it's tried again shortly (`remote::RETRY`).
     pub remote_error: Option<String>,
     /// An update of the iPhone app run from here (`remote::phone_update`).
@@ -2261,6 +2319,9 @@ pub struct Workspace {
     /// A restart asked for to get Trek's permissions back (its bundle was replaced on disk:
     /// `permissions::Status::Replaced`), waiting for agents like a restart to update.
     restart_wanted: bool,
+    /// When a save last failed in a way the user was told of (`save_failed`): once in a while,
+    /// not on every streamed word.
+    save_warned: Option<Instant>,
     /// Trek is on its way out: what sessions say from here on isn't news (`root::quit`).
     pub quitting: bool,
     /// Chats a quit or a crash cut off, by thread, until they're dealt with (`resume`).
@@ -2367,9 +2428,8 @@ impl Workspace {
             .detach();
         let mut launch_toasts: Vec<String> =
             settings_problem.map(|p| p.message()).into_iter().collect();
-        launch_toasts.extend(crate::logging::take_crash_note(
-            &trek_core::paths::data_dir(),
-        ));
+        // The last run ended in an internal error: said once, with a way to report it.
+        let crash = crate::logging::take_crash_note(&trek_core::paths::data_dir());
         if store.newer_schema().is_some() {
             launch_toasts.push("This data folder was last used by a newer Trek. Threads it saved may show only in part here, and rewinding or editing them is off until you update.".into());
         }
@@ -2434,6 +2494,7 @@ impl Workspace {
         };
         // Toasts with a button: a move out of where Trek is, and the old copy it left.
         let mut launch_actions: Vec<(String, UndoAction)> = vec![];
+        launch_actions.extend(crash.map(|note| (note, UndoAction::SendFeedback)));
         let windows = crate::words::is_windows();
         // Where Trek runs now, and the old copy: told by a toast and the Updates page (`arrived`),
         // once the user's shortcuts have been looked through.
@@ -2445,7 +2506,9 @@ impl Workspace {
             );
             this.arrived(relocated, cx);
         }
-        if trek_core::update::blocker().is_none() {
+        // A .deb or tarball install, which the user updates by hand, shows what the new one brought
+        // as well (`Blocker::notify_only`).
+        if trek_core::update::blocker().is_none_or(|b| b.notify_only()) {
             // Windows: trek-update couldn't swap the update in, and put this version back.
             if let Some(failure) = trek_core::update::take_install_failure() {
                 match relocate::failure_offer(&failure, windows) {
@@ -2653,6 +2716,9 @@ impl Workspace {
             remote: None,
             machines: Default::default(),
             remote_starting: false,
+            saved_devices: Default::default(),
+            unpaired_while_starting: Vec::new(),
+            wiped: None,
             remote_error: None,
             phone_update: Default::default(),
             remote_retry: None,
@@ -2736,6 +2802,7 @@ impl Workspace {
             tasks: vec![],
             restart_countdown: None,
             restart_wanted: false,
+            save_warned: None,
             quitting: false,
             interrupted: HashMap::new(),
             unsent: Default::default(),
@@ -3201,6 +3268,7 @@ impl Workspace {
             }
             if let Err(e) = self.store.save_thread(t) {
                 tracing::warn!("save thread: {e}");
+                self.save_failed(&e, cx);
             }
             cx.notify();
         }
@@ -3209,6 +3277,7 @@ impl Workspace {
     pub fn save_settings(&mut self, cx: &mut Context<Self>) {
         if let Err(e) = self.settings.save() {
             tracing::warn!("save settings: {e}");
+            self.save_failed(&e, cx);
         }
         #[cfg(windows)]
         self.sync_update_task(cx);
@@ -3473,7 +3542,11 @@ impl Workspace {
 
     /// Ask `thread`'s agent for the end of background task `task`'s output (it arrives as a
     /// `WorkspaceEvent::Background`). Nothing happens when its session is gone.
-    pub fn read_background(&mut self, thread: &str, task: &str) {
+    pub fn read_background(&mut self, thread: &str, task: &str, cx: &mut Context<Self>) {
+        // On another machine: asked of it (`background_output`).
+        if crate::machines::is_remote(thread) {
+            return self.machine_read_background(thread, task, cx);
+        }
         let Some(live) = self.live.get(thread) else {
             return;
         };
@@ -3509,6 +3582,11 @@ impl Workspace {
             let _ = tx.try_send(Command::StopTask {
                 id: task.to_string(),
             });
+        }
+        // On another machine: stopped there (its row says "Stopping…" meanwhile).
+        if crate::machines::is_remote(thread) {
+            let task = task.to_string();
+            self.machine_stop_background(thread, task, cx);
         }
         let (id, task) = (thread.to_string(), task.to_string());
         let again = cx.spawn(async move |this, cx| {
@@ -3681,9 +3759,9 @@ impl Workspace {
                             "git switch failed",
                         ),
                     }),
-                    Err(e) => cx.emit(WorkspaceEvent::Toast {
-                        message: format!("git: {e}"),
-                        undo: None,
+                    // No git here: how to get one, rather than "No such file or directory".
+                    Err(e) => cx.emit(WorkspaceEvent::Failure {
+                        message: format!("{:#}", trek_core::git::run_error(e)),
                     }),
                 }
                 this.refresh_checkout(cwd, cx);
@@ -5685,7 +5763,12 @@ impl Workspace {
             _ => None,
         };
         let cwd = self.thread(&id).and_then(|t| t.cwd.clone());
-        self.ensure_session(&id, cx);
+        // Its folder was moved or deleted: no agent can start there (each said "No such file or
+        // directory", as if it weren't installed). The message stays, and the turn fails saying so.
+        let gone = (!running).then(|| self.folder_gone(&id)).flatten();
+        if gone.is_none() {
+            self.ensure_session(&id, cx);
+        }
         let live = self.live.entry(id.clone()).or_default();
         live.drop_after_turn();
         let ix = live.items.push(Item::User {
@@ -5732,6 +5815,17 @@ impl Workspace {
         }
         live.last_active = Some(cx.background_executor().now());
         live.revision += 1;
+        if let Some(folder) = gone {
+            self.apply_events(
+                &id,
+                vec![AgentEvent::TurnComplete {
+                    error: Some(folder_gone_message(&folder)),
+                }],
+                cx,
+            );
+            self.persist_items(&id, cx);
+            return;
+        }
         let text = self.resume_prompt(&id, text);
         crate::privacy::count_agent(self, &id);
         self.dispatch(&id, Command::Prompt { text, images });
@@ -5796,6 +5890,20 @@ impl Workspace {
                 .thread(id)
                 .is_some_and(|t| t.worktree.as_ref().is_some_and(|w| w.is_missing()))
             || self.agent_updates.held.contains_key(id)
+    }
+
+    /// The folder `id` works in, when it has one and it's gone (moved, renamed or deleted since).
+    /// A worktree's own folder has its own way back (`worktree_missing`), and a thread on another
+    /// machine runs in a folder there.
+    pub fn folder_gone(&self, id: &str) -> Option<PathBuf> {
+        if crate::machines::is_remote(id) {
+            return None;
+        }
+        let t = self.thread(id)?;
+        if t.worktree.is_some() {
+            return None;
+        }
+        t.cwd.clone().filter(|c| !c.is_dir())
     }
 
     /// Send what was queued while nothing ran (a thread whose history was loading): the first
@@ -5873,6 +5981,7 @@ impl Workspace {
         // and no CLI to run while it's being updated.
         if thread.worktree.as_ref().is_some_and(|w| w.is_missing())
             || self.agent_updating(&thread.agent.key())
+            || self.folder_gone(id).is_some()
         {
             return;
         }
@@ -6176,6 +6285,7 @@ impl Workspace {
         // chat's requests to change things.
         let events = self.screen_advice(id, events);
         let events = self.screen_ask(id, events);
+        let events = self.screen_sign_in(id, events, cx);
         // Background tasks' output is read while it runs (polled): it goes to whatever shows it,
         // and changes nothing else.
         let (outputs, events): (Vec<AgentEvent>, Vec<AgentEvent>) = events
@@ -7827,8 +7937,26 @@ impl Workspace {
         match saved {
             Ok(true) => self.index_for_search(cx),
             Ok(false) => {}
-            Err(e) => tracing::warn!("save transcript: {e}"),
+            Err(e) => {
+                tracing::warn!("save transcript: {e}");
+                self.save_failed(&e, cx);
+            }
         }
+    }
+
+    /// A save failed: the user is told, once in a while, why and what to do, rather than finding
+    /// the work gone at the next launch (a full disk failed every save in silence).
+    pub fn save_failed(&mut self, e: &dyn std::fmt::Display, cx: &mut Context<Self>) {
+        if self
+            .save_warned
+            .is_some_and(|at| at.elapsed() < SAVE_WARNING_EVERY)
+        {
+            return;
+        }
+        self.save_warned = Some(Instant::now());
+        cx.emit(WorkspaceEvent::Failure {
+            message: save_failure_message(&format!("{e:#}")),
+        });
     }
 
     pub fn respond(
@@ -9625,6 +9753,7 @@ impl Workspace {
             }
             UndoAction::RevealFile(path) => cx.reveal_path(&path),
             UndoAction::OpenPrivacy(permission) => crate::permissions::open_pane(permission, cx),
+            UndoAction::SendFeedback => crate::feedback::open_in_main(cx),
             UndoAction::RestartToUpdate | UndoAction::InstallWhenFree => {
                 self.updater.later = None;
                 self.restart_to_update(cx)
@@ -10604,7 +10733,10 @@ impl Workspace {
             // The simulator's tools only where there's a simulator to drive (Xcode, not just its
             // command line tools): elsewhere they're tool names and words in every request.
             let sim_tools = tools.simulator && trek_core::detect::has_simulator();
-            for family in trek_mcp_families(tools.computer_use, sim_tools, windows) {
+            // Linux has no computer use or video watcher (`trek-mcp` has neither there).
+            let linux = crate::words::is_linux();
+            let computer_use = tools.computer_use && !linux;
+            for family in trek_mcp_families(computer_use, sim_tools, windows) {
                 let mut env = trek_mcp_env(family, tools.computer_background, windows);
                 // The simulator's `sim_test` writes its run where the Simulator tool reads it,
                 // and a test run takes minutes.
@@ -10625,7 +10757,7 @@ impl Workspace {
                     )
                 });
             }
-            if tools.video {
+            if tools.video && !linux {
                 out.push(video_server(&bin));
             }
         }
@@ -10784,11 +10916,17 @@ impl Workspace {
 
     // ---------- updates ----------
 
-    pub fn update_view(&self, cx: &App) -> UpdateView {
+    /// Why this copy can't replace itself (`trek_core::update::blocker`), or what a test said.
+    fn update_blocker(&self) -> Option<trek_core::update::Blocker> {
         #[cfg(any(test, feature = "test-support", feature = "shots"))]
-        let blocker = self.blocked.unwrap_or_else(trek_core::update::blocker);
-        #[cfg(not(any(test, feature = "test-support", feature = "shots")))]
-        let blocker = trek_core::update::blocker();
+        if let Some(said) = self.blocked {
+            return said;
+        }
+        trek_core::update::blocker()
+    }
+
+    pub fn update_view(&self, cx: &App) -> UpdateView {
+        let blocker = self.update_blocker();
         self.moving_view(crate::updater::wait::with_running(
             crate::updater::describe_update(
                 &self.updater.status,
@@ -10810,6 +10948,16 @@ impl Workspace {
             UpdateAction::DismissOldCopy => self.dismiss_old_copy(cx),
             UpdateAction::Check => self.check_for_updates(true, cx),
             UpdateAction::Download => self.download_update(cx),
+            // Linux's .deb and tarball: the release's page, built from the feed and the version
+            // the check found (never a link the manifest gives).
+            UpdateAction::OpenDownloadPage => {
+                if let Some(offer) = &self.updater.offer {
+                    cx.open_url(&trek_core::update::download_page(
+                        &self.settings.updates,
+                        &offer.version,
+                    ));
+                }
+            }
             UpdateAction::Restart => {
                 self.updater.later = None;
                 self.restart_to_update(cx)
@@ -10857,10 +11005,13 @@ impl Workspace {
                 trek_core::update::blocker()
             }
         });
-        if blocked.is_some() {
+        // Linux's .deb and tarball do ask, only to say what's out (`Blocker::notify_only`): what the
+        // check finds is never downloaded.
+        if blocked.is_some_and(|b| !b.notify_only()) {
             cx.notify();
             return;
         }
+        let downloads = blocked.is_none();
         let Some(ticket) = self
             .updater
             .begin_check(self.settings.updates.channel, now_ms())
@@ -10883,7 +11034,7 @@ impl Workspace {
         let task = cx.spawn(async move |this, cx| {
             let Ok(result) = rx.recv().await else { return };
             let _ = this.update(cx, |this, cx| {
-                let auto_download = this.settings.updates.auto_download;
+                let auto_download = downloads && this.settings.updates.auto_download;
                 let before = this.updater.offer.as_ref().map(|o| o.version.clone());
                 let download = this.updater.finish_check(
                     ticket,
@@ -10932,7 +11083,8 @@ impl Workspace {
     /// What this version brought, until the user has seen it: only after an update, and only for
     /// a release (a dev build has no notes of its own).
     pub fn whats_new(&self) -> Option<&trek_core::changelog::Release> {
-        if trek_core::update::blocker().is_some()
+        // A .deb or tarball install is updated by hand (`notify_only`), and has notes as much.
+        if trek_core::update::blocker().is_some_and(|b| !b.notify_only())
             || self.settings.updates.seen_notes == trek_core::VERSION
         {
             return None;
@@ -10978,6 +11130,10 @@ impl Workspace {
     /// Download, verify and unpack the update the last check found; it's `Ready` once the new
     /// bundle sits staged, so installing is a rename.
     pub fn download_update(&mut self, cx: &mut Context<Self>) {
+        // Linux's .deb and tarball only say what's out: nothing downloads there.
+        if self.update_blocker().is_some_and(|b| b.notify_only()) {
+            return;
+        }
         let Some(crate::updater::DownloadJob {
             update,
             ticket,
@@ -12001,7 +12157,7 @@ pub(crate) fn agent_notes(
             ),
             None => trek_core::artifact::AGENT_INSTRUCTIONS.to_string(),
         });
-    let video = (settings.tools.video && tool_server)
+    let video = (settings.tools.video && tool_server && !crate::words::is_linux())
         .then(|| trek_core::media::AGENT_INSTRUCTIONS.to_string());
     // Every session has its thread's transcript to search (`transcript_log`), and is told where
     // to look when asked to restyle Trek (`themes`).
@@ -12292,6 +12448,17 @@ mod tests {
                 .filter(|t| *t != PanelTool::Simulator)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn linux_offers_neither_the_iphone_nor_the_simulator() {
+        let linux = PanelTool::offered_on_linux();
+        assert!(!linux.contains(&PanelTool::Simulator));
+        assert!(!linux.contains(&PanelTool::Phone));
+        assert!(linux.contains(&PanelTool::Browser), "WebKitGTK");
+        assert_eq!(linux.len(), PanelTool::ALL.len() - 2);
+        let _linux = crate::words::pretend_os(crate::words::Os::Linux);
+        assert_eq!(PanelTool::offered(), linux);
     }
 
     #[test]

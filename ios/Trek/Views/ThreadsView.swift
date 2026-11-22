@@ -178,6 +178,9 @@ struct ThreadsView: View {
             } label: {
                 Image(systemName: projectFilter == nil && machineFilter == nil ? "ellipsis" : "line.3.horizontal.decrease")
             }
+            // What it holds: grouping, the machine and project filters, Mark all read, New thread.
+            .accessibilityLabel("Group and filter")
+            .accessibilityValue(filtering ? "Filtered" : "")
         }
     }
 
@@ -995,6 +998,10 @@ struct ConnectionBanner: View {
     var retry: (() -> Void)? = nil
     /// Offered when the Mac refused this iPhone (revoked, or a code that didn't work).
     var pairAgain: (() -> Void)? = nil
+    /// The words say to turn something on in iOS Settings (Local Network): Open Settings, as
+    /// trying again won't help until it's on (coming back to the app tries again by itself).
+    var opensSettings = false
+    @Environment(\.openURL) private var openURL
 
     private var waiting: Bool { if case .offline = state { true } else { false } }
     /// The Mac won't have this iPhone as it is: forgotten, or its certificate changed.
@@ -1024,6 +1031,10 @@ struct ConnectionBanner: View {
             Spacer()
             if refused, let pairAgain {
                 Button("Pair again", action: pairAgain)
+                    .font(.ui(.subheadline).weight(.semibold))
+                    .buttonStyle(.glass)
+            } else if waiting, opensSettings, let url = URL(string: UIApplication.openSettingsURLString) {
+                Button("Open Settings") { openURL(url) }
                     .font(.ui(.subheadline).weight(.semibold))
                     .buttonStyle(.glass)
             } else if waiting, let retry {
@@ -1128,7 +1139,8 @@ struct ThreadsHeader: View {
                     } else {
                         ConnectionBanner(state: link.connection, detail: link.connectionText,
                                          host: link.name,
-                                         retry: { model.retryNow(link) }) { model.pairAgain(link) }
+                                         retry: { model.retryNow(link) }, pairAgain: { model.pairAgain(link) },
+                                         opensSettings: link.detailOpensSettings)
                     }
                 }
                 .padding(.horizontal, 16)

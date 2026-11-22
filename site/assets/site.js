@@ -25,10 +25,13 @@
     "mac-intel": /^Trek-[\w.+-]+-darwin-x86_64\.dmg$/,
     "win-setup": /^Trek-Setup-x86_64\.exe$/,
     "win-zip": /^Trek-[\w.+-]+-windows-x86_64\.zip$/,
+    "linux-appimage": /^Trek-[\w.+-]+-linux-x86_64\.AppImage$/,
+    "linux-arm": /^Trek-[\w.+-]+-linux-aarch64\.AppImage$/,
+    "linux-deb": /^trek_[\w.+~-]+_amd64\.deb$/,
   };
   // Where each link goes until the API has answered, or if it never does.
-  const FALLBACK = { "mac-arm": LATEST, "mac-intel": LATEST, "win-setup": `${LATEST}/download/Trek-Setup-x86_64.exe`, "win-zip": LATEST };
-  const CHIP = { "mac-arm": "Apple silicon", "mac-intel": "Intel", "win-setup": "Windows 11, x64" };
+  const FALLBACK = { "mac-arm": LATEST, "mac-intel": LATEST, "win-setup": `${LATEST}/download/Trek-Setup-x86_64.exe`, "win-zip": LATEST, "linux-appimage": LATEST, "linux-arm": LATEST, "linux-deb": LATEST };
+  const CHIP = { "mac-arm": "Apple silicon", "mac-intel": "Intel", "win-setup": "Windows 11, x64", "linux-appimage": "x86_64", "linux-arm": "Arm" };
   const megabytes = (bytes) => `${Math.round(bytes / 1e6)} MB`;
 
   /** The Mac's chip from its GPU's name, where the browser gives one. Chrome and Firefox name it
@@ -66,7 +69,11 @@
       // Undecided (Safari): offer Apple silicon, say so, and put the Intel build one tap away.
       return { os: "mac", build: build || "mac-arm", sure: Boolean(build) };
     }
-    if (/Linux|X11|CrOS/i.test(`${platform} ${ua}`)) return { os: "linux", build: null, sure: true };
+    // Linux: offered only once a release has Linux files (`paint`), Arm where the browser says so.
+    if (/Linux|X11|CrOS/i.test(`${platform} ${ua}`)) {
+      const arm = /aarch64|arm64|armv8/i.test(`${platform} ${ua}`);
+      return { os: "linux", build: null, linux: arm ? "linux-arm" : "linux-appimage", sure: true };
+    }
     return { os: "other", build: null, sure: false };
   }
 
@@ -107,6 +114,14 @@
     const assets = (release && release.assets) || {};
     const href = (key) => (assets[key] && assets[key].url) || FALLBACK[key];
 
+    // The Linux card, only once the latest release has a Linux build.
+    const linux = Boolean(assets["linux-appimage"] || assets["linux-arm"]);
+    for (const card of all("[data-linux]")) {
+      card.hidden = !linux;
+      card.parentElement.classList.toggle("has-linux", linux);
+    }
+    if (who.os === "linux" && linux && assets[who.linux]) who = { ...who, build: who.linux };
+
     for (const a of all("[data-build]")) {
       const key = a.dataset.build;
       a.href = href(key);
@@ -120,7 +135,17 @@
     const other = document.querySelector("[data-dl-other]");
     const fine = document.querySelector("[data-dl-fine]");
     if (!primary || !label || !fine) return;
-    if (who.build) {
+    if (who.build && who.os === "linux") {
+      primary.href = href(who.build);
+      label.textContent = "Download for Linux";
+      if (other) {
+        other.hidden = false;
+        other.href = href("linux-deb");
+        other.textContent = ".deb for Ubuntu";
+      }
+      const size = assets[who.build].size ? `, ${megabytes(assets[who.build].size)}` : "";
+      fine.textContent = `Free and open source. Version ${release.version}, ${CHIP[who.build]}${size}. A preview. Make it executable, then run it.`;
+    } else if (who.build) {
       const windows = who.os === "windows";
       primary.href = href(who.build);
       label.textContent = windows ? "Download for Windows" : "Download for macOS";
@@ -138,8 +163,8 @@
       label.textContent = "See the downloads";
       if (other) other.hidden = true;
       if (who.os === "mobile") {
-        fine.textContent = "Trek is a desktop app. Open this page on your Mac or PC to download it. On a phone, use ";
-        fine.append(link("/remote/", "the remote"), " to answer your agents.");
+        fine.textContent = "Trek is a free, open-source desktop app. Open this page on your Mac or PC to download it. On a phone, use ";
+        fine.append(link("/remote/", "the\u00a0remote"), " to answer your agents.");
       } else {
         fine.textContent = "There is no Linux build yet. Trek runs on macOS and Windows.";
       }
@@ -228,17 +253,30 @@
     }, { rootMargin: "20% 0px" });
     driftable.forEach((el) => near.observe(el));
 
-    // Things come in once, a beat apart when they arrive together.
+    // Things come in once, a beat apart when they arrive together, and never more than two beats.
     const seen = new IntersectionObserver((entries) => {
       let n = 0;
       for (const entry of entries) {
         if (!entry.isIntersecting) continue;
-        entry.target.style.setProperty("--delay", `${(n++ * 0.08).toFixed(2)}s`);
+        entry.target.style.setProperty("--delay", `${(Math.min(n++, 2) * 0.1).toFixed(2)}s`);
         entry.target.classList.add("is-in");
         seen.unobserve(entry.target);
       }
     }, { rootMargin: "0px 0px -12% 0px" });
     all(".reveal").forEach((el) => seen.observe(el));
+
+    // The phones come together as their section arrives. Where the browser ties that to the scroll
+    // the stylesheet does it alone; elsewhere they start apart and meet once, here.
+    const phones = document.querySelector(".home .phones");
+    if (phones && !still.matches && !(window.CSS && CSS.supports("animation-timeline: view()"))) {
+      phones.classList.add("is-apart");
+      const meet = new IntersectionObserver((entries) => {
+        if (!entries.some((e) => e.isIntersecting)) return;
+        requestAnimationFrame(() => phones.classList.add("is-met"));
+        meet.disconnect();
+      }, { threshold: 0.3 });
+      meet.observe(phones);
+    }
 
     // Each recording is a still picture in the page (its poster). As one comes near, and only when
     // motion is welcome, the picture becomes the recording, which plays while it is on screen.
@@ -276,7 +314,13 @@
       }
     }, { rootMargin: "50% 0px" });
     posters.forEach((img) => coming.observe(img));
+    // The loops have no button: they stop with Reduce Motion, off screen and in a hidden tab.
     still.addEventListener("change", () => { if (still.matches) all("video").forEach((v) => v.pause()); });
+    document.addEventListener("visibilitychange", () => {
+      for (const v of all("video")) {
+        if (document.hidden) v.pause(); else { play.unobserve(v); play.observe(v); } // asks again whether it is seen
+      }
+    });
   } else {
     all(".reveal").forEach((el) => el.classList.add("is-in"));
   }

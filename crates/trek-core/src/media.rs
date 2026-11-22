@@ -36,17 +36,7 @@ pub const AGENT_INSTRUCTIONS: &str = "Video: you can't watch it yourself; for an
 /// (`~/Library/Caches/dev.trek.Trek/videos` on a Mac), or the data folder's when Trek's data is
 /// somewhere else (isolated, or `TREK_DATA_DIR`).
 pub fn video_cache_dir() -> PathBuf {
-    let moved = crate::paths::isolated()
-        || std::env::var_os("TREK_DATA_DIR").is_some_and(|d| !d.is_empty());
-    let cache = (!moved)
-        .then(|| {
-            directories::ProjectDirs::from("dev", "trek", "Trek")
-                .map(|p| p.cache_dir().to_path_buf())
-        })
-        .flatten();
-    cache
-        .unwrap_or_else(|| crate::paths::data_dir().join("cache"))
-        .join("videos")
+    crate::paths::cache_dir().join("videos")
 }
 
 /// Whether a tool row titled `title` is a call to `watch_video`: `mcp__trek-video__watch_video`
@@ -332,6 +322,10 @@ fn mentioned_paths(text: &str, cwd: Option<&Path>, keep: fn(&Path) -> bool) -> V
         } else {
             continue;
         };
+        // Another computer's (`\\server\share`): looking would connect there.
+        if crate::paths::reaches_out(&path, cwd) {
+            continue;
+        }
         if keep(&path) && !out.contains(&path) {
             out.push(path);
         }

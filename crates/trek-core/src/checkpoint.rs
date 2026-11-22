@@ -342,8 +342,19 @@ impl Repo {
     pub fn tree_now(&self) -> Result<String> {
         let index = TempIndex::new();
         // Starting from the user's index keeps its stat data: only files that changed are read.
+        // The copy keeps the index's own modification time too, which git's racy-clean check
+        // reads: a file changed in the same second the index recorded it, to the same size, is
+        // read again only because it isn't older than the index. macOS's copy keeps that time
+        // (a clone) and Windows' too; Linux's copy is new, and without this the change was missed
+        // and the checkpoint held the file as it had been.
         if self.index.exists() {
             std::fs::copy(&self.index, &index.0).context("copy the index")?;
+            if let Ok(modified) = std::fs::metadata(&self.index).and_then(|m| m.modified()) {
+                let _ = std::fs::File::options()
+                    .write(true)
+                    .open(&index.0)
+                    .and_then(|f| f.set_modified(modified));
+            }
         }
         let started = Instant::now();
         let big = self.big_untracked(&index)?;

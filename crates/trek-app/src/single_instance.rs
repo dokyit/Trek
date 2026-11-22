@@ -1,12 +1,13 @@
-//! One Trek per data folder, on Windows. macOS hands a second launch's links to the running app
-//! itself (`on_open_urls`, `on_reopen`); Windows starts another process, so Trek does the
-//! handing over: first thing in `main`, a launch takes the data folder's lock (the one the
+//! One Trek per data folder, on Windows and Linux. macOS hands a second launch's links to the
+//! running app itself (`on_open_urls`, `on_reopen`); Windows and Linux start another process (a
+//! `trek://` link from the browser, Open With in the file manager), so Trek does the handing over: first thing in `main`, a launch takes the data folder's lock (the one the
 //! workspace keeps, see `workspace::lock_folder`) or, finding it taken, sends what it was
 //! started with to the Trek holding it and exits.
 //!
 //! The running Trek listens on a named pipe of its own (`trek_ipc::pipe_name`: random in part,
 //! carrying its pid, only its user may open it) and writes the pipe's name to `trek.pipe` in the
-//! data folder, which is how a second launch finds it. The name isn't derived from the folder:
+//! data folder, which is how a second launch finds it. On Linux it's a Unix socket in the data
+//! folder (`trek_ipc::socket_dir`: a folder only its user may enter), named the same way. The name isn't derived from the folder:
 //! pipe names are machine-wide, and one anyone could work out is one another user could take
 //! first. A second launch connects the way trek-mcp does (`PipeStream::connect` checks the pipe
 //! is served by its user and by the pid its name carries), sends the arguments (`instance`) and
@@ -16,7 +17,7 @@
 //! locks) or have just quit, so the launch tries again for a while, and takes the lock itself if
 //! it comes free. Past that, the running Trek is hung: the launch says so and exits non-zero,
 //! rather than opening a second Trek on the same data.
-#![cfg_attr(not(windows), allow(dead_code))]
+#![cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 
 use gpui_kit::{App, Entity};
 use std::ffi::OsString;
@@ -61,10 +62,10 @@ pub enum Claim {
     Failed(String),
 }
 
-/// The launch's decision, first thing in `main`. Off the Windows path, always the Trek for its
-/// folder, as before.
+/// The launch's decision, first thing in `main`. On a Mac, always the Trek for its folder: macOS
+/// hands later launches over itself.
 pub fn claim() -> Claim {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     if let Some(dir) = folder() {
         let cwd = std::env::current_dir().unwrap_or_default();
         let open = Open {
@@ -80,7 +81,7 @@ pub fn claim() -> Claim {
 /// any other Trek, so it never looks at the user's folder: it claims the folder `TREK_DATA_DIR`
 /// gives it, which only its own launches share (its live check starts it a second time there,
 /// `shots`' `second-launch`), and without one it has a folder nothing else could launch into.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn folder() -> Option<PathBuf> {
     if std::env::var_os("TREK_SHOT_DIR").is_none() {
         return Some(trek_core::paths::data_dir());
@@ -145,7 +146,7 @@ pub fn launch_args(args: impl IntoIterator<Item = OsString>, cwd: &Path) -> Vec<
 }
 
 /// `claim` for the data folder `dir`, trying for at most `wait` to reach a running Trek.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub fn claim_in(dir: &Path, open: Open, wait: Duration) -> Claim {
     use trek_ipc::instance::ForwardError;
     let deadline = std::time::Instant::now() + wait;
@@ -167,6 +168,7 @@ pub fn claim_in(dir: &Path, open: Open, wait: Duration) -> Claim {
         }
         if let Some(address) = published(dir) {
             pid = trek_ipc::instance::served_by(&address).or(pid);
+            #[cfg(windows)]
             if !open.background {
                 allow_foreground(&address);
             }
@@ -209,13 +211,13 @@ pub fn claim_in(dir: &Path, open: Open, wait: Duration) -> Claim {
 
 /// " (process 1234)", for a running Trek whose process is known: Task Manager's Details tab lists
 /// it by that number.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn process(pid: Option<u32>) -> String {
     pid.map(|p| format!(" (process {p})")).unwrap_or_default()
 }
 
 /// The running Trek's pipe, as it wrote it to the data folder.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn published(dir: &Path) -> Option<PathBuf> {
     use std::io::Read as _;
     // A pipe's name is short: read no more than that, whatever the file has become.
@@ -241,7 +243,7 @@ fn allow_foreground(address: &Path) {
 }
 
 /// The Trek for `dir`: listen for later launches and say where.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn listen(dir: &Path, lock: std::fs::File, own: Vec<String>) -> Primary {
     let (tx, rx) = async_channel::unbounded();
     let forwarded = match start_listening(dir, tx) {
@@ -258,9 +260,31 @@ fn listen(dir: &Path, lock: std::fs::File, own: Vec<String>) -> Primary {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn start_listening(dir: &Path, tx: async_channel::Sender<Forwarded>) -> std::io::Result<()> {
+    #[cfg(windows)]
     let address = trek_ipc::pipe_name(0)?;
+    // A socket of this process's own (its pid in the name, as a pipe's), in a folder only this
+    // user may enter: the data folder's `run`, or one under /tmp when that path is too long.
+    #[cfg(target_os = "linux")]
+    let address = {
+        let name = format!("instance-{}.sock", std::process::id());
+        let folder = trek_ipc::socket_dir(&dir.join("run"), &name)?;
+        // Earlier Treks' sockets, which outlive them. The folder under /tmp is shared by every
+        // data folder of this user's, so only those whose process has gone.
+        for old in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
+            let n = old.file_name();
+            let gone = n
+                .to_str()
+                .and_then(|n| n.strip_prefix("instance-")?.strip_suffix(".sock"))
+                .and_then(|pid| pid.parse::<u32>().ok())
+                .is_some_and(|pid| !Path::new(&format!("/proc/{pid}")).exists());
+            if gone {
+                let _ = std::fs::remove_file(old.path());
+            }
+        }
+        folder.join(name)
+    };
     let rt = trek_core::runtime();
     let mut listener = {
         let _enter = rt.enter();

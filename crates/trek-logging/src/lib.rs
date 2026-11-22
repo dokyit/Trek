@@ -1,7 +1,10 @@
 //! Where Trek's log goes: stderr (a terminal launch), and a file a day in `~/Library/Logs/Trek`
 //! (kept a week), so a Finder launch leaves breadcrumbs too. A panic is logged with where it
 //! happened and a backtrace, and leaves a note the next launch shows and a report it can send
-//! (`CrashReport`, with the user's yes).
+//! (`CrashReport`, with the user's yes). A main thread that stops making progress is logged too,
+//! with its stacks on a Mac (`freeze`).
+
+pub mod freeze;
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -39,6 +42,7 @@ pub fn init() {
     let file = DailyFile::open(log_dir());
     let file_layer = file.map(|f| {
         let f: &'static DailyFile = Box::leak(Box::new(f));
+        let _ = FILE.set(f);
         tracing_subscriber::fmt::layer()
             .with_ansi(false)
             .with_writer(move || f.writer())
@@ -163,7 +167,7 @@ fn install_panic_hook() {
             .name()
             .unwrap_or("unnamed")
             .to_string();
-        let backtrace = std::backtrace::Backtrace::force_capture();
+        let backtrace = backtrace_text(&std::backtrace::Backtrace::force_capture());
         tracing::error!("panic on thread '{thread}' at {location}: {message}\n{backtrace}");
         let data_dir = trek_core::paths::data_dir();
         write_crash_note(&data_dir, &format!("{location}: {message}"));
@@ -175,11 +179,115 @@ fn install_panic_hook() {
                 thread,
                 location,
                 message,
-                backtrace: backtrace.to_string(),
+                backtrace,
             },
         );
         default(info);
     }));
+}
+
+/// A backtrace as the log and the crash report keep it. A release build is stripped, so its
+/// frames have no names: then each keeps its address (the short form leaves them out), under the
+/// line saying which binary they are in and where it was loaded, and `agent-cli symbolicate`
+/// names them from the symbols the release saved (docs/RELEASING.md, "Symbols").
+fn backtrace_text(backtrace: &std::backtrace::Backtrace) -> String {
+    let short = backtrace.to_string();
+    // A stripped Mac binary keeps one symbol, so its frames come out as that, not as unknown.
+    if short.contains("<unknown>") || short.contains("__mh_execute_header") {
+        format!("{}\n{backtrace:#}", binary_image())
+    } else {
+        short
+    }
+}
+
+/// The running Trek as symbols are found for it: its version and architecture and, on a Mac, the
+/// executable's name, UUID and load address, as in `Trek 0.4.64 (aarch64), trek
+/// <2F2D0CB7-2A2F-397E-A644-A954494E8264> at 0x104710000`. The UUID is the one its saved dSYM
+/// carries; the load address turns the addresses in a backtrace into offsets in the binary.
+pub fn binary_image() -> String {
+    let arch = std::env::consts::ARCH;
+    match executable_image() {
+        Some((name, uuid, base)) => {
+            format!(
+                "Trek {} ({arch}), {name} <{uuid}> at {base:#x}",
+                trek_core::VERSION
+            )
+        }
+        None => format!("Trek {} ({arch})", trek_core::VERSION),
+    }
+}
+
+/// The main executable's file name, LC_UUID and load address, from dyld's image 0.
+#[cfg(target_os = "macos")]
+fn executable_image() -> Option<(String, String, usize)> {
+    const MH_MAGIC_64: u32 = 0xfeed_facf;
+    const LC_UUID: u32 = 0x1b;
+    // dyld's own, in libSystem (libc's bindings are deprecated in favour of the mach2 crate).
+    unsafe extern "C" {
+        fn _dyld_get_image_header(image_index: u32) -> *const std::ffi::c_void;
+        fn _dyld_get_image_name(image_index: u32) -> *const std::ffi::c_char;
+    }
+    // SAFETY: image 0 is the main executable, mapped for the life of the process; its header and
+    // load commands are read within the `sizeofcmds` the header gives.
+    unsafe {
+        let header = _dyld_get_image_header(0).cast::<u8>();
+        if header.is_null() || header.cast::<u32>().read_unaligned() != MH_MAGIC_64 {
+            return None;
+        }
+        let ncmds = header.add(16).cast::<u32>().read_unaligned();
+        let sizeofcmds = header.add(20).cast::<u32>().read_unaligned() as usize;
+        let commands = header.add(32);
+        let mut at = 0usize;
+        let mut uuid = None;
+        for _ in 0..ncmds {
+            if at + 8 > sizeofcmds {
+                break;
+            }
+            let cmd = commands.add(at).cast::<u32>().read_unaligned();
+            let size = commands.add(at + 4).cast::<u32>().read_unaligned() as usize;
+            if cmd == LC_UUID && size >= 24 && at + 24 <= sizeofcmds {
+                let b = std::slice::from_raw_parts(commands.add(at + 8), 16);
+                uuid = Some(format!(
+                    "{:02X}{:02X}{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+                    b[0],
+                    b[1],
+                    b[2],
+                    b[3],
+                    b[4],
+                    b[5],
+                    b[6],
+                    b[7],
+                    b[8],
+                    b[9],
+                    b[10],
+                    b[11],
+                    b[12],
+                    b[13],
+                    b[14],
+                    b[15]
+                ));
+                break;
+            }
+            if size < 8 {
+                break;
+            }
+            at += size;
+        }
+        let name = _dyld_get_image_name(0);
+        let name = if name.is_null() {
+            "trek".to_string()
+        } else {
+            let path = std::ffi::CStr::from_ptr(name).to_string_lossy();
+            path.rsplit('/').next().unwrap_or("trek").to_string()
+        };
+        Some((name, uuid?, header as usize))
+    }
+}
+
+/// Elsewhere the version and architecture alone, for now (docs/RELEASING.md, "Symbols").
+#[cfg(not(target_os = "macos"))]
+fn executable_image() -> Option<(String, String, usize)> {
+    None
 }
 
 /// What a panic leaves for the next launch to report, if the user said yes to crash reports
@@ -308,6 +416,21 @@ pub fn take_crash_note(data_dir: &Path) -> Option<String> {
     ))
 }
 
+/// The log files are closed for good (`stop_files`).
+static STOPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Stop writing log files, for the rest of this process: "Delete all Trek data" is deleting them,
+/// and the log mustn't make them again on the way out. The log still goes to stderr.
+pub fn stop_files() {
+    STOPPED.store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Some(file) = FILE.get() {
+        *file.current.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+}
+
+/// The day's file the log writes to, once `init` opened its folder.
+static FILE: std::sync::OnceLock<&'static DailyFile> = std::sync::OnceLock::new();
+
 /// `trek-<date>.log` in a folder, a new file each day, older ones pruned.
 struct DailyFile {
     dir: PathBuf,
@@ -329,6 +452,9 @@ impl DailyFile {
     }
 
     fn write(&self, buf: &[u8]) -> std::io::Result<()> {
+        if STOPPED.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(());
+        }
         let today = chrono::Local::now().date_naive();
         let day = today.format("%Y-%m-%d").to_string();
         let mut current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
@@ -603,6 +729,32 @@ pub mod tests {
         let kept: Vec<i64> = crash_reports(&dir).iter().map(|r| r.at).collect();
         assert_eq!(kept, [4, 5, 6, 7, 8]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_binary_image_line_names_this_build() {
+        let line = binary_image();
+        let head = format!("Trek {} ({})", trek_core::VERSION, std::env::consts::ARCH);
+        assert!(line.starts_with(&head), "{line}");
+        #[cfg(target_os = "macos")]
+        {
+            let exe = std::env::current_exe().unwrap();
+            let name = exe.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(line.contains(&format!(", {name} <")), "{line}");
+            // The UUID the linker gave this executable, as dwarfdump reads it from the file.
+            if let Ok(out) = std::process::Command::new("dwarfdump")
+                .arg("--uuid")
+                .arg(&exe)
+                .output()
+            {
+                let out = String::from_utf8_lossy(&out.stdout).into_owned();
+                if let Some(uuid) = out.split_whitespace().nth(1) {
+                    assert!(line.contains(&format!("<{uuid}>")), "{line} / {out}");
+                }
+            }
+            let at = line.rsplit(" at 0x").next().unwrap();
+            assert!(usize::from_str_radix(at, 16).is_ok_and(|a| a > 0), "{line}");
+        }
     }
 
     #[test]

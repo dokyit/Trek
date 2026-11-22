@@ -6,7 +6,7 @@
 // returns.
 
 import { openWire, supported } from './wire.js';
-import { liveHashes, sessionUrl } from './link.js';
+import { liveHashes, mayReplace, sessionUrl } from './link.js';
 import * as store from './store.js';
 
 export const PROTOCOL = 1;
@@ -34,6 +34,8 @@ export class ClientError extends Error {
  * - `permission`: the browser needs a tap before it may look on the local network (Chrome's Local
  *   Network Access); `connect({ gesture: true })` from a tap.
  * - `unauthorized`: the machine doesn't know this phone any more (unpaired there): pair again.
+ * - `pairing_failed`: the code was refused. `pairing_conflict`: the computer that answered says
+ *   it's one this phone keeps already, without its certificates (`mayReplace`): not kept.
  * - `unsupported`: this browser has no WebTransport.
  */
 export class Client {
@@ -118,8 +120,8 @@ export class Client {
       if (this.wire === wire) this.wire = null;
       if (err.code === 'unauthorized') {
         this.setStatus('unauthorized', err.message);
-      } else if (err.code === 'pairing_failed') {
-        this.setStatus('pairing_failed', err.message);
+      } else if (err.code === 'pairing_failed' || err.code === 'pairing_conflict') {
+        this.setStatus(err.code, err.message);
       } else if (err.code === 'unsupported_protocol') {
         this.setStatus('unsupported_protocol', err.message);
       } else {
@@ -176,6 +178,13 @@ export class Client {
         platform: 'web',
       });
       if (reply.type !== 'paired') throw new ClientError('bad_reply', `the computer answered ${reply.type}`);
+      // A computer kept here already under the id this one gives keeps its place unless this is
+      // it (`mayReplace`): a link can name any computer's id.
+      const id = reply.host?.id || m.hostId;
+      const kept = id ? await store.machine(id) : null;
+      if (kept && !mayReplace(kept, m.certs)) {
+        throw new ClientError('pairing_conflict', `This phone is paired with ${kept.name} already, and the computer that answered isn’t it. If it’s the same computer, forget it under Machines, then pair again.`);
+      }
       m.token = reply.token;
       m.pairedAt = Date.now();
       delete m.pairing;

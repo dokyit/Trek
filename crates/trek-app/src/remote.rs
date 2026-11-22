@@ -198,6 +198,10 @@ pub struct Watched {
     /// back (`STREAM_STEP`): it goes on a later tick, whether or not more of it comes.
     stream_sent: Option<std::time::Instant>,
     held: bool,
+    /// It had sub-agents at work at the last tick: their rows change while nothing else in the
+    /// transcript does (one of Trek's works in a thread of its own), so they're looked at every
+    /// tick meanwhile, and once more after the last is done.
+    subs_live: bool,
 }
 
 /// An answer still streaming is sent whole each time it grows: every tick while it's shorter
@@ -237,6 +241,7 @@ impl Watched {
             recount: false,
             stream_sent: None,
             held: false,
+            subs_live: false,
         }
     }
 
@@ -703,6 +708,11 @@ fn mobile_dir() -> PathBuf {
     trek_core::paths::data_dir().join("mobile")
 }
 
+/// The paired devices' file, which the phone server keeps (`ServerConfig::devices_path`).
+fn devices_file() -> PathBuf {
+    mobile_dir().join("devices.json")
+}
+
 /// The web remote's side of the phone server: its certificates beside the server's own, and the
 /// page at trekdesktop.com/remote, or the copy `TREK_WEB_REMOTE_PAGE` names
 /// (`http://localhost:8080/remote/`, one served on this machine while it's worked on or checked),
@@ -771,8 +781,31 @@ pub(crate) fn computer_name() -> String {
     }
 }
 
+/// The computer's pretty name where systemd keeps one ("Tobias's Laptop", `hostnamectl
+/// set-hostname --pretty`), else its host name.
+#[cfg(target_os = "linux")]
+pub(crate) fn computer_name() -> String {
+    let pretty = std::fs::read_to_string("/etc/machine-info")
+        .ok()
+        .and_then(|info| {
+            info.lines().find_map(|l| {
+                let v = l.strip_prefix("PRETTY_HOSTNAME=")?.trim();
+                Some(v.trim_matches(|c| c == '"' || c == '\'').to_string())
+            })
+        })
+        .filter(|s| !s.is_empty());
+    pretty
+        .or_else(|| {
+            std::fs::read_to_string("/proc/sys/kernel/hostname")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| crate::words::words().computer.to_string())
+}
+
 /// "Tobias's MacBook Pro", as Sharing settings name it.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub(crate) fn computer_name() -> String {
     trek_core::procs::command("scutil")
         .args(["--get", "ComputerName"])
@@ -847,7 +880,7 @@ impl Workspace {
                                 link::describe(peer.ip(), local.ip(), tailscale, interface_of(local).as_deref())
                             })
                     });
-                    config.devices_path = Some(mobile_dir().join("devices.json"));
+                    config.devices_path = Some(devices_file());
                     // What a Trek that quit mid-upload left of a phone's file.
                     uploads::sweep_stale(&uploads::uploads_dir(), uploads::STALE);
                     config.tls = Some(identity);
@@ -902,6 +935,11 @@ impl Workspace {
                         remote.announce = Some((name, id));
                         remote.policy = policy;
                         remote.web = Some(web);
+                        // Unpaired from Settings while this server read the devices file.
+                        for id in std::mem::take(&mut ws.unpaired_while_starting) {
+                            remote.handle.revoke(&id);
+                        }
+                        remote.devices = remote.handle.devices();
                         ws.remote = Some(remote);
                         // A port or address changed while it started (`sync_remote` waits for a start
                         // to finish): start again with the new one.
@@ -990,7 +1028,7 @@ impl Workspace {
         config.bind = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
         config.advertise = Some(address.clone());
         config.routes = vec![address.clone()];
-        config.devices_path = Some(mobile_dir().join("devices.json"));
+        config.devices_path = Some(devices_file());
         config.tls = Some(identity);
         config.features = server_features();
         let web = self.settings.mobile.web;
@@ -1026,6 +1064,7 @@ impl Workspace {
         if let Some(remote) = self.remote.take() {
             remote.handle.shutdown();
         }
+        *self.saved_devices.borrow_mut() = None;
         cx.notify();
     }
 
@@ -1067,13 +1106,44 @@ impl Workspace {
         }
     }
 
+    /// Unpair a phone or machine. With the phone server on, it's dropped and its live connection
+    /// told. With it off, nothing can tell the device, so it comes off the devices file instead:
+    /// its token's hash goes, and the server turns it away the next time it starts and the device
+    /// connects. A server starting just then takes it off too, once it's up.
     pub fn revoke_device(&mut self, device_id: &str, cx: &mut Context<Self>) {
         if let Some(remote) = self.remote.as_mut() {
             remote.handle.revoke(device_id);
             remote.devices = remote.handle.devices();
             remote.connected.remove(device_id);
             cx.notify();
+            return;
         }
+        if self.remote_starting {
+            self.unpaired_while_starting.push(device_id.to_string());
+        }
+        if let Err(e) = tr::DeviceRegistry::revoke_saved(devices_file(), device_id) {
+            cx.emit(WorkspaceEvent::Failure {
+                message: format!("Couldn't unpair it: {e}."),
+            });
+        }
+        *self.saved_devices.borrow_mut() = None;
+        cx.notify();
+    }
+
+    /// The paired phones and machines: the server's list while it runs, else the devices file's
+    /// (read once, and again after an unpair or the server stopping).
+    pub fn paired_devices(&self) -> Vec<tr::DeviceInfo> {
+        if let Some(remote) = &self.remote {
+            return remote.devices.clone();
+        }
+        self.saved_devices
+            .borrow_mut()
+            .get_or_insert_with(|| {
+                tr::DeviceRegistry::load(devices_file())
+                    .map(|r| r.list())
+                    .unwrap_or_default()
+            })
+            .clone()
     }
 
     // ---- requests from phones ----
@@ -2066,8 +2136,8 @@ impl Workspace {
             ask: live
                 .and_then(|l| l.permissions.first())
                 .filter(|p| p.prompt.is_none())
-                .map(|p| (p, clip_text_to(&p.detail, tr::MAX_ASK_DETAIL)))
-                .filter(|(p, detail)| *detail == p.detail)
+                .map(|p| (p, trek_core::approval_text::shown(&p.detail)))
+                .filter(|(_, shown)| clip_text_to(shown, tr::MAX_ASK_DETAIL) == *shown)
                 .map(|(p, detail)| tr::RowAsk {
                     request_id: p.request_id.clone(),
                     detail,
@@ -2257,6 +2327,9 @@ impl Workspace {
     ) -> Vec<tr::HostEvent> {
         let cwd = self.thread(id).and_then(|t| t.cwd.clone());
         let probe = self.thread(id).and_then(|t| self.verify_probe(t));
+        let at_work = !self.sub_agents_at_work(id).is_empty();
+        let subs = at_work || w.subs_live;
+        w.subs_live = at_work;
         let Some(live) = self.live.get_mut(id) else {
             return vec![];
         };
@@ -2277,6 +2350,7 @@ impl Workspace {
             && cwd == w.cwd
             && !w.recount
             && !w.held
+            && !subs
         {
             return vec![];
         }
@@ -2339,6 +2413,34 @@ impl Workspace {
                 item_time(&live.items[ix]),
                 body,
             ));
+        }
+        // Sub-agents' rows above what was just looked at: where each stands now (its status
+        // line, its steps, its state) when that changed with no change to the item itself.
+        if subs {
+            for ix in w.from..floor.max(w.from).min(len) {
+                if !matches!(&live.items[ix], Item::Tool { id, title, .. }
+                    if title == "Subagent" || trek_core::orchestrate::task_of_row(id).is_some())
+                {
+                    continue;
+                }
+                let body = item_body(self, id, live, cwd.as_deref(), probe.as_ref(), ix);
+                let h = hash(&body);
+                if w.items[ix].hash == Some(h) {
+                    continue;
+                }
+                w.seq += 1;
+                w.items[ix] = Sent {
+                    seq: w.seq,
+                    hash: Some(h),
+                };
+                out.push(item_event(
+                    id,
+                    format!("i{ix}"),
+                    w.seq,
+                    item_time(&live.items[ix]),
+                    body,
+                ));
+            }
         }
         if asks {
             // Requests: new or changed ones as they are, answered ones as resolved.
@@ -3186,8 +3288,12 @@ fn request_cards(ws: &Workspace, id: &str) -> Vec<(String, tr::ItemBody)> {
             let body = match &p.prompt {
                 None => tr::ItemBody::Approval {
                     request_id: p.request_id.clone(),
-                    title: clip_text_to(&p.title, 64 << 10),
-                    detail: clip_text_to(&p.detail, MAX_PHONE_ITEM_TEXT - (64 << 10)),
+                    // Drawn as the Mac's card draws them: nothing in them reads as something else.
+                    title: clip_text_to(&trek_core::approval_text::shown(&p.title), 64 << 10),
+                    detail: clip_text_to(
+                        &trek_core::approval_text::shown(&p.detail),
+                        MAX_PHONE_ITEM_TEXT - (64 << 10),
+                    ),
                     state: tr::ApprovalState::Pending,
                     // No "Allow for session" on the phone for what a rule asks about every time.
                     asked_by: ws
@@ -3295,7 +3401,9 @@ fn restore_phone_answers(answers: &mut [tr::QA], questions: &[trek_agents::Quest
 
 /// An approval in a few plain words, as a sentence of its own: "Run cargo test?".
 fn asking_words(title: &str, detail: &str) -> String {
-    let words = crate::workspace::attention::approval_words(title, detail);
+    let words = trek_core::approval_text::shown(&crate::workspace::attention::approval_words(
+        title, detail,
+    ));
     let mut chars = words.trim_end_matches('?').chars();
     match chars.next() {
         Some(first) => format!("{}{}?", first.to_uppercase(), chars.as_str()),

@@ -4238,6 +4238,12 @@ impl Window {
         result
     }
 
+    /// Trek: paint what `f` paints at `opacity` (times any opacity it's already under), decided at
+    /// paint time, as an element's style opacity is decided before layout.
+    pub fn with_paint_opacity<R>(&mut self, opacity: f32, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.with_element_opacity(Some(opacity), f)
+    }
+
     pub(crate) fn with_element_opacity<R>(
         &mut self,
         opacity: Option<f32>,

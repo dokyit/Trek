@@ -628,6 +628,8 @@ type Step<'a> = &'a dyn Fn(&Trek, &mut TestAppContext);
 /// edges of the wide bordered boxes (the Inbox's card) as painted.
 struct Painted {
     glyphs: Vec<Area>,
+    /// The glyphs cut by their masks (part of the letter not painted), with their opacity.
+    cut: Vec<(Area, f32)>,
     rows: Vec<(String, Span, Span)>,
     edges: Vec<Area>,
 }
@@ -637,7 +639,7 @@ fn painted(trek: &Trek, cx: &mut TestAppContext) -> Painted {
     let (left, right) = (side.left().as_f32(), side.right().as_f32());
     let sidebar = cx.read(|cx| trek.root.read(cx).sidebar.clone());
     let rows = sidebar.read_with(cx, |s, _| s.painted_bands());
-    let (glyphs, edges) = trek.window(cx, |window, _| {
+    let (glyphs, cut, edges) = trek.window(cx, |window, _| {
         let k = window.scale_factor();
         let visible = |b: gpui_kit::Bounds<gpui_kit::ScaledPixels>,
                        m: gpui_kit::Bounds<gpui_kit::ScaledPixels>|
@@ -650,10 +652,19 @@ fn painted(trek: &Trek, cx: &mut TestAppContext) -> Painted {
             );
             (a.2 > a.0 && a.3 > a.1 && a.0 >= left - 0.5 && a.2 <= right + 0.5).then_some(a)
         };
-        let glyphs = window
-            .painted_monochrome_sprites()
-            .iter()
+        let sprites = window.painted_monochrome_sprites();
+        // Painted at all: a row faded out altogether paints its letters invisibly.
+        let seen = sprites.iter().filter(|s| s.color.a > 0.01);
+        let glyphs = seen
+            .clone()
             .filter_map(|s| visible(s.bounds, s.content_mask.bounds))
+            .collect();
+        let cut = seen
+            .filter_map(|s| {
+                let a = visible(s.bounds, s.content_mask.bounds)?;
+                let full = (s.bounds.origin.y.0 / k, s.bounds.bottom().0 / k);
+                (a.1 > full.0 + 0.5 || a.3 < full.1 - 0.5).then_some((a, s.color.a))
+            })
             .collect();
         let mut edges = vec![];
         for q in window.painted_quads() {
@@ -674,10 +685,11 @@ fn painted(trek: &Trek, cx: &mut TestAppContext) -> Painted {
                 }
             }
         }
-        (glyphs, edges)
+        (glyphs, cut, edges)
     });
     Painted {
         glyphs,
+        cut,
         rows,
         edges,
     }
@@ -686,6 +698,12 @@ fn painted(trek: &Trek, cx: &mut TestAppContext) -> Painted {
 /// What's wrong with a frame: two rows painted over the same pixels, a glyph painted across rows
 /// (outside the band its row may paint), or the card's edge painted through a row.
 fn overprint(p: &Painted) -> Option<String> {
+    // Letters are never seen cut in half: a row is faded out before its text is cut.
+    if let Some((g, alpha)) = p.cut.iter().find(|(_, a)| *a > 0.25) {
+        return Some(format!(
+            "a letter cut by a row over it, at {alpha} opacity: {g:?}"
+        ));
+    }
     for (i, (ka, _, (a0, a1))) in p.rows.iter().enumerate() {
         for (kb, _, (b0, b1)) in &p.rows[i + 1..] {
             if a1.min(*b1) - a0.max(*b0) > 0.5 {
@@ -1258,7 +1276,20 @@ fn groups_trading_places_pass_whole_the_one_going_up_over_the_other() {
             "drawn where it was"
         );
 
-        // Passing: `a`'s row isn't painted under `b`'s group, and `b` takes the click there.
+        // Passing: `a`'s row isn't painted under `b`'s group, and `b` takes the click there. Its
+        // fill is told by its colour (it fades as it goes under, `trek_motion::CUT_FADE`).
+        let k = trek.window(cx, |w, _| w.scale_factor());
+        let fill_of_a = trek.window(cx, |w, _| {
+            w.painted_quads()
+                .iter()
+                .filter(|q| {
+                    (q.bounds.size.height.0 - row_a.size.height.as_f32() * k).abs() < 1.
+                        && (q.bounds.size.width.0 - row_a.size.width.as_f32() * k).abs() < 1.
+                })
+                .find_map(|q| q.background.as_solid().filter(|c| c.a > 0.))
+                .map(|c| (c.h, c.s, c.l))
+                .expect("the open row's fill")
+        });
         let mut passed = false;
         for _ in 0..50 {
             frame(&trek, cx, 8);
@@ -1275,7 +1306,11 @@ fn groups_trading_places_pass_whole_the_one_going_up_over_the_other() {
                         (q.bounds.size.height.0 - row_a.size.height.as_f32() * k).abs() < 1.
                             && (q.bounds.size.width.0 - row_a.size.width.as_f32() * k).abs() < 1.
                     })
-                    .filter(|q| q.background.as_solid().is_some_and(|c| c.a > 0.))
+                    .filter(|q| {
+                        q.background
+                            .as_solid()
+                            .is_some_and(|c| (c.h, c.s, c.l) == fill_of_a)
+                    })
                     .map(|q| {
                         (
                             q.bounds.origin.y.0 / k,

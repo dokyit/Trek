@@ -1,0 +1,33 @@
+#!/bin/sh
+# The AppImage's entry point (script/bundle-linux.sh puts it at the AppDir's root). Starts Trek,
+# after checking the system has the libraries Trek links that the AppImage doesn't carry (GTK 3,
+# WebKitGTK 4.1): without them the dynamic loader's own message names a file and nothing else,
+# so this one says which package to install, on the terminal and, when started from a menu or a
+# file manager, in a dialog.
+HERE=$(dirname "$(readlink -f "$0")")
+TREK="$HERE/usr/bin/trek"
+
+missing=$(ldd "$TREK" 2>/dev/null | awk '/not found/ {print $1}')
+if [ -n "$missing" ]; then
+  hint="Ubuntu and Debian: sudo apt install libgtk-3-0 libwebkit2gtk-4.1-0 libsoup-3.0-0 libxkbcommon-x11-0
+Fedora: sudo dnf install gtk3 webkit2gtk4.1 libxkbcommon-x11
+Arch: sudo pacman -S gtk3 webkit2gtk-4.1 libxkbcommon-x11"
+  text="Trek needs some libraries this system doesn't have:
+$missing
+
+Install them with your package manager, then open Trek again.
+$hint"
+  echo "$text" >&2
+  if [ ! -t 2 ]; then
+    if command -v zenity >/dev/null 2>&1; then
+      zenity --error --title=Trek --no-wrap --text="$text" 2>/dev/null
+    elif command -v kdialog >/dev/null 2>&1; then
+      kdialog --title Trek --error "$text" 2>/dev/null
+    elif command -v notify-send >/dev/null 2>&1; then
+      notify-send "Trek can't start" "It needs GTK 3 and WebKitGTK 4.1 from your package manager."
+    fi
+  fi
+  exit 127
+fi
+
+exec "$TREK" "$@"

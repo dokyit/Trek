@@ -65,12 +65,13 @@ pub fn title_bar_height() -> f32 {
 
 /// How wide the caption buttons are, which `TitleBar` draws as a row of three squares as tall as
 /// the bar (34 px, 102 in all; Windows 11's own are 46 wide): 0 on macOS, where the traffic lights
-/// are on the left. `TitleBar` puts its content left of them by itself; this is for what Trek
-/// draws outside a `TitleBar` (Quick Look's header).
-pub const RIGHT_RESERVE: f32 = if cfg!(target_os = "macos") {
-    0.
-} else {
+/// are on the left, and on Linux, where the window manager draws them in its own frame (Trek's
+/// window is an X11 one there, `linux_gtk::prefer_x11`). `TitleBar` puts its content left of them
+/// by itself; this is for what Trek draws outside a `TitleBar` (Quick Look's header).
+pub const RIGHT_RESERVE: f32 = if cfg!(windows) {
     3. * TITLE_BAR_HEIGHT_PX
+} else {
+    0.
 };
 
 /// `TitleBar`'s height, as a plain number.

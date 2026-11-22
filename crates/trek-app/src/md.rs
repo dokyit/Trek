@@ -379,20 +379,41 @@ fn dress(
         .on_link_click(move |url, _, window, cx| {
             // A trek:// link is Trek's own to open (a thread an agent handed work to, a file);
             // a link to an image on disk previews it here; to another file or folder, opens it
-            // with the system; a scheme (https:, mailto:) stays a URL; anything else can't open —
-            // open_url's -50 says so bluntly.
-            if url.starts_with("trek://") {
-                crate::deep_link::open(url, cx);
-            } else if let Some(path) = link_path(url, link_cwd.as_deref()) {
-                if crate::image_preview::showable(&path) {
-                    crate::image_preview::open(vec![path], 0, window, cx);
-                } else {
-                    cx.open_with_system(&path);
+            // with the system; a web or mail address opens in the browser or the mail app. What
+            // an agent writes can name anything, so a file that runs a program when it's opened,
+            // or a link another app takes (ssh:, smb:, vscode:), asks first, showing where it
+            // goes; javascript: and data: links open nowhere.
+            match click(url, link_cwd.as_deref(), Path::exists) {
+                Click::Trek => crate::deep_link::open(url, cx),
+                Click::Preview(path) => crate::image_preview::open(vec![path], 0, window, cx),
+                Click::Open(path) => cx.open_with_system(&path),
+                Click::Web => cx.open_url(url),
+                Click::AskOpen(path) => {
+                    let detail = format!(
+                        "{}\n\nOpening it runs a program. Only open it if you know what it does.",
+                        path.display()
+                    );
+                    ask_then(window, cx, "Open a file that runs a program?", &detail, move |cx| {
+                        cx.open_with_system(&path)
+                    });
                 }
-            } else if is_url(url) {
-                cx.open_url(url);
-            } else {
-                crate::toast::push(window, format!("No file or URL at {url}"), cx);
+                Click::AskUrl(scheme) => {
+                    let detail = format!(
+                        "{url}\n\nThis link opens in the app that takes {scheme}: links. Only open it if you know where it goes."
+                    );
+                    let url = url.to_string();
+                    ask_then(window, cx, "Open a link in another app?", &detail, move |cx| {
+                        cx.open_url(&url)
+                    });
+                }
+                Click::Refuse(scheme) => crate::toast::push(
+                    window,
+                    format!("Trek doesn't open {scheme}: links"),
+                    cx,
+                ),
+                Click::Nothing => {
+                    crate::toast::push(window, format!("No file or URL at {url}"), cx)
+                }
             }
         });
     // Liveness is read only when rendering, so the answer finishing doesn't reparse it.
@@ -445,23 +466,191 @@ struct PathRef {
     resolved: Option<PathBuf>,
 }
 
+/// What clicking a link in an answer, a note or a message does ([`click`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Click {
+    /// `trek://`: Trek's own (`deep_link`).
+    Trek,
+    /// A picture on disk, previewed here.
+    Preview(PathBuf),
+    /// Another file or a folder, opened with the system.
+    Open(PathBuf),
+    /// A file that runs a program when it's opened (`runs_when_opened`): asked about first.
+    AskOpen(PathBuf),
+    /// `http:`, `https:` or `mailto:`, opened in the browser or the mail app.
+    Web,
+    /// Any other scheme (`ssh:`, `smb:`, `vscode:`, `ms-settings:`): another app takes it, so
+    /// it's asked about first. Carries the scheme.
+    AskUrl(String),
+    /// `javascript:`, `data:` and the like, and a `file:` address that names no file here:
+    /// nothing to open. Carries the scheme.
+    Refuse(String),
+    /// Neither a file here nor an address.
+    Nothing,
+}
+
+/// What clicking `url` does, for a link in text an agent wrote (or anyone it read): `exists`
+/// asks the disk.
+fn click(url: &str, cwd: Option<&Path>, exists: impl Fn(&Path) -> bool) -> Click {
+    if url.starts_with("trek://") {
+        return Click::Trek;
+    }
+    if let Some(path) = link_path_by(url, cwd, &exists) {
+        return if crate::image_preview::showable(&path) {
+            Click::Preview(path)
+        } else if runs_when_opened(&path) {
+            Click::AskOpen(path)
+        } else {
+            Click::Open(path)
+        };
+    }
+    if !is_url(url) {
+        return Click::Nothing;
+    }
+    let scheme = url
+        .split_once(':')
+        .map(|(s, _)| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    match scheme.as_str() {
+        "http" | "https" | "mailto" => Click::Web,
+        "javascript" | "vbscript" | "data" | "blob" | "about" | "file" => Click::Refuse(scheme),
+        _ => Click::AskUrl(scheme),
+    }
+}
+
+/// Ask `title` (with `detail`, which names what opens) before `then`.
+fn ask_then(
+    window: &mut Window,
+    cx: &mut App,
+    title: &str,
+    detail: &str,
+    then: impl FnOnce(&mut App) + 'static,
+) {
+    let answer = window.prompt(
+        PromptLevel::Warning,
+        title,
+        Some(detail),
+        &["Open", "Cancel"],
+        cx,
+    );
+    cx.spawn(async move |cx| {
+        if answer.await == Ok(0) {
+            cx.update(then);
+        }
+    })
+    .detach();
+}
+
+/// Whether opening `path` with the system runs a program rather than showing a document: an app
+/// or installer, a script or shortcut the system runs (`.command`, `.sh`, `.bat`, `.ps1`, `.lnk`,
+/// `.webloc`…), or, on a Mac or Linux, a file marked executable.
+fn runs_when_opened(path: &Path) -> bool {
+    const RUN: &[&str] = &[
+        "app",
+        "command",
+        "tool",
+        "terminal",
+        "sh",
+        "bash",
+        "zsh",
+        "csh",
+        "ksh",
+        "fish",
+        "py",
+        "pl",
+        "rb",
+        "workflow",
+        "action",
+        "scpt",
+        "scptd",
+        "applescript",
+        "pkg",
+        "mpkg",
+        "dmg",
+        "jar",
+        "webloc",
+        "inetloc",
+        "fileloc",
+        "url",
+        "lnk",
+        "exe",
+        "msi",
+        "msix",
+        "appx",
+        "appinstaller",
+        "bat",
+        "cmd",
+        "com",
+        "ps1",
+        "psm1",
+        "vbs",
+        "vbe",
+        "js",
+        "jse",
+        "wsf",
+        "wsh",
+        "hta",
+        "scr",
+        "cpl",
+        "msc",
+        "reg",
+        "appref-ms",
+        "library-ms",
+        "search-ms",
+        "searchconnector-ms",
+        "application",
+        "desktop",
+        "appimage",
+        "run",
+        "bin",
+        // Linux's packages: opening one starts an installer.
+        "deb",
+        "rpm",
+        "snap",
+        "flatpak",
+        "flatpakref",
+        "flatpakrepo",
+    ];
+    let by_name = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| RUN.contains(&e.to_ascii_lowercase().as_str()));
+    #[cfg(unix)]
+    let marked = {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    };
+    #[cfg(not(unix))]
+    let marked = false;
+    by_name || marked
+}
+
 /// The file a link points at on disk, if it does: absolute and `~` paths as written, `file://`
 /// unwrapped, and relative links resolved against the answer's folder. Only real paths count.
 pub fn link_path(url: &str, cwd: Option<&Path>) -> Option<PathBuf> {
+    link_path_by(url, cwd, |p| p.exists())
+}
+
+/// [`link_path`], asking `exists` of the disk.
+fn link_path_by(url: &str, cwd: Option<&Path>, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
     let raw = url.strip_prefix("file://").unwrap_or(url);
     // `file:///C:/x.png`: a drive after the slash that starts a file URL's path.
     let raw = match raw.strip_prefix('/') {
         Some(rest) if drive_prefix(rest) => rest,
         _ => raw,
     };
-    let path = resolve_link(raw, cwd)?;
-    if path.exists() {
+    // A file on another computer (`\\server\share\…`) isn't looked at: an answer's link or picture
+    // is read as it's drawn, and looking would connect there (on Windows, offering the user's
+    // sign-in), whoever wrote the link.
+    let here = |p: PathBuf| (!trek_core::paths::reaches_out(&p, cwd)).then_some(p);
+    let path = here(resolve_link(raw, cwd)?)?;
+    if exists(&path) {
         return Some(path);
     }
     // Markdown writes a space in a link as `%20`; the literal path wins when it exists.
     if raw.contains('%') {
-        let path = resolve_link(&crate::note_images::percent_decode(raw), cwd)?;
-        return path.exists().then_some(path);
+        let path = here(resolve_link(&crate::note_images::percent_decode(raw), cwd)?)?;
+        return exists(&path).then_some(path);
     }
     None
 }
@@ -570,6 +759,16 @@ fn path_part(raw: &str) -> &str {
 }
 
 fn resolve(raw: &str, cwd: Option<&Path>) -> Option<PathBuf> {
+    resolve_by(raw, cwd, crate::system::lately::exists)
+}
+
+/// [`resolve`], asking `exists` of the disk.
+fn resolve_by(raw: &str, cwd: Option<&Path>, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    // The whole text first: a GVFS mount's name has colons in it (`smb-share:server=…`), which
+    // `path_part` would take for a line number's and cut the server off.
+    if trek_core::paths::reaches_out(Path::new(raw.trim()), cwd) {
+        return None;
+    }
     let raw = path_part(raw);
     let p = if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix(r"~\")) {
         trek_core::paths::home().join(rest)
@@ -578,7 +777,11 @@ fn resolve(raw: &str, cwd: Option<&Path>) -> Option<PathBuf> {
     } else {
         cwd?.join(raw)
     };
-    crate::system::lately::exists(&p).then_some(p)
+    // Another computer's (`\\server\share`): looking would connect there as the chip is drawn.
+    if trek_core::paths::reaches_out(&p, cwd) {
+        return None;
+    }
+    exists(&p).then_some(p)
 }
 
 /// A path that stays in the thread's folder `cwd`: relative ones that don't climb out of it, and
@@ -816,11 +1019,12 @@ mod tests {
     #[cfg(windows)]
     use super::resolve;
     use super::{
-        COLUMN, IMAGE_MAX, Ink, LINE_HEIGHT, Metrics, Tone, column, image_size, in_folder, is_url,
-        link_path, looks_like_path, looks_like_path_on, path_part,
+        COLUMN, Click, IMAGE_MAX, Ink, LINE_HEIGHT, Metrics, Tone, click, column, image_size,
+        in_folder, is_url, link_path, link_path_by, looks_like_path, looks_like_path_on, path_part,
+        resolve_by,
     };
     use gpui_kit::{Hsla, px, rgb};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn spacing_and_sizes_scale_with_the_text() {
@@ -1165,6 +1369,176 @@ mod tests {
         assert_eq!(
             crate::file_icon::icon_name(path_part("src/main.rs:42")),
             crate::file_icon::icon_name("main.rs")
+        );
+    }
+
+    /// Eight ways text posts a script, as an answer, a note or a message from a phone could carry
+    /// them. Trek draws Markdown natively (no HTML engine): handlers (`onerror`, `ontoggle`,
+    /// `onclick`) are never run, frames, `<svg>` and `<details>` aren't drawn as such, and of the
+    /// raw HTML only `<a href>` becomes a link. What's left is the links a click follows: none of
+    /// them runs anything, and another app's scheme or a program asks first.
+    #[test]
+    fn script_shaped_links_open_nothing() {
+        let payloads = [
+            r#"<img src=x onerror="alert(1)">"#,
+            "[click](javascript:alert(1))",
+            "[click](&#106;avascript&#58;alert(1))",
+            "[click](data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==)",
+            r#"<svg><a xlink:href="javascript:alert(1)"><text>click</text></a></svg>"#,
+            r#"<details open ontoggle="alert(1)">x</details>"#,
+            r#"<iframe src="javascript:alert(1)"></iframe>"#,
+            r#"<a href="javascript:alert(1)" onclick="alert(1)">click</a>"#,
+        ];
+        // The links Markdown makes of them, decoded as the parser decodes them.
+        fn links(node: &markdown::mdast::Node, out: &mut Vec<String>) {
+            if let markdown::mdast::Node::Link(l) = node {
+                out.push(l.url.clone());
+            }
+            for child in node.children().into_iter().flatten() {
+                links(child, out);
+            }
+        }
+        let mut found = Vec::new();
+        for p in payloads {
+            let tree = markdown::to_mdast(p, &markdown::ParseOptions::gfm()).unwrap();
+            links(&tree, &mut found);
+        }
+        assert_eq!(
+            found,
+            [
+                "javascript:alert(1)",
+                "javascript:alert(1)",
+                "data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg=="
+            ],
+            "the entity-encoded one decodes to the plain one"
+        );
+        // An `<a href>` in raw HTML becomes a link to its href; `xlink:href` and `src` don't.
+        found.push("javascript:alert(1)".into());
+        let nowhere = |_: &Path| false;
+        for url in &found {
+            assert!(
+                matches!(click(url, None, nowhere), Click::Refuse(_)),
+                "{url}"
+            );
+        }
+        for (url, scheme) in [
+            ("JavaScript:alert(1)", "javascript"),
+            ("vbscript:msgbox(1)", "vbscript"),
+            ("file://attacker.example/share/x", "file"),
+        ] {
+            assert_eq!(
+                click(url, None, nowhere),
+                Click::Refuse(scheme.into()),
+                "{url}"
+            );
+        }
+        for (url, scheme) in [
+            ("ssh://attacker.example", "ssh"),
+            ("smb://attacker.example/share", "smb"),
+            ("vscode://vscode.git/clone?url=x", "vscode"),
+            ("search-ms:query=x", "search-ms"),
+            (
+                "x-apple.systempreferences:com.apple.preference.security",
+                "x-apple.systempreferences",
+            ),
+        ] {
+            assert_eq!(
+                click(url, None, nowhere),
+                Click::AskUrl(scheme.into()),
+                "{url}"
+            );
+        }
+        assert_eq!(click("https://example.com/a", None, nowhere), Click::Web);
+        assert_eq!(click("mailto:a@b.co", None, nowhere), Click::Web);
+        assert_eq!(click("trek://thread/x", None, nowhere), Click::Trek);
+        assert_eq!(click("not a link", None, nowhere), Click::Nothing);
+    }
+
+    /// A file the system runs when it's opened asks first; a document opens.
+    #[test]
+    fn a_link_to_a_program_asks_before_it_runs() {
+        let dir = std::env::temp_dir().join(format!("trek-md-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Tool.app")).unwrap();
+        let linux = [
+            "Trek.AppImage",
+            "trek.desktop",
+            "trek_0.4.1_amd64.deb",
+            "app.flatpakref",
+        ];
+        for name in ["run.command", "setup.sh", "report.pdf", "notes.md"]
+            .into_iter()
+            .chain(linux)
+        {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        let at = |name: &str| click(name, Some(&dir), Path::exists);
+        assert_eq!(at("run.command"), Click::AskOpen(dir.join("run.command")));
+        assert_eq!(at("setup.sh"), Click::AskOpen(dir.join("setup.sh")));
+        assert_eq!(at("Tool.app"), Click::AskOpen(dir.join("Tool.app")));
+        // Linux's: an AppImage, a desktop entry, a package whose installer opening it starts.
+        for name in linux {
+            assert_eq!(at(name), Click::AskOpen(dir.join(name)), "{name}");
+        }
+        assert_eq!(at("report.pdf"), Click::Open(dir.join("report.pdf")));
+        assert_eq!(at("notes.md"), Click::Open(dir.join("notes.md")));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let tool = dir.join("tool");
+            std::fs::write(&tool, b"#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(at("tool"), Click::AskOpen(tool));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A picture, link or path chip an answer names on another computer isn't looked up as the
+    /// answer is drawn: asking the disk would connect to that server (on Windows, offering it the
+    /// user's sign-in). A project kept on a share still finds its own files.
+    #[test]
+    fn paths_on_another_computer_are_not_looked_at() {
+        let asked = std::cell::RefCell::new(Vec::<PathBuf>::new());
+        let exists = |p: &Path| {
+            asked.borrow_mut().push(p.to_path_buf());
+            true
+        };
+        // Another computer as each platform writes one: a share on Windows, `/net` elsewhere.
+        let (far, far_url, share, here) = if cfg!(windows) {
+            (
+                r"\\attacker.example\share\x.png",
+                "file:////attacker.example/share/x.png",
+                Path::new(r"\\nas\code\app"),
+                Path::new(r"C:\code\app"),
+            )
+        } else {
+            (
+                "/net/attacker.example/share/x.png",
+                "file:///net/attacker.example/share/x.png",
+                Path::new("/net/nas/code/app"),
+                Path::new("/code/app"),
+            )
+        };
+        assert!(link_path_by(far, Some(here), exists).is_none());
+        assert!(link_path_by(far_url, None, exists).is_none());
+        assert!(link_path_by(&far.replace("x.png", "x%20y.png"), None, exists).is_none());
+        assert!(resolve_by(far, Some(here), exists).is_none());
+        assert!(resolve_by(far, None, exists).is_none());
+        // Linux's file manager's mounts (GVFS) of another computer's share.
+        if !cfg!(windows) {
+            let gvfs = "/run/user/1000/gvfs/smb-share:server=attacker.example,share=s/x.png";
+            assert!(link_path_by(gvfs, Some(here), exists).is_none());
+            assert!(resolve_by(gvfs, Some(here), exists).is_none());
+        }
+        assert!(asked.borrow().is_empty(), "looked at {:?}", asked.borrow());
+        // The thread's own share is looked at, as any project's folder is.
+        assert_eq!(
+            resolve_by("src/main.rs", Some(share), exists),
+            Some(share.join("src/main.rs"))
+        );
+        assert_eq!(
+            link_path_by("shot.png", Some(share), exists),
+            Some(share.join("shot.png"))
         );
     }
 

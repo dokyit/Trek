@@ -30,7 +30,8 @@ use trek_core::orchestrate as orch;
 use trek_core::store::{Item, ToolStatus};
 
 mod permission_cards;
-use permission_cards::AlwaysAllow;
+use permission_cards::{AlwaysAllow, CardKeys, key_cap};
+pub use permission_cards::{CardKey, CardReach, KEY_GUARD};
 
 /// How long a message a search result led to stays tinted (it holds, then fades).
 const FLASH: std::time::Duration = std::time::Duration::from_millis(2200);
@@ -510,6 +511,16 @@ pub struct ThreadView {
     sub_message: Option<(usize, String, Entity<InputState>, Subscription)>,
     /// Repaints on scroll activity of the scroller on screen; replaced when another one is.
     _scroller_sub: Subscription,
+    /// The approval card the keyboard answers, as last drawn (`answer_card`).
+    card_keys: Option<CardKeys>,
+    /// The approval card last drawn here and when it first was: keys answer it only once it's
+    /// been on screen a moment (`KEY_GUARD`).
+    card_seen: Option<(String, std::time::Instant)>,
+    /// On the approval card's buttons: Tab from the composer lands there (`card_reach`), and it
+    /// says whether the card is in the frame on screen.
+    card_focus: FocusHandle,
+    /// Whether an approval card is up here, for the composer's Tab.
+    card_up: std::rc::Rc<std::cell::Cell<bool>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -778,6 +789,10 @@ impl ThreadView {
             activity_lines: HashMap::new(),
             sub_message: None,
             _scroller_sub: scroller_sub,
+            card_keys: None,
+            card_seen: None,
+            card_focus: cx.focus_handle(),
+            card_up: Default::default(),
             _subscriptions: subscriptions,
         };
         this.sync(false, cx);
@@ -3471,10 +3486,18 @@ impl ThreadView {
                 // Steering it from here: Stop while it works (Trek's own, or the agent's where its
                 // agent lets Trek), and a message for the agent's own where its agent takes one.
                 let control = trek_agents::SubAgentControl::of(&at.agent);
-                let session = ws
-                    .live
-                    .get(&at.thread)
-                    .is_some_and(|l| l.commands.is_some());
+                // On another machine, its session is there: steered through it, where it serves
+                // that (`sub_agent_view`) and can be reached.
+                let session = if crate::machines::is_remote(&at.thread) {
+                    ws.machines.reachable_row(&at.thread).is_some()
+                        && ws
+                            .machines
+                            .serves(&at.thread, trek_remote::feature::SUB_AGENT_VIEW)
+                } else {
+                    ws.live
+                        .get(&at.thread)
+                        .is_some_and(|l| l.commands.is_some())
+                };
                 let in_background = ws.live.get(&at.thread).is_some_and(|l| {
                     l.background_agents().any(|b| {
                         b.task.call.as_deref() == Some(row_id.as_str()) && b.task.stoppable
@@ -4888,6 +4911,18 @@ impl ThreadView {
     /// thread's own, or else one of its sub-agents' (answered from here, with a line naming the
     /// sub-agent and opening it).
     fn live_footer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // The approval card drawn below says what the keyboard answers; none drawn, none.
+        self.card_keys = None;
+        let footer = self.live_footer_card(window, cx);
+        self.card_up.set(self.card_keys.is_some());
+        footer
+    }
+
+    fn live_footer_card(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let own = self.current.clone()?;
         let kid = {
             let ws = self.workspace.read(cx);
@@ -5011,8 +5046,29 @@ impl ThreadView {
                 .as_ref()
                 .filter(|_| asked_by.is_none())
                 .and_then(|call| trek_core::permission_rules::allow_draft(call, cwd.as_deref()));
+            // The keyboard answers this card when it's the one in front of the keys: this view's
+            // pane has them (or it's a thread window's own), and it's been up a moment.
+            let keyed = self.keys_reach_here(ws);
             let writing = self.always_allow_row(&p, cwd.as_deref(), cx);
             let open_id = p.request_id.clone();
+            let since = match &self.card_seen {
+                Some((rid, at)) if *rid == p.request_id => *at,
+                _ => {
+                    let now = std::time::Instant::now();
+                    self.card_seen = Some((p.request_id.clone(), now));
+                    now
+                }
+            };
+            if keyed {
+                self.card_keys = Some(CardKeys {
+                    thread: id.clone(),
+                    request: p.request_id.clone(),
+                    since,
+                    session: asked_by.is_none(),
+                    always: draft.clone().filter(|_| self.always_allow.is_none()),
+                });
+            }
+            let hint = move |key: crate::keys::Id, cx: &App| keyed.then(|| key_cap(key, cx));
             let respond = move |decision: Decision| {
                 let ws = ws_handle.clone();
                 let id = id.clone();
@@ -5052,11 +5108,10 @@ impl ThreadView {
                                             .small()
                                             .text_color(ink),
                                     )
-                                    .child(
-                                        div()
-                                            .font_semibold()
-                                            .child(format!("{agent} wants to: {}", p.title)),
-                                    )
+                                    .child(div().font_semibold().child(format!(
+                                        "{agent} wants to: {}",
+                                        trek_core::approval_text::shown(&p.title)
+                                    )))
                                     .when(waiting > 1, |el| {
                                         el.child(
                                             div()
@@ -5068,7 +5123,11 @@ impl ThreadView {
                                     }),
                             )
                             .when(!p.detail.is_empty(), |el| {
-                                // A long command scrolls here: the buttons stay in reach.
+                                // What runs, drawn so nothing in it reads as something else
+                                // (`approval_text`). A long command scrolls here: the buttons
+                                // stay in reach, and a line under it says there's more.
+                                let shown = trek_core::approval_text::shown(&p.detail);
+                                let lines = shown.lines().count();
                                 el.child(
                                     div()
                                         .id("permission-detail")
@@ -5081,7 +5140,22 @@ impl ThreadView {
                                         .bg(theme.muted)
                                         .font_family(theme.mono_font_family.clone())
                                         .text_size(to_rems(text::META))
-                                        .child(p.detail.clone()),
+                                        .child(shown),
+                                )
+                                .when(
+                                    lines > PERMISSION_DETAIL_LINES,
+                                    |el| {
+                                        el.child(
+                                            div()
+                                                .id("permission-detail-lines")
+                                                .test_support()
+                                                .text_size(to_rems(text::META))
+                                                .text_color(theme.muted_foreground)
+                                                .child(format!(
+                                                    "{lines} lines: scroll to read them all"
+                                                )),
+                                        )
+                                    },
                                 )
                             })
                             .when_some(asked_by.clone(), |el, rule| {
@@ -5106,6 +5180,7 @@ impl ThreadView {
                                             .ghost()
                                             .map(card_button)
                                             .label("Deny")
+                                            .children(hint(crate::keys::Id::DenyRequest, cx))
                                             .on_click(respond(Decision::Deny)),
                                     )
                                     .when(asked_by.is_none(), |el| {
@@ -5114,6 +5189,10 @@ impl ThreadView {
                                                 .small()
                                                 .map(|b| chip_button(b, cx))
                                                 .label("Allow for session")
+                                                .children(hint(
+                                                    crate::keys::Id::AllowRequestForSession,
+                                                    cx,
+                                                ))
                                                 .on_click(respond(Decision::AllowForSession)),
                                         )
                                     })
@@ -5125,6 +5204,10 @@ impl ThreadView {
                                                     .small()
                                                     .map(|b| chip_button(b, cx))
                                                     .label("Always allow…")
+                                                    .children(hint(
+                                                        crate::keys::Id::AlwaysAllowRequest,
+                                                        cx,
+                                                    ))
                                                     .on_click(cx.listener(
                                                         move |this, _, window, cx| {
                                                             this.open_always_allow(
@@ -5149,8 +5232,11 @@ impl ThreadView {
                                                 }
                                             })
                                             .label("Allow")
+                                            .children(hint(crate::keys::Id::AllowRequest, cx))
                                             .on_click(respond(Decision::Allow)),
-                                    ),
+                                    )
+                                    // Tab from the composer lands on the first of these.
+                                    .track_focus(&self.card_focus),
                             ),
                     )
                     // Keyed on the request, not the transcript revision, so streaming doesn't replay it.
@@ -5295,6 +5381,8 @@ fn thought_after(items: &[Item], reasoning: Option<usize>, members: &[usize]) ->
 const ERROR_MAX: f32 = 160.;
 /// The tallest an approval card's command grows before it scrolls.
 const PERMISSION_DETAIL_MAX: f32 = 160.;
+/// Lines of a command the card's box holds at once, about: more, and a line under it says so.
+const PERMISSION_DETAIL_LINES: usize = 8;
 /// How strong a row's chevron is: on Windows' opaque window the Mac's falls under 3:1 on Paper.
 const CHEVRON: f32 = fluent::pick(0.8, 0.6);
 /// A button in a card on Windows is this tall; the kit's small one is under Windows' 28 px.
@@ -5392,6 +5480,35 @@ impl SubAgentRow {
             }
             _ => state.label().to_string(),
         };
+        // A thread on another machine: the row as that machine reads it.
+        if let Some((host, _)) = crate::machines::split_id(thread)
+            && crate::machines::is_remote(thread)
+        {
+            if let Some(link) = ws.live.get(thread).and_then(|l| l.machine_subs.get(row_id)) {
+                return SubAgentRow::of_machine(host, link);
+            }
+            // A machine too old to say more than the call: what the row has.
+            let child = orch::task_of_row(row_id)
+                .map(|c| crate::machines::local_id(host, c))
+                .filter(|c| ws.thread(c).is_some());
+            return SubAgentRow {
+                agent: child
+                    .as_ref()
+                    .and_then(|c| ws.thread(c))
+                    .map(|t| t.agent.clone()),
+                label: if detail.trim().is_empty() {
+                    "Sub-agent".into()
+                } else {
+                    detail.to_string()
+                },
+                detail: with_error(by_status),
+                state: by_status,
+                elapsed: None,
+                child,
+                activity: None,
+                continued: None,
+            };
+        }
         if let Some(child) = orch::task_of_row(row_id) {
             let Some(t) = ws.thread(child) else {
                 // Its thread is gone (deleted, or archived on its own): what the row kept.
@@ -5542,6 +5659,49 @@ impl SubAgentRow {
                 )
             }),
             continued: None,
+        }
+    }
+}
+
+impl SubAgentRow {
+    /// The row of a sub-agent of a thread on machine `host`, from what the machine says of it
+    /// (`trek_remote::SubAgentLink`, worded there as `read` words it).
+    fn of_machine(host: &str, link: &trek_remote::SubAgentLink) -> SubAgentRow {
+        use trek_remote::SubAgentState as S;
+        let state = match link.state {
+            S::Running => TaskState::Running,
+            S::NeedsYou => TaskState::NeedsYou,
+            S::Done => TaskState::Done,
+            S::Failed => TaskState::Failed,
+            S::Stopped => TaskState::Cancelled,
+        };
+        let elapsed = match (link.since, link.took_secs) {
+            (Some(since), _) if state.live() => Some(std::time::Duration::from_millis(
+                (trek_core::store::now_ms() - since).max(0) as u64,
+            )),
+            (_, Some(secs)) => Some(std::time::Duration::from_secs(secs.into())),
+            _ => None,
+        };
+        SubAgentRow {
+            agent: Some(trek_core::AgentId::from_key(&link.agent.key)),
+            label: link.label.clone(),
+            detail: if link.detail.is_empty() {
+                state.label().to_string()
+            } else {
+                link.detail.clone()
+            },
+            state,
+            elapsed,
+            child: link
+                .thread_id
+                .as_deref()
+                .map(|c| crate::machines::local_id(host, c)),
+            activity: link
+                .activity
+                .as_ref()
+                .filter(|_| state.live())
+                .map(crate::working_bar::Group::from_wire),
+            continued: link.continued.clone(),
         }
     }
 }

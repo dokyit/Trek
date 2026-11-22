@@ -1,0 +1,30 @@
+Date/Time:        2026-11-21 10:42:18.527 -0500
+End time:         2026-11-21 10:45:16.976 -0500
+OS Version:       macOS 27.2 (Build 26B123)
+Architecture:     arm64e
+Report Version:   73
+
+Data Source:      Microstackshots
+Shared Cache:     B411828B-4450-38E3-973A-AFE7B7B5BEF5 slid base address 0x1921ec000
+
+Command:          trek
+Path:             /Applications/Trek.app/Contents/MacOS/trek
+Identifier:       dev.trek.Trek
+Version:          0.4.63 (0.4.63)
+Is First Party:   No
+Architecture:     arm64
+PID:              26885
+
+Event:            cpu usage
+Action taken:     none
+
+Heaviest stack for the target process:
+  9  start + 6652 (dyld + 204156) [0x1926a4d7c]
+  9  ??? (trek + 16286256) [0x105698230]
+  9  ??? (trek + 15346116) [0x1055b29c4]
+  9  ??? (trek + 2417276) [0x10495e27c]
+  9  __psynch_cvwait + 8 (libsystem_kernel.dylib + 18668) [0x1925f48ec]
+
+  Binary Images:
+           0x104710000 -        0x10ba77fff  dev.trek.Trek 0.4.63 (0.4.63)           <2F2D0CB7-2A2F-397E-A644-A954494E8264>  /Applications/Trek.app/Contents/MacOS/trek
+           0x192673000 -        0x192732c83  dyld (27104)                            <D8104ED6-185E-3A2F-AD71-B91EDDBE2598>  /usr/lib/dyld

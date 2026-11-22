@@ -236,6 +236,13 @@ pub fn delete(account: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Every account saved under [`SERVICE`] (their names only, never a prompt): the Keychain lists
+/// them, as does an isolated process's memory; `None` where the store can't list (Windows'
+/// Credential Manager, Linux's secret service), so a caller names what it knows of instead.
+pub fn accounts() -> Option<Vec<String>> {
+    with_store(|s| s.accounts()).map(|a| a.into_iter().collect())
+}
+
 /// Whether the last read of `account` found it locked.
 pub fn is_locked(account: &str) -> bool {
     locked_set().contains(account)
@@ -450,6 +457,10 @@ mod platform {
     use super::{Access, Read, Store};
     use std::collections::BTreeSet;
 
+    /// What saving a secret says on Linux when no keyring answers.
+    #[cfg(target_os = "linux")]
+    const NO_KEYRING: &str = "No keyring answered: Trek keeps keys in your desktop's keyring (GNOME Keyring or KWallet, through the Secret Service), and none is running in this session. Start one, or export the key in the shell Trek starts from";
+
     /// The store of one service (`SERVICE`).
     pub(super) struct Platform(pub &'static str);
 
@@ -466,7 +477,18 @@ mod platform {
         }
 
         fn add(&self, account: &str, value: &str) -> anyhow::Result<()> {
-            keyring::Entry::new(self.0, account)?.set_password(value)?;
+            let saved = keyring::Entry::new(self.0, account).and_then(|e| e.set_password(value));
+            // Linux keeps secrets in the desktop's keyring through the Secret Service; a session
+            // without one (a bare window manager, a server) has nowhere to put them. Trek doesn't
+            // write them to a file instead: it says what's missing.
+            #[cfg(target_os = "linux")]
+            if let Err(
+                e @ (keyring::Error::PlatformFailure(_) | keyring::Error::NoStorageAccess(_)),
+            ) = saved
+            {
+                anyhow::bail!("{NO_KEYRING} ({e})");
+            }
+            saved?;
             Ok(())
         }
 

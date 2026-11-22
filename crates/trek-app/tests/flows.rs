@@ -317,6 +317,103 @@ fn permission_cards_allow_deny_and_always_allow() {
     });
 }
 
+/// The approval card answers from the keyboard: each button shows its keys, a key pressed as the
+/// card comes up answers nothing (it says so), Deny and Allow each take one chord once it's been
+/// up a moment, Always allow… opens the rule row and allows nothing yet, typing in the composer
+/// goes to the composer, and Tab from the composer lands on the card's first button, Deny.
+#[test]
+fn permission_cards_answer_from_the_keyboard() {
+    use trek_app::keys::{Id, keystroke};
+    use trek_app::thread_view::KEY_GUARD;
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:permission");
+        trek.wait_needs_you(cx, &id).await;
+        trek.render(cx);
+        for key in [
+            Id::AllowRequest,
+            Id::AllowRequestForSession,
+            Id::AlwaysAllowRequest,
+            Id::DenyRequest,
+        ] {
+            assert!(
+                trek.visible(cx, format!("key-{}", key.name())),
+                "{key:?}'s keys are on its button"
+            );
+        }
+
+        // Too soon: the card stays, and nothing went to the agent.
+        trek.press(cx, &keystroke(Id::AllowRequest));
+        trek.render(cx);
+        assert!(
+            trek.visible(cx, "allow"),
+            "a key just as it came up answers nothing"
+        );
+        assert!(trek.read(cx, |ws, _| !ws.live[&id].permissions.is_empty()));
+
+        // Typing goes to the composer, card or no card.
+        trek.type_text(cx, "yes and no");
+        assert_eq!(trek.composer_text(cx), "yes and no");
+        assert!(trek.visible(cx, "allow"));
+
+        std::thread::sleep(KEY_GUARD);
+        trek.press(cx, &keystroke(Id::DenyRequest));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert!(trek.answers(cx, &id).contains("won't run it"));
+        assert!(!trek.visible(cx, "allow"));
+        assert_eq!(
+            trek.composer_text(cx),
+            "yes and no",
+            "the draft is left as it was"
+        );
+        trek.press(cx, "secondary-a");
+        trek.press(cx, "backspace");
+        assert_eq!(trek.composer_text(cx), "");
+
+        trek.send(cx, "permission again");
+        trek.wait_needs_you(cx, &id).await;
+        trek.render(cx);
+        std::thread::sleep(KEY_GUARD);
+        trek.press(cx, &keystroke(Id::AlwaysAllowRequest));
+        trek.render(cx);
+        assert!(
+            trek.visible(cx, "always-allow-pattern"),
+            "the rule row opens"
+        );
+        assert!(
+            trek.read(cx, |ws, _| !ws.live[&id].permissions.is_empty()),
+            "and nothing is allowed yet"
+        );
+        trek.click(cx, "always-allow-cancel");
+        trek.press(cx, &keystroke(Id::AllowRequest));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert!(trek.answers(cx, &id).contains("Migrations applied"));
+
+        // One Tab from the composer, and Enter on what it reached: Deny.
+        trek.send(cx, "permission once more");
+        trek.wait_needs_you(cx, &id).await;
+        trek.render(cx);
+        trek.press(cx, "tab");
+        trek.press(cx, "enter");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let items = trek.items(cx, &id);
+        let last_tool = items.iter().rev().find_map(|i| match i {
+            Item::Tool { status, .. } => Some(*status),
+            _ => None,
+        });
+        assert_eq!(
+            last_tool,
+            Some(ToolStatus::Failed),
+            "Deny, the safe one, is first"
+        );
+
+        // With no card up the keys do nothing here.
+        trek.press(cx, &keystroke(Id::AllowRequest));
+        assert!(trek.read(cx, |ws, _| ws.live[&id].permissions.is_empty()));
+        assert_eq!(turn_ends(&trek.items(cx, &id)), 3);
+    });
+}
+
 #[test]
 fn stopping_while_a_card_is_up_clears_it() {
     run(async |cx| {
@@ -1047,6 +1144,49 @@ fn a_failed_turn_needs_the_user() {
         });
         assert_eq!(inbox, Some(1));
     });
+}
+
+/// A thread whose folder was moved or deleted says so when sent to, in place of the agent's
+/// "No such file or directory" (which read as the agent not being installed); the message stays,
+/// and once the folder is back the thread carries on.
+#[test]
+fn a_thread_whose_folder_is_gone_says_so_and_keeps_the_message() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "hello");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let moved = trek.project.with_extension("moved");
+        std::fs::rename(&trek.project, &moved).unwrap();
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.folder_gone(&id)),
+            ws_cwd(&trek, cx, &id)
+        );
+        trek.send(cx, "and again");
+        trek.wait_done(cx, &id, RunState::Failed).await;
+        let items = trek.items(cx, &id);
+        assert!(
+            matches!(items.last(), Some(Item::Error { text }) if text.starts_with("The folder this thread works in isn't there any more")),
+            "{items:?}"
+        );
+        assert!(
+            items
+                .iter()
+                .any(|i| matches!(i, Item::User { text, .. } if text == "and again"))
+        );
+        // Put back, it works as before.
+        std::fs::rename(&moved, &trek.project).unwrap();
+        assert_eq!(trek.read(cx, |ws, _| ws.folder_gone(&id)), None);
+        trek.send(cx, "once more");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert!(!matches!(
+            trek.items(cx, &id).last(),
+            Some(Item::Error { .. })
+        ));
+    });
+}
+
+fn ws_cwd(trek: &Trek, cx: &TestAppContext, id: &str) -> Option<std::path::PathBuf> {
+    trek.read(cx, |ws, _| ws.thread(id).and_then(|t| t.cwd.clone()))
 }
 
 #[test]

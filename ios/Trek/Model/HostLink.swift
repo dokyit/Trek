@@ -23,6 +23,8 @@ final class HostLink: Identifiable, Equatable {
     var connection: ConnectionState = .idle
     /// What the connection is doing, in words, while it's connecting, connected or offline.
     var connectionDetail: String?
+    /// Those words send the user to iOS Settings (Local Network is off for Trek).
+    var detailOpensSettings = false
     /// The optional requests this host serves (`MacFeature`).
     var features: Set<String> = []
     /// Its projects and agents (bare ids), for the new-thread sheet and this host's pickers.

@@ -170,13 +170,15 @@ fn prompt_budget_notes_hold_each_piece_once() {
         skills(),
     )
     .unwrap();
-    for piece in [
-        trek_core::visualization::AGENT_INSTRUCTIONS,
-        trek_core::artifact::AGENT_INSTRUCTIONS,
-        trek_core::media::AGENT_INSTRUCTIONS,
-        trek_core::changes::RECAP,
+    // Linux has no video watcher, so no word of it there either.
+    let video = usize::from(!crate::words::is_linux());
+    for (piece, times) in [
+        (trek_core::visualization::AGENT_INSTRUCTIONS, 1),
+        (trek_core::artifact::AGENT_INSTRUCTIONS, 1),
+        (trek_core::media::AGENT_INSTRUCTIONS, video),
+        (trek_core::changes::RECAP, 1),
     ] {
-        assert_eq!(all.matches(piece).count(), 1, "{piece}");
+        assert_eq!(all.matches(piece).count(), times, "{piece}");
     }
     // Without the tool server there's no watcher, so no word of it.
     let bare = agent_notes(&Settings::default(), false, None, true, skills()).unwrap();

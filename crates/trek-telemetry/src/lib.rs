@@ -20,7 +20,7 @@ pub use feedback::{Diagnostics, Feedback, Kind, NotSent};
 pub use global::{
     Answer, Start, answered, changes, consent, count, feedback_destination, platform,
     reset_install_id, send_feedback, set_consent, set_setup, set_shared, set_totals, should_ask,
-    should_ask_totals, start, status, tokens,
+    should_ask_totals, start, status, stop, tokens,
 };
 pub use queue::Outcome;
 pub use scrub::Scrubber;
@@ -268,7 +268,7 @@ impl Telemetry {
         // Unanswered, they wait for the answer; answered, they're sent or not wanted.
         if self.state.consent != Consent::Unasked {
             for mut crash in trek_logging::take_crash_reports(&self.data_dir) {
-                crash.message = scrubber.scrub(&crash.message);
+                crash.message = scrubber.scrub(&scrub::without_quoted_text(&crash.message));
                 crash.location = scrubber.scrub(&crash.location);
                 crash.backtrace = scrubber.scrub(&crash.backtrace);
                 self.enqueue(&Event::Crash(crash), at);

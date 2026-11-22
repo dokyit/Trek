@@ -119,6 +119,9 @@ impl Workspace {
     /// The same, when the caller knows whether `id` has threads of Trek's under it at all
     /// (`trek`; the sidebar does, and looks for them only then).
     pub fn sub_agents_of(&self, id: &str, trek: bool) -> Vec<AtWork> {
+        if crate::machines::is_remote(id) {
+            return self.machine_sub_agents(id);
+        }
         let now = Instant::now();
         let children = if trek {
             self.running_children(id)
@@ -146,5 +149,108 @@ impl Workspace {
             out.extend(l.own_at_work(&t.agent));
         }
         out
+    }
+
+    /// A thread on another machine: its sub-agents at work as its row there lists them (the
+    /// machine's own `sub_agents_at_work`, which its sidebar badge here reads too), each by the
+    /// row it has in the transcript as the machine sent it. None while it can't be reached.
+    fn machine_sub_agents(&self, id: &str) -> Vec<AtWork> {
+        let Some((host, _)) = crate::machines::split_id(id) else {
+            return vec![];
+        };
+        let Some(row) = self.machines.reachable_row(id) else {
+            return vec![];
+        };
+        let now = Instant::now();
+        let ms = trek_core::store::now_ms();
+        row.sub_agents
+            .iter()
+            .filter(|k| {
+                matches!(
+                    k.state,
+                    trek_remote::SubAgentState::Running | trek_remote::SubAgentState::NeedsYou
+                )
+            })
+            .map(|k| {
+                let elapsed = Duration::from_millis(k.since.map_or(0, |s| (ms - s).max(0) as u64));
+                AtWork {
+                    row: match (&k.thread_id, &k.call_id) {
+                        (Some(child), _) => orch::task_row(child),
+                        (None, Some(call)) => call.clone(),
+                        (None, None) => String::new(),
+                    },
+                    agent: AgentId::from_key(&k.agent.key),
+                    name: match &k.model {
+                        Some(model) => format!("{model}: {}", k.title),
+                        None => k.title.clone(),
+                    },
+                    model: k.model.clone(),
+                    child: k
+                        .thread_id
+                        .as_deref()
+                        .map(|c| crate::machines::local_id(host, c)),
+                    started: now.checked_sub(elapsed).unwrap_or(now),
+                    elapsed,
+                    background: false,
+                }
+            })
+            .collect()
+    }
+
+    /// `waiting_on` for a thread on another machine, from its row and transcript there: with its
+    /// turn over, every sub-agent it has out; mid-turn, those its only calls still running are
+    /// (a turn blocked on them). Nothing while something waits on the user.
+    pub(super) fn machine_waiting_on(&self, id: &str) -> Vec<super::orchestrate::Waited> {
+        let Some(row) = self.machines.reachable_row(id) else {
+            return vec![];
+        };
+        if row.needs.is_some()
+            || row.run_state == trek_remote::RunState::NeedsYou
+            || self.live.get(id).is_some_and(|l| !l.permissions.is_empty())
+        {
+            return vec![];
+        }
+        let at_work = self.machine_sub_agents(id);
+        let at_work: Vec<AtWork> = if row.run_state == trek_remote::RunState::Working {
+            let Some(live) = self.live.get(id) else {
+                return vec![];
+            };
+            // The calls of this turn still running, when they're all sub-agents.
+            let running: Vec<&str> = live
+                .items
+                .iter()
+                .rev()
+                .take_while(|i| !matches!(i, Item::User { .. }))
+                .filter_map(|i| match i {
+                    Item::Tool {
+                        id,
+                        status: ToolStatus::Running,
+                        ..
+                    } => Some(id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let blocked = !running.is_empty()
+                && live.streaming.is_none()
+                && running.iter().all(|r| at_work.iter().any(|a| a.row == *r));
+            if !blocked {
+                return vec![];
+            }
+            at_work
+                .into_iter()
+                .filter(|a| running.contains(&a.row.as_str()))
+                .collect()
+        } else {
+            at_work
+        };
+        at_work
+            .into_iter()
+            .map(|a| super::orchestrate::Waited {
+                agent: a.agent,
+                name: a.name,
+                model: a.model,
+                elapsed: a.elapsed,
+            })
+            .collect()
     }
 }

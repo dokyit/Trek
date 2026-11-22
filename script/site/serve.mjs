@@ -4,7 +4,7 @@
 // comma, `! Name` taking one away), so the security policy a page meets here is the one it meets
 // at trekdesktop.com. For the web remote while it's worked on or checked:
 //
-//   node script/site/serve.mjs [port]           # http://localhost:8080/remote/
+//   node script/site/serve.mjs [port] [root]    # http://localhost:8080/remote/ (root: another copy of site/)
 //   TREK_WEB_REMOTE_PAGE=http://localhost:8080/remote/ <Trek>   # Trek lets that page in
 //
 // `headersFor` is exported for the tests (script/site/test/).
@@ -30,6 +30,8 @@ const TYPES = {
   '.ico': 'image/x-icon',
   '.webp': 'image/webp',
   '.jpg': 'image/jpeg',
+  '.avif': 'image/avif',
+  '.mp4': 'video/mp4',
   '.woff2': 'font/woff2',
   '.txt': 'text/plain; charset=utf-8',
   '.md': 'text/markdown; charset=utf-8',
@@ -98,7 +100,31 @@ export function serve(port = 8080, root = ROOT) {
         info = await stat(file);
       }
       const body = await readFile(file);
-      res.writeHead(200, { 'Content-Type': TYPES[extname(file)] || 'application/octet-stream', ...headersFor(rules, path) });
+      // Over plain http on this computer, two of the live site's headers would break the page in
+      // Safari and Trek's own Browser (WebKit sends the stylesheet's request to https://localhost,
+      // where nothing answers; Chrome leaves localhost alone): they are left off here.
+      const headers = headersFor(rules, path);
+      delete headers['Strict-Transport-Security'];
+      if (headers['Content-Security-Policy']) {
+        headers['Content-Security-Policy'] = headers['Content-Security-Policy'].replace(/;?\s*upgrade-insecure-requests/, '');
+      }
+      const type = { 'Content-Type': TYPES[extname(file)] || 'application/octet-stream', 'Accept-Ranges': 'bytes', ...headers };
+      // A part of the file, when that's what was asked for: Safari and Trek's Browser play a video
+      // only from a server that answers ranges.
+      const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+      if (range && (range[1] || range[2])) {
+        const size = body.length;
+        const start = range[1] ? Number(range[1]) : Math.max(size - Number(range[2]), 0);
+        const end = range[1] && range[2] ? Math.min(Number(range[2]), size - 1) : size - 1;
+        if (start > end || start >= size) {
+          res.writeHead(416, { 'Content-Range': `bytes */${size}` }).end();
+          return;
+        }
+        res.writeHead(206, { ...type, 'Content-Range': `bytes ${start}-${end}/${size}`, 'Content-Length': end - start + 1 });
+        res.end(body.subarray(start, end + 1));
+        return;
+      }
+      res.writeHead(200, type);
       res.end(body);
     } catch {
       res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }).end('Not found');
@@ -108,6 +134,8 @@ export function serve(port = 8080, root = ROOT) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  // An optional second argument serves another copy of the site, such as a design variant.
   const port = Number(process.argv[2] || process.env.PORT || 8080);
-  serve(port).then(() => console.log(`site/ at http://localhost:${port}/ (the web remote: http://localhost:${port}/remote/)`));
+  const root = process.argv[3] ? resolve(process.argv[3]) : ROOT;
+  serve(port, root).then(() => console.log(`${root} at http://localhost:${port}/ (the web remote: http://localhost:${port}/remote/)`));
 }

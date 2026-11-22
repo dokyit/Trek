@@ -299,6 +299,26 @@ fn simctl() -> Command {
     cmd
 }
 
+/// What the tool says when simctl couldn't list the simulators: with no Xcode (only the command
+/// line tools, or nothing), what to install, rather than xcrun's own words.
+fn list_problem(error: &str) -> String {
+    let lower = error.to_lowercase();
+    let no_xcode = [
+        "unable to find utility",
+        "not a developer tool",
+        "xcode-select",
+        "requires xcode",
+        "is xcode installed",
+    ]
+    .iter()
+    .any(|said| lower.contains(said));
+    if no_xcode {
+        "The iOS Simulator comes with Xcode, which isn't set up here. Install Xcode from the App Store and open it once to finish setting it up, then come back here.".into()
+    } else {
+        format!("Couldn't list simulators. {error}")
+    }
+}
+
 /// The useful line of a simctl / AXe failure.
 fn clean_error(stderr: &[u8], fallback: &str) -> String {
     let text = String::from_utf8_lossy(stderr);
@@ -2584,7 +2604,7 @@ impl SimulatorPanel {
                 .into_any_element();
         }
         if let Some(e) = &self.list_error {
-            let text = format!("Couldn't list simulators. {e}");
+            let text = list_problem(e);
             return v_flex()
                 .size_full()
                 .items_center()
@@ -3001,5 +3021,23 @@ mod tests {
             "Unable to boot device in current state: Booted"
         );
         assert_eq!(clean_error(b"", "fallback"), "fallback");
+    }
+
+    /// With no Xcode, the tool says to install it, not xcrun's "unable to find utility".
+    #[test]
+    fn no_xcode_says_what_to_install() {
+        let only_tools = clean_error(
+            b"xcrun: error: unable to find utility \"simctl\", not a developer tool or in PATH\n",
+            "x",
+        );
+        assert!(super::list_problem(&only_tools).starts_with("The iOS Simulator comes with Xcode"));
+        assert!(
+            super::list_problem("Couldn't run simctl (is Xcode installed?): No such file")
+                .starts_with("The iOS Simulator comes with Xcode")
+        );
+        assert_eq!(
+            super::list_problem("Unable to boot device"),
+            "Couldn't list simulators. Unable to boot device"
+        );
     }
 }
