@@ -30,7 +30,8 @@ use trek_core::orchestrate as orch;
 use trek_core::store::{Item, ToolStatus};
 
 mod permission_cards;
-use permission_cards::AlwaysAllow;
+use permission_cards::{AlwaysAllow, CardKeys, key_cap};
+pub use permission_cards::{CardKey, CardReach, KEY_GUARD};
 
 /// How long a message a search result led to stays tinted (it holds, then fades).
 const FLASH: std::time::Duration = std::time::Duration::from_millis(2200);
@@ -510,6 +511,16 @@ pub struct ThreadView {
     sub_message: Option<(usize, String, Entity<InputState>, Subscription)>,
     /// Repaints on scroll activity of the scroller on screen; replaced when another one is.
     _scroller_sub: Subscription,
+    /// The approval card the keyboard answers, as last drawn (`answer_card`).
+    card_keys: Option<CardKeys>,
+    /// The approval card last drawn here and when it first was: keys answer it only once it's
+    /// been on screen a moment (`KEY_GUARD`).
+    card_seen: Option<(String, std::time::Instant)>,
+    /// On the approval card's buttons: Tab from the composer lands there (`card_reach`), and it
+    /// says whether the card is in the frame on screen.
+    card_focus: FocusHandle,
+    /// Whether an approval card is up here, for the composer's Tab.
+    card_up: std::rc::Rc<std::cell::Cell<bool>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -778,6 +789,10 @@ impl ThreadView {
             activity_lines: HashMap::new(),
             sub_message: None,
             _scroller_sub: scroller_sub,
+            card_keys: None,
+            card_seen: None,
+            card_focus: cx.focus_handle(),
+            card_up: Default::default(),
             _subscriptions: subscriptions,
         };
         this.sync(false, cx);
@@ -4894,6 +4909,18 @@ impl ThreadView {
     /// thread's own, or else one of its sub-agents' (answered from here, with a line naming the
     /// sub-agent and opening it).
     fn live_footer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // The approval card drawn below says what the keyboard answers; none drawn, none.
+        self.card_keys = None;
+        let footer = self.live_footer_card(window, cx);
+        self.card_up.set(self.card_keys.is_some());
+        footer
+    }
+
+    fn live_footer_card(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let own = self.current.clone()?;
         let kid = {
             let ws = self.workspace.read(cx);
@@ -5017,8 +5044,29 @@ impl ThreadView {
                 .as_ref()
                 .filter(|_| asked_by.is_none())
                 .and_then(|call| trek_core::permission_rules::allow_draft(call, cwd.as_deref()));
+            // The keyboard answers this card when it's the one in front of the keys: this view's
+            // pane has them (or it's a thread window's own), and it's been up a moment.
+            let keyed = self.keys_reach_here(ws);
             let writing = self.always_allow_row(&p, cwd.as_deref(), cx);
             let open_id = p.request_id.clone();
+            let since = match &self.card_seen {
+                Some((rid, at)) if *rid == p.request_id => *at,
+                _ => {
+                    let now = std::time::Instant::now();
+                    self.card_seen = Some((p.request_id.clone(), now));
+                    now
+                }
+            };
+            if keyed {
+                self.card_keys = Some(CardKeys {
+                    thread: id.clone(),
+                    request: p.request_id.clone(),
+                    since,
+                    session: asked_by.is_none(),
+                    always: draft.clone().filter(|_| self.always_allow.is_none()),
+                });
+            }
+            let hint = move |key: crate::keys::Id, cx: &App| keyed.then(|| key_cap(key, cx));
             let respond = move |decision: Decision| {
                 let ws = ws_handle.clone();
                 let id = id.clone();
@@ -5130,6 +5178,7 @@ impl ThreadView {
                                             .ghost()
                                             .map(card_button)
                                             .label("Deny")
+                                            .children(hint(crate::keys::Id::DenyRequest, cx))
                                             .on_click(respond(Decision::Deny)),
                                     )
                                     .when(asked_by.is_none(), |el| {
@@ -5138,6 +5187,10 @@ impl ThreadView {
                                                 .small()
                                                 .map(|b| chip_button(b, cx))
                                                 .label("Allow for session")
+                                                .children(hint(
+                                                    crate::keys::Id::AllowRequestForSession,
+                                                    cx,
+                                                ))
                                                 .on_click(respond(Decision::AllowForSession)),
                                         )
                                     })
@@ -5149,6 +5202,10 @@ impl ThreadView {
                                                     .small()
                                                     .map(|b| chip_button(b, cx))
                                                     .label("Always allow…")
+                                                    .children(hint(
+                                                        crate::keys::Id::AlwaysAllowRequest,
+                                                        cx,
+                                                    ))
                                                     .on_click(cx.listener(
                                                         move |this, _, window, cx| {
                                                             this.open_always_allow(
@@ -5173,8 +5230,11 @@ impl ThreadView {
                                                 }
                                             })
                                             .label("Allow")
+                                            .children(hint(crate::keys::Id::AllowRequest, cx))
                                             .on_click(respond(Decision::Allow)),
-                                    ),
+                                    )
+                                    // Tab from the composer lands on the first of these.
+                                    .track_focus(&self.card_focus),
                             ),
                     )
                     // Keyed on the request, not the transcript revision, so streaming doesn't replay it.

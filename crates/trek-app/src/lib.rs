@@ -162,7 +162,11 @@ actions!(
         TerminalSmaller,
         TerminalActualSize,
         PreviewActualPixels,
-        PreviewFit
+        PreviewFit,
+        AllowRequest,
+        AllowRequestForSession,
+        AlwaysAllowRequest,
+        DenyRequest
     ]
 );
 

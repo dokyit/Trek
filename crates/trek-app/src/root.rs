@@ -10,7 +10,7 @@ use crate::panels::terminal::Job;
 use crate::scale::{radius, text, to_rems};
 use crate::settings_view::{SettingsNav, SettingsView};
 use crate::sidebar::Sidebar;
-use crate::thread_view::ThreadView;
+use crate::thread_view::{CardKey, ThreadView};
 use crate::working_bar::WorkingBar;
 use crate::workspace::{
     EditorCommand, Route, Scope, SettingsPage, UndoAction, Workspace, WorkspaceEvent,
@@ -180,6 +180,8 @@ impl TrekWindow {
         let sidebar = cx.new(|cx| Sidebar::new(workspace.clone(), window, cx));
         let composer = cx.new(|cx| Composer::new(workspace.clone(), Scope::Main, window, cx));
         let thread_view = cx.new(|cx| ThreadView::new(workspace.clone(), Scope::Main, window, cx));
+        let card = thread_view.read(cx).card_reach();
+        composer.update(cx, |c, _| c.reach_card(card));
         let working_bar = cx.new(|cx| WorkingBar::new(workspace.clone(), Scope::Main, window, cx));
         let background_strip = cx.new(|cx| {
             crate::background_strip::BackgroundStrip::new(
@@ -2859,6 +2861,22 @@ impl Render for TrekWindow {
                         ws.interrupt(&id, cx);
                     }
                 })
+            }))
+            .on_action(cx.listener(|this, _: &crate::AllowRequest, window, cx| {
+                this.answer_card(CardKey::Allow, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &crate::AllowRequestForSession, window, cx| {
+                    this.answer_card(CardKey::AllowForSession, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::AlwaysAllowRequest, window, cx| {
+                    this.answer_card(CardKey::AlwaysAllow, window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &crate::DenyRequest, window, cx| {
+                this.answer_card(CardKey::Deny, window, cx)
             }))
             .on_action(cx.listener(|this, _: &CycleHandHolding, _, cx| {
                 this.workspace.update(cx, |ws, cx| {

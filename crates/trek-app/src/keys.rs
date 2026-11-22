@@ -268,6 +268,11 @@ pub enum Id {
     TakeSnapshot,
     CycleHandHolding,
     Interrupt,
+    /// The approval card in front: Allow, Allow for session, Always allow…, Deny.
+    AllowRequest,
+    AllowRequestForSession,
+    AlwaysAllowRequest,
+    DenyRequest,
     ToggleRightPanel,
     OpenPalette,
     OpenPaletteAnywhere,
@@ -484,6 +489,43 @@ static TABLE: LazyLock<Vec<Binding>> = LazyLock::new(|| {
             act!(crate::CycleHandHolding),
         ),
         row(Interrupt, App, "cmd-.", Same, None, act!(crate::Interrupt)),
+        // The approval card in front (`ThreadView::answer_card`). ⌥⌘ and a letter type nothing
+        // in a text field, and nothing else of Trek's, the system's or the agents' own CLIs has
+        // them: Y and N as in yes and no (Codex's y/a/n), S for the session, A for always. On
+        // Windows Alt+Shift with the letter, as Trek's other ⌥⌘ keys are there: Ctrl+Y is redo
+        // and Ctrl+N a new thread. Each does nothing, and passes the keys on, with no card up.
+        row(
+            AllowRequest,
+            App,
+            "alt-cmd-y",
+            Keys("alt-shift-y"),
+            None,
+            act!(crate::AllowRequest),
+        ),
+        row(
+            AllowRequestForSession,
+            App,
+            "alt-cmd-s",
+            Keys("alt-shift-s"),
+            None,
+            act!(crate::AllowRequestForSession),
+        ),
+        row(
+            AlwaysAllowRequest,
+            App,
+            "alt-cmd-a",
+            Keys("alt-shift-a"),
+            None,
+            act!(crate::AlwaysAllowRequest),
+        ),
+        row(
+            DenyRequest,
+            App,
+            "alt-cmd-n",
+            Keys("alt-shift-n"),
+            None,
+            act!(crate::DenyRequest),
+        ),
         row(
             ToggleRightPanel,
             App,
@@ -1610,6 +1652,15 @@ const PAGE: &[(&str, &[(&str, Show)])] = &[
         ],
     ),
     (
+        "Approval cards",
+        &[
+            ("Allow", Bound(Id::AllowRequest)),
+            ("Allow for session", Bound(Id::AllowRequestForSession)),
+            ("Always allow…", Bound(Id::AlwaysAllowRequest)),
+            ("Deny", Bound(Id::DenyRequest)),
+        ],
+    ),
+    (
         "Editor",
         &[
             ("Go to file", Bound(Id::QuickOpen)),
@@ -2160,9 +2211,9 @@ mod tests {
             .filter_map(|b| resolve(b, true))
             .map(|r| format!("{}|{}", r.keystroke, r.context.unwrap_or_default()))
             .collect();
-        // The 44 in main.rs, the 13 in notes.rs, the 2 in editor.rs, a diff's 17, zoom's 4, and the
+        // The 48 in main.rs, the 13 in notes.rs, the 2 in editor.rs, a diff's 17, zoom's 4, and the
         // terminal's and a preview's own 4 each.
-        assert_eq!(mac.len(), 44 + 13 + 2 + 17 + 4 + 8);
+        assert_eq!(mac.len(), 48 + 13 + 2 + 17 + 4 + 8);
         for (keys, ctx) in [
             ("cmd-q", ""),
             ("alt-cmd-e", ""),
@@ -2261,6 +2312,10 @@ mod tests {
             })
             .collect();
         let want = [
+            (Id::AllowRequest, "alt-shift-y"),
+            (Id::AllowRequestForSession, "alt-shift-s"),
+            (Id::AlwaysAllowRequest, "alt-shift-a"),
+            (Id::DenyRequest, "alt-shift-n"),
             (Id::CopyThreadLink, "alt-shift-l"),
             (Id::SwitchMode, "alt-shift-e"),
             (Id::ToggleAiBar, "alt-shift-b"),
@@ -2523,6 +2578,7 @@ mod tests {
             [
                 "Threads",
                 "Composer",
+                "Approval cards",
                 "Editor",
                 "Window",
                 "Zoom",
@@ -2530,6 +2586,15 @@ mod tests {
                 "Image preview",
                 "Notes",
                 "Diff review"
+            ]
+        );
+        assert_eq!(
+            flat(&page, "Approval cards", true),
+            [
+                "Allow: ⌥ ⌘ Y",
+                "Allow for session: ⌥ ⌘ S",
+                "Always allow…: ⌥ ⌘ A",
+                "Deny: ⌥ ⌘ N",
             ]
         );
         assert_eq!(
@@ -2661,6 +2726,10 @@ mod tests {
             "Open the thread in a new window: Ctrl Shift Enter",
             "New line: Shift Enter",
             "Plan mode: Shift Tab",
+            "Allow: Alt Shift Y",
+            "Allow for session: Alt Shift S",
+            "Always allow…: Alt Shift A",
+            "Deny: Alt Shift N",
             "Switch Agents / Editor: Alt Shift E",
             "Undo a change: Alt Shift Backspace",
             "Next change: Alt F5",
@@ -2900,7 +2969,7 @@ mod tests {
                 .sum();
             // Windows drops Hide, Minimize and Copy working directory (Ctrl+Shift+C is the
             // terminal's copy there) and adds Ctrl+Shift+P and Ctrl+F4.
-            assert_eq!(n, if mac { 88 } else { 88 - 3 + 2 }, "mac: {mac}");
+            assert_eq!(n, if mac { 92 } else { 92 - 3 + 2 }, "mac: {mac}");
         }
     }
 
