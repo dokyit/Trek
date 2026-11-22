@@ -182,6 +182,9 @@ trek-phone = { path = "../trek-phone" }
 # GTK, which the tray icon (AppIndicator) and the web views (WebKitGTK) are made of, started and
 # run from GPUI's loop (`linux_gtk`). The version tray-icon and wry are built on.
 gtk = "0.18"
+# The Browser's page dialogs to Trek's bar (WebKitGTK's `script-dialog`, kept and answered later):
+# the version and API level wry builds on.
+webkit2gtk = { version = "2.0", features = ["v2_40"] }
 # The capture build's `shot`: the window's pixels from the X server (GPUI's Linux renderer has no
 # offscreen render of a frame). The version GPUI's X11 platform talks to the server with.
 x11rb = { version = "0.13", features = ["allow-unsafe-code"] }

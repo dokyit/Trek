@@ -110,6 +110,7 @@ macos = "yes"
 windows = "yes"
 linux = "yes"
 live = ["route settings:appearance", "wait 300", "reveal trek-theme-console", "count trek-theme-console 1", "count trek-theme-journal 1", "count trek-theme-alpenglow 1", "click trek-theme-console", "wait 1500", "look is console", "route project:{project}", "pace 0", "send Show a short answer", "wait idle 30000", "look journal", "wait 1500", "look is journal", "look alpenglow", "wait 1500", "look is alpenglow", "look trek", "wait 1500", "look is trek"]
+live_linux = ["route settings:appearance", "wait 300", "reveal trek-theme-console", "count trek-theme-console 1", "count trek-theme-journal 1", "count trek-theme-alpenglow 1", "click trek-theme-console", "wait 6000", "look is console", "route project:{project}", "pace 0", "send Show a short answer", "wait idle 30000", "look journal", "wait 6000", "look is journal", "look alpenglow", "wait 6000", "look is alpenglow", "look trek", "wait 6000", "look is trek"]
 how = { macos = "Shared code: the format and applying one in trek_core::themes, the look in trek-app's themes (the kit's theme, Trek's accents, GPUI's corner scale), fonts Trek bundles (Inter, JetBrains Mono, Spectral).", windows = "The same code. Windows keeps its own radii under a theme's corner scale, and its glass and art follow the settings a theme sets as they do when set by hand." }
 code = ["crates/trek-core/src/themes.rs", "crates/trek-app/src/themes.rs", "vendor/gpui-pre/src/corner_scale.rs", "crates/trek-assets/src/fonts.rs"]
 tests = ["crates/trek-app/tests/themes.rs"]
@@ -122,6 +123,7 @@ macos = "yes"
 windows = "yes"
 linux = "yes"
 live = ["plugin install example:focus-timer", "plugin install example:campfire", "plugin install example:marmot", "plugin install example:trailhead", "plugin on trailhead", "plugin install example:now-playing", "plugin on now-playing", "plugin problems 0", "route settings:plugins", "wait 300", "count plugin-ask 1", "reveal plugin-row-focus-timer", "count plugin-row-focus-timer 1", "plugin running focus-timer", "plugin running marmot", "plugin running now-playing", "route project:{project}", "new", "wait 500", "count plugin-surface-new-thread 1", "count focus-chip 1", "plugin focus at 300", "wait 300", "look campfire", "wait 1500", "look is campfire", "look trek", "wait 1500", "look is trek", "plugin off trailhead", "wait 300", "count plugin-surface-new-thread 0", "plugin focus stop", "plugin off focus-timer", "wait 300", "count focus-chip 0", "route project:{project}", "pace 0", "send mock:plugin", "wait idle 30000", "wait 2500", "plugin running trail-notes", "send mock:look", "wait idle 30000", "wait 2500", "plugin running dusk", "look is dusk", "route settings:plugins", "wait 300", "reveal plugin-row-dusk", "count plugin-row-dusk 1", "count plugin-added-dusk 1", "count plugin-look-dusk 1", "look console", "wait 1500", "look is console", "plugin stopped dusk", "plugin running trail-notes", "plugin on dusk", "wait 1500", "look is dusk", "plugin running dusk", "plugin delete dusk", "wait 1500", "plugin gone dusk", "look is trek"]
+live_linux = ["plugin install example:focus-timer", "plugin install example:campfire", "plugin install example:marmot", "plugin install example:trailhead", "plugin on trailhead", "plugin install example:now-playing", "plugin on now-playing", "plugin problems 0", "route settings:plugins", "wait 300", "count plugin-ask 1", "reveal plugin-row-focus-timer", "count plugin-row-focus-timer 1", "plugin running focus-timer", "plugin running marmot", "plugin running now-playing", "route project:{project}", "new", "wait 500", "count plugin-surface-new-thread 1", "count focus-chip 1", "plugin focus at 300", "wait 300", "look campfire", "wait 6000", "look is campfire", "look trek", "wait 6000", "look is trek", "plugin off trailhead", "wait 300", "count plugin-surface-new-thread 0", "plugin focus stop", "plugin off focus-timer", "wait 300", "count focus-chip 0", "route project:{project}", "pace 0", "send mock:plugin", "wait idle 30000", "wait 2500", "plugin running trail-notes", "send mock:look", "wait idle 30000", "wait 2500", "plugin running dusk", "look is dusk", "route settings:plugins", "wait 300", "reveal plugin-row-dusk", "count plugin-row-dusk 1", "count plugin-added-dusk 1", "count plugin-look-dusk 1", "look console", "wait 6000", "look is console", "plugin stopped dusk", "plugin running trail-notes", "plugin on dusk", "wait 6000", "look is dusk", "plugin running dusk", "plugin delete dusk", "wait 6000", "plugin gone dusk", "look is trek"]
 how = { macos = "Shared code: the manifest, the folder, the CLI and the element trees' format in trek_core::plugins; drawing with GPUI, the registry and Settings in trek-app's plugins; logic in the QuickJS trek-script already ships; line weight, shadows and square pills as scales in GPUI's quad painting. `cmd` in a plugin's key is Cmd.", windows = "The same code. `cmd` in a plugin's key is Ctrl (keys::is_mac, a runtime value). A release trek.exe is a GUI program with no output of its own: `trek plugin` typed at a console attaches to the parent's console to print (procs::parent_console), and an agent's pipe gets its output as on the Mac. A plugin file that is a link is sealed as what it points to on both; the test that makes a link runs on Unix only, since Windows makes one only in Developer Mode or as an administrator." }
 code = ["crates/trek-core/src/skills.rs", "crates/trek-core/skills/trek-plugin/SKILL.md", "crates/trek-core/skills/trek-theme/SKILL.md", "crates/trek-core/src/plugins/mod.rs", "crates/trek-core/src/plugins/grant.rs", "crates/trek-core/src/plugins/ui.rs", "crates/trek-core/src/plugins/cli.rs", "crates/trek-core/src/plugins/data.rs", "crates/trek-core/src/plugins/examples.rs", "crates/trek-app/src/plugins/mod.rs", "crates/trek-app/src/plugins/render.rs", "crates/trek-app/src/plugins/logic.rs", "crates/trek-app/src/plugins/focus.rs", "crates/trek-app/src/plugins/trail.rs", "crates/trek-app/src/settings_view/plugins.rs", "crates/trek-script/src/plugin.rs", "vendor/gpui-pre/src/corner_scale.rs"]
 tests = ["crates/trek-core/src/plugins/mod.rs", "crates/trek-core/src/plugins/ui.rs", "crates/trek-core/src/plugins/cli.rs", "crates/trek-script/src/plugin.rs", "crates/trek-app/tests/plugins.rs"]
@@ -248,6 +250,7 @@ macos = "yes"
 windows = "yes"
 linux = "yes"
 live = ["route project:{project}", "pace 0", "send Show a short answer", "wait idle 30000", "count hub-open 1", "count hub-open-more 1"]
+live_linux = ["route project:{project}", "pace 0", "send Show a short answer", "wait idle 30000", "count hub-open 1"]
 how = { macos = "Finder, Terminal, Ghostty, Zed, Cursor, VS Code, the JetBrains IDEs and Xcode, found in /Applications or the user's own ~/Applications (one list, trek_core::open_in::MAC_APPS, for both menus). Looked for once at launch and kept; looked for again off the UI thread once a minute old.", windows = "File Explorer, Windows Terminal (its default profile: PowerShell, cmd or Git Bash as the user set it), Zed, Cursor, VS Code, the JetBrains IDEs (JetBrains Toolbox's scripts on the PATH) and Visual Studio, found through App Paths and the PATH. Looked for once at launch and kept; looked for again off the UI thread once a minute old (a search of the PATH is thousands of file checks: done on each frame, it was most of each frame's time with the hub pinned open).", linux = "The file manager (xdg-open), then VS Code, Cursor, Windsurf, Zed, Sublime Text and a terminal found on the PATH (`linux_open_in`)." }
 code = ["crates/trek-core/src/open_in.rs", "crates/trek-app/src/hub.rs", "crates/trek-app/src/thread_menu.rs", "crates/trek-app/src/linux_open_in.rs"]
 tests = ["crates/trek-app/tests/hub.rs"]
@@ -271,10 +274,10 @@ area = "Install"
 what = "A native build for each kind of processor"
 macos = "yes"
 windows = "partial"
-linux = "partial"
+linux = "yes"
 live = ["native"]
 how = { macos = "Apple silicon and Intel; an Intel build under Rosetta moves to the native one.", windows = "x64." }
-note = "No ARM64 build: Windows on Arm runs the x64 one emulated. Needs an aarch64-pc-windows-msvc release job and manifest entry. Linux: x86_64 release builds; aarch64 builds and runs from source (checked in an arm64 Ubuntu 22.04 container) but has no release download yet."
+note = "No ARM64 build: Windows on Arm runs the x64 one emulated. Needs an aarch64-pc-windows-msvc release job and manifest entry. Linux: x86_64 and Arm (aarch64) releases, each built on a runner of its own architecture."
 code = ["crates/trek-core/src/update.rs"]
 
 [[feature]]
@@ -708,6 +711,7 @@ macos = "yes"
 windows = "yes"
 linux = "partial"
 live = ["route project:{project}", "tools browser", "wait 600", "browser go https://example.com", "wait 2500", "browser eval window.open('https://example.com/', 'pop', 'width=420,height=320'); 1", "wait 2500", "count browser-sheet-tab 1", "click browser-sheet-close"]
+live_linux = ["route project:{project}", "tools browser", "wait 600", "browser go https://example.com", "wait 2500", "browser eval window.open('https://example.com/', 'pop', 'width=420,height=320'); 1", "wait 2500", "count browser-tab#* 2"]
 how = { macos = "A real view made from WebKit's configuration.", windows = "WebView2's NewWindowRequested hands the page a view of Trek's (SetNewWindow) made from its opener's environment; WindowCloseRequested closes it. Ctrl-click and middle-click tabs keep an opener there (wry doesn't pass the click's details).", linux = "A page's popup opens in a tab of its own, without window.opener." }
 note = "Linux: a sign-in popup that answers its opener doesn't work (WebKitGTK's popup isn't made from the opener's configuration yet)."
 code = ["crates/trek-app/src/panels/browser.rs", "crates/trek-app/src/panels/browser/webview2.rs"]
@@ -722,8 +726,8 @@ windows = "yes"
 linux = "partial"
 live = ["route project:{project}", "tools browser", "wait 600", "browser go https://example.com", "wait 2500", "browser eval setTimeout(() => alert('Live check'), 10); 1", "wait 1200", "count browser-ask-yes 1", "click browser-ask-yes"]
 how = { macos = "WebKit's UI delegate into Trek's bar.", windows = "WebView2's ScriptDialogOpening, PermissionRequested and LaunchingExternalUriScheme into the same bar (camera and microphone as one ask; an app link names the app Windows has for it); while an agent drives, Trek answers dialogs for it (Ask::for_agent, shared)." }
-note = "Linux: Trek's bar asks what its own page script sees; WebKitGTK's permission requests (camera, location) aren't routed to it yet. Not yet seen live on Linux."
-code = ["crates/trek-app/src/panels/browser/asks.rs", "crates/trek-app/src/panels/browser/webview2.rs"]
+note = "Linux: a page's alert, confirm and prompt go to Trek's bar (WebKitGTK's script-dialog, kept until the bar answers, `webkitgtk.rs`); WebKitGTK's permission requests (camera, location) aren't routed to it yet, so it asks them in the page."
+code = ["crates/trek-app/src/panels/browser/asks.rs", "crates/trek-app/src/panels/browser/webview2.rs", "crates/trek-app/src/panels/browser/webkitgtk.rs"]
 tests = ["crates/trek-app/src/panels/browser/asks.rs"]
 
 [[feature]]
@@ -732,10 +736,10 @@ area = "Browser"
 what = "Downloads said in Trek's toasts"
 macos = "yes"
 windows = "yes"
-linux = "partial"
+linux = "yes"
 live = ["route project:{project}", "tools browser", "wait 600", "browser go https://example.com", "wait 2500", "browser eval (() => { const a = document.createElement('a'); a.href = 'data:text/plain,live%20check'; a.download = 'live-check.txt'; document.body.appendChild(a); a.click(); return 1; })()", "wait 2500", "file downloads{/}live-check.txt"]
 how = { macos = "WebKit's downloads, through wry.", windows = "WebView2's, through wry; taking them hides WebView2's own flyout, so Trek's toasts say it." }
-note = "Linux: WebKitGTK's downloads go through wry's handler as on the Mac; not yet seen live on Linux."
+note = "Linux: WebKitGTK's downloads go through wry's handler as on the Mac, and its live check passes there."
 code = ["crates/trek-app/src/panels/browser.rs"]
 
 [[feature]]
@@ -746,7 +750,8 @@ macos = "yes"
 windows = "yes"
 linux = "partial"
 live = ["route project:{project}", "tools browser", "wait 600", "browser go https://example.com", "wait 3000", "browser expect loaded", "browser crash", "wait 3000", "browser expect crashed loaded", "browser crash", "wait 3000", "browser expect crashed failed:example.com", "browser go http://127.0.0.1:39999/", "wait 3000", "browser expect failed:127.0.0.1:39999 why:running", "browser go http://127.0.0.1:9/", "wait 3000", "browser expect failed:127.0.0.1:9 why:kept"]
-note = "Checked against a real WebView2 on Windows 11: a refused connection (127.0.0.1:39999) gets Trek's \"Can't reach this page\" with its reason, and port 9 \"Can't open this page\", saying why, and links handed to another app (mailto:, a custom scheme) leave the page as it was; the six real-WebView2 tests pass. The mapping is plain code, so the Mac's CI checks the Windows words too. The crash page now points to \"Open in default browser\", which both platforms' ⋯ menus have (it said Safari). A port browsers keep pages off (the Fetch standard's list: 9, 22, 25…) is said as that on both platforms (\"Port 9 is kept for another kind of service…\"), not as a server that isn't running: WebView2 shows its own page for it with a status it calls unknown, and WebKit stops it before it starts. A newer WebKit reports that as its \"restricted port\" error (103, which Trek called its ad blocker's), and an older one, macOS 15's in CI, showed an empty page and reported nothing, leaving the tab blank; Trek's delegate now says it before WebKit is asked. The live check loads a closed port and port 9, and reads the reason Trek's page gives for each. Linux: a failed load says why; a web process that crashes isn't caught (WebKitGTK's web-process-terminated signal isn't hooked yet)."
+live_linux = ["route project:{project}", "tools browser", "wait 600", "browser go https://example.com", "wait 3000", "browser expect loaded", "browser crash", "wait 3000", "browser expect crashed loaded", "browser crash", "wait 3000", "browser expect crashed failed:example.com", "browser go http://127.0.0.1:39999/", "wait 3000", "browser expect failed:127.0.0.1:39999 why:running"]
+note = "Checked against a real WebView2 on Windows 11: a refused connection (127.0.0.1:39999) gets Trek's \"Can't reach this page\" with its reason, and port 9 \"Can't open this page\", saying why, and links handed to another app (mailto:, a custom scheme) leave the page as it was; the six real-WebView2 tests pass. The mapping is plain code, so the Mac's CI checks the Windows words too. The crash page now points to \"Open in default browser\", which both platforms' ⋯ menus have (it said Safari). A port browsers keep pages off (the Fetch standard's list: 9, 22, 25…) is said as that on both platforms (\"Port 9 is kept for another kind of service…\"), not as a server that isn't running: WebView2 shows its own page for it with a status it calls unknown, and WebKit stops it before it starts. A newer WebKit reports that as its \"restricted port\" error (103, which Trek called its ad blocker's), and an older one, macOS 15's in CI, showed an empty page and reported nothing, leaving the tab blank; Trek's delegate now says it before WebKit is asked. The live check loads a closed port and port 9, and reads the reason Trek's page gives for each. Linux: a failed load and a page whose web process ended say so on Trek's page (WebKitGTK's load-failed and web-process-terminated, its GLib errors given as the Mac's codes, `webkitgtk.rs`); a port browsers keep pages off (9) shows a blank page, as WebKitGTK reports nothing for it, so its live check is left out there."
 how = { macos = "WebKit's errors (NSURLErrorDomain, WebKitErrorDomain) and its web content process ending.", windows = "WebView2's: a load it put its own error page up for (ContentLoading's IsErrorPage), with NavigationCompleted's WebErrorStatus in Trek's words (an unknown status, as for a refused connection, said as unreachable); a load only stopped (a link handed to another app, a download) and a server's own 404 page are left alone. ProcessFailed for the page's own process (exited, or unresponsive) is a crash: reloaded, then explained if it ends again." }
 tests = ["crates/trek-app/src/panels/browser/asks.rs", "crates/trek-app/src/panels/browser.rs", "crates/trek-app/tests/browser.rs"]
 code = ["crates/trek-app/src/panels/browser.rs", "crates/trek-app/src/panels/browser/webview2.rs", "crates/trek-app/src/panels/browser/asks.rs"]
@@ -1532,7 +1537,7 @@ what = "A verification skill: the agent checks its work with the project's own C
 macos = "yes"
 windows = "yes"
 linux = "yes"
-live = ["route project:{project}", "route settings:project", "wait 400", "count verify-setup 1"]
+live = ["project {project}", "route settings:project", "wait 400", "count verify-setup 1"]
 how = { macos = "The skill's CLI found by its `cli:` line or its execute bit; runs read as shell commands.", windows = "The skill's CLI found by its `cli:` line, a program's extension or a `#!` line; runs read as PowerShell, cmd.exe and Git Bash write them (a backslash before a name a folder separator, `app` for `app.cmd`, any case, `pwsh -c`, `cmd /c`). The mock agent's CLI is a batch file it runs through cmd.exe." }
 code = ["crates/trek-core/src/verification.rs", "crates/trek-agents/src/mock.rs"]
 tests = ["crates/trek-core/src/verification.rs", "crates/trek-agents/src/mock.rs", "crates/trek-app/tests/pstack.rs", "crates/trek-agents/src/claude.rs"]
@@ -1906,7 +1911,7 @@ macos = "yes"
 windows = "yes"
 linux = "partial"
 live = ["self-contained"]
-how = { macos = "What it links comes with macOS or with the app.", windows = "The Visual C++ runtime is built into Trek's programs (script/static_vcruntime.rs), whisper.cpp's C++ too (/MT, vendor/whisper-rs-sys/build.rs), so no redistributable is needed; the Universal CRT is Windows' own. tests/hardening.rs and release.ps1 refuse a trek.exe that names the redistributable's DLLs.", linux = "The .deb names its libraries (WebKitGTK, GTK 3, libayatana-appindicator) for apt to install; the AppImage carries what it can." }
+how = { macos = "What it links comes with macOS or with the app.", windows = "The Visual C++ runtime is built into Trek's programs (script/static_vcruntime.rs), whisper.cpp's C++ too (/MT, vendor/whisper-rs-sys/build.rs), so no redistributable is needed; the Universal CRT is Windows' own. tests/hardening.rs and release.ps1 refuse a trek.exe that names the redistributable's DLLs.", linux = "The .deb names its libraries (WebKitGTK, GTK 3, libayatana-appindicator) for apt to install; the AppImage carries Trek alone, and its start script names any of them missing and the package to install." }
 note = "Linux: Trek links the desktop's WebKitGTK and GTK, so a computer without them (a minimal server) needs them installed first."
 code = ["script/static_vcruntime.rs", "vendor/whisper-rs-sys/build.rs", "script/release.ps1"]
 tests = ["crates/trek-app/tests/hardening.rs"]

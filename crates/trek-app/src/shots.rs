@@ -291,7 +291,21 @@ fn native_build() -> anyhow::Result<()> {
         );
         Ok(())
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    // Linux: the processor the kernel reports (uname) is the one Trek was built for.
+    #[cfg(target_os = "linux")]
+    {
+        let machine = std::process::Command::new("uname")
+            .arg("-m")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())?;
+        let built = std::env::consts::ARCH;
+        anyhow::ensure!(
+            machine == built || (machine == "arm64" && built == "aarch64"),
+            "native: this computer's processor is {machine}, and Trek was built for {built}"
+        );
+        Ok(())
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     anyhow::bail!("native: Windows and macOS only")
 }
 
@@ -1273,16 +1287,32 @@ async fn browser(
             let answer = cx
                 .update(|cx| panel.read(cx).shots_eval(rest, cx))
                 .ok_or_else(|| anyhow::anyhow!("browser eval: no page"))?;
-            let json = answer
-                .recv()
-                .await
-                .map_err(|_| anyhow::anyhow!("browser eval: the page closed"))?;
+            // A page held by a dialog runs no script until it's answered: a bounded wait, so the
+            // command says so rather than holding every later one (Linux's Live run waited out
+            // its two hours behind a page WebKitGTK had stopped for an alert).
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            let json = loop {
+                match answer.try_recv() {
+                    Ok(json) => break json,
+                    Err(async_channel::TryRecvError::Closed) => {
+                        anyhow::bail!("browser eval: the page closed")
+                    }
+                    Err(async_channel::TryRecvError::Empty) => {}
+                }
+                anyhow::ensure!(
+                    std::time::Instant::now() < deadline,
+                    "browser eval: the page didn't answer in 30 s (a dialog holding it?)"
+                );
+                cx.background_executor()
+                    .timer(Duration::from_millis(50))
+                    .await;
+            };
             std::fs::write(dir.join("browser-eval.json"), json)?;
             Ok(())
         }
         // `browser crash`: end the page's own process, as a crash would (WebView2's renderer,
         // WebKit's web content process).
-        #[cfg(any(windows, target_os = "macos"))]
+        #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
         "crash" => {
             let ended = cx
                 .update(|cx| panel.read(cx).shots_crash(cx))
