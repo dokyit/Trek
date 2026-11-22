@@ -658,8 +658,11 @@ POSTHOG_PROJECT_FILE = HOME / ".trek-bench" / "posthog-project"
 
 def asset_kind(name):
     """(kind, platform) of a release asset: installers people download, archives the updater
-    fetches, the channel manifest every update check reads; signatures are (None, None)."""
+    fetches, the channel manifest every update check reads; signatures and symbols (.dSYM.zip,
+    .pdb.zip: for `symbolicate`, not a download) are (None, None)."""
     if name.endswith(".minisig") or name.endswith(".sig"):
+        return None, None
+    if re.search(r"\.(dSYM|pdb|debug)\.(zip|tar\.gz|tar\.xz)$", name):
         return None, None
     if re.fullmatch(r"(stable|beta|nightly)\.json", name):
         return "manifest", None
@@ -1047,6 +1050,409 @@ def cmd_dock(a):
             + (f" originalPid {r['original_pid']}" if r.get("original_pid") else "")
             + (f"  {r.get('command', r['executable'])}" if r.get("pid") else f"  {r['executable']}") for r in records]
     return {"verdict": verdict, "records": records, "tiles": tiles, "_text": text + [f"tiles: pinned {tiles['pinned']}, recent {tiles['recent']}", verdict]}
+
+
+# ---------------------------------------------------------------- symbolicate
+
+# A release is stripped: Trek's own frames in a freeze file (sample), a panic's backtrace, and a
+# macOS .ips, .diag, spin or hang report are offsets in the binary. The release workflow keeps
+# the symbols (docs/RELEASING.md, "Symbols"): on the release as Trek-<v>-<platform>.dSYM.zip, and
+# for 90 days as the run's artifact trek-symbols-<v>-<platform>.
+SYMBOLS_CACHE = HOME / "Library" / "Caches" / "Trek" / "symbols"
+TREK_EXES = ("trek", "trek-mcp")
+SEMVER = r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?"
+# crates/trek-logging's binary_image(): "Trek 0.4.64 (aarch64), trek <UUID> at 0x104710000".
+IMAGE_LINE = re.compile(rf"\bTrek ({SEMVER}) \((aarch64|x86_64)\)(?:, ([\w.-]+) <([0-9A-Fa-f-]{{36}})> at (0x[0-9a-fA-F]+))?")
+# sample (a freeze file, and the freeze's heaviest-stack log line): ???  (in trek)  load address 0x… + 0x…
+SAMPLE_FRAME = re.compile(r"\?\?\?(\s+\(in (trek|trek-mcp)\)\s+load address (0x[0-9a-f]+) \+ (0x[0-9a-f]+))")
+# A .diag, spin or hang report: ??? (trek + 16286256) [0x105698230]
+DIAG_FRAME = re.compile(r"\?\?\?( \((trek|trek-mcp) \+ (\d+)\))")
+# std's backtrace of a stripped build, as Trek logs it: "  12:        0x104c3d2a8 - <unknown>"; on a
+# Mac each frame takes the one symbol a stripped executable keeps, __mh_execute_header.
+RUST_FRAME = re.compile(r"^(\s*\d+:\s+(0x[0-9a-fA-F]+) - )(?:<unknown>|__mh_execute_header)$", re.M)
+# A crash report's Binary Images line: 0x104710000 - 0x10ba77fff  dev.trek.Trek 0.4.63 (0.4.63)  <UUID>  /path/trek
+BINARY_IMAGE = re.compile(r"^\s*(0x[0-9a-fA-F]+)\s*-\s*(?:0x[0-9a-fA-F]+|\?\?\?)\s+(.*?)\s*<([0-9A-Fa-f-]{36})>\s+(\S.*?)\s*$", re.M)
+
+
+def sym_platform(arch):
+    a = (arch or "").lower().replace("-", "_")
+    if a in ("arm64", "arm64e", "aarch64", "arm_64"):
+        return "darwin-aarch64"
+    if a in ("x86_64", "x86_64h", "x86"):
+        return "darwin-x86_64"
+    return None
+
+
+def read_report(path):
+    """What a report says about the Trek it came from, and where its unnamed Trek frames are."""
+    text = Path(path).read_text(errors="replace")
+    r = {"kind": None, "version": None, "arch": None, "images": {}, "text": text, "ips": None}
+    first, _, body = text.partition("\n")
+    if first.lstrip().startswith("{") and ('"app_name"' in first or '"bug_type"' in first):
+        try:
+            head, data = json.loads(first), json.loads(body)
+        except ValueError:
+            head = data = None
+        if isinstance(data, dict) and "usedImages" in data:
+            r.update(kind="ips", ips=(head, data))
+            r["version"] = head.get("build_version") or head.get("app_version") or None
+            r["arch"] = data.get("cpuType")
+            for img in data.get("usedImages", []):
+                name = img.get("name") or Path(img.get("path", "")).name
+                if name in TREK_EXES and img.get("uuid"):
+                    r["images"][name] = {"uuid": img["uuid"].upper(), "load": img.get("base")}
+    if r["kind"] is None and text.lstrip().startswith("{"):
+        try:  # a crash report Trek wrote for the next launch: crash-reports/panic-*.json
+            data = json.loads(text)
+        except ValueError:
+            data = None
+        if isinstance(data, dict) and "backtrace" in data:
+            r.update(kind="panic-report", text=data["backtrace"])
+            r["version"] = data.get("version")
+            text = data["backtrace"]
+    if r["kind"] is None:
+        r["kind"] = ("freeze" if text.startswith("Analysis of sampling") else
+                     "diag" if DIAG_FRAME.search(text) or "Data Source:" in text[:2000] else
+                     "log")
+    m = re.search(r"^Version:\s+(\S+)(?: \(([^)]+)\))?", text, re.M)
+    if m and not r["version"] and m.group(1) not in ("0", "???"):
+        # CFBundleShortVersionString (CFBundleVersion): the second is the full one, a beta's suffix too.
+        r["version"] = m.group(2) if m.group(2) and re.fullmatch(SEMVER, m.group(2)) else m.group(1)
+    archs = re.findall(r"^(?:Code Type|Architecture):\s+(\S+)", text, re.M)
+    if archs and not r["arch"]:
+        r["arch"] = archs[-1]  # a .diag names the OS's first, then the process's
+    for base, desc, uuid, where in BINARY_IMAGE.findall(text):
+        name = Path(where.strip()).name
+        if name in TREK_EXES:
+            r["images"].setdefault(name, {"uuid": uuid.upper(), "load": int(base, 16)})
+    for m in IMAGE_LINE.finditer(text):
+        r["version"] = r["version"] or m.group(1)
+        r["arch"] = r["arch"] or m.group(2)
+        if m.group(3):
+            r["images"].setdefault(m.group(3), {"uuid": m.group(4).upper(), "load": int(m.group(5), 16)})
+    m = re.search(r"^Load Address:\s+(0x[0-9a-f]+)", text, re.M)
+    proc = re.search(r"^Process:\s+(\S+)", text, re.M)
+    if m and proc and proc.group(1) in r["images"] and r["images"][proc.group(1)].get("load") is None:
+        r["images"][proc.group(1)]["load"] = int(m.group(1), 16)
+    r["frames"] = report_frames(r, text)
+    return r
+
+
+def report_frames(r, text):
+    """(image, offset) of each frame that wants a name, in order."""
+    frames = []
+    if r["kind"] == "ips":
+        head, data = r["ips"]
+        names = [img.get("name") or Path(img.get("path", "")).name for img in data.get("usedImages", [])]
+        for th in data.get("threads", []):
+            for f in th.get("frames", []):
+                i = f.get("imageIndex")
+                if isinstance(i, int) and i < len(names) and names[i] in TREK_EXES and "imageOffset" in f:
+                    frames.append((names[i], int(f["imageOffset"])))
+        return frames
+    for m in SAMPLE_FRAME.finditer(text):
+        frames.append((m.group(2), int(m.group(4), 16)))
+    for m in DIAG_FRAME.finditer(text):
+        frames.append((m.group(2), int(m.group(3))))
+    image = next((n for n in TREK_EXES if r["images"].get(n, {}).get("load") is not None), None)
+    if image:
+        base = r["images"][image]["load"]
+        for m in RUST_FRAME.finditer(text):
+            off = int(m.group(2), 16) - base
+            if 0 <= off < 1 << 31:
+                frames.append((image, off))
+    return frames
+
+
+def symbol_names(version, platform):
+    asset = f"Trek-{version}-{platform}.dSYM.zip"
+    return asset, [f"trek-symbols-{version}-{platform}", f"trek-symbols-v{version}-{platform}"]
+
+
+def dwarf_files(root):
+    """{UUID: path} of every dSYM's DWARF file under root."""
+    found = {}
+    root = Path(root)
+    dwarfs = list(root.glob("Contents/Resources/DWARF/*")) if root.name.endswith(".dSYM") else []
+    for dwarf in dwarfs or root.glob("**/*.dSYM/Contents/Resources/DWARF/*"):
+        rc, out = run(["dwarfdump", "--uuid", str(dwarf)], timeout=60)
+        for uuid, arch in re.findall(r"UUID: ([0-9A-F-]{36}) \((\w+)\)", out):
+            found[uuid.upper()] = {"path": str(dwarf), "arch": arch}
+    return found
+
+
+def unzip_into(zip_path, dest):
+    """Unpack a downloaded zip into a new, empty folder of its own (it is data, never run)."""
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    rc, out = run(["ditto", "-x", "-k", str(zip_path), str(dest)], timeout=600)
+    if rc != 0:
+        raise CliError(f"couldn't unpack {zip_path}: {out.strip()[-200:]}")
+    for inner in list(dest.glob("**/*.dSYM.zip")):  # an artifact holds the release's zip
+        unzip_into(inner, inner.parent / (inner.name + ".d"))
+        inner.unlink()
+
+
+def symbol_sources(version, platform, repo, a, tried):
+    """Where Trek <version>'s symbols for <platform> may be, in order: --symbols, what was fetched
+    before, the release's asset, the release runs' artifacts. Yields (folder, where it's from);
+    the caller takes the first whose UUIDs are the binary's."""
+    asset, artifacts = symbol_names(version, platform)
+    if a.symbols:
+        p = Path(a.symbols).expanduser().resolve()
+        if p.is_file() and p.suffix == ".zip":
+            dest = Path(tempfile.mkdtemp(prefix="trek-symbols-"))
+            unzip_into(p, dest / "zip")
+            yield dest, str(p)
+        elif p.exists():
+            yield p, str(p)
+        else:
+            raise CliError(f"no symbols at {p}")
+        return
+    cache = SYMBOLS_CACHE / version
+    for folder in sorted(cache.glob(f"{platform}*")) if cache.exists() else []:
+        if any(folder.glob("**/*.dSYM")):
+            tried.append(f"cache {folder}")
+            yield folder, f"cache {folder}"
+    if not gh_ok():
+        tried.append("no fetching (" + ("--offline" if OFFLINE else "gh is missing") + ")")
+        return
+    work = Path(tempfile.mkdtemp(prefix="trek-symbols-"))
+    try:
+        # A stable release's tag is v<version>; a beta's or nightly's GitHub release moves with
+        # its channel and holds only the newest build's.
+        for tag in [f"v{version}"] + (["beta", "nightly"] if "-" in version else []):
+            tried.append(f"release {tag}: {asset}")
+            dl = work / f"release-{tag}"
+            rc, out = run(["gh", "release", "download", tag, "--repo", repo, "--pattern", asset, "--dir", str(dl)], timeout=900)
+            if rc == 0 and (dl / asset).exists():
+                dest = cache / f"{platform}-release-{tag}"
+                shutil.rmtree(dest, ignore_errors=True)
+                unzip_into(dl / asset, dest)
+                yield dest, f"release {tag} ({asset})"
+        for name in artifacts:
+            found, err = gh_json(["api", f"repos/{repo}/actions/artifacts?name={name}&per_page=20"])
+            arts = (found or {}).get("artifacts", [])
+            tried.append(f"artifact {name}: " + (err or f"{len(arts)} found"))
+            for art in arts:
+                run_id = (art.get("workflow_run") or {}).get("id")
+                if art.get("expired"):
+                    tried.append(f"artifact {name} of run {run_id}: expired {art.get('expires_at')}")
+                    continue
+                z = work / f"artifact-{art['id']}.zip"
+                rc, _ = run(["sh", "-c", 'gh api "$1" > "$2"', "sh", f"repos/{repo}/actions/artifacts/{art['id']}/zip", str(z)],
+                            timeout=900)
+                if rc == 0 and z.exists() and z.stat().st_size > 0:
+                    dest = cache / f"{platform}-run{run_id}"
+                    shutil.rmtree(dest, ignore_errors=True)
+                    unzip_into(z, dest)
+                    yield dest, f"artifact {name} (run {run_id}, kept until {art.get('expires_at')})"
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def text_size(dwarf):
+    """__TEXT's size in a dSYM's DWARF file: offsets past it aren't Trek's code."""
+    rc, out = run(["otool", "-l", dwarf], timeout=60)
+    m = re.search(r"segname __TEXT\s+vmaddr (0x[0-9a-f]+)\s+vmsize (0x[0-9a-f]+)", out)
+    return int(m.group(2), 16) if m else 1 << 31
+
+
+def atos_names(dwarf, arch, offsets):
+    """{offset: "innermost (file:line) < … < function (file:line)"} from atos, demangled."""
+    offsets = sorted(set(offsets))
+    names = {}
+    delim = "@@agent-cli@@"
+    for i in range(0, len(offsets), 400):
+        chunk = offsets[i:i + 400]
+        rc, out = run(["atos", "-o", dwarf, "-arch", arch, "-i", "-d", delim, "-offset", *[hex(o) for o in chunk]], timeout=300)
+        blocks = out.split(delim)
+        blocks = [b.strip("\n") for b in blocks[:-1]] if out.rstrip().endswith(delim) else None
+        if rc != 0 or blocks is None or len(blocks) != len(chunk):
+            # Inline frames didn't line up with the addresses: one name per address, without them.
+            rc, out = run(["atos", "-o", dwarf, "-arch", arch, "-offset", *[hex(o) for o in chunk]], timeout=300)
+            blocks = out.rstrip("\n").split("\n") if rc == 0 else []
+            if len(blocks) != len(chunk):
+                raise CliError(f"atos gave {len(blocks)} answers for {len(chunk)} addresses: {out.strip()[-200:]}")
+        for off, block in zip(chunk, blocks):
+            parts = [re.sub(r" \(in [^)]*\)", "", l).strip() for l in block.splitlines() if l.strip()]
+            parts = [p for p in parts if not re.fullmatch(r"0x[0-9a-f]+", p)]
+            if parts:
+                names[off] = " < ".join(parts)
+    if names and shutil.which("c++filt"):  # Rust's v0 names (_RNv…); c++filt reads them
+        keys = list(names)
+        p = subprocess.run(["c++filt"], input="\n".join(names[k] for k in keys) + "\n", text=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        lines = p.stdout.split("\n")
+        if p.returncode == 0 and len(lines) >= len(keys):
+            names = {k: lines[n] for n, k in enumerate(keys)}
+    return names
+
+
+def render_ips(r, named):
+    head, data = r["ips"]
+    imgs = data.get("usedImages", [])
+    names = [img.get("name") or Path(img.get("path", "")).name for img in imgs]
+    exc = data.get("exception", {})
+    out = [f"{head.get('name') or data.get('procName')} {r['version'] or '?'} ({data.get('cpuType')})  "
+           f"{exc.get('type', '')} {exc.get('signal', '')}".rstrip()]
+    term = data.get("termination", {})
+    if term.get("indicator") or term.get("reasons"):
+        out.append(f"termination: {term.get('indicator', '')} {' '.join(term.get('reasons', []))}".strip())
+    for n, th in enumerate(data.get("threads", [])):
+        label = " ".join(x for x in (f"Thread {n}", th.get("name") or "", f"({th['queue']})" if th.get("queue") else "",
+                                     "crashed" if th.get("triggered") else "") if x)
+        out.append("")
+        out.append(label + ":")
+        for k, f in enumerate(th.get("frames", [])):
+            i = f.get("imageIndex")
+            image = names[i] if isinstance(i, int) and i < len(names) else "???"
+            off = f.get("imageOffset", 0)
+            name = named.get((image, off)) or (f"{f['symbol']} + {f.get('symbolLocation', 0)}" if f.get("symbol") else "???")
+            out.append(f"{k:<3} {image:<28} {name}  ({image} + {off})")
+    return out
+
+
+def named_text(r, named):
+    """The report's lines with each named frame's name in place of its ??? (an .ips: its threads)."""
+    if r["kind"] == "ips":
+        return render_ips(r, named)
+
+    def sample_sub(m):
+        n = named.get((m.group(2), int(m.group(4), 16)))
+        return f"{n}{m.group(1)}" if n else m.group(0)
+
+    def diag_sub(m):
+        n = named.get((m.group(2), int(m.group(3))))
+        return f"{n}{m.group(1)}" if n else m.group(0)
+    image = next((n for n in TREK_EXES if r["images"].get(n, {}).get("load") is not None), None)
+
+    def rust_sub(m):
+        n = named.get((image, int(m.group(2), 16) - r["images"][image]["load"])) if image else None
+        return f"{m.group(1)}{n}" if n else m.group(0)
+    return RUST_FRAME.sub(rust_sub, DIAG_FRAME.sub(diag_sub, SAMPLE_FRAME.sub(sample_sub, r["text"]))).splitlines()
+
+
+SYMBOLICATE_FIXTURES = ROOT / "script" / "tests" / "fixtures" / "symbolicate"
+
+
+def symbolicate_units():
+    """symbolicate's reading and naming of each kind of report, on fixtures (no atos, no network)."""
+    want = {  # file: (kind, version, platform, trek's UUID, its load address, frames, a frame and where its name goes)
+        "freeze.txt": ("freeze", "0.4.64", "darwin-aarch64", "0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0", 0x104c84000, 3,
+                       ("trek", 0xcd4d64), "fake::hold  (in trek)  load address 0x104c84000 + 0xcd4d64"),
+        "report.diag": ("diag", "0.4.63", "darwin-aarch64", "2F2D0CB7-2A2F-397E-A644-A954494E8264", 0x104710000, 3,
+                        ("trek", 16286256), "fake::hold (trek + 16286256) [0x105698230]"),
+        "crash.ips": ("ips", "0.4.64-beta.2", "darwin-x86_64", "6576D418-4C72-3B4A-BD13-936E6CB748B2", 4295000064, 2,
+                      ("trek", 74580), "fake::hold  (trek + 74580)"),
+        "panic.log": ("log", "0.4.64", "darwin-aarch64", "0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0", 0x104710000, 2,
+                      ("trek", 0x2a8), "0x1047102a8 - fake::hold"),
+    }
+    results = []
+    for name, (kind, version, platform, uuid, load, frames, frame, shown) in want.items():
+        try:
+            r = read_report(SYMBOLICATE_FIXTURES / name)
+            img = r["images"].get("trek", {})
+            got = (r["kind"], r["version"], sym_platform(r["arch"]), img.get("uuid"), img.get("load"), len(r["frames"]))
+            text = "\n".join(named_text(r, {frame: "fake::hold"}))
+            ok = got == (kind, version, platform, uuid, load, frames) and frame in r["frames"] and shown in text
+            why = "" if ok else f"read {got}, frames {r['frames'][:4]}, named: {shown in text}"
+        except Exception as e:  # a fixture that can't be read is a failure, not a crash of the selftest
+            ok, why = False, repr(e)
+        results.append({"cmd": f"unit symbolicate {name}", "ok": ok, **({"why": why} if not ok else {})})
+    return results
+
+
+def cmd_symbolicate(a):
+    """Name Trek's frames in a freeze file, a panic's backtrace, or a macOS .ips/.diag report from a release's saved symbols (atos)."""
+    path = Path(a.file).expanduser()
+    if not path.exists():
+        raise CliError(f"no file {path}")
+    r = read_report(path)
+    version = (a.version or r["version"] or "").lstrip("v") or None
+    arch = a.arch or r["arch"]
+    platform = sym_platform(arch)
+    wanted = sorted({img for img, _ in r["frames"]})
+    d = {"file": str(path), "kind": r["kind"], "version": version, "arch": arch, "platform": platform,
+         "images": {n: {"uuid": i.get("uuid"), "load": hex(i["load"]) if isinstance(i.get("load"), int) else None}
+                    for n, i in r["images"].items()},
+         "frames": len(r["frames"])}
+    if not r["frames"]:
+        d["note"] = "no unnamed Trek frames in it: nothing to name"
+        d["_text"] = [f"{path}: {r['kind']}, Trek {version or '?'} {arch or '?'}: no unnamed Trek frames in it"]
+        return d
+    if not version:
+        raise CliError(f"{path} doesn't say which Trek it came from: pass --version")
+    if not platform:
+        raise CliError(f"{path} doesn't say which architecture (got {arch!r}): pass --arch arm64 or x86_64")
+    asset, artifacts = symbol_names(version, platform)
+    d["looks_for"] = [asset + " on its release", artifacts[0] + " (release workflow artifact)"]
+    if a.parse_only:
+        d["_text"] = [f"{path}: {r['kind']}, Trek {version} {arch} ({platform}), {len(r['frames'])} frames to name in "
+                      + ", ".join(f"{n} <{r['images'].get(n, {}).get('uuid', '?')}>" for n in wanted),
+                      f"symbols: {d['looks_for'][0]}, else {d['looks_for'][1]}"]
+        return d
+    repo = a.repo or repo_slug() or "dokyit/Trek"
+    atos_arch = "arm64" if platform == "darwin-aarch64" else "x86_64"
+    want = {img: r["images"].get(img, {}).get("uuid") for img in wanted}
+    tried, others, chosen = [], [], None
+    for folder, source in symbol_sources(version, platform, repo, a, tried):
+        dwarfs = dwarf_files(folder)
+        match = {}
+        for image, uuid in want.items():
+            if uuid and uuid in dwarfs:
+                match[image] = dwarfs[uuid]
+            elif uuid is None:
+                # No UUID in the file (a log line from before Trek wrote one): the dSYM of that
+                # name, unchecked.
+                guess = next((v for v in dwarfs.values() if Path(v["path"]).parts[-5] == image + ".dSYM"), None)
+                if guess:
+                    match[image] = guess
+                    d.setdefault("unchecked", []).append(f"{image}: no UUID in the file, so the symbols weren't checked against it")
+        if match:
+            chosen = (source, match)
+            break
+        others.append(f"{source}: " + (", ".join(f"<{u}>" for u in dwarfs) or "no dSYM"))
+    if chosen is None:
+        asks = ", ".join(f"{i} <{u}>" for i, u in want.items())
+        if others:
+            raise CliError(f"no symbols for {asks}: the ones found for Trek {version} are another build's, so they'd name "
+                           f"the wrong code ({'; '.join(others)})")
+        if any(t.startswith("no fetching") for t in tried):
+            raise CliError(f"Trek {version}'s symbols for {platform} aren't in {SYMBOLS_CACHE / version}, and {tried[-1][13:-1]} "
+                           f"fetches nothing: pass --symbols, or let it fetch {asset}")
+        raise CliError(f"Trek {version}'s symbols for {platform} were never saved, or have expired: no {asset} on its release "
+                       f"and no artifact {artifacts[0]} in {repo} ({'; '.join(tried)}). Releases keep them since the release "
+                       "workflow started to; an older build's frames stay offsets (a rebuild of its tag has other paths in it, "
+                       "so other UUIDs, and can't stand in).")
+    source, match = chosen
+    d["symbols"] = source
+    named, missing = {}, []
+    for image in wanted:
+        if image not in match:
+            missing.append(f"{image} <{want[image]}>: not in {source}")
+            continue
+        offs = [o for img, o in r["frames"] if img == image]
+        limit = text_size(match[image]["path"])
+        names = atos_names(match[image]["path"], atos_arch, [o for o in offs if o < limit])
+        named.update({(image, o): n for o, n in names.items()})
+    if missing:
+        d["not_named"] = missing
+    lines = named_text(r, named)
+    unique = {}
+    for img, off in r["frames"]:
+        if (img, off) in named:
+            unique.setdefault((img, off), named[(img, off)])
+    hits = sum(1 for f in r["frames"] if f in named)
+    d.update(named=hits, unnamed=len(r["frames"]) - hits,
+             names=[{"image": i, "offset": hex(o), "name": n} for (i, o), n in list(unique.items())[:300]])
+    if a.out:
+        Path(a.out).write_text("\n".join(lines) + "\n")
+        d["out"] = a.out
+    head = [f"# {path.name}: Trek {version} {arch}, {hits} of {len(r['frames'])} Trek frames named from {source}"]
+    head += [f"# not named: {m}" for m in missing] + [f"# {u}" for u in d.get("unchecked", [])]
+    d["_text"] = head + ([f"# written to {a.out}"] if a.out else lines)
+    return d
 
 
 # ---------------------------------------------------------------- output
@@ -1776,6 +2182,17 @@ def build_parser():
     s.add_argument("--keep", action="store_true", help="keep the scratch folder")
     s.add_argument("--dry-run", action="store_true", help="print what would be built and measured, run nothing")
     s.add_argument("--timeout", type=int, default=3600)
+    s = add("symbolicate", cmd_symbolicate, epilog="Examples: agent-cli symbolicate ~/Library/Logs/Trek/freeze-2026-11-21-171439.txt; "
+            "agent-cli symbolicate /Library/Logs/DiagnosticReports/trek_….cpu_resource.diag; agent-cli symbolicate panic.log --version 0.4.64. "
+            f"Symbols come from the release (Trek-<v>-<platform>.dSYM.zip), else the release run's 90-day artifact, and are kept in {SYMBOLS_CACHE}. "
+            "Replaces: gh release download …; unzip; dwarfdump --uuid; atos -o … -arch … -offset …; c++filt.")
+    s.add_argument("file", help="a freeze-*.txt, a Trek log or crash-reports/panic-*.json with a backtrace, a .ips, or a .diag/spin/hang report")
+    s.add_argument("--version", help="Trek's version, when the file doesn't say (it usually does)")
+    s.add_argument("--arch", help="arm64 or x86_64, when the file doesn't say")
+    s.add_argument("--symbols", help="a .dSYM, a folder of them, or a .dSYM.zip, instead of fetching the release's")
+    s.add_argument("--repo", help="owner/name (default: origin's)")
+    s.add_argument("--out", help="write the named file here instead of printing it")
+    s.add_argument("--parse-only", action="store_true", help="say what the file is from and which symbols it needs; fetch nothing")
     return p
 
 
@@ -1786,6 +2203,7 @@ SELFTEST_ARGS = {
     "logs": ["5"], "worktrees": ["--fast"], "disk": [], "release": [], "downloads": ["3"], "phone": [], "memory": [], "tasks": ["3"],
     "digest": ["-"], "test": ["--dry-run", "-p", "trek-time"], "check": ["--dry-run", "-p", "trek-time"],
     "ios-build": ["--dry-run"], "sims": ["2"],
+    "symbolicate": ["script/tests/fixtures/symbolicate/freeze.txt", "--parse-only"],
 }
 DIGEST_SAMPLE = ("2026-10-31T10:00:00.0000000Z \x1b[31merror[E0425]\x1b[0m: cannot find value `x`\n"
                  "  --> crates/a/src/lib.rs:3:5\nwarning: unused import\n"
@@ -1826,10 +2244,12 @@ def selftest(as_json, online):
     results.append({"cmd": "unit extract_errors", "ok": bool(unit) and unit[0].startswith("error[E0425]") and "\x1b" not in unit[0]})
     kinds = [asset_kind(n) for n in ("stable.json", "Trek-0.4.40-darwin-aarch64.dmg", "Trek-0.4.40-darwin-aarch64.app.tar.gz",
                                      "Trek-0.4.40-darwin-x86_64.app.tar.gz", "Trek-Setup-x86_64.exe",
-                                     "Trek-0.4.40-windows-x86_64.zip", "Trek-0.4.40-windows-x86_64.zip.minisig")]
+                                     "Trek-0.4.40-windows-x86_64.zip", "Trek-0.4.40-windows-x86_64.zip.minisig",
+                                     "Trek-0.4.40-darwin-aarch64.dSYM.zip", "Trek-0.4.40-windows-x86_64.pdb.zip")]
     results.append({"cmd": "unit asset_kind", "ok": kinds == [("manifest", None), ("installer", "mac-arm64"), ("update", "mac-arm64"),
                                                               ("update", "mac-intel"), ("installer", "windows-x64"),
-                                                              ("update", "windows-x64"), (None, None)]})
+                                                              ("update", "windows-x64"), (None, None), (None, None), (None, None)]})
+    results.extend(symbolicate_units())
     if missing:
         results.append({"cmd": "selftest covers " + ",".join(missing), "ok": False})
     passed = all(r["ok"] for r in results)

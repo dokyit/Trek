@@ -35,9 +35,9 @@ In `telemetry/` in Trek's data folder:
 | `last-sent.json` | The last request, exactly as it was sent, for Settings › Privacy. |
 | `posthog.toml` | Only if you put one there (see above). |
 
-A panic also leaves `crash-reports/panic-*.json` in the data folder (the newest five). Until the user answers they wait; with a yes the next launch sends them, with a no it deletes them.
+A panic also leaves `crash-reports/panic-*.json` in the data folder (the newest five). Until the user answers they wait; with a yes the next launch sends them, with a no it deletes them. A release build is stripped, so its backtrace is the frames' addresses under one line naming the build (`Trek 0.4.64 (aarch64), trek <the binary's UUID> at <its load address>`): numbers that name nothing until they're matched with the symbols the release kept on GitHub (docs/RELEASING.md, "Symbols"), which happens on the maintainer's machine, never in Trek.
 
-A freeze (the main thread making no progress for 5 seconds, `trek_logging::freeze`) is WARN lines in the log, and on a Mac `freeze-<time>.txt` beside it: every thread's stacks from `/usr/bin/sample`, three a run at most, the newest ten kept. Those files are never sent, with a yes or without; the WARN lines are log lines like any other, so feedback sent with diagnostics can carry them, scrubbed.
+A freeze (the main thread making no progress for 5 seconds, `trek_logging::freeze`) is WARN lines in the log, and on a Mac `freeze-<time>.txt` beside it: every thread's stacks from `/usr/bin/sample`, three a run at most, the newest ten kept, ending with the same line naming the build. Those files are never sent, with a yes or without; the WARN lines are log lines like any other, so feedback sent with diagnostics can carry them, scrubbed.
 
 ## The install id
 

@@ -400,13 +400,24 @@ fn sample_into(path: &Path) {
             }
         }
     };
-    match (status, std::fs::read_to_string(path)) {
+    let text = std::fs::read_to_string(path);
+    // Which Trek it was, as `agent-cli symbolicate` finds its symbols by: a release is stripped,
+    // so its own frames are offsets (`load address … + 0x…`) until they're named from the dSYM
+    // the release saved. (`sample`'s header has the version only from a bundle's Info.plist.)
+    let image = crate::binary_image();
+    if text.is_ok() {
+        use std::io::Write as _;
+        if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(path) {
+            let _ = writeln!(file, "\nTrek: {image}");
+        }
+    }
+    match (status, text) {
         (Some(s), Ok(text)) if s.success() => match heaviest_main_stack(&text) {
             Some((total, frames)) if !frames.is_empty() => {
                 let leaf = frames.last().map_or(0, |f| f.0);
                 let shown: Vec<&str> = frames.iter().rev().take(12).map(|f| f.1.as_str()).collect();
                 tracing::warn!(
-                    "freeze: the main thread's heaviest stack ({leaf} of its {total} samples), innermost first: {}",
+                    "freeze: the main thread's heaviest stack ({leaf} of its {total} samples) in {image}, innermost first: {}",
                     shown.join(" < ")
                 );
             }

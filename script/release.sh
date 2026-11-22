@@ -7,6 +7,8 @@
 # Sets the version, builds and signs Trek.app (script/bundle.sh), packs it as
 # Trek-<version>-darwin-<arch>.app.tar.gz (what the updater downloads), signs that with minisign,
 # makes the disk image people install from, Trek-<version>-darwin-<arch>.dmg (script/dmg.sh),
+# keeps the executables' symbols in Trek-<version>-darwin-<arch>.dSYM.zip (the app ships without
+# them; docs/RELEASING.md, "Symbols"),
 # writes the channel manifest (<channel>.json) and release notes, then tags, pushes and creates
 # the GitHub release. With a Developer ID identity and the TREK_NOTARY_* variables, the app is
 # notarized before it's archived and the disk image after it's made (script/notarize.sh). --dry-run
@@ -86,6 +88,9 @@ ARCH=$(uname -m); [[ $ARCH == arm64 ]] && ARCH=aarch64
 PLATFORM="darwin-$ARCH"
 NAME="Trek-$VERSION-$PLATFORM.app.tar.gz"
 DMG_NAME="Trek-$VERSION-$PLATFORM.dmg"
+# The symbols, which the app doesn't ship (docs/RELEASING.md, "Symbols"). Named so nothing that
+# looks for a download takes it for one: the site and the updater go by .dmg, .app.tar.gz, .zip.
+SYM_NAME="Trek-$VERSION-$PLATFORM.dSYM.zip"
 if [[ $CHANNEL == stable ]]; then RELEASE_TAG="v$VERSION"; else RELEASE_TAG=$CHANNEL; fi
 # Nightlies don't get a version tag of their own; they'd bury the real ones.
 VERSION_TAG=""; [[ $CHANNEL != nightly ]] && VERSION_TAG="v$VERSION"
@@ -199,6 +204,26 @@ fi
 
 # ---------- archive, checksum, signature ----------
 rm -rf "$OUT"; mkdir -p "$OUT"
+
+# ---------- symbols ----------
+# The app's Rust executables are stripped; rustc's dsymutil kept their symbols first, in a .dSYM
+# beside each in the target dir ([profile.release] in Cargo.toml). Each must carry the UUID of
+# the executable in the app, or it would name the wrong code. trek-phone-helper (Swift) has none.
+BIN_DIR=${CARGO_TARGET_DIR:-target}${TARGET:+/$TARGET}/release
+SYMS=$(mktemp -d)
+for exe in trek trek-mcp; do
+  dsym="$BIN_DIR/$exe.dSYM"
+  [[ -d $dsym ]] || die "no $dsym: the release profile keeps line tables for rustc to put there (Cargo.toml)"
+  want=$(dwarfdump --uuid "dist/Trek.app/Contents/MacOS/$exe" | awk '{print $2}')
+  have=$(dwarfdump --uuid "$dsym" | awk '{print $2}')
+  [[ -n $want && $want == "$have" ]] || die "$dsym has UUID ${have:-none}, but the app's $exe is ${want:-none}"
+  # Cargo's $exe.dSYM is a link to the one in deps/.
+  ditto "${dsym:A}" "$SYMS/$exe.dSYM"
+  echo "• $exe.dSYM  $want"
+done
+(cd "$SYMS" && zip -qry -X "$OLDPWD/$OUT/$SYM_NAME" trek.dSYM trek-mcp.dSYM)
+rm -rf "$SYMS"
+echo "• $SYM_NAME  $(du -h "$OUT/$SYM_NAME" | cut -f1)"
 # One pass over the app: tee writes the compressed stream to the archive while shasum hashes
 # the same bytes, so the file isn't read a second time for the checksum. pigz compresses on
 # every core; gzip is the fallback.
@@ -248,7 +273,7 @@ print(json.dumps({
 PY
 echo "• $OUT/$CHANNEL.json → ${BASE%/}/$NAME"
 
-ASSETS=("$OUT/$DMG_NAME" "$OUT/$NAME" "$OUT/$NAME.minisig" "$OUT/$CHANNEL.json")
+ASSETS=("$OUT/$DMG_NAME" "$OUT/$NAME" "$OUT/$NAME.minisig" "$OUT/$SYM_NAME" "$OUT/$CHANNEL.json")
 if (( DRY )); then
   # A stable dry run rehearses the push against a throwaway copy of the repository: the "Release
   # v<version>" commit of what it built, the check the workflow's gate makes of it, the atomic push
@@ -305,14 +330,15 @@ else
     sleep $(( 5 * attempt ))
   done
   if gh release view "$CHANNEL" --repo "$REPO" >/dev/null 2>&1; then
-    gh release upload "$CHANNEL" --repo "$REPO" --clobber "$OUT/$NAME" "$OUT/$NAME.minisig" "$OUT/$DMG_NAME"
+    gh release upload "$CHANNEL" --repo "$REPO" --clobber "$OUT/$NAME" "$OUT/$NAME.minisig" "$OUT/$DMG_NAME" "$OUT/$SYM_NAME"
     gh release upload "$CHANNEL" --repo "$REPO" --clobber "$OUT/$CHANNEL.json"
     # The body is replaced whole from release-notes.md, never appended to: the install block is
     # there once, whatever the earlier builds' bodies said.
     gh release edit "$CHANNEL" --repo "$REPO" --prerelease --title "Trek $VERSION ($CHANNEL)" --notes-file "$OUT/release-notes.md"
+    # Older builds' symbols go too; the release workflow's artifacts keep them for 90 days.
     for asset in ${(f)"$(gh release view "$CHANNEL" --repo "$REPO" --json assets --jq '.assets[].name')"}; do
-      if [[ ( $asset == Trek-*.app.tar.gz* || $asset == Trek-*-darwin-*.dmg ) \
-            && $asset != "$NAME" && $asset != "$NAME.minisig" && $asset != "$DMG_NAME" ]]; then
+      if [[ ( $asset == Trek-*.app.tar.gz* || $asset == Trek-*-darwin-*.dmg || $asset == Trek-*-darwin-*.dSYM.zip ) \
+            && $asset != "$NAME" && $asset != "$NAME.minisig" && $asset != "$DMG_NAME" && $asset != "$SYM_NAME" ]]; then
         gh release delete-asset "$CHANNEL" "$asset" --repo "$REPO" -y
       fi
     done
