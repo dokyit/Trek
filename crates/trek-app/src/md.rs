@@ -448,20 +448,29 @@ struct PathRef {
 /// The file a link points at on disk, if it does: absolute and `~` paths as written, `file://`
 /// unwrapped, and relative links resolved against the answer's folder. Only real paths count.
 pub fn link_path(url: &str, cwd: Option<&Path>) -> Option<PathBuf> {
+    link_path_by(url, cwd, |p| p.exists())
+}
+
+/// [`link_path`], asking `exists` of the disk.
+fn link_path_by(url: &str, cwd: Option<&Path>, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
     let raw = url.strip_prefix("file://").unwrap_or(url);
     // `file:///C:/x.png`: a drive after the slash that starts a file URL's path.
     let raw = match raw.strip_prefix('/') {
         Some(rest) if drive_prefix(rest) => rest,
         _ => raw,
     };
-    let path = resolve_link(raw, cwd)?;
-    if path.exists() {
+    // A file on another computer (`\\server\share\…`) isn't looked at: an answer's link or picture
+    // is read as it's drawn, and looking would connect there (on Windows, offering the user's
+    // sign-in), whoever wrote the link.
+    let here = |p: PathBuf| (!trek_core::paths::reaches_out(&p, cwd)).then_some(p);
+    let path = here(resolve_link(raw, cwd)?)?;
+    if exists(&path) {
         return Some(path);
     }
     // Markdown writes a space in a link as `%20`; the literal path wins when it exists.
     if raw.contains('%') {
-        let path = resolve_link(&crate::note_images::percent_decode(raw), cwd)?;
-        return path.exists().then_some(path);
+        let path = here(resolve_link(&crate::note_images::percent_decode(raw), cwd)?)?;
+        return exists(&path).then_some(path);
     }
     None
 }
@@ -570,6 +579,11 @@ fn path_part(raw: &str) -> &str {
 }
 
 fn resolve(raw: &str, cwd: Option<&Path>) -> Option<PathBuf> {
+    resolve_by(raw, cwd, crate::system::lately::exists)
+}
+
+/// [`resolve`], asking `exists` of the disk.
+fn resolve_by(raw: &str, cwd: Option<&Path>, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
     let raw = path_part(raw);
     let p = if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix(r"~\")) {
         trek_core::paths::home().join(rest)
@@ -578,7 +592,11 @@ fn resolve(raw: &str, cwd: Option<&Path>) -> Option<PathBuf> {
     } else {
         cwd?.join(raw)
     };
-    crate::system::lately::exists(&p).then_some(p)
+    // Another computer's (`\\server\share`): looking would connect there as the chip is drawn.
+    if trek_core::paths::reaches_out(&p, cwd) {
+        return None;
+    }
+    exists(&p).then_some(p)
 }
 
 /// A path that stays in the thread's folder `cwd`: relative ones that don't climb out of it, and
@@ -817,10 +835,10 @@ mod tests {
     use super::resolve;
     use super::{
         COLUMN, IMAGE_MAX, Ink, LINE_HEIGHT, Metrics, Tone, column, image_size, in_folder, is_url,
-        link_path, looks_like_path, looks_like_path_on, path_part,
+        link_path, link_path_by, looks_like_path, looks_like_path_on, path_part, resolve_by,
     };
     use gpui_kit::{Hsla, px, rgb};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn spacing_and_sizes_scale_with_the_text() {
@@ -1165,6 +1183,49 @@ mod tests {
         assert_eq!(
             crate::file_icon::icon_name(path_part("src/main.rs:42")),
             crate::file_icon::icon_name("main.rs")
+        );
+    }
+
+    /// A picture, link or path chip an answer names on another computer isn't looked up as the
+    /// answer is drawn: asking the disk would connect to that server (on Windows, offering it the
+    /// user's sign-in). A project kept on a share still finds its own files.
+    #[test]
+    fn paths_on_another_computer_are_not_looked_at() {
+        let asked = std::cell::RefCell::new(Vec::<PathBuf>::new());
+        let exists = |p: &Path| {
+            asked.borrow_mut().push(p.to_path_buf());
+            true
+        };
+        // Another computer as each platform writes one: a share on Windows, `/net` elsewhere.
+        let (far, far_url, share, here) = if cfg!(windows) {
+            (
+                r"\\attacker.example\share\x.png",
+                "file:////attacker.example/share/x.png",
+                Path::new(r"\\nas\code\app"),
+                Path::new(r"C:\code\app"),
+            )
+        } else {
+            (
+                "/net/attacker.example/share/x.png",
+                "file:///net/attacker.example/share/x.png",
+                Path::new("/net/nas/code/app"),
+                Path::new("/code/app"),
+            )
+        };
+        assert!(link_path_by(far, Some(here), exists).is_none());
+        assert!(link_path_by(far_url, None, exists).is_none());
+        assert!(link_path_by(&far.replace("x.png", "x%20y.png"), None, exists).is_none());
+        assert!(resolve_by(far, Some(here), exists).is_none());
+        assert!(resolve_by(far, None, exists).is_none());
+        assert!(asked.borrow().is_empty(), "looked at {:?}", asked.borrow());
+        // The thread's own share is looked at, as any project's folder is.
+        assert_eq!(
+            resolve_by("src/main.rs", Some(share), exists),
+            Some(share.join("src/main.rs"))
+        );
+        assert_eq!(
+            link_path_by("shot.png", Some(share), exists),
+            Some(share.join("shot.png"))
         );
     }
 
