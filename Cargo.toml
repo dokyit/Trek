@@ -49,14 +49,23 @@ opt-level = 3
 # worth the wait for a GUI app.
 lto = "thin"
 codegen-units = 16
+# Symbols for what ships, kept beside it rather than in it (docs/RELEASING.md, "Symbols"): line
+# tables (function names, files and lines, inlined calls; no variables) go into a .dSYM that
+# rustc's dsymutil makes from the objects before it strips the binary, which ships as stripped as
+# before. Windows has the linker write them to a .pdb instead, which needs the binary unstripped
+# (script/release.ps1 sets CARGO_PROFILE_RELEASE_STRIP=false, adding only the .pdb's name to it).
+debug = "line-tables-only"
+split-debuginfo = "packed"
 strip = true
 
 # Local app bundles skip thin LTO: the link alone ran about a minute of script/bundle.sh,
 # and a build you'll install from source doesn't need link-time optimisation. Releases keep
 # the real thing — script/release.sh sets TREK_RELEASE_BUILD=1 and bundle.sh uses --release.
+# Nor do they keep symbols, as before.
 [profile.bundle]
 inherits = "release"
 lto = false
+debug = false
 
 # Trek carries a small patch to gpui-base: semibold (not bold) emphasis, calmer heading sizes,
 # and a few opt-in style knobs for rendered markdown (bold colour, a measure for running text,

@@ -88,6 +88,10 @@ jobs:
 
       # What script/release.ps1 builds for a release (trek-update while the crate exists), short
       # of trek's link.
+      # Unstripped, as script/release.ps1 builds (for the .pdb files): the strip setting is part of
+      # every dependency's fingerprint, so a cache built stripped would be compiled again there.
       - name: cargo build --release
         if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          CARGO_PROFILE_RELEASE_STRIP: 'false'
         run: cargo build --release --locked -p trek-app -p trek-mcp -p trek-update --lib --bin trek-mcp --bin trek-update

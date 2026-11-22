@@ -243,7 +243,8 @@ never opened.
 
 - **Idle timers.** A hidden Trek has nothing that ticks for nothing: in 20 seconds of `sample` its threads spent nearly all their
   time waiting, and its timers are a minute apart (the sidebar's clock, housekeeping) but for one that asks the system every
-  2 seconds about reduced motion.
+  2 seconds about reduced motion. The freeze watch (`trek_logging::freeze`) adds nothing to that: its thread waits for the
+  main run loop's next pass while the loop is idle, and looks once a second only while it's working.
 - **Long threads.** Older messages aren't loaded lazily: the whole history is read when a thread opens, off the main thread, and kept
   in memory, while rows are laid out only as they come on screen. At 10,000 items that's the time and memory above, so paging the
   history in wouldn't pay for itself yet. Items with much larger tool output than these cost more memory.

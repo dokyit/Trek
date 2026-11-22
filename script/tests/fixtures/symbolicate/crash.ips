@@ -1,0 +1,61 @@
+{"app_name": "trek", "timestamp": "2026-11-21 12:00:00.00 -0500", "app_version": "0.4.64", "slice_uuid": "6576d418-4c72-3b4a-bd13-936e6cb748b2", "build_version": "0.4.64-beta.2", "platform": 1, "bundleID": "dev.trek.Trek", "bug_type": "309", "os_version": "macOS 27.2 (26B123)", "name": "trek", "incident_id": "00000000-0000-0000-0000-000000000000"}
+{
+  "version": 2,
+  "procName": "trek",
+  "procPath": "/Applications/Trek.app/Contents/MacOS/trek",
+  "cpuType": "X86-64",
+  "translated": true,
+  "exception": {
+    "type": "EXC_CRASH",
+    "signal": "SIGABRT"
+  },
+  "termination": {
+    "indicator": "Abort trap: 6",
+    "reasons": []
+  },
+  "faultingThread": 0,
+  "usedImages": [
+    {
+      "source": "P",
+      "arch": "x86_64",
+      "base": 4295000064,
+      "size": 120000000,
+      "uuid": "6576d418-4c72-3b4a-bd13-936e6cb748b2",
+      "path": "/Applications/Trek.app/Contents/MacOS/trek",
+      "name": "trek",
+      "CFBundleVersion": "0.4.64-beta.2"
+    },
+    {
+      "source": "P",
+      "arch": "x86_64",
+      "base": 140703000000000,
+      "size": 40000,
+      "uuid": "d5e656b3-84b5-368d-a6e7-ccc1a736fb75",
+      "path": "/usr/lib/system/libsystem_kernel.dylib",
+      "name": "libsystem_kernel.dylib"
+    }
+  ],
+  "threads": [
+    {
+      "triggered": true,
+      "id": 1,
+      "queue": "com.apple.main-thread",
+      "frames": [
+        {
+          "imageOffset": 28012,
+          "symbol": "__pthread_kill",
+          "symbolLocation": 10,
+          "imageIndex": 1
+        },
+        {
+          "imageOffset": 74580,
+          "imageIndex": 0
+        },
+        {
+          "imageOffset": 91234,
+          "imageIndex": 0
+        }
+      ]
+    }
+  ]
+}

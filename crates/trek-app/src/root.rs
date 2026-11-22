@@ -1958,6 +1958,9 @@ pub fn quit(cx: &mut App) {
 
 /// `quit`, once nothing unsaved is in the way.
 fn quit_now(cx: &mut App) {
+    // The way out may hold the main thread a while (every thread saved, an update installed,
+    // the windows let go of first on Windows): that's no freeze.
+    crate::logging::freeze::stop();
     crate::workspace::workspace_global(cx).update(cx, |ws, _| {
         ws.quitting = true;
         ws.shutdown_sessions()
