@@ -1494,8 +1494,10 @@ impl Composer {
                 .as_ref()
                 .is_some_and(|(_, c)| c.kind == Kind::Pr && c.number.is_none());
 
-        // Fades: in as a state arrives (180 ms), out at the end of a finished chip's linger.
+        // Fades: in as a state arrives (`motion::FADE`), out at the end of a finished chip's linger.
+        // Without motion it's there at once, and gone at the end of its linger.
         let mut moving = false;
+        let fades = crate::motion::enabled(cx);
         let opacity = status.as_ref().map_or(1., |(key, card)| {
             let fresh = self
                 .chip_since
@@ -1504,18 +1506,26 @@ impl Composer {
             if fresh {
                 self.chip_since = Some((key.clone(), card.phase, std::time::Instant::now()));
             }
-            let since = self
-                .chip_since
-                .as_ref()
-                .map_or(0., |(.., at)| at.elapsed().as_secs_f32() / 0.18);
+            let since = self.chip_since.as_ref().map_or(0., |(.., at)| {
+                at.elapsed().as_secs_f32()
+                    / crate::motion::scaled(crate::motion::FADE)
+                        .as_secs_f32()
+                        .max(0.001)
+            });
             let left = pr_card::chip_until(card).map_or(1., |until| {
                 ((until - now) as f32 / Phase::CHIP_FADE_MS as f32).clamp(0., 1.)
             });
-            let o = since.min(1.).min(left);
+            let o = if fades {
+                since.min(1.).min(left)
+            } else if left > 0. {
+                1.
+            } else {
+                0.
+            };
             moving = o < 1.;
             o
         });
-        if moving && !cx.reduce_motion() {
+        if moving && fades {
             window.request_animation_frame();
         }
         let merged = status

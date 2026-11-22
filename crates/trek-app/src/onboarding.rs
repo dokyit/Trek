@@ -905,8 +905,7 @@ impl Render for Onboarding {
                 SharedString::from(format!("ob-step-{}-{}", self.step.key(), self.run)),
                 0usize,
             ),
-            Animation::new(Duration::from_millis(if reduce { 160 } else { 320 }))
-                .with_easing(ease_out_quint()),
+            crate::motion::timed(Duration::from_millis(if reduce { 160 } else { 320 })),
             move |el, t| {
                 if reduce {
                     el.opacity(t)

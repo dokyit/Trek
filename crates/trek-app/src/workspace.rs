@@ -235,6 +235,11 @@ pub struct PendingPermission {
 /// How long a new title takes to animate in.
 pub const TITLE_REVEAL: Duration = Duration::from_millis(380);
 
+/// `TITLE_REVEAL` at the motion scale (never quite nothing: it's divided by).
+fn title_reveal_time() -> Duration {
+    crate::motion::scaled(TITLE_REVEAL).max(Duration::from_millis(1))
+}
+
 /// In-memory state of an open thread: transcript plus its live agent session, if any.
 #[derive(Default)]
 pub struct LiveThread {
@@ -3218,9 +3223,13 @@ impl Workspace {
         ))
     }
 
-    /// Motion is allowed: neither Trek's Reduce motion setting nor the system asks for less.
+    /// Motion is allowed: neither Trek's Reduce motion setting nor the system asks for less, and
+    /// the motion scale isn't 0 (a "Still" Trek theme). The app's one motion policy
+    /// (`motion::enabled` asks it).
     pub fn motion(&self, cx: &App) -> bool {
-        !self.settings.appearance.reduce_motion && !cx.reduce_motion()
+        !self.settings.appearance.reduce_motion
+            && !crate::motion::stills(self.settings.appearance.motion_scale)
+            && !crate::motion::reduced(cx)
     }
 
     /// The sidebar's width in a window `window_width` wide: what the user left it at, held within
@@ -3241,7 +3250,7 @@ impl Workspace {
     /// How far `id`'s new title has animated in (0 to 1), and the title it replaces, while it does.
     pub fn title_reveal(&self, id: &str) -> Option<(f32, &str)> {
         let (old, at) = self.retitled.get(id)?;
-        let t = at.elapsed().as_secs_f32() / TITLE_REVEAL.as_secs_f32();
+        let t = at.elapsed().as_secs_f32() / title_reveal_time().as_secs_f32();
         (t < 1.).then_some((t, old.as_str()))
     }
 
@@ -3253,7 +3262,7 @@ impl Workspace {
             f(t);
             if t.title != before && motion {
                 self.retitled
-                    .retain(|_, (_, at)| at.elapsed() < TITLE_REVEAL);
+                    .retain(|_, (_, at)| at.elapsed() < title_reveal_time());
                 self.retitled
                     .insert(id.to_string(), (before, Instant::now()));
             }

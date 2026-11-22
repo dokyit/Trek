@@ -45,7 +45,7 @@ pub use trek_mascot as mascot;
 pub use trek_math as math;
 pub mod md;
 pub use trek_mentions as mentions;
-pub use trek_motion as motion;
+pub mod motion;
 pub mod note_images;
 pub mod notes;
 pub mod onboarding;

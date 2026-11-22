@@ -2275,9 +2275,11 @@ impl ThreadView {
                             0.
                         }));
                     let band = if animate {
-                        band.with_animation(("reveal", seq), Animation::new(FLASH), |el, t| {
-                            el.opacity(1. - ((t - 0.45) / 0.55).clamp(0., 1.))
-                        })
+                        band.with_animation(
+                            ("reveal", seq),
+                            crate::motion::timed(FLASH).with_easing(|t| t),
+                            |el, t| el.opacity(1. - ((t - 0.45) / 0.55).clamp(0., 1.)),
+                        )
                         .into_any_element()
                     } else {
                         band.into_any_element()
@@ -5241,9 +5243,14 @@ impl ThreadView {
                     // With reduced motion it fades in where it stands.
                     .with_animation(
                         SharedString::from(format!("perm-in-{rid_anim}")),
-                        Animation::new(std::time::Duration::from_millis(220))
-                            .with_easing(ease_out_quint()),
-                        move |el, t| el.opacity(t).mt(px(if rise { 10. * (1. - t) } else { 0. })),
+                        crate::motion::timed(crate::motion::ENTER),
+                        move |el, t| {
+                            el.opacity(t).mt(px(if rise {
+                                crate::motion::RISE * (1. - t)
+                            } else {
+                                0.
+                            }))
+                        },
                     )
                     .into_any_element(),
             );
@@ -5883,7 +5890,7 @@ impl ThreadView {
     fn jump_to_latest(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let away = self.scroller.read(cx).is_scrolled_up();
         let pace = if self.animate(window, cx) {
-            JUMP_IN
+            crate::motion::scaled(JUMP_IN)
         } else {
             std::time::Duration::ZERO
         };

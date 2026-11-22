@@ -179,12 +179,9 @@ pub fn keys(window: &Window, cx: &App) -> Vec<SharedString> {
     })
 }
 
-/// Motion, by Trek's settings and the system's.
+/// Motion, by the app's policy (Trek's settings and the system's).
 fn moving(cx: &App) -> bool {
-    match cx.try_global::<crate::workspace::GlobalWorkspace>() {
-        Some(ws) => ws.0.read(cx).motion(cx),
-        None => !cx.reduce_motion(),
-    }
+    motion::enabled(cx)
 }
 
 struct Item {
@@ -207,7 +204,7 @@ impl Toasts {
         let key = toast.key.clone();
         let lifetime = toast.lifetime;
         self.items.retain(|i| i.toast.key != key);
-        let mut shown = Presence::new(SURFACE);
+        let mut shown = Presence::new(SURFACE).exit_with(motion::QUICK);
         shown.enter((), moving(cx), motion::now(cx));
         self.items.push(Item { toast, shown });
         // Its time runs out unless the pointer is on the toasts; then a moment after it leaves.
@@ -382,12 +379,21 @@ impl Render for Toasts {
         );
         let mut stack =
             ToastStack::new("toasts", self.stack.clone()).placement(Anchor::BottomCenter);
-        if !moving(cx) {
-            stack = stack.motion(ToastMotion {
+        // The stack's reflow (a toast arriving nudges the others up) at the motion scale; at once
+        // without motion.
+        let sonner = ToastMotion::sonner();
+        stack = stack.motion(if moving(cx) {
+            ToastMotion {
+                duration: motion::scaled(sonner.duration),
+                exit_duration: motion::scaled(sonner.exit_duration),
+                ..sonner
+            }
+        } else {
+            ToastMotion {
                 duration: Duration::ZERO,
-                ..ToastMotion::sonner()
-            });
-        }
+                ..sonner
+            }
+        });
         // The newest `max` that are up, and all that are going.
         let mut older = self
             .items

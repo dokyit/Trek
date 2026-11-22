@@ -675,3 +675,187 @@ fn the_tools_panel_filling_the_window_keeps_clicks_off_the_sidebar() {
         }
     });
 }
+
+// ---------- the panel sliding: a click where it lies is its alone in every frame ----------
+
+/// Motion on (the harness starts with the system's Reduce motion set), as the user has it.
+fn moving(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(|cx| cx.set_reduce_motion(false));
+}
+
+/// Move the clock on `ms` and draw a frame.
+fn frame(trek: &common::Trek, cx: &mut gpui_kit::TestAppContext, ms: u64) {
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(ms));
+    trek.render(cx);
+}
+
+/// What of the tools panel is on screen in the last frame: as much as is out while it slides
+/// (or grows), all of it once it's there.
+fn panel_cover(
+    trek: &common::Trek,
+    cx: &mut gpui_kit::TestAppContext,
+) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
+    trek.bounds(cx, "tools-sliding")
+        .or_else(|| trek.bounds(cx, "tools-out"))
+        .filter(|b| b.size.width > px(1.))
+}
+
+/// How a slide of the tools panel starts: the panel as it is before (open or not, filling the
+/// window or not; put there at once, as code does) and the pointer's click that starts it.
+#[derive(Clone, Copy, Debug)]
+struct Slide {
+    open: bool,
+    full: bool,
+    click: &'static str,
+}
+
+impl Slide {
+    /// The panel is on its way back into the window's edge.
+    fn leaving(&self) -> bool {
+        self.open && self.click != "panel-fill"
+    }
+
+    fn kind(&self) -> &'static str {
+        if self.leaving() {
+            "leaving"
+        } else if self.click == "panel-fill" {
+            "growing or shrinking"
+        } else {
+            "coming out"
+        }
+    }
+}
+
+/// The slides the pointer starts from `full` (the panel at its side, or filling the window): out
+/// from the title bar's button, back in by each control that hides it on this platform, and
+/// growing to fill the window or back.
+fn slides(full: bool) -> Vec<Slide> {
+    let mut all = vec![
+        Slide {
+            open: false,
+            full,
+            click: "toggle-tools",
+        },
+        Slide {
+            open: true,
+            full,
+            click: "panel-fill",
+        },
+    ];
+    for &click in panel_hiders() {
+        if click != "panel-fill" {
+            all.push(Slide {
+                open: true,
+                full,
+                click,
+            });
+        }
+    }
+    all
+}
+
+/// The panel as `slide` has it before, in `id`'s thread with the window `width` wide, then the
+/// slide started with its click and `ms` of it run.
+fn mid_slide(
+    trek: &common::Trek,
+    cx: &mut gpui_kit::TestAppContext,
+    id: &str,
+    width: f32,
+    slide: Slide,
+    ms: u64,
+) -> gpui_kit::Entity<trek_app::panels::RightPanel> {
+    let panel = tools_open(trek, cx, id, width, PanelTool::Git, slide.full);
+    if !slide.open {
+        panel.update(cx, |p, cx| p.toggle(cx));
+    }
+    // Settled where it starts, nothing left moving from the last slide.
+    frame(trek, cx, 1_000);
+    assert_eq!(cx.read(|cx| panel.read(cx).open), slide.open, "{slide:?}");
+    trek.click(cx, slide.click);
+    frame(trek, cx, ms);
+    panel
+}
+
+/// While the tools panel slides out of the window's right edge or back into it, or grows to fill
+/// the window or back, a click where it lies is the panel's alone in every frame of the way: as
+/// it starts, part way, nearly done. 0.4.63's fix (the panel takes the pointer over its whole
+/// area) holds through the slides: its hide button doesn't also press the tab strip's + under it
+/// (a new thread), and a press on it doesn't also take the thread to Study, Notes or Basecamp,
+/// moving or not. On its way back in, the panel does nothing with a click either: a second press
+/// on its hide button doesn't bring it back.
+#[test]
+fn a_click_on_the_tools_panel_as_it_slides_is_the_panels_alone() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let threads = trek.read(cx, |ws, _| ws.threads.len());
+        moving(cx);
+        // Clicks that landed where the panel lay over something, per kind of slide.
+        let mut landed = std::collections::BTreeMap::<&str, usize>::new();
+        // Over the chat (a narrow window), and filling the window wide and narrow.
+        for (width, full) in [(600., false), (1280., true), (600., true)] {
+            for slide in slides(full) {
+                // Its first frame, part way, most of the way, nearly done.
+                for ms in [0, 24, 60, 120, 200, 320] {
+                    // What it could lie over, and its own controls where they are in this frame:
+                    // each clicked where it is, if the panel lies on it.
+                    let mut targets = under_the_panel(&id);
+                    for own in ["panel-close", "panel-fill", "panel-add"] {
+                        targets.push(own.into());
+                    }
+                    for target in targets {
+                        let panel = mid_slide(&trek, cx, &id, width, slide, ms);
+                        let Some(cover) = panel_cover(&trek, cx) else {
+                            continue;
+                        };
+                        let Some(spot) = trek.bounds(cx, target.clone()) else {
+                            continue;
+                        };
+                        if !cover.contains(&spot.center()) {
+                            continue;
+                        }
+                        let own = matches!(&target, gpui_kit::ElementId::Name(n)
+                            if n.starts_with("panel-"));
+                        let at = format!("{width} wide, {slide:?}, {ms} ms in, on {target:?}");
+                        trek.click(cx, target);
+                        trek.render(cx);
+                        still_on(&trek, cx, &id, threads);
+                        if slide.leaving() {
+                            assert!(!cx.read(|cx| panel.read(cx).open), "{at}: stays hidden");
+                        }
+                        // It goes on where it was going, and nothing else happened on the way.
+                        frame(&trek, cx, 1_000);
+                        still_on(&trek, cx, &id, threads);
+                        if slide.leaving() {
+                            assert!(panel_cover(&trek, cx).is_none(), "{at}: gone");
+                        }
+                        if !own {
+                            *landed.entry(slide.kind()).or_default() += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // What makes it a test: in each kind of slide, clicks landed where the panel lay over
+        // the strip's +, a tab or a sidebar row, at several points of the way.
+        for kind in ["coming out", "leaving", "growing or shrinking"] {
+            let n = landed.get(kind).copied().unwrap_or(0);
+            assert!(n >= 3, "{kind}: {n} clicks over something ({landed:?})");
+        }
+        // And with the panel gone, the same click does reach the strip's +.
+        let panel = tools_open(&trek, cx, &id, 600., PanelTool::Git, false);
+        panel.update(cx, |p, cx| p.toggle(cx));
+        frame(&trek, cx, 1_000);
+        assert!(panel_cover(&trek, cx).is_none());
+        let before = tab_ids(&trek, cx);
+        trek.click(cx, "tab-new");
+        trek.render(cx);
+        assert!(
+            tab_ids(&trek, cx) != before
+                || trek.read(cx, |ws, _| ws.route.clone()) != Route::Thread(id.clone()),
+            "with nothing over it the + opens a thread"
+        );
+    });
+}

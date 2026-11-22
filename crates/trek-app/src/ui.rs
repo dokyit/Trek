@@ -1139,6 +1139,8 @@ impl RenderOnce for Pill {
                 (false, false) => 0.065,
             }))
             .hover(|s| s.bg(theme.foreground.opacity(0.11)))
+            // Pressed: a step past the hover, on pointer-down.
+            .active(|s| s.bg(theme.foreground.opacity(0.16)))
             .when(self.flexible, |el| el.min_w_0().flex_shrink(1.))
             .when(!self.flexible, |el| el.flex_none())
             .overflow_hidden()
@@ -1183,6 +1185,7 @@ impl Pill {
                 (false, false) => el.bg(fill),
             })
             .hover(move |s| s.bg(if self.selected { pressed } else { hover }))
+            .active(move |s| s.bg(pressed))
             .when(self.flexible, |el| el.min_w_0().flex_shrink(1.))
             .when(!self.flexible, |el| el.flex_none())
             .overflow_hidden()

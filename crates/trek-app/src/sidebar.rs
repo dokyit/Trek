@@ -1127,7 +1127,10 @@ impl Sidebar {
             .cursor_pointer()
             .text_size(px(look::TITLE_SIZE))
             .when(selected, |el| el.bg(theme.list_active))
-            .when(!selected, |el| el.hover(|s| s.bg(theme.list_hover)))
+            .when(!selected, |el| {
+                el.hover(|s| s.bg(theme.list_hover))
+                    .active(|s| s.bg(theme.list_active))
+            })
             .children(fluent::selection_bar(selected, cx))
             .child(title)
             .child(place)
@@ -1199,7 +1202,10 @@ impl Sidebar {
             .cursor_pointer()
             .text_size(px(look::TITLE_SIZE))
             .when(selected, |el| el.bg(theme.list_active))
-            .when(!selected, |el| el.hover(|s| s.bg(theme.list_hover)))
+            .when(!selected, |el| {
+                el.hover(|s| s.bg(theme.list_hover))
+                    .active(|s| s.bg(theme.list_active))
+            })
             .children(fluent::selection_bar(selected, cx))
             .child(title)
             .when_some(hit.clone(), |el, h| {
@@ -1454,7 +1460,10 @@ impl Sidebar {
             .cursor_pointer()
             .text_size(px(look::TITLE_SIZE))
             .when(selected, |el| el.bg(theme.list_active))
-            .when(!selected, |el| el.hover(|s| s.bg(theme.list_hover)))
+            .when(!selected, |el| {
+                el.hover(|s| s.bg(theme.list_hover))
+                    .active(|s| s.bg(theme.list_active))
+            })
             .children(fluent::selection_bar(selected, cx))
             .child(title)
             .when_some(hit.clone(), |el, h| {
@@ -1523,6 +1532,7 @@ impl Sidebar {
             .h(px(look::LINE_H))
             .rounded(px(fluent::control(look::ROW_RADIUS)))
             .hover(|s| s.bg(theme.list_hover))
+            .active(|s| s.bg(theme.list_active))
             .child(
                 h_flex()
                     .id(SharedString::from(format!("{prefix}-fold-{pid}")))
@@ -1850,6 +1860,7 @@ impl Sidebar {
             .rounded(px(fluent::control(look::ROW_RADIUS)))
             .cursor_pointer()
             .hover(|s| s.bg(theme.list_hover))
+            .active(|s| s.bg(theme.list_active))
             .child(
                 h_flex()
                     .flex_none()
@@ -1910,6 +1921,7 @@ impl Sidebar {
             .rounded(px(fluent::control(look::ROW_RADIUS)))
             .cursor_pointer()
             .hover(|s| s.bg(theme.list_hover))
+            .active(|s| s.bg(theme.list_active))
             .child(
                 h_flex()
                     .flex_none()
@@ -1972,6 +1984,7 @@ impl Sidebar {
             .rounded(px(fluent::control(look::ROW_RADIUS)))
             .cursor_pointer()
             .hover(|s| s.bg(theme.list_hover))
+            .active(|s| s.bg(theme.list_active))
             .text_size(px(look::TITLE_SIZE))
             .child(div().flex_none().w(px(look::MARK_W)))
             .child(
@@ -3761,6 +3774,7 @@ impl Render for Sidebar {
                         .rounded(px(fluent::control(look::ROW_RADIUS)))
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.list_hover))
+                        .active(|s| s.bg(theme.list_active))
                         .child(look::device_glyph(true, connected, cx))
                         .child(
                             div()

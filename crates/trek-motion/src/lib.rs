@@ -9,22 +9,60 @@
 //! - `flip_scope` / `flip_row`: layout animation (FLIP). A row laid out somewhere else than last
 //!   frame is drawn where it was and springs to where it is now.
 //!
-//! Every caller asks `Workspace::motion` first and passes the answer in: without motion, every
-//! value is at its target at once. Frames are asked for only while something moves; at rest none
-//! of this costs anything.
+//! - Fixed-time fades and draws (`timed`, `looping`, `scaled`): a card arriving, a check drawing
+//!   itself, a spinner. They take the motion scale as the springs do.
+//!
+//! Every caller asks the app's motion policy first (`trek_app::motion::enabled`, which is
+//! `Workspace::motion`) and passes the answer in: without motion, every value is at its target at
+//! once. Frames are asked for only while something moves; at rest none of this costs anything.
+//!
+//! # What moves, and how much (how often it's seen decides)
+//!
+//! | Surface | How often | Motion | Why |
+//! | --- | --- | --- | --- |
+//! | Command palette | all day, from the keyboard | opens at once; leaves on `QUICK` | Raycast's rule: never animate a keyboard toggle |
+//! | Sidebar (⌘B), Agents ↔ Editor | tens a day | `QUICK` from a key, `SURFACE` from the pointer | the spring turns round mid-flight; a key wants it done |
+//! | Thread switch, tabs, the model menu, `@` / `/` pickers | all day | none | content behind a switch changes at once |
+//! | Rows reordering in the sidebar | as threads change | `ROW` (FLIP) | shows where a row went |
+//! | Toasts | occasional | in on `SURFACE` from below, out on `QUICK` | exits are quicker than entrances |
+//! | Image preview | occasional | `SURFACE` both ways | the way back to the thumbnail is the point |
+//! | Cards arriving in a transcript (permission, PR) | per turn | `ENTER`, `RISE` px up, ease-out | once per card, never replayed by streaming |
+//! | The context card | occasional, from the pointer | one `FADE`, sections with it; fills `FILL` | one entrance per container |
+//! | Tooltips, flyouts, small swaps | often | `FADE` opacity only | no travel for something that small |
+//! | Spinners, loading sweeps | while busy | `looping`, linear | status, not decoration |
+//!
+//! Reduce motion (Trek's or the system's) and a motion scale of 0 turn all of it into the end
+//! state at once.
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Large surfaces (the sidebar, the switch to the editor, the image preview, sheets): critically
 /// damped, so nothing that big bounces; most of the way in a quarter second.
 pub const SURFACE: SpringConfig = SpringConfig::new(400., 40., 1.);
 /// Rows sliding to their new places in a list: a touch quicker, still without overshoot.
 pub const ROW: SpringConfig = SpringConfig::new(500., 45., 1.);
+/// Exits, and what a key brings in or out: critically damped (a hair over), 95 percent of the way
+/// in about 0.15 s, against `SURFACE`'s 0.24 s. Emil Kowalski and Jakub Krehel: an exit is
+/// quicker than its entrance; a keyboard toggle wants to be done.
+pub const QUICK: SpringConfig = SpringConfig::new(1000., 64., 1.);
+
+/// Small fades: a tooltip, a flyout, a status chip, a tick, the context card. Opacity only.
+pub const FADE: Duration = Duration::from_millis(120);
+/// A card arriving in a transcript (a permission request, a PR card): fades in as it rises `RISE`.
+pub const ENTER: Duration = Duration::from_millis(200);
+/// A bar growing to its value once it's shown (the context card's usage fills).
+pub const FILL: Duration = Duration::from_millis(240);
+/// A mark drawing itself in (the context card's check).
+pub const DRAW: Duration = Duration::from_millis(220);
+/// How far a card rises as it arrives, in pixels: enough to show it came in, no more.
+pub const RISE: f32 = 8.;
+/// What's shown longest takes this long at most: a chart's entrance (the visualizations' bars).
+pub const SHOWCASE: Duration = Duration::from_millis(720);
 
 /// Settled within this of the target on a 0-to-1 value: past what an eye can tell, and frames
 /// stop well before the spring's long tail.
@@ -57,6 +95,62 @@ pub fn pace() -> f32 {
 /// everything is where it's going at once.
 fn paced(pace: f32, secs: f32) -> Option<f32> {
     (pace > 0.).then(|| secs / pace)
+}
+
+/// `d` at the motion scale, for a fixed-time animation on the app's clock (`now`): 1.35 makes it
+/// a third longer, 0 makes it nothing.
+pub fn scaled(d: Duration) -> Duration {
+    stretch(d, pace())
+}
+
+fn stretch(d: Duration, pace: f32) -> Duration {
+    if pace > 0. {
+        d.mul_f32(pace)
+    } else {
+        Duration::ZERO
+    }
+}
+
+/// How many times slower than real time the design-review build runs (`TREK_SLOW_MOTION`), 1
+/// otherwise.
+fn slow() -> f32 {
+    #[cfg(feature = "shots")]
+    {
+        if let Some((k, _)) = *SLOW {
+            return k;
+        }
+    }
+    1.
+}
+
+#[cfg(feature = "shots")]
+static SLOW: std::sync::LazyLock<Option<(f32, Instant)>> = std::sync::LazyLock::new(|| {
+    std::env::var("TREK_SLOW_MOTION")
+        .ok()?
+        .parse::<f32>()
+        .ok()
+        .filter(|k| *k > 1.)
+        .map(|k| (k, Instant::now()))
+});
+
+/// A fixed-time animation for GPUI's `with_animation` (which runs on its own clock): `d` at the
+/// motion scale, eased out (fast first, so it answers at once, then settling). Every
+/// `with_animation` in the app takes its `Animation` from here or `looping`, so the motion scale
+/// and the design-review slow motion reach all of them; Reduce motion reaches them through GPUI,
+/// which draws the end state at once while the app's flag is set (`trek_app::system`).
+pub fn timed(d: Duration) -> Animation {
+    // Never quite zero: GPUI divides by it.
+    let d = stretch(d, pace())
+        .mul_f32(slow())
+        .max(Duration::from_millis(1));
+    Animation::new(d).with_easing(ease_out_quint())
+}
+
+/// A status loop (a spinner, a loading sweep) at constant speed: linear, as constant motion is.
+/// It isn't stretched by the motion scale (it says something is busy, for as long as it is), and
+/// under Reduce motion GPUI holds it still.
+pub fn looping(d: Duration) -> Animation {
+    Animation::new(d).repeat()
 }
 
 /// A value on a spring. See the module's notes.
@@ -125,11 +219,20 @@ impl Spring {
     /// Head for `target` from wherever it is, as fast as it's already going. Without motion it's
     /// there at once.
     pub fn set(&mut self, target: f32, motion: bool, now: Instant) {
+        self.set_with(self.config, target, motion, now);
+    }
+
+    /// `set`, on `config` from here (a key's toggle on `QUICK`, the pointer's on `SURFACE`). The
+    /// spring takes it only when the target changes, so it never changes feel mid-flight; turned
+    /// round, it keeps where it is and how fast it's going.
+    pub fn set_with(&mut self, config: SpringConfig, target: f32, motion: bool, now: Instant) {
         if !motion {
+            self.config = config;
             self.snap(target, now);
         } else if target != self.target {
             self.from = self.state(now);
             self.at = now;
+            self.config = config;
             self.target = target;
         }
     }
@@ -169,14 +272,6 @@ pub fn now(cx: &App) -> Instant {
     // recording catches them mid-flight.
     #[cfg(feature = "shots")]
     {
-        static SLOW: std::sync::LazyLock<Option<(f32, Instant)>> = std::sync::LazyLock::new(|| {
-            std::env::var("TREK_SLOW_MOTION")
-                .ok()?
-                .parse::<f32>()
-                .ok()
-                .filter(|k| *k > 1.)
-                .map(|k| (k, Instant::now()))
-        });
         if let Some((k, from)) = *SLOW {
             return from + now.saturating_duration_since(from).div_f32(k);
         }
@@ -198,6 +293,9 @@ pub struct Presence<T> {
     item: Option<T>,
     present: bool,
     spring: Spring,
+    /// Coming in, and going out (quicker, by `exit_with`).
+    enter: SpringConfig,
+    exit: SpringConfig,
 }
 
 impl<T> Presence<T> {
@@ -206,14 +304,22 @@ impl<T> Presence<T> {
             item: None,
             present: false,
             spring: Spring::new(config, UNIT, 0., Instant::now()),
+            enter: config,
+            exit: config,
         }
+    }
+
+    /// Leave on `config` rather than the way it came: an exit is quicker than its entrance.
+    pub fn exit_with(mut self, config: SpringConfig) -> Self {
+        self.exit = config;
+        self
     }
 
     /// Mount `item` and bring it in (one on its way out turns round where it is).
     pub fn enter(&mut self, item: T, motion: bool, now: Instant) {
         self.item = Some(item);
         self.present = true;
-        self.spring.set(1., motion, now);
+        self.spring.set_with(self.enter, 1., motion, now);
     }
 
     /// Take it out. It stays mounted until it's all the way out (at once without motion).
@@ -222,7 +328,7 @@ impl<T> Presence<T> {
             return;
         }
         self.present = false;
-        self.spring.set(0., motion, now);
+        self.spring.set_with(self.exit, 0., motion, now);
         if !motion {
             self.item = None;
         }
@@ -1407,8 +1513,105 @@ mod tests {
         assert_eq!(super::paced(0., 0.3), None);
     }
 
-    use super::{Presence, SURFACE, Spring, UNIT};
+    use super::{Presence, QUICK, SURFACE, Spring, UNIT};
     use std::time::{Duration, Instant};
+
+    /// The first time `s` is within 5 percent of 1, stepping 1 ms from `t0`.
+    fn to_95(s: &Spring, t0: Instant) -> Duration {
+        (0..2_000)
+            .map(Duration::from_millis)
+            .find(|d| s.value(t0 + *d) >= 0.95)
+            .expect("gets there")
+    }
+
+    #[test]
+    fn quick_gets_there_in_about_a_hundred_and_fifty_ms_without_overshoot() {
+        let t0 = Instant::now();
+        let mut quick = Spring::new(QUICK, UNIT, 0., t0);
+        quick.set(1., true, t0);
+        let mut surface = Spring::new(SURFACE, UNIT, 0., t0);
+        surface.set(1., true, t0);
+        let (q, s) = (to_95(&quick, t0), to_95(&surface, t0));
+        assert!(
+            q >= Duration::from_millis(130) && q <= Duration::from_millis(170),
+            "{q:?}"
+        );
+        assert!(
+            s >= Duration::from_millis(220) && s <= Duration::from_millis(260),
+            "{s:?}"
+        );
+        // Starts within the first frame, and never passes 1 (no bounce) or goes back.
+        assert!(quick.value(t0 + Duration::from_millis(16)) > 0.05);
+        let mut last = 0.;
+        for ms in 0..600 {
+            let v = quick.value(t0 + Duration::from_millis(ms));
+            assert!(v <= 1. && v >= last, "monotonic, at {ms} ms: {v}");
+            last = v;
+        }
+        assert!(!quick.moving(t0 + Duration::from_millis(400)), "settled");
+    }
+
+    #[test]
+    fn a_spring_takes_a_new_feel_only_when_its_target_changes() {
+        let t0 = Instant::now();
+        let mut s = Spring::new(SURFACE, UNIT, 0., t0);
+        s.set_with(QUICK, 1., true, t0);
+        let quick_at = s.value(t0 + Duration::from_millis(60));
+        // Asked again for the same target on another feel (a frame drawn after the pointer
+        // moved): it carries on as it was.
+        s.set_with(SURFACE, 1., true, t0 + Duration::from_millis(30));
+        assert_eq!(s.value(t0 + Duration::from_millis(60)), quick_at);
+        // Turned round on SURFACE: from where it is, as fast as it was going.
+        let mid = t0 + Duration::from_millis(60);
+        let going = s.state(mid).velocity;
+        s.set_with(SURFACE, 0., true, mid);
+        assert_eq!(s.value(mid), quick_at);
+        assert_eq!(s.state(mid).velocity, going);
+    }
+
+    #[test]
+    fn a_presence_leaves_quicker_than_it_came_and_turns_round_where_it_is() {
+        let t0 = Instant::now();
+        let mut p = Presence::new(SURFACE).exit_with(QUICK);
+        p.enter((), true, t0);
+        let t1 = t0 + Duration::from_secs(1);
+        assert_eq!(p.progress(t1), 1.);
+        p.exit(true, t1);
+        // Out: within 5 percent of gone by about 150 ms, where SURFACE took 240.
+        let out = (0..1_000)
+            .map(Duration::from_millis)
+            .find(|d| p.progress(t1 + *d) <= 0.05)
+            .unwrap();
+        assert!(out <= Duration::from_millis(170), "{out:?}");
+        // Wanted back half way out: it comes back from there, no jump.
+        let mut p = Presence::new(SURFACE).exit_with(QUICK);
+        p.enter((), true, t0);
+        p.exit(true, t1);
+        let mid = t1 + Duration::from_millis(50);
+        let at = p.progress(mid);
+        assert!(at > 0.2 && at < 0.9, "{at}");
+        p.enter((), true, mid);
+        assert_eq!(p.progress(mid), at);
+        assert!(p.progress(mid + Duration::from_millis(400)) > 0.99);
+    }
+
+    #[test]
+    fn fixed_times_follow_the_motion_scale() {
+        let d = Duration::from_millis(200);
+        assert_eq!(super::stretch(d, 1.), d);
+        assert_eq!(super::stretch(d, 1.35), d.mul_f32(1.35));
+        assert_eq!(super::stretch(d, 0.75), Duration::from_millis(150));
+        assert_eq!(super::stretch(d, 0.), Duration::ZERO);
+        // GPUI's animation divides by its duration: never zero, even stilled.
+        assert!(super::timed(Duration::ZERO).duration > Duration::ZERO);
+        let e = super::timed(d).easing;
+        assert_eq!((e(0.), e(1.)), (0., 1.));
+        assert!(
+            e(0.25) > 0.5,
+            "ease-out: most of the way in the first quarter"
+        );
+        assert!(!super::looping(d).oneshot);
+    }
 
     #[test]
     fn a_spring_turned_round_mid_flight_keeps_going_from_where_it_is() {

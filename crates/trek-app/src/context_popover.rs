@@ -46,8 +46,10 @@ pub const NEAR: f32 = 0.6;
 const RESERVE: f64 = 1. / 30.;
 /// How long the messages column takes to fold up once a compaction lands.
 const COLLAPSE: Duration = Duration::from_millis(1_100);
+/// How long the pointer rests on the ring before its tooltip fades in.
+const TIP_WAIT: Duration = Duration::from_millis(150);
 /// A hover's cross-fade, and the card's and the flyout's open.
-const FADE: Duration = Duration::from_millis(140);
+const FADE: Duration = crate::motion::FADE;
 /// The most chunks the messages segment splits into while compacting.
 const BLOCKS: u64 = 15;
 /// What a row's parts fade to while another row is hovered. The Mac fades the whole row to the
@@ -370,8 +372,13 @@ impl RenderOnce for RingTrigger {
                             // A short wait, then a quick fade, with no movement.
                             .with_animation(
                                 "context-ring-tip-in",
-                                Animation::new(Duration::from_millis(290)),
-                                |el, t| el.opacity(((t - 0.52) / 0.48).clamp(0., 1.)),
+                                crate::motion::timed(TIP_WAIT + crate::motion::FADE)
+                                    .with_easing(|t| t),
+                                |el, t| {
+                                    let wait = TIP_WAIT.as_secs_f32()
+                                        / (TIP_WAIT + crate::motion::FADE).as_secs_f32();
+                                    el.opacity(((t - wait) / (1. - wait)).clamp(0., 1.))
+                                },
                             ),
                     ),
             )
@@ -795,7 +802,7 @@ impl Card {
         let folded = transition_with_status(
             "context-messages",
             messages as f32,
-            Transition::new(COLLAPSE).ease(|t| 1. - (1. - t).powi(3)),
+            Transition::new(crate::motion::scaled(COLLAPSE)).ease(|t| 1. - (1. - t).powi(3)),
             window,
             cx,
         );
@@ -816,7 +823,7 @@ impl Card {
             // The shimmer and the sweep need frames; idle, the card asks for none.
             window.request_animation_frame();
         }
-        let still = cx.reduce_motion();
+        let still = !crate::motion::enabled(cx);
         let frac = fraction(shown_used, self.window);
         let header = small(h_flex())
             .w_full()
@@ -849,7 +856,7 @@ impl Card {
                 } else {
                     1.
                 },
-                Transition::new(FADE),
+                Transition::new(crate::motion::scaled(FADE)),
                 window,
                 cx,
             )
@@ -866,7 +873,8 @@ impl Card {
         let tall = transition(
             "context-bar-tall",
             if folding { 1. } else { 0. },
-            Transition::new(Duration::from_millis(300)).ease(|t| 1. - (1. - t).powi(3)),
+            Transition::new(crate::motion::scaled(Duration::from_millis(300)))
+                .ease(|t| 1. - (1. - t).powi(3)),
             window,
             cx,
         );
@@ -1044,32 +1052,19 @@ impl Card {
                     .border_1()
                     .border_color(ink.edge)
                     .shadow(fluent::flyout_shadow(shadow(4., 14., 0.05), cx))
-                    .child(reveal(
-                        context.into_any_element(),
-                        "context-reveal-context",
-                        0,
-                    ))
+                    .child(context.into_any_element())
                     .when_some(
                         self.limits
                             .render(limit_hover.clone(), me.clone(), window, cx),
-                        |el, limits| {
-                            el.child(rule())
-                                .child(reveal(limits, "context-reveal-limits", 1))
-                        },
+                        |el, limits| el.child(rule()).child(limits),
                     )
                     .child(rule())
-                    .child(reveal(
-                        self.footer(me, window, shown_free, folding, cx),
-                        "context-reveal-footer",
-                        2,
-                    )),
+                    .child(self.footer(me, window, shown_free, folding, cx)),
             )
             .when_some(flyout, |el, f| el.child(f))
-            .with_animation(
-                "context-card",
-                Animation::new(Duration::from_millis(150)).with_easing(ease_out_quint()),
-                |el, t| el.opacity(t),
-            )
+            // One entrance for the whole card, its sections with it: the popover's own (a quick
+            // fade as it rises the few points from the ring it stands over; gpui-base's
+            // `popover.rs`), not another on top of it.
             .into_any_element()
     }
 
@@ -1090,7 +1085,7 @@ impl Card {
                 .child(crate::working_bar::shimmer(
                     "Summarizing messages".into(),
                     clock(),
-                    cx.reduce_motion(),
+                    !crate::motion::enabled(cx),
                     ink.muted,
                     ink.surface.blend(ink.muted.opacity(0.55)),
                 ))
@@ -1116,7 +1111,7 @@ impl Card {
                 ))
                 .with_animation(
                     "context-freed",
-                    Animation::new(Duration::from_millis(200)),
+                    crate::motion::timed(crate::motion::FADE),
                     |el, t| el.opacity(t),
                 )
                 .into_any_element(),
@@ -1255,7 +1250,7 @@ fn check(color: Hsla) -> AnyElement {
         .flex_none()
         .with_animation(
             "context-check",
-            Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
+            crate::motion::timed(crate::motion::DRAW),
             move |el, t| {
                 el.child(
                     canvas(
@@ -1291,23 +1286,6 @@ fn check(color: Hsla) -> AnyElement {
         .into_any_element()
 }
 
-/// A section of the card fading in, `step` tenths of a second after the first.
-fn reveal(el: AnyElement, id: &'static str, step: u32) -> AnyElement {
-    let delay = step as f32 * 90.;
-    let total = delay + 150.;
-    div()
-        .child(el)
-        .with_animation(
-            id,
-            Animation::new(Duration::from_millis(total as u64)),
-            move |el, t| {
-                let start = delay / total;
-                el.opacity(((t - start) / (1. - start)).clamp(0., 1.))
-            },
-        )
-        .into_any_element()
-}
-
 /// Seconds since the process start, for the shimmer's sweep: any monotonic phase does.
 fn clock() -> f32 {
     static T0: std::sync::LazyLock<std::time::Instant> =
@@ -1337,7 +1315,7 @@ fn fade(id: &str, part: &str, dimmed: bool, to: f32, window: &mut Window, cx: &m
     transition(
         SharedString::from(format!("context-dim-{id}{part}")),
         if dimmed { to } else { 1. },
-        Transition::new(FADE),
+        Transition::new(crate::motion::scaled(FADE)),
         window,
         cx,
     )
@@ -1508,7 +1486,7 @@ fn flyout(part: &Part, cx: &App) -> AnyElement {
         })
         .with_animation(
             SharedString::from(format!("context-flyout-{}", part.kind.row_id())),
-            Animation::new(Duration::from_millis(100)),
+            crate::motion::timed(crate::motion::FADE),
             |el, t| el.opacity(t),
         )
         .into_any_element()
@@ -1750,18 +1728,15 @@ fn limit_row(
                 }))
                 .into_any_element()
         } else {
-            // On open the fill grows from nothing, once its row is in.
+            // On open the fill grows from nothing, with the card, eased out.
             div()
                 .h_full()
                 .rounded_full()
                 .bg(color)
                 .with_animation(
                     SharedString::from(format!("{}-fill", row.id)),
-                    Animation::new(Duration::from_millis(560)),
-                    move |el, t| {
-                        let k = ((t - 0.3) / 0.7).clamp(0., 1.);
-                        el.w(relative(target * (1. - (1. - k).powi(3))))
-                    },
+                    crate::motion::timed(crate::motion::FILL),
+                    move |el, t| el.w(relative(target * t)),
                 )
                 .into_any_element()
         });

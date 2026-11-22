@@ -112,8 +112,11 @@ pub(crate) fn apply_reduce_motion(workspace: &Entity<Workspace>, cx: &mut App) {
 /// either one stills every animation. Split from the read so that a test can say what the system
 /// asked, as the clock is told in the motion tests.
 pub fn reduce_motion_as(system: bool, workspace: &Entity<Workspace>, cx: &mut App) {
-    let on = system || workspace.read(cx).settings.appearance.reduce_motion;
-    if cx.reduce_motion() != on {
+    // A motion scale of 0 (a "Still" theme) is the same ask: GPUI's and the components' own
+    // fixed-time animations (a dropdown's, a dialog's) can't take a scale, but they do take this.
+    let appearance = &workspace.read(cx).settings.appearance;
+    let on = system || appearance.reduce_motion || crate::motion::stills(appearance.motion_scale);
+    if crate::motion::reduced(cx) != on {
         cx.set_reduce_motion(on)
     }
 }
