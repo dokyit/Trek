@@ -399,6 +399,13 @@ pub fn run() {
         // (`system::sync`, `keys::rebind`).
         cx.bind_keys(keys::trek_bindings());
         app_actions(cx);
+        // Before anything else's quit hook: what they do on the way out (saving every thread,
+        // installing an update) may hold the main thread, and that's no freeze.
+        cx.on_app_quit(|_| {
+            logging::freeze::stop();
+            async {}
+        })
+        .detach();
         // macOS has the system's menu bar; Windows and Linux have none (the commands are in the
         // palette, the settings, the context menus and the shortcuts), and no Dock to keep the app
         // up with its main window closed.
@@ -474,7 +481,32 @@ pub fn run() {
         if !background {
             cx.activate(true);
         }
+        // Last, once the app is up: a slow launch isn't a freeze.
+        watch_for_freezes(cx);
     });
+}
+
+/// A main thread that stops making progress is logged, with its stacks on a Mac
+/// (`logging::freeze`). The Mac watches its run loop; elsewhere the main thread is asked to
+/// answer through GPUI's own way of running work there.
+#[cfg_attr(target_os = "macos", allow(unused_variables))]
+fn watch_for_freezes(cx: &mut App) {
+    #[cfg(target_os = "macos")]
+    logging::freeze::watch_run_loop();
+    #[cfg(not(target_os = "macos"))]
+    {
+        let (asks, asked) = async_channel::bounded::<()>(1);
+        cx.foreground_executor()
+            .spawn(async move {
+                while asked.recv().await.is_ok() {
+                    logging::freeze::answer();
+                }
+            })
+            .detach();
+        logging::freeze::watch_asking(move || {
+            let _ = asks.try_send(());
+        });
+    }
 }
 
 /// Actions the app handles itself. Windows handle the rest of these; with none open, the menu and

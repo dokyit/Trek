@@ -5,9 +5,9 @@ Third-party materials bundled in this repository:
 
 * vendor/gpui-base — a patched copy of Longbridge's gpui-base, Apache-2.0
   (vendor/gpui-base/LICENSE-APACHE).
-* crates/trek-app/assets/file-icons — Catppuccin file icons, MIT
-  (crates/trek-app/assets/file-icons/LICENSE).
-* crates/trek-app/assets/fonts — Inter (The Inter Project Authors) and JetBrains Mono
+* crates/trek-assets/assets/file-icons — Catppuccin file icons, MIT
+  (crates/trek-assets/assets/file-icons/LICENSE).
+* crates/trek-assets/assets/fonts — Inter (The Inter Project Authors) and JetBrains Mono
   (The JetBrains Mono Project Authors), both under the SIL Open Font License 1.1
   (OFL-Inter.txt and OFL-JetBrainsMono.txt in that folder), and the KaTeX fonts
   (Design Science, Inc. and Khan Academy), seven of them modified and renamed TrekMath,
@@ -18,10 +18,10 @@ Third-party materials bundled in this repository:
 * ios/Trek/Backgrounds.xcassets — the background art of crates/trek-assets/assets/backgrounds
   cut to a phone's shape (ios/scripts/backgrounds.py); the paintings are public domain, as
   assets/backgrounds/SOURCES.md says.
-* crates/trek-app/src/math/tables.rs — glyph metrics and the math symbol table from
+* crates/trek-math/src/tables.rs — glyph metrics and the math symbol table from
   KaTeX (Khan Academy and other contributors), MIT; the layout rules in
-  crates/trek-app/src/math/layout.rs follow KaTeX's implementation of TeX's
-  (crates/trek-app/src/math/LICENSE-KaTeX).
+  crates/trek-math/src/layout.rs follow KaTeX's implementation of TeX's
+  (crates/trek-math/LICENSE-KaTeX).
 * crates/trek-mcp/src/desktop/skylight.rs — the recipe for input to a window in the
   background (the window server's event records and event fields) follows the findings of
   cua-driver (Cua AI, github.com/trycua/cua), MIT.
@@ -42,7 +42,7 @@ Third-party materials bundled in this repository:
   backends left out (vendor/whisper-rs-sys/whisper.cpp/LICENSE). The speech model dictation
   downloads the first time the mic is used is OpenAI's Whisper base model
   (github.com/openai/whisper), MIT, as whisper.cpp publishes it.
-* Agent and provider logos under crates/trek-app/assets/logos,
+* Agent and provider logos under crates/trek-assets/assets/logos,
   ios/Trek/Assets.xcassets/Logos and site/remote/logos are trademarks of their respective owners
   (Anthropic, OpenAI, Google, Microsoft/GitHub, xAI, Cursor, Factory, DeepSeek,
   Moonshot, Alibaba, Ollama, LM Studio, OpenRouter, Mistral, Groq, Cognition,
@@ -50,11 +50,37 @@ Third-party materials bundled in this repository:
   agent or provider a thread or setting uses; no endorsement or affiliation is
   implied, and Trek claims no rights in those marks. Trademark holders may
   request removal via a GitHub issue.
+  The PNG files themselves were added on 2 October 2026 with no record of where each was taken
+  from; the one-colour glyphs below are the ones whose source is known.
 * site/remote/vendor — the web remote's libraries, as their authors publish them: Preact
   (Jason Miller), MIT; htm (Google), Apache-2.0; marked (Christopher Jeffrey and contributors), MIT;
   DOMPurify (Cure53 and contributors), Apache-2.0 or MPL-2.0; and KaTeX (Khan Academy and other
   contributors), MIT, with its fonts under the SIL Open Font License 1.1. Each licence is beside
   it in that folder.
+* site/assets/fonts — the website's type: Bricolage Grotesque (The Bricolage Grotesque Project
+  Authors) and Hanken Grotesk (The Hanken Grotesk Project Authors), both SIL Open Font License 1.1,
+  as the @fontsource-variable packages publish them, and a Latin subset of JetBrains Mono (see
+  above). Each licence is beside its font as OFL-*.txt.
+* site/assets/img/backdrop — the website's two photographs, graded by script/site/make_backdrops.py:
+  "Dried grass field under blue sky during daytime" by Chris Mongeau
+  (unsplash.com/photos/ZRdSZeVKBaE) and "The sun is setting over a field of tall grass" by
+  Johannes Plenio (unsplash.com/photos/X7RUQSjQv0k), both under the Unsplash License.
+* ios/Trek/Assets.xcassets/Glyphs — one-colour agent marks from Lobe Icons
+  (@lobehub/icons-static-svg 1.95.1), MIT, with each path's arc flags written out; the marks
+  themselves belong to their owners, as the logos above do.
+* crates/trek-assets/assets/katex — KaTeX 0.16.11 (Khan Academy and other contributors), as the
+  npm package publishes it (katex.min.js, contrib/auto-render.min.js, katex.min.css and the
+  woff2 fonts), MIT (LICENSE in that folder) with the fonts under the SIL Open Font License 1.1
+  (OFL-KaTeX.txt). Study question cards draw their formulas with it, served from the app itself.
+* ios/Trek/Assets.xcassets/Cards — the glyphs on the iPhone's cards (git merge, pull request,
+  rocket, workflow and the like) are Lucide icons (Lucide Icons and Contributors), ISC (the
+  licence text is docs/assets/icons/features/LICENSE), with their stroke widths changed.
+* Made for Trek and under its licence, with nothing taken from elsewhere: the drawings in
+  plugins/examples/*/art; the four sounds in plugins/examples/soft-sounds/sounds, which were
+  synthesised for that plugin (plain tones with a fading tail, each peaking at the same level,
+  added 17 November 2026); crates/trek-assets/assets/icons/hub.svg; assets/dmg/background.svg
+  (drawn by script/dmg-background.sh); and the demo recordings and screenshots under ios/screenshots,
+  site/assets/img/features and site/assets/img/window-*, which are captures of Trek itself.
 * Model metadata (context windows, pricing) is sourced from models.dev.
 * docs/assets/icons/features — Lucide icons (Lucide Icons and Contributors), ISC
   (docs/assets/icons/features/LICENSE), recoloured. docs/assets/icons/tech and

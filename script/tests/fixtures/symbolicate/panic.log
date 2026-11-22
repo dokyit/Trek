@@ -1,0 +1,6 @@
+2026-11-21T17:20:01.123456Z ERROR trek_logging: panic on thread 'main' at crates/trek-app/src/lib.rs:10: boom
+Trek 0.4.64 (aarch64), trek <0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0> at 0x104710000
+   0:        0x1047102a8 - <unknown>
+   1:        0x104710300 - __mh_execute_header
+   2:        0x19260e0e0 - <unknown>
+2026-11-21T17:20:01.200000Z  INFO trek: quitting

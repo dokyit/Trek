@@ -1,0 +1,36 @@
+Analysis of sampling trek (pid 4242) every 1 millisecond
+Process:         trek [4242]
+Path:            /Applications/Trek.app/Contents/MacOS/trek
+Load Address:    0x104c84000
+Identifier:      dev.trek.Trek
+Version:         0.4.64 (0.4.64)
+Code Type:       ARM64
+Platform:        macOS
+Parent Process:  launchd [1]
+Target Type:     live task
+
+Date/Time:       2026-11-21 17:14:39.120 -0500
+OS Version:      macOS 27.2 (26B123)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+----
+
+Call graph:
+    1514 Thread_1   DispatchQueue_1: com.apple.main-thread  (serial)
+      1514 start  (in dyld) + 6652  [0x1926a4d7c]
+        1514 ???  (in trek)  load address 0x104c84000 + 0x24e27c  [0x104ed227c]
+          1514 ???  (in trek)  load address 0x104c84000 + 0xcd4d10  [0x105958d10]
+            1514 ???  (in trek)  load address 0x104c84000 + 0xcd4d64  [0x105958d64]
+              1514 nanosleep  (in libsystem_c.dylib) + 220  [0x1927ea2a0]
+                1514 __semwait_signal  (in libsystem_kernel.dylib) + 8  [0x19280bc4c]
+
+Total number in stack (recursive counted multiple, when >=5):
+
+Sort by top of stack, same collapsed (when >= 5):
+        __semwait_signal  (in libsystem_kernel.dylib)        1514
+
+Binary Images:
+       0x104c84000 -        0x10bfebfff +trek (0.4.64) <0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0> /Applications/Trek.app/Contents/MacOS/trek
+       0x1926a1000 -        0x19273fe8b  dyld (1.0.0 - 1340) <D8104ED6-185E-3A2F-AD71-B91EDDBE2598> /usr/lib/dyld
+
+Trek: Trek 0.4.64 (aarch64), trek <0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0> at 0x104c84000

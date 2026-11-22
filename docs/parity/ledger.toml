@@ -1694,6 +1694,19 @@ how = { macos = "~/Library/Logs/Trek.", windows = "%LOCALAPPDATA%\\Trek\\logs (n
 code = ["crates/trek-logging/src/lib.rs"]
 
 [[feature]]
+id = "freeze-evidence"
+area = "App"
+what = "A frozen Trek leaves evidence: when the main thread makes no progress for 5 seconds the log says so, and again with how long once it's back; nothing is sent anywhere"
+macos = "yes"
+windows = "partial"
+linux = "partial"
+live = ["freeze 10", "wait 6000", "freeze told"]
+how = { macos = "Observers on the main run loop (its common modes, so a modal panel, a menu or a window drag keeps passing) mark each pass; a watcher thread sleeps while the loop is idle, so an idle Trek has nothing more ticking. A freeze runs /usr/bin/sample for 2 seconds into freeze-<time>.txt in ~/Library/Logs/Trek (three a run at most, the newest ten kept), and logs the main thread's heaviest stack.", windows = "The watcher asks the main thread to answer every 2 seconds, through GPUI's posted message, which the system's modal loops (a window moved or sized, a dialog) dispatch too. The WARN lines and how long, no stacks.", linux = "As on Windows, through GPUI's posted message: the WARN lines and how long, with the main thread's state and the kernel function it waits in (/proc/self/task/<pid>/stat and wchan), no stacks." }
+note = "Windows takes no stacks: the in-process way (suspend the main thread, walk it with dbghelp, as script/sampler does from outside) needs the PDB beside the executable to name anything, which a release doesn't ship, and hasn't been tried there. Linux adds the main thread's state and the kernel function it waits in to the WARN line. On both, the computer sleeping, a debugger, a quit and the launch are left out as on the Mac. A release build is stripped, so Trek's own frames are addresses in the binary and the system's and std's are named; the file ends with the build's version, architecture, UUID and load address, and `bin/agent-cli symbolicate` names Trek's frames from the dSYM each release keeps beside it (docs/RELEASING.md, Symbols): checked with a stripped release build, its saved dSYM and a freeze it sampled."
+code = ["crates/trek-logging/src/freeze.rs", "crates/trek-app/src/lib.rs"]
+tests = ["crates/trek-logging/src/freeze.rs"]
+
+[[feature]]
 id = "basecamp"
 area = "Threads"
 what = "Basecamp: a recap of the prompts, turns, models, projects and tokens of today, this week or all along"

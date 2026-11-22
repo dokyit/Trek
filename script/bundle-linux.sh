@@ -165,6 +165,8 @@ if [[ ,$formats, == *,appimage,* ]]; then
   install -Dm755 "$bin_dir/trek" "$appdir/usr/bin/trek"
   install -Dm755 "$bin_dir/trek-mcp" "$appdir/usr/bin/trek-mcp"
   install_share "$appdir/usr" trek
+  install -Dm644 LICENSE "$appdir/usr/share/doc/trek/LICENSE"
+  install -Dm644 NOTICE "$appdir/usr/share/doc/trek/NOTICE"
   cp "$appdir/usr/share/applications/$app_id.desktop" "$appdir/$app_id.desktop"
   cp "$icons/256.png" "$appdir/$app_id.png"
   cp "$icons/256.png" "$appdir/.DirIcon"
@@ -197,7 +199,9 @@ if [[ ,$formats, == *,deb,* ]]; then
   mkdir -p "$pkg/usr/bin"
   ln -s ../lib/trek/trek "$pkg/usr/bin/trek"
   install_share "$pkg/usr" /usr/bin/trek
+  # Debian's place for a package's licence (copyright), and the notices beside it.
   install -Dm644 LICENSE "$pkg/usr/share/doc/trek/copyright"
+  install -Dm644 NOTICE "$pkg/usr/share/doc/trek/NOTICE"
   size=$(du -sk "$pkg/usr" | cut -f1)
   mkdir -p "$pkg/DEBIAN"
   cat > "$pkg/DEBIAN/control" <<EOF
@@ -227,6 +231,8 @@ if [[ ,$formats, == *,tar,* ]]; then
   dir=$work/tar/trek-$version
   install -Dm755 "$bin_dir/trek" "$dir/trek"
   install -Dm755 "$bin_dir/trek-mcp" "$dir/trek-mcp"
+  install -Dm644 LICENSE "$dir/LICENSE"
+  install -Dm644 NOTICE "$dir/NOTICE"
   desktop trek > "$dir/$app_id.desktop"
   cp "$icons/256.png" "$dir/$app_id.png"
   cat > "$dir/README.txt" <<EOF

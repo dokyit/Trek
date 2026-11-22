@@ -9,7 +9,8 @@ name: Release
 # does the manifest merge and upload once both are done (release.ps1 -PublishOnly -Publish). The
 # Intel Mac build runs alongside them too and joins the release after Windows (jobs intel,
 # publish-intel), and the Linux builds (x86_64 and Arm, on runners of each) join it last (jobs
-# linux, publish-linux: script/release-linux.sh).
+# linux, publish-linux: script/release-linux.sh). Each build's symbols (.dSYM, .pdb, .debug), which
+# the apps ship without, go on the release beside it and into a 90-day artifact (docs/RELEASING.md, "Symbols"; `bin/agent-cli symbolicate` reads them).
 #
 #   gh workflow run release.yml -f version=0.4.1-beta.4 -f channel=beta
 #   gh workflow run release.yml -f version=0.4.1-beta.4 -f channel=beta -f dry_run=true
@@ -387,6 +388,20 @@ jobs:
           if [[ $DRY_RUN == true ]]; then args+=(--dry-run); fi
           script/release.sh "${args[@]}"
 
+      # What was just built, named (docs/RELEASING.md, "Symbols"): the release has the same file,
+      # for good; this copy stays 90 days (a public repository's most, and this one's setting), a
+      # dry run's a week. Never fails the job: what release.sh published stays published.
+      - name: Symbols
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: trek-symbols-${{ inputs.version }}-darwin-aarch64
+          path: dist/release/*/Trek-*-darwin-aarch64.dSYM.zip
+          retention-days: ${{ inputs.dry_run && 7 || 90 }}
+          compression-level: 0
+          if-no-files-found: warn
+
       - name: Summary
         env:
           VERSION: ${{ inputs.version }}
@@ -674,6 +689,18 @@ jobs:
       - name: The Intel build starts
         run: arch -x86_64 dist/Trek.app/Contents/MacOS/trek-mcp --version
 
+      # As the macos job's Symbols step; publish-intel attaches the same file to the release.
+      - name: Symbols
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: trek-symbols-${{ inputs.version }}-darwin-x86_64
+          path: dist/release/*/Trek-*-darwin-x86_64.dSYM.zip
+          retention-days: ${{ inputs.dry_run && 7 || 90 }}
+          compression-level: 0
+          if-no-files-found: warn
+
       - name: Summary
         env:
           VERSION: ${{ inputs.version }}
@@ -793,6 +820,17 @@ jobs:
           path: dist/release/
           if-no-files-found: error
 
+      # As the macos job's Symbols step: the .pdb files, which the publish job attaches too.
+      - name: Symbols
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: trek-symbols-${{ inputs.version }}-windows-x86_64
+          path: dist/release/*/Trek-*-windows-x86_64.pdb.zip
+          retention-days: ${{ inputs.dry_run && 7 || 90 }}
+          compression-level: 0
+          if-no-files-found: warn
+
   # Linux, alongside the others: an AppImage, a .deb and a tarball per architecture, each built on
   # a runner of its own architecture (Ubuntu 22.04: the oldest glibc Trek's Linux builds support),
   # the AppImage minisigned with the same key (script/release-linux.sh --build-only). Only the
@@ -864,6 +902,17 @@ jobs:
           name: linux-build-${{ matrix.arch }}
           path: dist/release/
           if-no-files-found: error
+
+      # As the macos job's Symbols step: the .debug files, which publish-linux attaches too.
+      - name: Symbols
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: trek-symbols-${{ inputs.version }}-linux-${{ matrix.arch }}
+          path: dist/release/*/linux-*/Trek-*-linux-${{ matrix.arch }}.debug.tar.gz
+          retention-days: ${{ inputs.dry_run && 7 || 90 }}
+          compression-level: 0
+          if-no-files-found: warn
 
   # Only the manifest merge needs the macOS release to exist (release.ps1 -PublishOnly downloads
   # the <channel>.json release.sh wrote), so this is a short tail after both builds.
@@ -987,7 +1036,11 @@ jobs:
           gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$CHANNEL.json" --output "$RUNNER_TEMP/release.json" --clobber
           python3 script/lib/merge-manifest.py "$RUNNER_TEMP/release.json" "$out/$CHANNEL.json" > "$RUNNER_TEMP/$CHANNEL.json"
           # The archive first, the manifest that points at it last.
-          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "$out/Trek-$version-darwin-x86_64.app.tar.gz" "$out/Trek-$version-darwin-x86_64.app.tar.gz.minisig" "$out/Trek-$version-darwin-x86_64.dmg"
+          files=("$out/Trek-$version-darwin-x86_64.app.tar.gz" "$out/Trek-$version-darwin-x86_64.app.tar.gz.minisig" "$out/Trek-$version-darwin-x86_64.dmg")
+          # Its symbols go with it; a missing file doesn't hold the update back ("complete" says so).
+          sym="$out/Trek-$version-darwin-x86_64.dSYM.zip"
+          if [[ -f $sym ]]; then files+=("$sym"); else echo "::warning::no ${sym##*/}"; fi
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}"
           gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "$RUNNER_TEMP/$CHANNEL.json"
 
   # Linux joins the release last, after the Intel build however that ended: two merges of one
@@ -1071,16 +1124,19 @@ jobs:
           fi
           gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$CHANNEL.json" --output "$RUNNER_TEMP/release.json" --clobber
           missing=()
+          # The symbols too (docs/RELEASING.md, "Symbols"): without them this build's crash reports
+          # and freezes can't be named.
           wanted=(
             "Trek-$version-darwin-aarch64.app.tar.gz" "Trek-$version-darwin-aarch64.app.tar.gz.minisig" "Trek-$version-darwin-aarch64.dmg"
             "Trek-$version-darwin-x86_64.app.tar.gz" "Trek-$version-darwin-x86_64.app.tar.gz.minisig" "Trek-$version-darwin-x86_64.dmg"
             "Trek-$version-windows-x86_64.zip" "Trek-$version-windows-x86_64.zip.minisig" "Trek-Setup-x86_64.exe"
+            "Trek-$version-darwin-aarch64.dSYM.zip" "Trek-$version-darwin-x86_64.dSYM.zip" "Trek-$version-windows-x86_64.pdb.zip"
           )
           # Debian orders 0.4.1~beta.2 before 0.4.1: the .deb's version (script/bundle-linux.sh).
           deb=${version/-/\~}
           for arch in x86_64 aarch64; do
             debarch=amd64; [[ $arch == aarch64 ]] && debarch=arm64
-            wanted+=("Trek-$version-linux-$arch.AppImage" "Trek-$version-linux-$arch.AppImage.minisig" "Trek-$version-linux-$arch.tar.gz" "trek_${deb}_$debarch.deb")
+            wanted+=("Trek-$version-linux-$arch.AppImage" "Trek-$version-linux-$arch.AppImage.minisig" "Trek-$version-linux-$arch.tar.gz" "trek_${deb}_$debarch.deb" "Trek-$version-linux-$arch.debug.tar.gz")
           done
           for want in "${wanted[@]}"; do
             grep -qxF "$want" <<< "$assets" || missing+=("$want")

@@ -62,6 +62,14 @@ fn respond(
             .unwrap_or_default()
     } else if let (Some(file), true) = (media, path == trek_core::artifact::MEDIA_PATH) {
         crate::ide::preview::serve(file, range).map(Cow::Owned)
+    } else if let Some((kind, bytes)) = path
+        .strip_prefix(trek_core::artifact::KATEX_PATH)
+        .and_then(trek_assets::assets::katex_file)
+    {
+        // The KaTeX a study card draws its formulas with: bundled, nothing fetched.
+        base.header("Content-Type", kind)
+            .body(bytes)
+            .unwrap_or_default()
     } else {
         base.status(404)
             .body(Cow::Borrowed(&[][..]))
@@ -918,10 +926,39 @@ mod tests {
         assert_eq!(page.headers()["content-type"], "text/html; charset=utf-8");
         assert_eq!(page.headers()["cache-control"], "no-store");
         assert_eq!(&page.body()[..], b"<p>hi</p>");
-        for other in ["/favicon.ico", "/../../etc/passwd", "/x.js"] {
+        for other in [
+            "/favicon.ico",
+            "/../../etc/passwd",
+            "/x.js",
+            "/_trek/katex/../../secret",
+            "/_trek/katex/fonts/../katex.min.js",
+            "/_trek/katex/nothing.js",
+        ] {
             let r = respond("<p>hi</p>", trek_core::artifact::CSP, None, other, None);
             assert_eq!(r.status(), 404, "{other}");
             assert!(r.body().is_empty());
+        }
+    }
+
+    #[test]
+    fn the_bundled_katex_is_served_from_the_documents_own_origin() {
+        let path = |rel: &str| format!("{}{rel}", trek_core::artifact::KATEX_PATH);
+        for (rel, kind) in [
+            ("katex.min.js", "text/javascript"),
+            ("auto-render.min.js", "text/javascript"),
+            ("katex.min.css", "text/css"),
+            ("fonts/KaTeX_Main-Regular.woff2", "font/woff2"),
+        ] {
+            let r = respond(
+                "<p>hi</p>",
+                trek_core::artifact::STUDY_CSP,
+                None,
+                &path(rel),
+                None,
+            );
+            assert_eq!(r.status(), 200, "{rel}");
+            assert!(r.body().len() > 1000, "{rel}");
+            assert_eq!(r.headers()["content-type"], kind);
         }
     }
 

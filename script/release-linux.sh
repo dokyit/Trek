@@ -10,7 +10,10 @@
 # AppImage, .deb, tarball), signs the AppImage with minisign (trusted comment "Trek <version>
 # linux-<arch>"), checks the signature against assets/update/minisign.pub, and writes the
 # platform's manifest entry (linux-<arch>.json) into dist/release/<version>/linux-<arch>/. The
-# AppImage is what the update manifest points at: it's the one that replaces itself.
+# AppImage is what the update manifest points at: it's the one that replaces itself. The build
+# is unstripped, and each executable's DWARF (line tables) goes into trek.debug and trek-mcp.debug
+# before it's stripped for the packages, kept as Trek-<version>-linux-<arch>.debug.tar.gz
+# (docs/RELEASING.md, "Symbols"); the GNU build ID in both matches them.
 #
 # --publish-only takes every dist/release/<version>/linux-*/ there is (the workflow downloads each
 # architecture's), merges their entries into the release's <channel>.json (script/lib/merge-manifest.py,
@@ -44,7 +47,7 @@ while [[ $# -gt 0 ]]; do
     --publish) publish=1; shift ;;
     --skip-tests) skip_tests=1; shift ;;
     --existing-manifest) existing=$2; shift 2 ;;
-    -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
     -*) die "unknown option $1" ;;
     *) [[ -z $version ]] || die "one version, please"; version=${1#v}; shift ;;
   esac
@@ -88,8 +91,10 @@ if [[ $mode == build ]]; then
 
   target=${CARGO_TARGET_DIR:-target}
   if [[ ${BUILD:-1} != 0 ]]; then
-    say "build: cargo build --release --locked -p trek-app -p trek-mcp"
-    cargo build --release --locked -p trek-app -p trek-mcp
+    # Unstripped, with the DWARF in the executables (not a .dwp beside them), for the .debug files.
+    say "build: cargo build --release --locked -p trek-app -p trek-mcp (unstripped)"
+    CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=off \
+      cargo build --release --locked -p trek-app -p trek-mcp
   fi
   if [[ $skip_tests == 0 ]]; then
     say "smoke: cargo test -p trek-core --locked"
@@ -98,7 +103,27 @@ if [[ $mode == build ]]; then
 
   rm -rf "$dir"
   mkdir -p "$dir"
-  script/bundle-linux.sh --version "$version" --arch "$arch" --bin-dir "$target/release" --out "$dir" --release
+  # The symbols out, then the executables stripped as a release ships them, each pointing at its
+  # .debug by name (a debugger looks for it there) and both keeping the build ID.
+  command -v objcopy >/dev/null || die "needs objcopy (apt install binutils)"
+  bins=$(mktemp -d)
+  syms=$bins/symbols
+  mkdir -p "$syms"
+  for b in trek trek-mcp; do
+    cp "$target/release/$b" "$bins/$b"
+    objcopy --only-keep-debug "$bins/$b" "$syms/$b.debug"
+    objcopy --strip-all "$bins/$b"
+    (cd "$syms" && objcopy --add-gnu-debuglink="$b.debug" "$bins/$b")
+    id=$(readelf -n "$bins/$b" 2>/dev/null | awk '/Build ID/{print $3}')
+    [[ -n $id ]] || say "! $b has no GNU build ID: a symbolicator can't match its .debug"
+    [[ $id == "$(readelf -n "$syms/$b.debug" 2>/dev/null | awk '/Build ID/{print $3}')" ]] \
+      || die "$b.debug's build ID isn't the executable's"
+    say "$b  build ID $id  $(du -h "$syms/$b.debug" | cut -f1) of symbols"
+  done
+  symbols="Trek-$version-$platform.debug.tar.gz"
+  tar -C "$syms" -czf "$dir/$symbols" trek.debug trek-mcp.debug
+  script/bundle-linux.sh --version "$version" --arch "$arch" --bin-dir "$bins" --out "$dir" --release
+  rm -rf "$bins"
   image="Trek-$version-$platform.AppImage"
   [[ -f $dir/$image ]] || die "$dir/$image missing after packaging"
 
@@ -156,7 +181,10 @@ for d in "${dirs[@]}"; do
   fi
   python3 script/lib/merge-manifest.py "$manifest" "$d/$platform.json" > "$work/merged.json"
   mv "$work/merged.json" "$manifest"
+  # The .tar.gz glob takes the symbols (.debug.tar.gz) too; a build without them says so here
+  # and goes out anyway ("Every platform released" names the missing file).
   for f in "$d"/*.AppImage "$d"/*.AppImage.minisig "$d"/*.deb "$d"/*.tar.gz; do assets+=("$f"); done
+  compgen -G "$d/*.debug.tar.gz" >/dev/null || say "! no symbols in $d"
 done
 mkdir -p "$out"
 cp "$manifest" "$out/$channel.json"

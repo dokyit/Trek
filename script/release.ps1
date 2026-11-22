@@ -9,9 +9,11 @@
 #
 # Sets the workspace version for the build, builds trek.exe and trek-mcp.exe (release,
 # --locked), smokes trek-core, packs Trek-<version>-windows-x86_64.zip flat, signs it with
-# minisign (trusted comment "Trek <version> windows-x86_64"), builds the Inno installer and
-# writes the channel manifest to dist/release/<version>/. With -Publish it uploads to the
-# channel's EXISTING GitHub release - zip and .minisig first, the merged <channel>.json last,
+# minisign (trusted comment "Trek <version> windows-x86_64"), builds the Inno installer, keeps
+# the executables' .pdb files in Trek-<version>-windows-x86_64.pdb.zip (their symbols, which the
+# release doesn't ship; docs/RELEASING.md, "Symbols") and writes the channel manifest to
+# dist/release/<version>/. With -Publish it uploads to the channel's EXISTING GitHub release -
+# zip, .minisig, installer and symbols first, the merged <channel>.json last,
 # --clobber - like release.sh does. It never creates a release, tag or commit, and always puts
 # Cargo.toml and Cargo.lock back; without -Publish nothing leaves the machine.
 #
@@ -117,7 +119,10 @@ function Invoke-TrekReleasePublish {
     [IO.File]::WriteAllText($manifestPath, ($merged | ConvertTo-Json -Depth 8) + "`n")
     Say " $manifestPath -> $url"
 
-    $assets = @("$Out\$Name") + $(if ($signature) { @("$Out\$Name.minisig") } else { @() }) + $(if ($haveInstaller) { @($installerPath) } else { @() }) + @($manifestPath)
+    $haveSymbols = Test-Path "$Out\$SymbolsName"
+    # Missing symbols don't hold the update back; release.yml's last job says they're missing.
+    if (-not $haveSymbols) { Say " ! no $($SymbolsName): this build's frames can't be named later" }
+    $assets = @("$Out\$Name") + $(if ($signature) { @("$Out\$Name.minisig") } else { @() }) + $(if ($haveInstaller) { @($installerPath) } else { @() }) + $(if ($haveSymbols) { @("$Out\$SymbolsName") } else { @() }) + @($manifestPath)
     if (-not $Publish) {
         Say " dry run: $Out ready; not publishing. Would upload to ${Repo}'s release $ReleaseTag ($Channel):"
         foreach ($a in $assets) { Say "   $(Split-Path $a -Leaf)" }
@@ -130,6 +135,8 @@ function Invoke-TrekReleasePublish {
     $uploadFiles = @("$Out\$Name")
     if ($signature) { $uploadFiles += "$Out\$Name.minisig" }
     if ($haveInstaller) { $uploadFiles += $installerPath }
+    # The symbols go with the build they name, never after it.
+    if ($haveSymbols) { $uploadFiles += "$Out\$SymbolsName" }
     & gh release upload $ReleaseTag --repo $Repo --clobber @uploadFiles
     if ($LASTEXITCODE -ne 0) { Die 'uploading the archive failed' }
     & gh release upload $ReleaseTag --repo $Repo --clobber $manifestPath
@@ -138,7 +145,8 @@ function Invoke-TrekReleasePublish {
     # does for the Mac's.
     $assetNames = & gh release view $ReleaseTag --repo $Repo --json assets --jq '.assets[].name'
     foreach ($asset in $assetNames) {
-        if ($asset -like "Trek-*-$Platform.zip*" -and $asset -ne $Name -and $asset -ne "$Name.minisig") {
+        if (($asset -like "Trek-*-$Platform.zip*" -or $asset -like "Trek-*-$Platform.pdb.zip") -and
+            $asset -ne $Name -and $asset -ne "$Name.minisig" -and $asset -ne $SymbolsName) {
             & gh release delete-asset $ReleaseTag $asset --repo $Repo -y
         }
     }
@@ -174,6 +182,8 @@ if (-not $PubKey) { $PubKey = 'assets\update\minisign.pub' }
 $Repo = if ($env:TREK_RELEASE_REPO) { $env:TREK_RELEASE_REPO } else { 'dokyit/Trek' }
 $Platform = 'windows-x86_64'
 $Name = "Trek-$Version-$Platform.zip"
+# Not "...-windows-x86_64.zip": the site and the clean-ups below find the archive by that ending.
+$SymbolsName = "Trek-$Version-$Platform.pdb.zip"
 $ReleaseTag = if ($Channel -eq 'stable') { "v$Version" } else { $Channel }
 $Out = "dist\release\$Version"
 $TargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { 'target' }
@@ -275,6 +285,11 @@ try {
         Say ' build: BUILD=0, reusing the binaries already in the target dir'
     } else {
         $buildArgs = @('--release', '--locked') + ($packages | ForEach-Object { '-p'; $_ })
+        # Unstripped, so the linker writes each executable's symbols to its .pdb (Cargo.toml's
+        # [profile.release]; a strip there makes it link with /DEBUG:NONE, and no .pdb). The .exe
+        # gains only the .pdb's name. warm-release.yml builds the dependencies the same way, or
+        # this build would compile them all again.
+        $env:CARGO_PROFILE_RELEASE_STRIP = 'false'
         Say " build: cargo build $($buildArgs -join ' ')"
         & cargo build @buildArgs
         if ($LASTEXITCODE -ne 0) { Die 'cargo build failed' }
@@ -310,6 +325,20 @@ try {
         Die "$Name holds [$($entries -join ', ')], expected exactly [$($exes -join ', ')]"
     }
     $sha = (Get-FileHash "$Out\$Name" -Algorithm SHA256).Hash.ToLowerInvariant()
+
+    # ---------- symbols ----------
+    # Kept beside the release, never in it (docs/RELEASING.md, "Symbols"): each executable's .pdb,
+    # which Cargo puts beside it, a dash in the name an underscore.
+    $pdbs = @()
+    foreach ($exe in $exes) {
+        $stem = [IO.Path]::GetFileNameWithoutExtension($exe)
+        $pdb = @("$stem.pdb", "$($stem.Replace('-', '_')).pdb") | ForEach-Object { Join-Path $BinDir $_ } | Where-Object { Test-Path $_ } | Select-Object -First 1
+        if ($pdb) { $pdbs += $pdb } else { Say " ! no .pdb for $exe in $BinDir" }
+    }
+    if ($pdbs) {
+        Compress-Archive -Path $pdbs -DestinationPath "$Out\$SymbolsName" -Force
+        Say " $SymbolsName  ($($pdbs.Count) .pdb)"
+    }
 
     # ---------- installer (.exe) ----------
     $iscc = Get-Command "iscc" -ErrorAction SilentlyContinue
@@ -392,6 +421,7 @@ try {
     }
     Invoke-TrekReleasePublish
 } finally {
+    Remove-Item Env:CARGO_PROFILE_RELEASE_STRIP -ErrorAction SilentlyContinue
     Copy-Item "$backup\Cargo.toml", "$backup\Cargo.lock" . -Force
     Remove-Item $backup -Recurse -Force -ErrorAction SilentlyContinue
 }

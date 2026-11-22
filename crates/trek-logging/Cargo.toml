@@ -18,9 +18,15 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-log = "0.2"
+# Rust names in a freeze's stacks (`freeze`), which `sample` leaves mangled.
+rustc-demangle = "0.1"
 tracing-subscriber.workspace = true
 trek-core.workspace = true
 wry = { version = "0.53.3", package = "lb-wry", features = ["devtools", "transparent"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Whether a debugger is attached (`freeze`): proc_pidinfo's PROC_FLAG_TRACED.
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 gpui_windows = { package = "gpui-pre-windows", version = "=0.3.7", optional = true }
