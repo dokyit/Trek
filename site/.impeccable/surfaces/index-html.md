@@ -1,5 +1,5 @@
 ---
-version: 1
+version: 2
 slug: "index-html"
 primary_target: "index.html"
 related_targets: []
@@ -9,22 +9,18 @@ related_targets: []
 
 Scope: the one landing page of trekdesktop.com. Mode: Persuade.
 
-Who must act: a developer who already runs coding agents and has more than one piece of work going. What they should do: download Trek. What earns it: the line "Every agent. One trail.", the real app shown large, and each feature shown by the app doing it. No testimonials, logos or numbers exist, and the page is built not to need them.
+Who must act: a developer who already runs coding agents and has more than one piece of work going. What they should do: download Trek. What earns it: the line "Every agent. One trail.", one picture of the idea (the thread that needs you finding you), and an honest list of everything Trek does. No testimonials, logos or numbers exist, and the page is built not to need them.
 
-Must stay: few words, in short plain sentences, claiming only what the README says; real captures only; staged content said to be staged; no trackers; reads whole without scripts and with Reduce Motion on. The mark is brand (bar, favicon, one moment above the headline), never scenery or a layout device. The hiker is not on this page.
-
-Open: the iPhone app is built from source only. Better feature captures are being made; each picture or loop is a file slot under assets/img/features/ that a new capture replaces by name.
+Must stay: few words, in short plain sentences, claiming only what the latest release does; the redrawn window says it is redrawn and its threads staged; no trackers; reads whole with Reduce Motion on. Nothing outdoors; the mark is in the bar and the footer only.
 
 ## Direction contract
 
-THESIS: Trek's signpost as one confident brand moment, then the real app doing each job, at a rhythm that changes from row to row. It refuses the mockup's literal trick (buttons and feature rows drawn as boards on a stick), the dark-page-plus-shrunken-window arrangement, and a grid of same-size feature cards.
+THESIS: Every agent, one trail, drawn as one ink line down the whole page; its ember dot is the thread that needs you, and it reaches your phone before it rests at Download. The scroll, the copy and the picture are the same story.
 
-OWN-WORLD: A lavender sky field (#C9C1DE into #DCD6EA) over a pale lilac ground (#F1EFF6); ember (#EE5A24) only on the mark's boards, the primary button and a few state dots; ink (#1F1714) type. Night: a deep indigo field (#1D1A2C) with the night mark (cream post, #FF7A3D boards). Lowercase "trek" wordmark and display in Bricolage Grotesque 650 to 700, text in Hanken Grotesk. Real captures in soft, offset-shadowed frames with the app's own corner radius. Hairlines tinted lilac, no grey.
+OWN-WORLD: Paper (#F2EFF6) and ink (#1F1714) by day, violet-black (#17151F) and pale ink at night, a 512 px paper tooth over both; ember (#EE5A24, #FF7A3D at night) for the dot, the one button, the field's caret and the drawings' one part that needs you. A field of JetBrains Mono characters (the agents' output) at the top and the bottom. Bricolage Grotesque for headlines, Hanken Grotesk for text.
 
-STORY: The visitor reads the line and the one-sentence description, downloads at once or scrolls. The window rises from tilted to flat as they scroll. Then each feature is the app doing it: the Inbox reordering itself, sub-agents running, undo and fork, worktrees, access levels and Plan, the iPhone answering, the menu bar's three states, Study, Plugins, the four themes. Then where each build is, and the end.
+STORY: The first screen: the headline, one sentence, one Download, Trek's window on its stand, the field above thinning to the desk. The dot leaves the stand with "Run ./migrate?" and travels the line down to the two phones as they come together; the Allow is tapped. Down the left margin past everything Trek does (Native with a laptop and Trek's notification), round the box of your computer and phone (No account. No Trek server.), to the downloads and the field lying still.
 
-FIRST VIEWPORT: Lavender field. The bar: lockup (mark + lowercase trek) left, two links and a dark Download right. Centred: the mark at ~84 px whose two boards swing in and settle once, the headline "Every agent. One trail." near 88 px, one sentence, one filled ember-ink Download button for the visitor's platform with a quiet second line for the other builds. The app window (1086 px) begins in the lower third, tilted back a few degrees with a long soft shadow, its lower half running into the ground.
+FORM: Chosen by the owner on 22 November 2026 from two preview directions, then refined in three rounds from his notes: the field interactive at the top and bottom, the dot as the line's head, the phones' arrival and tap, the two drawings redrawn to read in two seconds, Linux as a preview. Motion grammar: one scroll-tied story (the line); everything else a quiet loop that pauses off screen; transforms and opacity only.
 
-FORM: Pinned by the owner: he chose direction 2, Signpost, from the 17 November rebrand (lavender sky field, ember boards, ink type, lowercase "trek" wordmark in Bricolage Grotesque, headline "Every agent. One trail."), and of its mockup said "use the tools to make it look better especially when it comes to the website and the features thing, looks like images stacked on top of a fake stick". seed: none (pinned). Signature interaction: the hero window's scroll-linked tilt-to-flat and the boards settling once on load; feature loops play only while seen. Motion grammar: exponential ease-out, transforms, opacity and clip only; reveals rise 24 px and clear a 6 px blur once; nothing loops but the app's own recordings.
-
-FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
+FINISH: the line self-check (`window.__trailCheck()`) within a pixel at 390 to 2560 wide; the page under the live CSP with nothing in the console; WebKit and Chrome; DESIGN.md and design.json describe this page.

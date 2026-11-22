@@ -1,734 +1,497 @@
 {
-  "schemaVersion": 2,
-  "generatedAt": "2026-11-17T16:22:00Z",
-  "title": "Design System: trekdesktop.com",
-  "extensions": {
-    "colorMeta": {
-      "sky": {
-        "role": "neutral",
-        "displayName": "Lavender Sky",
-        "canonical": "#C9C1DE",
-        "tonalRamp": [
-          "#0C0912",
-          "#262330",
-          "#443F50",
-          "#635D73",
-          "#857D98",
-          "#A7A1B9",
-          "#CBC5DA",
-          "#F0EBFD"
-        ]
-      },
-      "sky-2": {
-        "role": "neutral",
-        "displayName": "Lavender Sky, low",
-        "canonical": "#DCD6EA",
-        "tonalRamp": [
-          "#0C0A10",
-          "#26232C",
-          "#43404C",
-          "#635E6D",
-          "#847F91",
-          "#A7A2B2",
-          "#CBC6D5",
-          "#F0ECF8"
-        ]
-      },
-      "ground": {
-        "role": "neutral",
-        "displayName": "Lilac Ground",
-        "canonical": "#F1EFF6",
-        "tonalRamp": [
-          "#0B0B0D",
-          "#252428",
-          "#424145",
-          "#626065",
-          "#838187",
-          "#A6A4AA",
-          "#CAC8CD",
-          "#EFEEF2"
-        ]
-      },
-      "panel": {
-        "role": "neutral",
-        "displayName": "Panel Lilac",
-        "canonical": "#E4DFEF",
-        "tonalRamp": [
-          "#0C0A0F",
-          "#26242B",
-          "#43404A",
-          "#635F6B",
-          "#84808E",
-          "#A7A3AF",
-          "#CAC7D2",
-          "#F0EDF6"
-        ]
-      },
-      "panel-2": {
-        "role": "neutral",
-        "displayName": "Panel Lilac, deep",
-        "canonical": "#D6CFE6",
-        "tonalRamp": [
-          "#0C0A11",
-          "#26232D",
-          "#443F4D",
-          "#635E6F",
-          "#857E93",
-          "#A7A1B4",
-          "#CBC6D7",
-          "#F0ECFA"
-        ]
-      },
-      "raised": {
-        "role": "neutral",
-        "displayName": "Raised White",
-        "canonical": "#FBFAFD",
-        "tonalRamp": [
-          "#0B0B0C",
-          "#252526",
-          "#424243",
-          "#616163",
-          "#838284",
-          "#A5A4A7",
-          "#C9C9CB",
-          "#EFEEF0"
-        ]
-      },
-      "ink": {
-        "role": "neutral",
-        "displayName": "Warm Ink",
-        "canonical": "#1F1714",
-        "tonalRamp": [
-          "#0E0A09",
-          "#292422",
-          "#47403E",
-          "#685F5C",
-          "#8A807C",
-          "#ACA39F",
-          "#CFC7C4",
-          "#F4EDEA"
-        ]
-      },
-      "ink-2": {
-        "role": "neutral",
-        "displayName": "Second Ink",
-        "canonical": "#463C47",
-        "tonalRamp": [
-          "#0D0A0E",
-          "#282329",
-          "#473F47",
-          "#675E68",
-          "#897E8A",
-          "#ABA1AC",
-          "#CFC6CF",
-          "#F3ECF4"
-        ]
-      },
-      "mute": {
-        "role": "neutral",
-        "displayName": "Muted Ink",
-        "canonical": "#5E5466",
-        "tonalRamp": [
-          "#0D0910",
-          "#28232C",
-          "#463F4B",
-          "#665D6D",
-          "#887D91",
-          "#AAA1B2",
-          "#CEC5D4",
-          "#F2EBF8"
-        ]
-      },
-      "line": {
-        "role": "neutral",
-        "displayName": "Lilac Hairline",
-        "canonical": "rgb(70 50 100 / 0.14)"
-      },
-      "board": {
-        "role": "primary",
-        "displayName": "Signpost Ember",
-        "canonical": "#EE5A24",
-        "tonalRamp": [
-          "#260000",
-          "#4F0000",
-          "#7C1500",
-          "#AB2F00",
-          "#DC4A0C",
-          "#FA7A51",
-          "#FFA784",
-          "#FFD4B6"
-        ]
-      },
-      "board-hover": {
-        "role": "primary",
-        "displayName": "Signpost Ember, hover",
-        "canonical": "#F26A37",
-        "tonalRamp": [
-          "#250000",
-          "#4D0300",
-          "#781C00",
-          "#A63600",
-          "#D6521A",
-          "#F47F56",
-          "#FFAB87",
-          "#FFD7B9"
-        ]
-      },
-      "board-ink": {
-        "role": "primary",
-        "displayName": "Ink on Ember",
-        "canonical": "#1F1714",
-        "tonalRamp": [
-          "#0E0A09",
-          "#292422",
-          "#47403E",
-          "#685F5C",
-          "#8A807C",
-          "#ACA39F",
-          "#CFC7C4",
-          "#F4EDEA"
-        ]
-      },
-      "post": {
-        "role": "neutral",
-        "displayName": "Signpost Post",
-        "canonical": "#1F1714",
-        "tonalRamp": [
-          "#0E0A09",
-          "#292422",
-          "#47403E",
-          "#685F5C",
-          "#8A807C",
-          "#ACA39F",
-          "#CFC7C4",
-          "#F4EDEA"
-        ]
-      },
-      "shade": {
-        "role": "neutral",
-        "displayName": "Shade",
-        "canonical": "rgb(31 23 20)"
-      },
-      "sky-night": {
-        "role": "neutral",
-        "displayName": "Indigo Field (night)",
-        "canonical": "#1D1A2C",
-        "tonalRamp": [
-          "#0B0A12",
-          "#25232F",
-          "#42404F",
-          "#615E72",
-          "#827F96",
-          "#A5A2B7",
-          "#C9C7D9",
-          "#EEECFC"
-        ]
-      },
-      "sky-2-night": {
-        "role": "neutral",
-        "displayName": "Lavender Sky, low (night)",
-        "canonical": "#25213A",
-        "tonalRamp": [
-          "#0B0914",
-          "#252332",
-          "#413F53",
-          "#615E77",
-          "#827E9C",
-          "#A4A1BD",
-          "#C8C6DE",
-          "#EEECFF"
-        ]
-      },
-      "ground-night": {
-        "role": "neutral",
-        "displayName": "Lilac Ground (night)",
-        "canonical": "#13111C",
-        "tonalRamp": [
-          "#0B0A0F",
-          "#25242B",
-          "#42414A",
-          "#615F6C",
-          "#82808F",
-          "#A5A3B0",
-          "#C9C7D3",
-          "#EEEDF7"
-        ]
-      },
-      "panel-night": {
-        "role": "neutral",
-        "displayName": "Panel Lilac (night)",
-        "canonical": "#1F1B2E",
-        "tonalRamp": [
-          "#0B0A12",
-          "#25232F",
-          "#423F4F",
-          "#625E72",
-          "#837F96",
-          "#A5A2B7",
-          "#C9C6D9",
-          "#EFECFC"
-        ]
-      },
-      "panel-2-night": {
-        "role": "neutral",
-        "displayName": "Panel Lilac, deep (night)",
-        "canonical": "#2A2540",
-        "tonalRamp": [
-          "#0B0914",
-          "#252333",
-          "#423F54",
-          "#615D78",
-          "#827E9E",
-          "#A5A1BE",
-          "#C9C6DF",
-          "#EEEBFF"
-        ]
-      },
-      "raised-night": {
-        "role": "neutral",
-        "displayName": "Raised White (night)",
-        "canonical": "#1B1828",
-        "tonalRamp": [
-          "#0B0A11",
-          "#25232E",
-          "#42404E",
-          "#615F70",
-          "#827F94",
-          "#A5A2B5",
-          "#C9C7D7",
-          "#EEECFA"
-        ]
-      },
-      "ink-night": {
-        "role": "neutral",
-        "displayName": "Warm Ink (night)",
-        "canonical": "#F4EFF7",
-        "tonalRamp": [
-          "#0C0A0D",
-          "#262428",
-          "#444145",
-          "#636065",
-          "#858087",
-          "#A7A3AA",
-          "#CBC8CD",
-          "#F0EDF2"
-        ]
-      },
-      "ink-2-night": {
-        "role": "neutral",
-        "displayName": "Second Ink (night)",
-        "canonical": "#D2C9DD",
-        "tonalRamp": [
-          "#0D0A10",
-          "#27232C",
-          "#453F4B",
-          "#655E6D",
-          "#867E90",
-          "#A9A1B2",
-          "#CCC6D4",
-          "#F1ECF8"
-        ]
-      },
-      "mute-night": {
-        "role": "neutral",
-        "displayName": "Muted Ink (night)",
-        "canonical": "#A89FB6",
-        "tonalRamp": [
-          "#0D0911",
-          "#27232E",
-          "#453F4D",
-          "#655D70",
-          "#867E94",
-          "#A9A1B5",
-          "#CCC6D7",
-          "#F1EBFA"
-        ]
-      },
-      "line-night": {
-        "role": "neutral",
-        "displayName": "Lilac Hairline (night)",
-        "canonical": "rgb(214 200 255 / 0.13)"
-      },
-      "board-night": {
-        "role": "primary",
-        "displayName": "Signpost Ember (night)",
-        "canonical": "#FF7A3D",
-        "tonalRamp": [
-          "#240000",
-          "#4C0500",
-          "#771F00",
-          "#A53800",
-          "#D45407",
-          "#F28150",
-          "#FFAC83",
-          "#FFD8B6"
-        ]
-      },
-      "board-hover-night": {
-        "role": "primary",
-        "displayName": "Signpost Ember, hover (night)",
-        "canonical": "#FF8A52",
-        "tonalRamp": [
-          "#220000",
-          "#480D00",
-          "#722600",
-          "#9E4004",
-          "#CC5D21",
-          "#EA8759",
-          "#FFB18A",
-          "#FFDBBB"
-        ]
-      },
-      "board-ink-night": {
-        "role": "primary",
-        "displayName": "Ink on Ember (night)",
-        "canonical": "#1D1A2C",
-        "tonalRamp": [
-          "#0B0A12",
-          "#25232F",
-          "#42404F",
-          "#615E72",
-          "#827F96",
-          "#A5A2B7",
-          "#C9C7D9",
-          "#EEECFC"
-        ]
-      },
-      "post-night": {
-        "role": "neutral",
-        "displayName": "Cream Post (night)",
-        "canonical": "#F6F1EA",
-        "tonalRamp": [
-          "#0C0B09",
-          "#272522",
-          "#44413D",
-          "#64615B",
-          "#86827B",
-          "#A8A49F",
-          "#CCC8C4",
-          "#F1EEEA"
-        ]
-      },
-      "shade-night": {
-        "role": "neutral",
-        "displayName": "Shade (night)",
-        "canonical": "rgb(0 0 0)"
-      }
-    },
-    "typographyMeta": {
-      "display": {
-        "displayName": "Display",
-        "purpose": "The first screen's headline only."
-      },
-      "headline": {
-        "displayName": "Headline",
-        "purpose": "A section's headline."
-      },
-      "title-large": {
-        "displayName": "Title large",
-        "purpose": "A feature with a split row to itself."
-      },
-      "title": {
-        "displayName": "Title",
-        "purpose": "Other feature headings."
-      },
-      "title-small": {
-        "displayName": "Title small",
-        "purpose": "Feature headings in the strip."
-      },
-      "wordmark": {
-        "displayName": "Wordmark",
-        "purpose": "The lowercase trek in the lockup (22 px in the footer)."
-      },
-      "lede": {
-        "displayName": "Lede",
-        "purpose": "The sentence under the display headline, at most 30ch, second ink."
-      },
-      "body": {
-        "displayName": "Body",
-        "purpose": "Running text."
-      },
-      "label": {
-        "displayName": "Label",
-        "purpose": "Buttons (17 px big, 15 px small)."
-      },
-      "caption": {
-        "displayName": "Caption",
-        "purpose": "Fine print, captions and the staged-content line."
-      },
-      "mono": {
-        "displayName": "Mono",
-        "purpose": "Inline code on the privacy page."
-      }
-    },
-    "shadows": [
-      {
-        "name": "capture-frame",
-        "value": "0 0 0 1px rgb(0 0 0 / 0.07), 0 2px 4px rgb(var(--shade) / 0.06), 0 24px 48px -20px rgb(var(--shade) / 0.42)",
-        "purpose": "Every capture in a panel or the strip."
-      },
-      {
-        "name": "button-ember",
-        "value": "0 1px 0 rgb(255 255 255 / 0.28) inset, 0 10px 24px -12px rgb(var(--shade) / 0.55)",
-        "purpose": "The ember button at rest."
-      },
-      {
-        "name": "button-ember-hover",
-        "value": "0 1px 0 rgb(255 255 255 / 0.28) inset, 0 16px 30px -14px rgb(var(--shade) / 0.6)",
-        "purpose": "The ember button on hover."
-      },
-      {
-        "name": "button-line",
-        "value": "0 0 0 1px var(--line) inset, 0 1px 2px rgb(var(--shade) / 0.06)",
-        "purpose": "A build's line button at rest."
-      },
-      {
-        "name": "button-line-hover",
-        "value": "0 0 0 1px color-mix(in srgb, var(--ink) 30%, transparent) inset, 0 6px 14px -8px rgb(var(--shade) / 0.3)",
-        "purpose": "A line button on hover."
-      },
-      {
-        "name": "panel-ring",
-        "value": "0 0 0 1px var(--line) inset",
-        "purpose": "A panel's edge; panels cast no shadow."
-      },
-      {
-        "name": "menubar-tile",
-        "value": "0 0 0 1px var(--line) inset, 0 10px 24px -16px rgb(var(--shade) / 0.5)",
-        "purpose": "The menu bar icon tiles."
-      },
-      {
-        "name": "ground-contact",
-        "value": "radial-gradient(closest-side, rgb(var(--shade) / 0.32), transparent) with blur(10px)",
-        "purpose": "Where the hero window meets the ground."
-      },
-      {
-        "name": "phone-front",
-        "value": "0 0 0 1px rgb(255 255 255 / 0.08) inset, 0 40px 80px -30px rgb(0 0 0 / 0.45)",
-        "purpose": "The front iPhone."
-      },
-      {
-        "name": "phone-back",
-        "value": "drop-shadow(0 30px 40px rgb(0 0 0 / 0.28))",
-        "purpose": "The tilted back iPhone."
-      },
-      {
-        "name": "bar-stuck",
-        "value": "0 1px 0 var(--line)",
-        "purpose": "The bar's edge once the page has moved under it."
-      }
-    ],
-    "motion": [
-      {
-        "name": "ease-out",
-        "value": "cubic-bezier(0.16, 1, 0.3, 1)",
-        "purpose": "The site's one ease, for every transition and animation."
-      },
-      {
-        "name": "color",
-        "value": "150ms to 180ms",
-        "purpose": "Link and button colour changes."
-      },
-      {
-        "name": "lift",
-        "value": "220ms",
-        "purpose": "Button shadow and transform."
-      },
-      {
-        "name": "signpost-settle",
-        "value": "post 0.7s; boards 1.5s from 0.25s and 0.42s, overshoot then settle",
-        "purpose": "Once on load, first screen only."
-      },
-      {
-        "name": "hover-lean",
-        "value": "rotate 5deg or -5deg over 0.6s",
-        "purpose": "A board turns while the ember or quiet button is hovered or focused."
-      },
-      {
-        "name": "hero-rise",
-        "value": "translateY(14px) and blur(6px) to none over 1s, 0.1s to 0.38s apart; the window 60px over 1.3s",
-        "purpose": "The first screen's entrance."
-      },
-      {
-        "name": "window-tilt",
-        "value": "rotateX 10deg to 0, scale 0.94 to 1, lift 0 to -40px over 0.75 of a screen, cubic ease-out; a pointer turn of up to 2.2deg",
-        "purpose": "The hero window comes up flat as the page scrolls."
-      },
-      {
-        "name": "drift",
-        "value": "up to 18px either way, against the scroll",
-        "purpose": "Panel captures and the back phone, while near the screen."
-      },
-      {
-        "name": "reveal",
-        "value": "translateY(28px) and blur(6px) to none; opacity 0.9s, transform 1.1s; 0.08s stagger",
-        "purpose": "Content arriving, once."
-      },
-      {
-        "name": "loop-upgrade",
-        "value": "poster swapped for a muted looping video within half a screen; plays while 25% is visible",
-        "purpose": "Recordings, only when motion is welcome."
-      }
-    ],
-    "breakpoints": [
-      {
-        "name": "one-column",
-        "value": "1023px"
-      },
-      {
-        "name": "phone",
-        "value": "767px"
-      },
-      {
-        "name": "narrow-loop",
-        "value": "600px"
-      },
-      {
-        "name": "full-width-cta",
-        "value": "420px"
-      }
+ "schemaVersion": 2,
+ "generatedAt": "2026-11-22T16:30:00Z",
+ "title": "Design System: trekdesktop.com",
+ "extensions": {
+  "colorMeta": {
+   "paper": {
+    "role": "neutral",
+    "displayName": "Paper",
+    "canonical": "#F2EFF6",
+    "tonalRamp": [
+     "#0B0B0C",
+     "#252427",
+     "#434145",
+     "#626065",
+     "#838187",
+     "#A6A4A8",
+     "#CAC8CC",
+     "#EFEEF0"
     ]
+   },
+   "paper-2": {
+    "role": "neutral",
+    "displayName": "Paper, the end",
+    "canonical": "#E9E4F1",
+    "tonalRamp": [
+     "#0C0B0D",
+     "#262429",
+     "#434048",
+     "#635F69",
+     "#84808B",
+     "#A6A3AC",
+     "#CAC8CE",
+     "#EFEEF1"
+    ]
+   },
+   "wash": {
+    "role": "neutral",
+    "displayName": "Wash",
+    "canonical": "#DAD2EC",
+    "tonalRamp": [
+     "#0C0A0F",
+     "#26232C",
+     "#443F4E",
+     "#645D71",
+     "#857E94",
+     "#A7A2B3",
+     "#CBC7D3",
+     "#EFEDF4"
+    ]
+   },
+   "ink": {
+    "role": "neutral",
+    "displayName": "Ink",
+    "canonical": "#1F1714",
+    "tonalRamp": [
+     "#0D0B0A",
+     "#282422",
+     "#47403E",
+     "#685F5C",
+     "#89807C",
+     "#ABA3A0",
+     "#CDC8C6",
+     "#F1EEEC"
+    ]
+   },
+   "ink-2": {
+    "role": "neutral",
+    "displayName": "Second Ink",
+    "canonical": "#463C47",
+    "tonalRamp": [
+     "#0C0A0D",
+     "#282328",
+     "#463F47",
+     "#675D68",
+     "#897E8A",
+     "#AAA2AB",
+     "#CDC7CD",
+     "#F1EDF1"
+    ]
+   },
+   "stroke": {
+    "role": "neutral",
+    "displayName": "The Line",
+    "canonical": "#1F1714",
+    "tonalRamp": [
+     "#0D0B0A",
+     "#282422",
+     "#47403E",
+     "#685F5C",
+     "#89807C",
+     "#ABA3A0",
+     "#CDC8C6",
+     "#F1EEEC"
+    ]
+   },
+   "ember": {
+    "role": "primary",
+    "displayName": "Ember",
+    "canonical": "#EE5A24",
+    "tonalRamp": [
+     "#1C0200",
+     "#480D00",
+     "#781C00",
+     "#AD2C00",
+     "#D55325",
+     "#EB8565",
+     "#FFB59D",
+     "#FFE3D5"
+    ]
+   },
+   "ember-hover": {
+    "role": "primary",
+    "displayName": "Ember, hover",
+    "canonical": "#F26A37",
+    "tonalRamp": [
+     "#1B0300",
+     "#451000",
+     "#752100",
+     "#A83400",
+     "#CF592C",
+     "#E68968",
+     "#FBB79F",
+     "#FFE4D6"
+    ]
+   },
+   "on-ember": {
+    "role": "neutral",
+    "displayName": "Ink on Ember",
+    "canonical": "#1F1714",
+    "tonalRamp": [
+     "#0D0B0A",
+     "#282422",
+     "#47403E",
+     "#685F5C",
+     "#89807C",
+     "#ABA3A0",
+     "#CDC8C6",
+     "#F1EEEC"
+    ]
+   },
+   "raised": {
+    "role": "neutral",
+    "displayName": "Raised",
+    "canonical": "#FBFAFD",
+    "tonalRamp": [
+     "#0B0B0C",
+     "#252526",
+     "#424243",
+     "#616163",
+     "#838284",
+     "#A5A5A6",
+     "#C9C9CA",
+     "#EEEEEF"
+    ]
+   },
+   "paper-night": {
+    "role": "neutral",
+    "displayName": "Night Paper",
+    "canonical": "#17151F",
+    "tonalRamp": [
+     "#0B0B0D",
+     "#252429",
+     "#424149",
+     "#615F6B",
+     "#83808C",
+     "#A5A4AD",
+     "#C9C8CF",
+     "#EEEEF2"
+    ]
+   },
+   "paper-2-night": {
+    "role": "neutral",
+    "displayName": "Night Paper, the end",
+    "canonical": "#1D1A28",
+    "tonalRamp": [
+     "#0B0B0E",
+     "#25242B",
+     "#42404B",
+     "#625F6E",
+     "#838090",
+     "#A5A3B0",
+     "#C9C8D1",
+     "#EEEEF3"
+    ]
+   },
+   "wash-night": {
+    "role": "neutral",
+    "displayName": "Night Wash",
+    "canonical": "#2A2640",
+    "tonalRamp": [
+     "#0B0A10",
+     "#25232F",
+     "#413F52",
+     "#615D78",
+     "#827E9A",
+     "#A4A2B9",
+     "#C8C7D7",
+     "#EEEDF7"
+    ]
+   },
+   "ink-night": {
+    "role": "neutral",
+    "displayName": "Night Ink",
+    "canonical": "#F3EEF6",
+    "tonalRamp": [
+     "#0C0B0C",
+     "#262427",
+     "#434145",
+     "#636066",
+     "#858187",
+     "#A7A4A9",
+     "#CAC8CC",
+     "#EFEEF0"
+    ]
+   },
+   "ink-2-night": {
+    "role": "neutral",
+    "displayName": "Night Second Ink",
+    "canonical": "#D3CBDD",
+    "tonalRamp": [
+     "#0C0A0E",
+     "#26242A",
+     "#44404A",
+     "#645E6C",
+     "#867F8E",
+     "#A8A2AE",
+     "#CBC7D0",
+     "#EFEDF2"
+    ]
+   },
+   "stroke-night": {
+    "role": "neutral",
+    "displayName": "The Line at Night",
+    "canonical": "#EDE6F2",
+    "tonalRamp": [
+     "#0C0B0D",
+     "#262428",
+     "#444047",
+     "#645F68",
+     "#858089",
+     "#A7A3AB",
+     "#CBC8CD",
+     "#EFEDF1"
+    ]
+   },
+   "ember-night": {
+    "role": "primary",
+    "displayName": "Night Ember",
+    "canonical": "#FF7A3D",
+    "tonalRamp": [
+     "#1B0400",
+     "#451200",
+     "#742300",
+     "#A63700",
+     "#CE5B24",
+     "#E58A64",
+     "#FAB89D",
+     "#FFE5D5"
+    ]
+   },
+   "on-ember-night": {
+    "role": "neutral",
+    "displayName": "Night Ink on Ember",
+    "canonical": "#1D1A2C",
+    "tonalRamp": [
+     "#0B0A0F",
+     "#25242D",
+     "#42404E",
+     "#615E72",
+     "#827F94",
+     "#A5A3B3",
+     "#C9C7D3",
+     "#EEEDF4"
+    ]
+   },
+   "raised-night": {
+    "role": "neutral",
+    "displayName": "Night Raised",
+    "canonical": "#221F30",
+    "tonalRamp": [
+     "#0B0B0F",
+     "#25242C",
+     "#42404D",
+     "#615F71",
+     "#828093",
+     "#A5A3B2",
+     "#C9C8D3",
+     "#EEEDF4"
+    ]
+   },
+   "line": {
+    "role": "neutral",
+    "displayName": "Hairline",
+    "canonical": "rgb(31 23 20 / 0.18)",
+    "tonalRamp": [
+     "#0D0B0A",
+     "#282422",
+     "#47403E",
+     "#685F5C",
+     "#89807C",
+     "#ABA3A0",
+     "#CDC8C6",
+     "#F1EEEC"
+    ]
+   },
+   "line-night": {
+    "role": "neutral",
+    "displayName": "Night Hairline",
+    "canonical": "rgb(243 238 246 / 0.2)",
+    "tonalRamp": [
+     "#0C0B0C",
+     "#262427",
+     "#434145",
+     "#636066",
+     "#858187",
+     "#A7A4A9",
+     "#CAC8CC",
+     "#EFEEF0"
+    ]
+   }
   },
-  "components": [
-    {
-      "name": "Ember Button",
-      "kind": "button",
-      "refersTo": "button-ember",
-      "description": "The one primary action on a screen: Download for the visitor's platform.",
-      "html": "<a class=\"ds-btn ds-btn-ember\" href=\"#\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M12 4v11\"/><path d=\"m7 10 5 5 5-5\"/><path d=\"M5 20h14\"/></svg><span>Download for macOS</span></a>",
-      "css": ":host{--ground:#F1EFF6;--raised:#FBFAFD;--panel:#E4DFEF;--panel-2:#D6CFE6;--ink:#1F1714;--ink-2:#463C47;--mute:#5E5466;--line:rgb(70 50 100 / 0.14);--board:#EE5A24;--board-hover:#F26A37;--board-ink:#1F1714;--post:#1F1714;--shade:31 23 20;--out:cubic-bezier(0.16,1,0.3,1);} .ds-btn{display:inline-flex;align-items:center;justify-content:center;gap:10px;border:0;font-family:'Hanken Grotesk',ui-sans-serif,system-ui,sans-serif;font-weight:600;font-size:16px;line-height:1;white-space:nowrap;text-decoration:none;cursor:pointer;transition:background-color 180ms var(--out),box-shadow 220ms var(--out),transform 220ms var(--out);} .ds-btn:focus-visible{outline:2px solid var(--ink);outline-offset:3px;} .ds-btn svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round;} .ds-btn-ember{height:56px;padding:0 24px 0 20px;font-size:17px;border-radius:14px;background:var(--board);color:var(--board-ink);box-shadow:0 1px 0 rgb(255 255 255 / 0.28) inset,0 10px 24px -12px rgb(var(--shade) / 0.55);} .ds-btn-ember:hover{background:var(--board-hover);transform:translateY(-1px);box-shadow:0 1px 0 rgb(255 255 255 / 0.28) inset,0 16px 30px -14px rgb(var(--shade) / 0.6);} .ds-btn-ember:active{transform:none;}"
-    },
-    {
-      "name": "Quiet Button",
-      "kind": "button",
-      "refersTo": "button-quiet",
-      "description": "The first screen's second choice beside the ember button.",
-      "html": "<a class=\"ds-btn ds-btn-quiet\" href=\"#\">Other builds</a>",
-      "css": ":host{--ground:#F1EFF6;--raised:#FBFAFD;--panel:#E4DFEF;--panel-2:#D6CFE6;--ink:#1F1714;--ink-2:#463C47;--mute:#5E5466;--line:rgb(70 50 100 / 0.14);--board:#EE5A24;--board-hover:#F26A37;--board-ink:#1F1714;--post:#1F1714;--shade:31 23 20;--out:cubic-bezier(0.16,1,0.3,1);} .ds-btn{display:inline-flex;align-items:center;justify-content:center;gap:10px;border:0;font-family:'Hanken Grotesk',ui-sans-serif,system-ui,sans-serif;font-weight:600;font-size:16px;line-height:1;white-space:nowrap;text-decoration:none;cursor:pointer;transition:background-color 180ms var(--out),box-shadow 220ms var(--out),transform 220ms var(--out);} .ds-btn:focus-visible{outline:2px solid var(--ink);outline-offset:3px;} .ds-btn svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round;} .ds-btn-quiet{height:56px;padding:0 20px;font-size:17px;border-radius:14px;color:var(--ink);background:color-mix(in srgb,var(--raised) 42%,transparent);box-shadow:0 0 0 1px var(--line) inset;} .ds-btn-quiet:hover{background:color-mix(in srgb,var(--raised) 75%,transparent);}"
-    },
-    {
-      "name": "Ink Button",
-      "kind": "button",
-      "refersTo": "button-ink",
-      "description": "The small dark Download in the bar.",
-      "html": "<a class=\"ds-btn ds-btn-ink\" href=\"#\">Download</a>",
-      "css": ":host{--ground:#F1EFF6;--raised:#FBFAFD;--panel:#E4DFEF;--panel-2:#D6CFE6;--ink:#1F1714;--ink-2:#463C47;--mute:#5E5466;--line:rgb(70 50 100 / 0.14);--board:#EE5A24;--board-hover:#F26A37;--board-ink:#1F1714;--post:#1F1714;--shade:31 23 20;--out:cubic-bezier(0.16,1,0.3,1);} .ds-btn{display:inline-flex;align-items:center;justify-content:center;gap:10px;border:0;font-family:'Hanken Grotesk',ui-sans-serif,system-ui,sans-serif;font-weight:600;font-size:16px;line-height:1;white-space:nowrap;text-decoration:none;cursor:pointer;transition:background-color 180ms var(--out),box-shadow 220ms var(--out),transform 220ms var(--out);} .ds-btn:focus-visible{outline:2px solid var(--ink);outline-offset:3px;} .ds-btn svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round;} .ds-btn-ink{height:40px;padding:0 16px;font-size:15px;border-radius:11px;background:var(--ink);color:var(--ground);} .ds-btn-ink:hover{background:color-mix(in srgb,var(--ink) 86%,var(--board));}"
-    },
-    {
-      "name": "Line Button",
-      "kind": "button",
-      "refersTo": "button-line",
-      "description": "A build's download in the build list; the visitor's own build gets an ember ring.",
-      "html": "<a class=\"ds-btn ds-btn-line\" href=\"#\">Apple silicon <small>18 MB</small></a> <a class=\"ds-btn ds-btn-line is-yours\" href=\"#\">Intel <small>19 MB</small></a>",
-      "css": ":host{--ground:#F1EFF6;--raised:#FBFAFD;--panel:#E4DFEF;--panel-2:#D6CFE6;--ink:#1F1714;--ink-2:#463C47;--mute:#5E5466;--line:rgb(70 50 100 / 0.14);--board:#EE5A24;--board-hover:#F26A37;--board-ink:#1F1714;--post:#1F1714;--shade:31 23 20;--out:cubic-bezier(0.16,1,0.3,1);} .ds-btn{display:inline-flex;align-items:center;justify-content:center;gap:10px;border:0;font-family:'Hanken Grotesk',ui-sans-serif,system-ui,sans-serif;font-weight:600;font-size:16px;line-height:1;white-space:nowrap;text-decoration:none;cursor:pointer;transition:background-color 180ms var(--out),box-shadow 220ms var(--out),transform 220ms var(--out);} .ds-btn:focus-visible{outline:2px solid var(--ink);outline-offset:3px;} .ds-btn svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round;} .ds-btn-line{height:40px;padding:0 13px;font-size:15px;border-radius:11px;color:var(--ink);background:var(--raised);box-shadow:0 0 0 1px var(--line) inset,0 1px 2px rgb(var(--shade) / 0.06);} .ds-btn-line:hover{box-shadow:0 0 0 1px color-mix(in srgb,var(--ink) 30%,transparent) inset,0 6px 14px -8px rgb(var(--shade) / 0.3);} .ds-btn-line.is-yours{box-shadow:0 0 0 2px var(--board) inset;} .ds-btn-line small{font-size:13px;font-weight:500;opacity:0.72;font-variant-numeric:tabular-nums;}"
-    },
-    {
-      "name": "Bar and Lockup",
-      "kind": "nav",
-      "refersTo": "wordmark",
-      "description": "The fixed bar in its stuck state: lockup, two links, the ink Download.",
-      "html": "<header class=\"ds-bar\"><a class=\"ds-lockup\" href=\"#\"><svg class=\"ds-mark\" viewBox=\"212 236 600 600\" aria-hidden=\"true\"><path class=\"p\" d=\"M512 236A32 32 0 0 1 544 268V804A32 32 0 0 1 512 836A32 32 0 0 1 480 804V268A32 32 0 0 1 512 236Z\"/><path class=\"b a\" stroke-width=\"36\" stroke-linejoin=\"round\" transform=\"rotate(-4 512 352)\" d=\"M262 290H676L770 352L676 414H262Z\"/><path class=\"b bb\" stroke-width=\"36\" stroke-linejoin=\"round\" transform=\"rotate(3 512 540)\" d=\"M762 478H348L254 540L348 602H762Z\"/></svg><span>trek</span></a><nav class=\"ds-links\"><a href=\"#\">Features</a><a href=\"#\">GitHub</a></nav><a class=\"ds-dl\" href=\"#\">Download</a></header>",
-      "css": ":host{--ground:#F1EFF6;--raised:#FBFAFD;--panel:#E4DFEF;--panel-2:#D6CFE6;--ink:#1F1714;--ink-2:#463C47;--mute:#5E5466;--line:rgb(70 50 100 / 0.14);--board:#EE5A24;--board-hover:#F26A37;--board-ink:#1F1714;--post:#1F1714;--shade:31 23 20;--out:cubic-bezier(0.16,1,0.3,1);} .ds-mark{overflow:visible;} .ds-mark .p{fill:var(--post);} .ds-mark .b{fill:var(--board);stroke:var(--board);} .ds-bar{display:flex;align-items:center;gap:28px;padding:14px 24px;background:color-mix(in srgb,var(--ground) 82%,transparent);backdrop-filter:blur(14px) saturate(1.3);box-shadow:0 1px 0 var(--line);font-family:'Hanken Grotesk',ui-sans-serif,system-ui,sans-serif;} .ds-lockup{display:inline-flex;align-items:center;gap:9px;margin-right:auto;font:700 27px/1 'Bricolage Grotesque',ui-sans-serif,system-ui,sans-serif;letter-spacing:-0.035em;color:var(--ink);text-decoration:none;} .ds-lockup .ds-mark{width:30px;height:30px;} .ds-links{display:flex;gap:26px;} .ds-links a{font-weight:500;font-size:15px;color:var(--ink-2);text-decoration:none;transition:color 150ms var(--out);} .ds-links a:hover{color:var(--ink);} .ds-bar a:focus-visible{outline:2px solid var(--ink);outline-offset:3px;border-radius:8px;} .ds-dl{height:40px;display:inline-flex;align-items:center;padding:0 16px;border-radius:11px;background:var(--ink);color:var(--ground);font-weight:600;font-size:15px;text-decoration:none;} .ds-dl:hover{background:color-mix(in srgb,var(--ink) 86%,var(--board));}"
-    },
-    {
-      "name": "Feature Panel",
-      "kind": "card",
-      "refersTo": "panel",
-      "description": "A piece of the sky holding one real capture in its soft lifted frame.",
-      "html": "<div class=\"ds-panel\"><div class=\"ds-shot\"><div class=\"ds-row\"></div><div class=\"ds-row\"></div><div class=\"ds-row short\"></div></div></div>",
-      "css": ":host{--ground:#F1EFF6;--raised:#FBFAFD;--panel:#E4DFEF;--panel-2:#D6CFE6;--ink:#1F1714;--ink-2:#463C47;--mute:#5E5466;--line:rgb(70 50 100 / 0.14);--board:#EE5A24;--board-hover:#F26A37;--board-ink:#1F1714;--post:#1F1714;--shade:31 23 20;--out:cubic-bezier(0.16,1,0.3,1);} .ds-panel{display:grid;place-items:center;min-height:280px;padding:40px;border-radius:28px;background:linear-gradient(170deg,var(--panel-2),var(--panel) 70%);box-shadow:0 0 0 1px var(--line) inset;} .ds-shot{width:280px;padding:16px;display:grid;gap:10px;border-radius:12px;background:var(--raised);box-shadow:0 0 0 1px rgb(0 0 0 / 0.07),0 2px 4px rgb(var(--shade) / 0.06),0 24px 48px -20px rgb(var(--shade) / 0.42);} .ds-row{height:14px;border-radius:5px;background:color-mix(in srgb,var(--ink) 8%,transparent);} .ds-row.short{width:60%;}"
-    },
-    {
-      "name": "Bleeding Panel",
-      "kind": "card",
-      "refersTo": "panel",
-      "description": "A wide panel whose capture rises from its foot with square bottom corners.",
-      "html": "<div class=\"ds-bleed\"><div class=\"ds-bshot\"></div></div>",
-      "css": ":host{--ground:#F1EFF6;--raised:#FBFAFD;--panel:#E4DFEF;--panel-2:#D6CFE6;--ink:#1F1714;--ink-2:#463C47;--mute:#5E5466;--line:rgb(70 50 100 / 0.14);--board:#EE5A24;--board-hover:#F26A37;--board-ink:#1F1714;--post:#1F1714;--shade:31 23 20;--out:cubic-bezier(0.16,1,0.3,1);} .ds-bleed{display:grid;place-items:end center;padding:48px 40px 0;overflow:hidden;border-radius:28px;background:linear-gradient(170deg,var(--panel-2),var(--panel) 70%);box-shadow:0 0 0 1px var(--line) inset;} .ds-bshot{width:min(520px,100%);height:180px;border-radius:12px 12px 0 0;background:var(--raised);box-shadow:0 0 0 1px rgb(0 0 0 / 0.07),0 2px 4px rgb(var(--shade) / 0.06),0 24px 48px -20px rgb(var(--shade) / 0.42);}"
-    },
-    {
-      "name": "Strip Item",
-      "kind": "custom",
-      "refersTo": "title-small",
-      "description": "A small feature on the ground under a hairline, one of the strip's three.",
-      "html": "<article class=\"ds-mini\"><h3>Undo any turn</h3><p>Edit, retry or fork. Files roll back too.</p></article>",
-      "css": ":host{--ground:#F1EFF6;--raised:#FBFAFD;--panel:#E4DFEF;--panel-2:#D6CFE6;--ink:#1F1714;--ink-2:#463C47;--mute:#5E5466;--line:rgb(70 50 100 / 0.14);--board:#EE5A24;--board-hover:#F26A37;--board-ink:#1F1714;--post:#1F1714;--shade:31 23 20;--out:cubic-bezier(0.16,1,0.3,1);} .ds-mini{max-width:320px;padding-top:22px;border-top:1px solid var(--line);font-family:'Hanken Grotesk',ui-sans-serif,system-ui,sans-serif;} .ds-mini h3{margin:0;font:650 1.4rem/1.08 'Bricolage Grotesque',ui-sans-serif,system-ui,sans-serif;letter-spacing:-0.02em;color:var(--ink);} .ds-mini p{margin:8px 0 0;font-size:16px;line-height:1.55;color:var(--ink-2);}"
-    },
-    {
-      "name": "Signpost Mark",
-      "kind": "custom",
-      "refersTo": "post",
-      "description": "The mark from mark.svg on the sky; a board leans while an action is hovered.",
-      "html": "<div class=\"ds-sign\"><svg class=\"ds-mark\" viewBox=\"212 236 600 600\" aria-hidden=\"true\"><path class=\"p\" d=\"M512 236A32 32 0 0 1 544 268V804A32 32 0 0 1 512 836A32 32 0 0 1 480 804V268A32 32 0 0 1 512 236Z\"/><path class=\"b a\" stroke-width=\"36\" stroke-linejoin=\"round\" transform=\"rotate(-4 512 352)\" d=\"M262 290H676L770 352L676 414H262Z\"/><path class=\"b bb\" stroke-width=\"36\" stroke-linejoin=\"round\" transform=\"rotate(3 512 540)\" d=\"M762 478H348L254 540L348 602H762Z\"/></svg></div>",
-      "css": ":host{--ground:#F1EFF6;--raised:#FBFAFD;--panel:#E4DFEF;--panel-2:#D6CFE6;--ink:#1F1714;--ink-2:#463C47;--mute:#5E5466;--line:rgb(70 50 100 / 0.14);--board:#EE5A24;--board-hover:#F26A37;--board-ink:#1F1714;--post:#1F1714;--shade:31 23 20;--out:cubic-bezier(0.16,1,0.3,1);} .ds-mark{overflow:visible;} .ds-mark .p{fill:var(--post);} .ds-mark .b{fill:var(--board);stroke:var(--board);} .ds-sign{display:grid;place-items:center;padding:24px;border-radius:16px;background:linear-gradient(180deg,#C9C1DE,#DCD6EA);} .ds-sign .ds-mark{width:76px;height:76px;} .ds-mark .b{transform-box:fill-box;transform-origin:50% 50%;transition:rotate 0.6s var(--out);} .ds-sign:hover .bb{rotate:5deg;}"
-    }
+  "typographyMeta": {
+   "display": {
+    "displayName": "Display",
+    "usage": "The first screen's headline only."
+   },
+   "headline": {
+    "displayName": "Headline",
+    "usage": "Section headlines: Walk away, All of it, No account, Get Trek."
+   },
+   "title": {
+    "displayName": "Title",
+    "usage": "Group names in the list, facts in the privacy box, each build."
+   },
+   "wordmark": {
+    "displayName": "Wordmark",
+    "usage": "The lowercase \"trek\" beside the mark."
+   },
+   "lede": {
+    "displayName": "Lede",
+    "usage": "The sentence under a headline."
+   },
+   "body": {
+    "displayName": "Body",
+    "usage": "Everything else."
+   },
+   "run": {
+    "displayName": "Run",
+    "usage": "A group's items, run together with middots."
+   },
+   "field": {
+    "displayName": "Field",
+    "usage": "The character field only: texture, aria-hidden."
+   }
+  },
+  "shadows": [
+   {
+    "name": "ember-button",
+    "value": "0 1px 0 rgb(255 255 255 / 0.3) inset, 0 10px 24px -12px rgb(31 23 20 / 0.5)",
+    "purpose": "The one main button."
+   },
+   {
+    "name": "window",
+    "value": "0 0 0 1px rgb(0 0 0 / 0.10), 0 2px 4px rgb(0 0 0 / 0.05), 0 30px 60px -24px rgb(31 23 20 / 0.45)",
+    "purpose": "Trek's redrawn window in its screen."
+   }
   ],
-  "narrative": {
-    "northStar": "The Signpost",
-    "overview": "The site is the place a visitor meets Trek before installing it. It opens on one brand moment: the signpost (one post, two pointed boards) under a lavender sky, its boards swinging in and settling once above the line \"Every agent. One trail.\" Under it the real app window stands on a ground line, tilted back, and comes up flat as the page scrolls. After that the page is the app doing each job, one feature to a row, and the rows change their arrangement from one to the next: a split, a wide band, a pair, a strip of three, an iPhone band, a flipped split, a wide band again. Then where each build is, and the end.\n\nThe world is soft and lit from above. A lavender sky field runs into a pale lilac ground by day; by night it is a deep indigo field. Ember belongs to the signpost's boards and the one action that matters. Everything else is ink on lilac, with hairlines tinted lilac and never grey. Panels are pieces of the sky the app is shown against; the captures inside them carry their own colour. Type is two grotesques, upright throughout, at a confident display weight.\n\nThe page refuses buttons or feature rows drawn as boards on a stick, a dark page with a shrunken window under the headline, and a grid of same-size feature cards.",
-    "keyCharacteristics": [
-      "One signpost moment in the first screen; the mark is brand, never scenery or a layout device.",
-      "Real captures of the app, large and sharp, in soft lifted frames with the app's own corner radius.",
-      "A row rhythm that changes from row to row on a 12-part grid.",
-      "Ember only on the boards, the main button and the visitor's own build.",
-      "Every colour defined for day and night; every picture shipped as Paper and Night where the app has both.",
-      "Reads whole without script and with Reduce Motion on."
-    ],
-    "rules": [
-      {
-        "name": "The Ember Is Spoken Once Rule",
-        "body": "Ember is the boards, the one primary button on a screen, and the visitor's own build. It is never a background band, a heading colour or a decorative stroke.",
-        "section": "colors"
-      },
-      {
-        "name": "The Lilac Line Rule",
-        "body": "Borders are the lilac hairline or ink mixed into transparency (10% on the ground line, 22% over a build). Never a neutral grey.",
-        "section": "colors"
-      },
-      {
-        "name": "The Two Dresses Rule",
-        "body": "Every token has a night value under `prefers-color-scheme: dark`. A new colour is not done until it has both.",
-        "section": "colors"
-      },
-      {
-        "name": "The Plain Headline Rule",
-        "body": "A headline is a plain statement in one colour, in short words. Nothing sits above it: no label, no pill, no eyebrow. Display copy has no colon and no semicolon. No paragraph opens with a bold lead-in.",
-        "section": "typography"
-      },
-      {
-        "name": "The Own Type Rule",
-        "body": "The three faces are variable or subset woff2 files served from this domain, each under the SIL Open Font License 1.1 with its licence text beside it in `assets/fonts/`. Bricolage and Hanken are preloaded on every page. No font from another domain, and no system face for display.",
-        "section": "typography"
-      },
-      {
-        "name": "The App Floats Rule",
-        "body": "Shadows belong to the things that are the app (captures, phones, the window) and to buttons. Panels, the strip and the build list do not cast shadows.",
-        "section": "elevation"
-      }
-    ],
-    "dos": [
-      "Do show only real captures and real recordings of the app, cut from its isolated test app in demo dress, and say in a visible line when threads are staged.",
-      "Do replace a feature picture or loop by writing a new capture under the same file name in `assets/img/features/` (`<name>-paper.webp`, `<name>-night.webp`, `<name>.mp4`, `<name>-poster.webp`); `script/site/feature_media.sh` makes them. Sizes come from the CSS.",
-      "Do write each picture's origin into the `.json` file of the same name beside it.",
-      "Do change the mark only in `assets/img/mark.svg`, then run `script/site/make_icons.py` to redraw the favicon, touch and manifest icons and the share picture.",
-      "Do run `python3 script/site/stamp.py site` before every push: every local link carries `?v=<hash>`, and a stale stamp serves old files.",
-      "Do keep all styling in `assets/site.css`; the CSP forbids inline styles and scripts. Script may set custom properties through the CSSOM.",
-      "Do define every new colour for day and night, and keep text at 4.5:1 against its ground.",
-      "Do change the row arrangement from one feature to the next.",
-      "Do keep the page whole without script and with Reduce Motion on.",
-      "Do keep words few, in short plain sentences, claiming only what the README says."
-    ],
-    "donts": [
-      "Don't draw buttons or feature rows as boards on a stick, or use the signpost as scenery, a bullet, a divider or a layout device.",
-      "Don't put the pixel hiker on the home page.",
-      "Don't use a dark page with a shrunken window under the headline, or a grid of same-size feature cards.",
-      "Don't use a mock-up, a generated image or a hand-retouched frame as a picture of the app. The one retouch is the hero window's three title-bar buttons, painted in because the test window is never the key window.",
-      "Don't put ember on anything but the boards, the primary button and the visitor's build.",
-      "Don't put a label, pill or eyebrow above a headline, use italics or bold lead-ins, or put a colon or semicolon in display copy.",
-      "Don't use a grey border or a hard offset shadow.",
-      "Don't add trackers, analytics, cookies, or type or script from another domain. The only request off the domain is to GitHub's API for the latest release.",
-      "Don't loop anything that is not the app's own recording.",
-      "Don't credit the fonts in the footer or add words to it."
-    ]
+  "motion": [
+   {
+    "name": "line-to-dot",
+    "value": "stroke-dashoffset set each frame so the line ends at the dot; the dot keeps level with 60% of the window where the line runs down, steady pace where it runs across",
+    "purpose": "The page's one story, tied to the scroll both ways."
+   },
+   {
+    "name": "first-draw",
+    "value": "the desk then the line draw over 1.5s, cubic ease-out",
+    "purpose": "Once on load."
+   },
+   {
+    "name": "field-drift",
+    "value": "each row translateX(-50%) to 0, linear, 40 to 110s, infinite; paused off screen",
+    "purpose": "The character field, as output running."
+   },
+   {
+    "name": "field-ripple",
+    "value": "a ring of scrambled characters to 180px (120 on a phone) over 1.1s, fading; ember spark 0.8s",
+    "purpose": "A click or touch on the field."
+   },
+   {
+    "name": "caret",
+    "value": "opacity 1 to 0.35, 2.4s ease-in-out, infinite",
+    "purpose": "The ember caret in the field."
+   },
+   {
+    "name": "phones-together",
+    "value": "back phone from -90px 46px, front from 110px 70px and 6deg, to rest over 0.7 of a screen, cubic ease-out",
+    "purpose": "The phones as their section arrives."
+   },
+   {
+    "name": "phone-tap",
+    "value": "a ring scaling 0.4 to 1.6 and a press over 0.9s",
+    "purpose": "The Allow, as the dot arrives under the phone."
+   },
+   {
+    "name": "native-banner",
+    "value": "translateX(290px) to 0 at 14% (expo out), back at 76% (expo in), 5s loop",
+    "purpose": "Trek's notification beside Native."
+   },
+   {
+    "name": "private-pulse",
+    "value": "translateX 0 to 246px and back, 3.6s ease-in-out loop",
+    "purpose": "The note between computer and phone."
+   },
+   {
+    "name": "reduce-motion",
+    "value": "every loop stops; the line is whole and the dot at Download; the drawings at their telling frame",
+    "purpose": "prefers-reduced-motion: reduce."
+   }
+  ],
+  "breakpoints": [
+   {
+    "name": "one-column-hero",
+    "value": "1000px"
+   },
+   {
+    "name": "phone",
+    "value": "720px"
+   }
+  ]
+ },
+ "components": [
+  {
+   "name": "Ember Button",
+   "kind": "button",
+   "refersTo": "button-ember",
+   "description": "The one action: Download for the visitor's computer.",
+   "html": "<a class=\"b e\" href=\"#\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M12 4v11\"/><path d=\"m7 10 5 5 5-5\"/><path d=\"M5 20h14\"/></svg><span>Download for macOS</span></a>",
+   "css": ":host{--paper:#F2EFF6;--wash:#DAD2EC;--ink:#1F1714;--ink-2:#463C47;--line:rgb(31 23 20 / 0.18);--stroke:#1F1714;--ember:#EE5A24;--ember-hover:#F26A37;--on-ember:#1F1714;--raised:#FBFAFD;--out:cubic-bezier(0.16,1,0.3,1);font-family:'Hanken Grotesk',ui-sans-serif,system-ui,sans-serif;color:var(--ink);}.b{display:inline-flex;align-items:center;gap:10px;font:600 16px/1 'Hanken Grotesk',ui-sans-serif,sans-serif;border-radius:14px;text-decoration:none;transition:background-color 180ms var(--out),translate 220ms var(--out);} .b svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;} .e{height:56px;padding:0 24px 0 20px;font-size:17px;background:var(--ember);color:var(--on-ember);box-shadow:0 1px 0 rgb(255 255 255 / 0.3) inset,0 10px 24px -12px rgb(31 23 20 / 0.5);} .e:hover{background:var(--ember-hover);translate:0 -1px;}"
+  },
+  {
+   "name": "Ink Button",
+   "kind": "button",
+   "refersTo": "button-ink",
+   "description": "The bar's Download.",
+   "html": "<a class=\"b i\" href=\"#\">Download</a>",
+   "css": ":host{--paper:#F2EFF6;--wash:#DAD2EC;--ink:#1F1714;--ink-2:#463C47;--line:rgb(31 23 20 / 0.18);--stroke:#1F1714;--ember:#EE5A24;--ember-hover:#F26A37;--on-ember:#1F1714;--raised:#FBFAFD;--out:cubic-bezier(0.16,1,0.3,1);font-family:'Hanken Grotesk',ui-sans-serif,system-ui,sans-serif;color:var(--ink);}.b{display:inline-flex;align-items:center;gap:10px;font:600 16px/1 'Hanken Grotesk',ui-sans-serif,sans-serif;border-radius:14px;text-decoration:none;transition:background-color 180ms var(--out),translate 220ms var(--out);} .b svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;} .i{height:40px;padding:0 16px;border-radius:11px;font-size:15px;background:var(--ink);color:var(--paper);}"
+  },
+  {
+   "name": "Line Button",
+   "kind": "button",
+   "refersTo": "button-line",
+   "description": "One build in the downloads, its size beside it; the visitor's own has an ember ring.",
+   "html": "<a class=\"b l\" href=\"#\">AppImage <small>46 MB</small></a> <a class=\"b l y\" href=\"#\">Apple silicon <small>45 MB</small></a>",
+   "css": ":host{--paper:#F2EFF6;--wash:#DAD2EC;--ink:#1F1714;--ink-2:#463C47;--line:rgb(31 23 20 / 0.18);--stroke:#1F1714;--ember:#EE5A24;--ember-hover:#F26A37;--on-ember:#1F1714;--raised:#FBFAFD;--out:cubic-bezier(0.16,1,0.3,1);font-family:'Hanken Grotesk',ui-sans-serif,system-ui,sans-serif;color:var(--ink);}.b{display:inline-flex;align-items:center;gap:10px;font:600 16px/1 'Hanken Grotesk',ui-sans-serif,sans-serif;border-radius:14px;text-decoration:none;transition:background-color 180ms var(--out),translate 220ms var(--out);} .b svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;} .l{height:40px;padding:0 13px;border-radius:11px;font-size:15px;color:var(--ink);background:var(--raised);box-shadow:inset 0 0 0 1px var(--line);} .l small{font-size:13px;opacity:.72;font-variant-numeric:tabular-nums;} .y{box-shadow:inset 0 0 0 2px var(--ember);}"
+  },
+  {
+   "name": "The Line and its Dot",
+   "kind": "illustration",
+   "description": "One 2.25px ink line with round 26px corners; its head is the ember dot with a paper ring, its words riding under it.",
+   "html": "<svg viewBox=\"0 0 360 120\" width=\"360\" height=\"120\"><path d=\"M0 40H270A26 26 0 0 1 296 66V90\" fill=\"none\" stroke=\"#1F1714\" stroke-width=\"2.25\" stroke-linecap=\"round\"/><circle cx=\"296\" cy=\"90\" r=\"8\" fill=\"#EE5A24\" stroke=\"#F2EFF6\" stroke-width=\"3\"/><text x=\"180\" y=\"118\" font-family=\"Hanken Grotesk\" font-weight=\"650\" font-size=\"13\" fill=\"#1F1714\">Run ./migrate?</text></svg>",
+   "css": ":host{--paper:#F2EFF6;--wash:#DAD2EC;--ink:#1F1714;--ink-2:#463C47;--line:rgb(31 23 20 / 0.18);--stroke:#1F1714;--ember:#EE5A24;--ember-hover:#F26A37;--on-ember:#1F1714;--raised:#FBFAFD;--out:cubic-bezier(0.16,1,0.3,1);font-family:'Hanken Grotesk',ui-sans-serif,system-ui,sans-serif;color:var(--ink);}"
+  },
+  {
+   "name": "Feature Row",
+   "kind": "list",
+   "description": "A group hanging off the line: its name and count, then its items run together with middots; a tag for what is Mac only, partial or a preview.",
+   "html": "<div class=\"r\"><h3>Native <span>8</span></h3><ul><li>A menu bar or tray icon</li><li>Updates itself, never mid-turn</li><li>Linux <em>Preview</em></li></ul></div>",
+   "css": ":host{--paper:#F2EFF6;--wash:#DAD2EC;--ink:#1F1714;--ink-2:#463C47;--line:rgb(31 23 20 / 0.18);--stroke:#1F1714;--ember:#EE5A24;--ember-hover:#F26A37;--on-ember:#1F1714;--raised:#FBFAFD;--out:cubic-bezier(0.16,1,0.3,1);font-family:'Hanken Grotesk',ui-sans-serif,system-ui,sans-serif;color:var(--ink);} .r{display:grid;grid-template-columns:200px 1fr;gap:12px 40px;padding:22px 0 28px;border-top:1px solid var(--line);} h3{margin:0;font:650 22px/1.2 'Bricolage Grotesque',sans-serif;letter-spacing:-0.02em;} h3 span{font:500 14px 'Hanken Grotesk',sans-serif;color:var(--ink-2);} ul{margin:0;padding:0;font-size:16.5px;line-height:1.75;} li{display:inline;} li+li::before{content:'·';margin:0 .6em;color:var(--ink-2);} em{font:600 12px/1.2 'Hanken Grotesk',sans-serif;font-style:normal;padding:2px 6px 3px;border-radius:5px;box-shadow:inset 0 0 0 1px var(--line);color:var(--ink-2);}"
   }
+ ],
+ "narrative": {
+  "northStar": "One line",
+  "overview": "Every agent, one trail, drawn as one ink line that runs the whole page. The first screen stands in\na field of characters, the agents' own output running in rows, that thins out to nothing at the\ndesk; there the one line takes over. It is the desk under Trek's window, turns down the right edge,\nbecomes the ground the two phones stand on, runs down the left edge past everything Trek does,\ncloses round \"your computer and phone\", and stops at the Download button, over the same field of\ncharacters lying still. The ember dot at the line's head is the thread that needs you: it carries\n\"Run ./migrate?\" from the desk to the phone, where its Allow is tapped, and rests at Download. The\nline is drawn exactly to the dot as the page scrolls, never past it; scrolled to the end, the line\nis whole.\n\nThe world is paper and ink: a pale lilac paper by day, a deep violet-black at night, a 512 px paper\ntooth over both, one ink weight for the line and the drawings, and ember for the one thing that\nneeds you. Type is two grotesques, upright, and a monospace face for the field only.",
+  "keyCharacteristics": [
+   "One line, one dot, one ember. Ember is the dot, the main button, the caret in the field, and the",
+   "The character field is text, not a picture: rows built once and slid by CSS transforms. A click",
+   "Drawings are ink lines on the page's paper (faces filled with it, so what is behind stays",
+   "The product is shown alive: Trek's window redrawn so it can act (and saying so), and real iPhone",
+   "Every colour is defined for Paper and Night, following the system.",
+   "Reads whole with Reduce Motion on: the field and drawings stand still, the line is drawn whole"
+  ],
+  "rules": [],
+  "dos": [
+   "Keep the line drawn exactly to the dot, and whole at the end of the page.",
+   "Keep every claim true for the latest release; tag what is Mac only, partial or a preview.",
+   "Run `python3 script/site/stamp.py site` after any change under `site/`.",
+   "Keep all styling in the stylesheets and all script in files: the CSP forbids inline styles and scripts. Script may set custom properties through the CSSOM."
+  ],
+  "donts": [
+   "Don't draw anything outdoors (hills, trails, mountains), and don't use the mark as scenery.",
+   "Don't let a line leave the privacy box or stop short of a joint.",
+   "Don't load type, script or pictures from another domain; the only request elsewhere is GitHub's release API, for the download.",
+   "Don't add trackers, analytics or cookies."
+  ]
+ }
 }

@@ -197,10 +197,20 @@ above it an empty dashed space: "No Trek server, nothing in between". Nothing cr
 Ember (the one main action), ink (the bar's Download), line (each build). 56 px and 40 px, rounded
 14 and 11, a pressed scale of 0.96, hover only where there is a hover.
 
+### Text sizes
+Nothing a visitor reads is under 12 px at any width; the words inside the two drawings render at
+14 px or more on a phone (they scale with the drawing, so their own sizes are set for the narrowest
+column). Two things stay smaller on purpose: the redrawn window's text, at the real app's own sizes
+(11 to 13 px, scaled with the window), because it depicts Trek's interface and is labelled as a
+picture; and the character field, which is texture, hidden from assistive technology.
+
 ## Motion
 
 One authored story: the line drawing to its dot as the page is read. Around it, only loops that
-pause off screen: the field's rows, the caret, the window's steps, the two drawings. Transforms and
+pause off screen: the field's rows, the caret, the window's steps, the two drawings. Nothing a visitor
+needs to read moves by itself: the field is decorative and `aria-hidden`, and its rows drift a few
+characters a second. There is no pause button on the page, as on the earlier home page's loops:
+every loop stops under Reduce Motion (the system setting is the control) and while off screen. Transforms and
 opacity only. Under Reduce Motion nothing moves; the line is whole, the dot at Download, the drawings
 at their telling moment.
 

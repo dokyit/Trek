@@ -89,33 +89,32 @@ main, .bar, .foot { position: relative; z-index: 1; }
 .ill .e { fill: var(--paper); stroke: var(--stroke); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
 .ill .faint { fill: none; stroke-opacity: 0.4; }
 .ill .ui { font-family: var(--text); fill: var(--ink); }
-.ill .ui-mute { font-size: 11px; fill: var(--ink-2); font-variant-numeric: tabular-nums; }
-.ill .ui-app { font-size: 10px; font-weight: 600; fill: var(--ink-2); letter-spacing: 0.02em; }
-.ill .ui-title { font-size: 13px; font-weight: 650; }
-.ill .ui-body { font-size: 11.5px; fill: var(--ink-2); }
+.ill .ui-app { font-size: 16px; font-weight: 600; fill: var(--ink-2); letter-spacing: 0.02em; }
+.ill .ui-title { font-size: 21px; font-weight: 650; }
+.ill .ui-body { font-size: 19px; fill: var(--ink-2); }
 .ill .banner-card { fill: var(--raised); stroke: var(--stroke); stroke-width: 1.2; }
 .ill .banner-icon { fill: var(--ember); }
 .ill .menu-dot { fill: var(--ember); opacity: 0; }
-.ill .banner { transform: translateX(200px); animation: native-banner 5s infinite; }
+.ill .banner { transform: translateX(290px); animation: native-banner 5s infinite; }
 .ill .menu-dot { animation: native-dot 5s infinite; }
 @keyframes native-banner {
-  0% { transform: translateX(200px); animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1); }
+  0% { transform: translateX(290px); animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1); }
   14%, 66% { transform: translateX(0); animation-timing-function: cubic-bezier(0.7, 0, 0.84, 0); }
-  76%, 100% { transform: translateX(200px); }
+  76%, 100% { transform: translateX(290px); }
 }
 @keyframes native-dot { 0%, 8% { opacity: 0; } 14%, 70% { opacity: 1; } 76%, 100% { opacity: 0; } }
 .ill .slot { fill: none; stroke: var(--ink-2); stroke-width: 1.4; stroke-dasharray: 5 6; stroke-linecap: round; }
-.ill .ui-slot { font-size: 16px; font-weight: 650; fill: var(--ink-2); }
-.ill .ui-slot-sub { font-size: 13px; fill: var(--ink-2); }
-.ill .ui-link { font-size: 13px; fill: var(--ink-2); }
-.ill .ui-cap { font-size: 14px; font-weight: 600; }
+.ill .ui-slot { font-size: 22px; font-weight: 650; fill: var(--ink-2); }
+.ill .ui-slot-sub { font-size: 19.5px; fill: var(--ink-2); }
+.ill .ui-link { font-size: 19.5px; fill: var(--ink-2); }
+.ill .ui-cap { font-size: 19.5px; font-weight: 600; }
 .ill .pulse { fill: var(--ember); animation: private-pulse 3.6s ease-in-out infinite; }
-@keyframes private-pulse { 0%, 6% { transform: translateX(0); } 42%, 56% { transform: translateX(180px); } 92%, 100% { transform: translateX(0); } }
+@keyframes private-pulse { 0%, 6% { transform: translateX(0); } 42%, 56% { transform: translateX(246px); } 92%, 100% { transform: translateX(0); } }
 .ill.is-off *, .phones.is-off * { animation-play-state: paused !important; }
 @media (prefers-reduced-motion: reduce) {
   .ill .banner { animation: none; transform: none; }
   .ill .menu-dot { animation: none; opacity: 1; }
-  .ill .pulse { animation: none; transform: translateX(90px); }
+  .ill .pulse { animation: none; transform: translateX(123px); }
 }
 .ill .thin { fill: none; stroke-width: 1; }
 .ill .ground, .ill .link, .ill .exit { fill: none; }
@@ -259,9 +258,9 @@ main, .bar, .foot { position: relative; z-index: 1; }
   .hero { grid-template-columns: 1fr; padding-top: 104px; align-items: start; min-height: 0; }
   .walk { grid-template-columns: 1fr; }
   .private-in { grid-template-columns: 1fr; }
-  .ill-private { order: -1; max-width: 360px; }
+  .ill-private { order: -1; max-width: none; }
   .row-ill { grid-template-columns: minmax(170px, 230px) minmax(0, 1fr); }
-  .row-ill .ill-native { grid-column: 1 / -1; max-width: 420px; justify-self: end; }
+  .row-ill .ill-native { grid-column: 1 / -1; max-width: 460px; justify-self: end; }
 }
 @media (max-width: 720px) {
   :root { --gutter: 34px; }
@@ -288,7 +287,7 @@ main, .bar, .foot { position: relative; z-index: 1; }
   .row, .row-ill { grid-template-columns: 1fr; padding: 18px 0 22px; }
   .run { font-size: 15.5px; line-height: 1.7; }
   .facts div { grid-template-columns: 1fr; }
-  .ill-native { max-width: 300px; }
+  .ill-native { max-width: none; }
   .field { font-size: 11px; line-height: 13px; }
   .fr { height: 13px; }
   .get-act { padding-left: 0; margin-left: 30px; }
