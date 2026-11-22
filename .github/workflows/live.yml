@@ -371,7 +371,7 @@ jobs:
           runtime=$(./.agents/skills/verify-trek/scripts/trek-dev status | python3 -c 'import json, sys; print(json.load(sys.stdin)["runtime_dir"])')
           echo "RUNTIME=$runtime" >> "$GITHUB_ENV"
           cargo build -p trek-parity --bin parity-live --locked
-          cargo run -q -p trek-parity --bin parity-live --locked -- --shot-dir "$runtime/shot" --report live-linux.md --ci
+          cargo run -q -p trek-parity --bin parity-live --locked -- --shot-dir "$runtime/shot" --report live-linux.md --ci --skip "status-icon=the runner has no desktop to host a tray icon (no StatusNotifierWatcher on its session bus)" --skip "heic-photos=Linux has no HEIF encoder to make the photo the check attaches (and Trek doesn't convert HEIC there: the ledger's note)" --skip "rendering-cost=Mesa's software OpenGL on the runner draws a few frames a second, under the frame counts the check holds a GPU to" --skip "no-runtime-to-install=Trek links the desktop's GTK and WebKitGTK on Linux (partial: the ledger's note), which the check's Windows and Mac halves have no Linux twin for"
 
       - name: Report
         if: always()
