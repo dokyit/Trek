@@ -49,7 +49,8 @@ the iPhone app.
 
 ## Capabilities and Constraints
 
-- macOS 13 or later (Apple silicon and Intel) and Windows 11 (x64). The iPhone app needs iOS 26.
+- macOS 13 or later (Apple silicon and Intel), Windows 11 (x64), and Linux as a preview (Ubuntu
+  22.04, Debian 12, Fedora 36 or later; x86_64 and Arm). The iPhone app needs iOS 26.
 - The iPhone app is built from source for now; there is no App Store or TestFlight build. The site
   must not present it as something a visitor can install with a tap.
 - The Mac build is not notarized yet, so the first launch needs one extra step, which the install
@@ -61,10 +62,10 @@ the iPhone app.
 ## Brand Commitments
 
 - The name Trek, and the line "Every agent. One trail."
-- The mark: the signpost, one post and two pointed boards, on a lavender field (the owner chose
-  it on 2026-11-17, replacing the mountain on the site first; the app follows). The lowercase
-  "trek" wordmark in Bricolage Grotesque. The ember boards, ink type, and the lavender sky by day
-  and deep indigo by night. The signpost is brand, never a layout device or scenery.
+- The home page is "One line": one ink line from the desk to the download, its ember dot the
+  thread that needs you, over a field of characters. The mark (the shipping one, in the bar and
+  footer only) is never scenery; nothing outdoors appears on the page. The lowercase "trek"
+  wordmark in Bricolage Grotesque.
 - The pixel-art hiker from the app may appear only in a story section, never in the first screen.
 - The owner's standing requirements for the site: it should look official and professional; clean,
   modern and a little minimal; nothing that reads as AI-made (default typefaces, italic or bold

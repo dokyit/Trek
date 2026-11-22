@@ -5,22 +5,27 @@ JavaScript. There is no framework and no build step; the folder is served as it 
 
 ```
 site/
-  index.html            the page: one afternoon from a grass hill to dusk in the grass; the
-                        signpost and the line, the app's window, the features (each shown by the
-                        app doing it, three with a line drawing), the iPhone, the download list
+  index.html            the page, "One line": one ink line runs the whole page from the desk under
+                        Trek's window to the download, through a field of characters at the top and
+                        the bottom; its ember dot is the thread that needs you, reaching the phone
+                        on the way; everything Trek does, a private-by-default box, the downloads
   privacy/index.html    docs/PRIVACY.md in plain words, and what this site itself does
   terms/index.html      the licence and terms of use in plain words (what Apache-2.0 already says)
   remote/               the web remote: Trek's remote for a phone's browser (an Android phone first of
                         all), which pairs from Trek's QR code and talks to Trek on the user's computer
                         over WebTransport. A web app of its own; docs/MOBILE.md, "The web remote"
   404.html
-  assets/site.css       every style (no inline styles: the CSP forbids them)
-  assets/site.js        the download button, the window's tilt on scroll, things coming in as
-                        they are reached, and the loops playing only while seen
+  assets/home/          the home page's own files: home.css (its styles), home.js (the line, the
+                        dot, the phones coming together), field.js (the character field and its
+                        ripples), inbox.css and inbox.js (Trek's window, redrawn so it can act),
+                        dl.js (the download for the visitor's computer, from GitHub's API)
+  assets/site.css       the privacy, terms and not-found pages' styles (no inline styles: the CSP
+                        forbids them)
+  assets/site.js        those pages' bar and download links
   assets/fonts/         Bricolage Grotesque, Hanken Grotesk and JetBrains Mono, with their OFL licences
-  assets/img/           mark.svg (the signpost, the only copy of its shape), the app's window,
-                        features/ (pictures and loops of the app, one file name each), icons,
-                        the share image
+  assets/img/           mark.svg (the shipping mark, the only copy of its shape), home/paper.webp
+                        (the page's paper), features/ (the iPhone app's captures), icons, the
+                        share image
   _headers  _redirects  Cloudflare Pages: security headers, caching, short addresses
   robots.txt  sitemap.xml  site.webmanifest  favicon.ico  favicon.svg  apple-touch-icon.png
   DESIGN.md             the design record: colours, type, layout, components, the rules, and
@@ -123,43 +128,29 @@ staged in a line beside each picture.
 
 | File in `assets/img/` | What it is | How it is shown |
 |---|---|---|
-| `window-paper.webp`, `window-night.webp` | The app's window, 1040 by 700 points, with its shadow: 2172 by 1492 px | At real size, 1086 by 746, in the first screen, tilted back a few degrees until the page scrolls |
-| `features/<name>-paper.webp`, `features/<name>-night.webp`, or `features/<name>.webp` for one picture in both themes | Crops of real captures of the app at 2x: `access`, `worktree`, `undo` and `iphone-threads` in each theme; `study`, `plugins` and `iphone-night` once | One per feature, at their 1x size or a little under |
-| `features/<name>.mp4` (and `<name>-night.mp4`), `features/<name>-poster.webp` (and `-night-poster.webp`) | Silent H.264 loops of real screen recordings and their stills: `inbox` (Paper and Night), `consult`, `themes`, `iphone` (Paper; Night shows a still) | The poster is the picture in the page; the script turns it into the recording as it comes near, and it plays while on screen. With Reduce Motion or no script the poster stays |
-| `features/menubar-{idle,working,attention}.svg` | The app's own menu bar icons, copied from `assets/brand` | In the menu bar feature, large, each with its name |
-| `backdrop/hill-*.avif`, `.jpg` | The first screen's photograph: "Dried grass field under blue sky during daytime" by Chris Mongeau, https://unsplash.com/photos/ZRdSZeVKBaE (Unsplash License), framed wide and tall, graded for Paper and Night, the top of its footpath grassed over from its own grass (`script/site/make_backdrops.py hill`) | Behind the first screen; AVIF at 1280, 1920 and 2560 (720 and 1080 tall), one JPEG for browsers without AVIF; preloaded |
-| `backdrop/dusk-*.avif`, `.jpg` | The page's end: "The sun is setting over a field of tall grass" by Johannes Plenio, https://unsplash.com/photos/X7RUQSjQv0k (Unsplash License), graded dusk for Paper and later night for Night (`make_backdrops.py dusk`) | Behind the last section and the footer, loaded lazily |
-| `backdrop/grain.svg` | A 240 px fractal-noise tile, drawn by the browser | Over the page's light and both photographs, soft-light |
-| `og.jpg` | The share image, 1200 by 630 px: the signpost and the line on the lavender sky | In link previews |
-| `mark.svg`, the icons, `favicon.*`, `apple-touch-icon.png` | The signpost: one post and two boards. `mark.svg` is the only copy of its shape; `script/site/make_icons.py` draws the rest from it | The bar, the first screen, the footer, the browser and the web manifest |
+| `features/iphone-poster.webp`, `features/iphone-night.webp` | The iPhone app answering an approval for `./migrate`, Paper and Night, 590 by 1276 px | The front phone in "Walk away", at its own pixels (295 points) |
+| `features/iphone-threads-paper.webp`, `features/iphone-threads-night.webp` | The iPhone app's Threads list, Paper and Night | The phone behind it |
+| `home/paper.webp` | A 512 px seamless paper tile, written by `script/site/make_paper.py` | Under the whole home page, soft-light |
+| `og.jpg` | The share image, 1200 by 630 px: the headline over the character field, one line ending in the ember dot, drawn from the page itself by `script/site/make_og.mjs` | In link previews |
+| `mark.svg`, the icons, `favicon.*`, `apple-touch-icon.png` | The shipping mark. `mark.svg` is the only copy of its shape; `script/site/make_icons.py` draws the icons from it | The bar, the footer, the browser and the web manifest |
+| `backdrop/grain.svg` | A 240 px noise tile | The privacy, terms and not-found pages |
 
-**Feature pictures by file name.** `script/site/feature_media.sh` cuts every picture and loop in
-`features/` from real captures (the screenshot atlas and the launch footage), leaving out any mock
-agent's name, and takes a file from the newest launch captures instead whenever one exists under
-the same name. To replace a picture, write a better capture under the same name and run
-`script/site/stamp.py`; sizes on the page come from the stylesheet, so a new crop may differ.
+**Trek's window on the home page is redrawn**, in HTML (`assets/home/inbox.*`), so it can show one
+thread stop, rise to the top and be answered; its threads are staged and the page says it is
+redrawn. Its colours and type follow the real app's Paper and Night captures.
 
-**Retaking a capture.** The captures are regenerated from the app, not edited by hand. One script,
-`masters.sh`, stages the scene in the test app with the verify-trek driver (the `dress`, `title`
-and `theme` controls), sizes the window, and takes each master with `screencapture` at 2x in Paper
-and in Night. A second, `site_assets.sh`, converts the masters with
-`cwebp -q 92 -alpha_q 100 -m 6 -sharp_yuv`. The iPhone frames come from the iPhone app's demo mode
-(`-TrekDemo YES`, see `ios/README.md`) through `xcrun simctl io … screenshot`
-(`iphone_masters.sh`). The scripts are in `script/site/`, with a note on how to run them.
+**The iPhone pictures** come from the iPhone app's demo mode (`-TrekDemo YES`, see
+`ios/README.md`) through `xcrun simctl io … screenshot` (`iphone_masters.sh`). Each has its origin
+in a `.json` file of the same name beside it. Keep a picture's name when replacing it and run
+`script/site/stamp.py`, which gives its links a new address.
 
-**One retouch.** In the window pictures the three title-bar buttons are painted in, in macOS's own
-colours and places: the test window is never the key window, so macOS draws them grey. Nothing
-else in any picture is changed.
+**The drawings** (the laptop with Trek's notification beside Native, the computer and phone in the
+privacy box) are inline SVG in `index.html`, ink lines on the page's paper with one ember part, and
+move by CSS alone.
 
-**Where a picture came from** is written into the picture. Each PNG and the JPEG carries its
-origin inside the file, and each WebP has it in a `.json` file of the same name beside it. From
-this folder, the design skill's `impeccable embed-prompt --read assets/img/<file>` prints it and
-`impeccable embed-prompt --scan assets/img` lists any picture without one. Write the origin of a
-new or retaken picture the same way.
-
-Window captures are WebP at twice their shown size, with `width` and `height` set, and lazy below
-the first screen. Each picture ships in Paper and in Night. Keep a picture's name when replacing it and
-run `script/site/stamp.py`, which gives its links a new address.
+The scripts for the earlier home page's photographs, window captures and feature loops
+(`make_backdrops.py`, `make_illustrations.py`, `masters.sh`, `feature_media.sh`,
+`themes_loop.py`) are kept, but their files are no longer on the page.
 
 ## Rules for the look
 
@@ -167,9 +158,12 @@ run `script/site/stamp.py`, which gives its links a new address.
 
 - Headlines at a weight of 500 to 700, never light. No italics, no bold lead-ins, no two-tone
   headlines, no pill or label above a heading.
-- Every picture is a real capture of the app; the first screen's window at real size.
-- The signpost is the brand: the bar, the first screen's one moment, the icons. It is never a
-  layout device (no buttons or rows drawn as boards) and never scenery.
+- One line, one ember dot. The line is drawn to the dot and no further; scrolled to the end, it
+  is whole and the dot rests at Download. Ember is the dot, the one button and the drawings' one
+  part that needs you.
+- Pictures of the iPhone app are real captures; the window on the desk is redrawn and says so.
+- The mark is never scenery: it is in the bar and the footer only.
+- Nothing outdoors: no hills, trails or mountains anywhere on the page.
 - The page reads whole without its script and with Reduce Motion on.
 - No trackers, no analytics, no cookies, and no type or script from another domain.
 

@@ -37,9 +37,9 @@ def stamp(text):
     return REF.sub(one, text)
 
 
-# In this order: the stylesheet and the manifest link to pictures, and the pages link to them.
+# In this order: the stylesheets and the manifest link to pictures and type, and the pages link to them.
 pages = [f for f in sorted(site.rglob("*.html")) if not any(part.startswith(".") for part in f.relative_to(site).parts)]
-files = [site / "assets" / "site.css", site / "site.webmanifest"] + pages
+files = [site / "assets" / "site.css", site / "assets" / "home" / "home.css", site / "site.webmanifest"] + pages
 stale = []
 for f in files:
     before = f.read_text()

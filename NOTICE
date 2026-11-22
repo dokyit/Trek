@@ -61,10 +61,6 @@ Third-party materials bundled in this repository:
   Authors) and Hanken Grotesk (The Hanken Grotesk Project Authors), both SIL Open Font License 1.1,
   as the @fontsource-variable packages publish them, and a Latin subset of JetBrains Mono (see
   above). Each licence is beside its font as OFL-*.txt.
-* site/assets/img/backdrop — the website's two photographs, graded by script/site/make_backdrops.py:
-  "Dried grass field under blue sky during daytime" by Chris Mongeau
-  (unsplash.com/photos/ZRdSZeVKBaE) and "The sun is setting over a field of tall grass" by
-  Johannes Plenio (unsplash.com/photos/X7RUQSjQv0k), both under the Unsplash License.
 * ios/Trek/Assets.xcassets/Glyphs — one-colour agent marks from Lobe Icons
   (@lobehub/icons-static-svg 1.95.1), MIT, with each path's arc flags written out; the marks
   themselves belong to their owners, as the logos above do.
