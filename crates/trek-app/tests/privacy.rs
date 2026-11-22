@@ -266,3 +266,22 @@ fn what_was_sent_shows_the_project_key_cut_to_its_ends() {
     );
     assert!(trek_app::settings_view::privacy::KEY_NOTE.contains("can only add events"));
 }
+
+/// A run that ended in an internal error is told at the next launch with a way to report it:
+/// the toast's button opens Send feedback.
+#[test]
+fn the_toast_after_a_crash_opens_send_feedback() {
+    run(async |cx| {
+        use trek_app::workspace::UndoAction;
+        let trek = open(cx);
+        assert_eq!(
+            trek_app::root::toast_button_label(&UndoAction::SendFeedback),
+            "Send feedback…"
+        );
+        assert!(!trek.visible(cx, "feedback-sheet"));
+        trek.update(cx, |ws, cx| ws.undo(UndoAction::SendFeedback, cx));
+        cx.run_until_parked();
+        trek.render(cx);
+        assert!(trek.visible(cx, "feedback-sheet"));
+    });
+}

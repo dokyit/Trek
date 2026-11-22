@@ -325,6 +325,24 @@ impl LocalServer {
             _ => "https://github.com/ggml-org/llama.cpp#quick-start",
         }
     }
+
+    /// What a server that's running with no model yet says: how to get one in this server
+    /// (Ollama's `pull` was said of LM Studio and llama.cpp too).
+    pub fn no_models_yet(&self) -> String {
+        match self.id {
+            "ollama" => {
+                "Running, with no models yet. Pull one, e.g. ollama pull qwen3-coder".into()
+            }
+            "lmstudio" => format!(
+                "Running, with no models yet. Download one in {} and load it.",
+                self.name
+            ),
+            _ => format!(
+                "Running, with no models yet. Start {} with a model file.",
+                self.name
+            ),
+        }
+    }
 }
 
 /// The CLI each local server is found by.
@@ -947,6 +965,32 @@ mod tests {
         key_state, next_step, prev_step, scan_agents, scan_local, start_step, steps,
     };
     use std::collections::{HashMap, HashSet};
+
+    /// A server that's up with no model says how to get one in that server: Ollama's pull for
+    /// Ollama alone.
+    #[test]
+    fn each_server_says_how_to_get_its_first_model() {
+        let server = |id: &'static str, name: &'static str| super::LocalServer {
+            id,
+            name,
+            running: true,
+            models: vec![],
+            installed: true,
+            enabled: true,
+        };
+        assert!(
+            server("ollama", "Ollama")
+                .no_models_yet()
+                .contains("ollama pull")
+        );
+        let lm = server("lmstudio", "LM Studio").no_models_yet();
+        assert_eq!(
+            lm,
+            "Running, with no models yet. Download one in LM Studio and load it."
+        );
+        let cpp = server("llamacpp", "llama.cpp / MLX").no_models_yet();
+        assert!(!cpp.contains("ollama"), "{cpp}");
+    }
     use trek_agents::{AcpInfo, AgentStatus, Billing};
     use trek_core::AgentId;
     use trek_core::detect::{Availability, DetectedAgent};

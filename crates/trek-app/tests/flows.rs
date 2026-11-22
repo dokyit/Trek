@@ -1049,6 +1049,49 @@ fn a_failed_turn_needs_the_user() {
     });
 }
 
+/// A thread whose folder was moved or deleted says so when sent to, in place of the agent's
+/// "No such file or directory" (which read as the agent not being installed); the message stays,
+/// and once the folder is back the thread carries on.
+#[test]
+fn a_thread_whose_folder_is_gone_says_so_and_keeps_the_message() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "hello");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let moved = trek.project.with_extension("moved");
+        std::fs::rename(&trek.project, &moved).unwrap();
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.folder_gone(&id)),
+            ws_cwd(&trek, cx, &id)
+        );
+        trek.send(cx, "and again");
+        trek.wait_done(cx, &id, RunState::Failed).await;
+        let items = trek.items(cx, &id);
+        assert!(
+            matches!(items.last(), Some(Item::Error { text }) if text.starts_with("The folder this thread works in isn't there any more")),
+            "{items:?}"
+        );
+        assert!(
+            items
+                .iter()
+                .any(|i| matches!(i, Item::User { text, .. } if text == "and again"))
+        );
+        // Put back, it works as before.
+        std::fs::rename(&moved, &trek.project).unwrap();
+        assert_eq!(trek.read(cx, |ws, _| ws.folder_gone(&id)), None);
+        trek.send(cx, "once more");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert!(!matches!(
+            trek.items(cx, &id).last(),
+            Some(Item::Error { .. })
+        ));
+    });
+}
+
+fn ws_cwd(trek: &Trek, cx: &TestAppContext, id: &str) -> Option<std::path::PathBuf> {
+    trek.read(cx, |ws, _| ws.thread(id).and_then(|t| t.cwd.clone()))
+}
+
 #[test]
 fn keyboard_shortcuts_reach_their_actions() {
     run(async |cx| {

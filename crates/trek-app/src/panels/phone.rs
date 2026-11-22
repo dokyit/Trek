@@ -65,6 +65,9 @@ use trek_phone::{device, files};
 mod lists;
 mod touch;
 
+/// What the tool says before any iPhone is found: how to bring one, as Windows' says too (a
+/// charge-only cable, a locked phone and an unanswered Trust prompt all look like no phone).
+const NO_PHONE_YET: &str = "Waiting for an iPhone on the cable. Plug it in with a data cable, unlock it, and tap Trust if it asks.";
 /// Frames for the panel are at most this wide, and come this often at most.
 const FRAME_WIDTH: u32 = 900;
 const LIVE_FPS: u32 = 15;
@@ -2111,7 +2114,7 @@ impl PhonePanel {
             Some(Err(e)) => Some(e.clone()),
             _ if self.frame.is_none() => Some(
                 if self.phone.is_none() {
-                    "Waiting for an iPhone on the cable…"
+                    NO_PHONE_YET
                 } else if self.on_wifi() {
                     let facts = self.facts();
                     if facts.locked() && facts.route() == Route::Mirroring {
