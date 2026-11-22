@@ -62,6 +62,7 @@ jobs:
         run: |
           bash script/tests/release-notes.sh
           bash script/tests/merge-manifest.sh
+          bash script/tests/release-manifests.sh
           bash script/tests/release-finish.sh
           zsh ios/scripts/tests/phone-update.sh
           zsh script/capture.sh check
@@ -533,10 +534,12 @@ jobs:
       - name: System packages
         run: sudo sh script/linux/packages.sh --with-packaging
 
-      # The manifest merge the Linux release runs, and the web remote's plain code, as on the others.
+      # The manifest merge the Linux release runs (and the whole chain of them, dry and real), and
+      # the web remote's plain code, as on the others.
       - name: Script tests
         run: |
           bash script/tests/merge-manifest.sh
+          bash script/tests/release-manifests.sh
           node script/site/test/run.mjs
 
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026

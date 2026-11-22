@@ -239,6 +239,15 @@ would decide without enforcing it, and its macOS job rehearses the push (above) 
 repository. A dry run does not prove the real p12, the pushes to GitHub or the release upload; the first
 real run is the first time those happen.
 
+The Windows, Intel and Linux publish jobs of a dry run each merge their platforms into the Mac's
+manifest, which the macOS job hands over as the `mac-manifest` artifact (`script/lib/dry-run-manifest.sh`
+stages it as one file at the artifact's top) in place of the release's; each fails when it isn't
+there, rather than merging into nothing. They don't chain as a real run's do (Windows, then Intel,
+then Linux, each into what the last uploaded): `script/tests/release-manifests.sh` runs that chain,
+and the dry chain, on fixtures. 0.4.64-beta.1's dry run was the first to reach the Intel merge since
+it was added, and found the artifact's manifest one folder down (`upload-artifact` keeps the folders
+after a wildcard), which the Windows and Linux dry runs had passed over without a word.
+
 Secrets, added once from the Mac that has `~/.trek-signing/` (repository Settings > Secrets and
 variables > Actions, or `gh`):
 
