@@ -216,6 +216,26 @@ static URL: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r#"([A-Za-z][A-Za-z0-9+.\-]*)://([^\s"'`<>\[\]()]+)"#).unwrap()
 });
 
+/// A crash's message without the text a panic quotes: Rust's own messages quote what they were
+/// working on between backticks (``byte index 9 is not a char boundary; … of `<the text>` ``, up to
+/// 256 characters of it), which may be what the user wrote or a file of theirs. What a report
+/// needs is where and why, so a quoted span with a space in it or longer than a name is written
+/// `[text]`; a name (`Option::unwrap()`, `None`) stays.
+pub fn without_quoted_text(message: &str) -> String {
+    QUOTED
+        .replace_all(message, |c: &regex::Captures| {
+            let inner = &c[1];
+            if inner.chars().count() > 48 || inner.chars().any(char::is_whitespace) {
+                "`[text]`".to_string()
+            } else {
+                c[0].to_string()
+            }
+        })
+        .into_owned()
+}
+
+static QUOTED: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"`([^`]*)`").unwrap());
+
 static EMAIL: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}")
         .unwrap()
@@ -387,6 +407,24 @@ mod tests {
             s.scrub(r"C:\Windows\System32\cmd.exe"),
             r"C:\Windows\System32\cmd.exe"
         );
+    }
+
+    /// A panic that quotes the user's text says where and why, not what the text was.
+    #[test]
+    fn a_crash_says_why_without_the_text_it_quoted() {
+        // What `&s[..n]` says when `n` falls inside a character.
+        let message = "byte index 9 is not a char boundary; it is inside 'é' (bytes 8..10) of `Dear Sam, the merger closes Friday`";
+        assert_eq!(
+            without_quoted_text(message),
+            "byte index 9 is not a char boundary; it is inside 'é' (bytes 8..10) of `[text]`"
+        );
+        let long = format!("index out of bounds of `{}`[...]", "x".repeat(200));
+        assert_eq!(
+            without_quoted_text(&long),
+            "index out of bounds of `[text]`[...]"
+        );
+        let named = "called `Option::unwrap()` on a `None` value";
+        assert_eq!(without_quoted_text(named), named);
     }
 
     #[test]
