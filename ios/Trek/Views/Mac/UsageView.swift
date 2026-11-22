@@ -34,7 +34,14 @@ struct UsageView: View {
         .overlay {
             if providers.isEmpty {
                 if link?.usage == nil {
-                    ProgressView("Asking your agents…").foregroundStyle(Trek.muted)
+                    if let link, link.connection != .connected {
+                        // Nothing is asked until it is: a spinner here would turn for ever.
+                        // Its own width: the empty list under it is narrower than the words.
+                        Text(link.waitingWords).foregroundStyle(Trek.muted)
+                            .fixedSize()
+                    } else {
+                        ProgressView("Asking your agents…").foregroundStyle(Trek.muted)
+                    }
                 } else if !asking {
                     ContentUnavailableView("No plan usage", systemImage: "gauge.with.dots.needle.0percent",
                                            description: Text(link?.usage?.picked == true ? "No providers picked. Choose some on your Mac's Usage card."
@@ -54,6 +61,7 @@ struct UsageView: View {
         }
         .refreshable { await reload() }
         .task(id: link?.id) { model.loadUsage(on: link) }
+        .asksAgainOnConnect(link) { if link?.usage == nil { model.loadUsage(quiet: true, on: link) } }
     }
 
     private func reload() async {

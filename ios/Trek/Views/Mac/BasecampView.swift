@@ -49,13 +49,11 @@ struct BasecampView: View {
                             }
                         }
                     } else {
-                        HStack(spacing: 10) {
-                            ProgressView().controlSize(.small)
-                            Text("Reading the trail…").foregroundStyle(Trek.muted)
-                        }
-                        .font(.ui(.subheadline))
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 60)
+                        MachineWaiting(link: link, asking: "Reading the trail…")
+                            .font(.ui(.subheadline))
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 60)
                     }
                 }
                 .padding(.horizontal, 16)
@@ -83,6 +81,7 @@ struct BasecampView: View {
                 }
             }
             .task(id: "\(range)-\(link?.id ?? "")") { model.loadBasecamp(range, on: link) }
+            .asksAgainOnConnect(link) { if recap == nil { model.loadBasecamp(range, on: link) } }
             .onAppear { if Launch.sheet == "usage", path.isEmpty { path.append(.usage) } }
             .navigationDestination(for: BasecampRoute.self) { route in
                 switch route {

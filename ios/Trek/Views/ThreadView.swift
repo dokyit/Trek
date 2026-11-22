@@ -153,7 +153,8 @@ private struct ThreadScreen: View {
                         // The machine's own banner, as the list has it: what's wrong, and Try now.
                         if let link {
                             ConnectionBanner(state: link.connection, detail: link.connectionText, host: link.name,
-                                             retry: { model.retryNow(link) }) { model.pairAgain(link) }
+                                             retry: { model.retryNow(link) }, pairAgain: { model.pairAgain(link) },
+                                             opensSettings: link.detailOpensSettings)
                         }
                         if let t { ThreadStatusStrip(thread: t) }
                     }
@@ -418,6 +419,11 @@ private struct TranscriptList: View, nonisolated Equatable {
             // the rows clear of them.
             .ignoresSafeArea(.all, edges: .vertical)
         }
+        // A thread with nothing in it: said over the list (as a row of its own, going as the first
+        // message came in, it upset the list's batch updates).
+        .overlay {
+            if store.nothingYet, !working { TranscriptEmpty().allowsHitTesting(false) }
+        }
         // Jump back to the latest when the transcript has been left behind.
         .overlay(alignment: .bottomTrailing) {
             Group {
@@ -601,6 +607,26 @@ struct TranscriptWaiting: View {
         .padding(.top, 70)
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .contain)
+    }
+}
+
+/// Where the transcript would be, when the thread has nothing in it yet.
+struct TranscriptEmpty: View {
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "bubble.left.and.text.bubble.right")
+                .font(.system(size: 28, weight: .regular))
+                .foregroundStyle(Trek.muted)
+                .accessibilityHidden(true)
+            Text("Nothing here yet").font(.ui(.headline))
+            Text("Messages and the agent's work show up here.")
+                .font(.ui(.subheadline))
+                .foregroundStyle(Trek.muted)
+                .multilineTextAlignment(.center)
+        }
+        .padding(.horizontal, 32)
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .combine)
     }
 }
 

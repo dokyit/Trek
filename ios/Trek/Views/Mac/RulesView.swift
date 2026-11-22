@@ -35,10 +35,7 @@ struct RulesView: View {
                             }
                     }
                 } else {
-                    HStack(spacing: 10) {
-                        ProgressView().controlSize(.small)
-                        Text("Asking your Mac…").foregroundStyle(Trek.muted)
-                    }
+                    MachineWaiting(link: link ?? model.selected, asking: "Asking your Mac…")
                 }
             } header: {
                 Text("Rules")
@@ -109,6 +106,7 @@ struct RulesView: View {
         .navigationTitle("Permission rules")
         .navigationSubtitle(link?.name ?? "")
         .task { model.loadRules(on: link) { list = $0 } }
+        .asksAgainOnConnect(link ?? model.selected) { if list == nil { model.loadRules(on: link) { list = $0 } } }
         .task(id: "\(testKind.rawValue) \(tried)") {
             let text = tried.trimmingCharacters(in: .whitespaces)
             guard !text.isEmpty else { test = nil; return }

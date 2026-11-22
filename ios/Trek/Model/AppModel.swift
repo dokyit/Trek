@@ -399,7 +399,11 @@ final class AppModel {
         detach(link)
         PairedMac.remove(hostId: link.id)
         pairingError = nil
-        if links.isEmpty { mode = .unpaired }
+        if links.isEmpty {
+            mode = .unpaired
+            // Nothing left to come back to: the next launch opens on pairing, not the demo.
+            UserDefaults.standard.set(false, forKey: "demoMode")
+        }
     }
 
     /// Every link down and forgotten (demo included): the state every one of them kept goes too.
@@ -447,7 +451,10 @@ final class AppModel {
         }
         let b = link.backend
         b.onMessage = { [weak self, weak link] in guard let link else { return }; self?.handle($0, from: link) }
-        (b as? TrekClient)?.onDetail = { [weak link] in link?.connectionDetail = $0 }
+        (b as? TrekClient)?.onDetail = { [weak link] text, opensSettings in
+            link?.connectionDetail = text
+            link?.detailOpensSettings = opensSettings
+        }
         b.onState = { [weak self, weak link] state in
             guard let self, let link else { return }
             let was = link.connection
@@ -1360,6 +1367,11 @@ final class AppModel {
     func show(_ text: String, error: Bool = false) {
         withAnimation(.snappy) { toast = Toast(text: text, isError: error) }
         endToast(after: error ? 5 : 3)
+        // VoiceOver doesn't move to the toast: it's read out where the user is, and what went
+        // wrong before whatever else it was about to say.
+        var announcement = AttributedString(text)
+        announcement.accessibilitySpeechAnnouncementPriority = error ? .high : .default
+        AccessibilityNotification.Announcement(announcement).post()
     }
 
     /// A finger on the toast keeps it up; let go of it, it stays a moment longer.

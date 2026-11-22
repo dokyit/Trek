@@ -17,10 +17,7 @@ struct MacSettingsView: View {
             if let s = link?.macSettings {
                 MacSettingsForm(s: s, link: link)
             } else {
-                HStack(spacing: 10) {
-                    ProgressView().controlSize(.small)
-                    Text("Asking your Mac…").foregroundStyle(Trek.muted)
-                }
+                MachineWaiting(link: link, asking: "Asking your Mac…")
             }
         }
         .scrollContentBackground(.hidden)
@@ -29,6 +26,7 @@ struct MacSettingsView: View {
         .navigationTitle("Trek settings")
         .navigationSubtitle(link?.name ?? "")
         .task { model.loadSettings(on: link) }
+        .asksAgainOnConnect(link) { model.loadSettings(on: link) }
     }
 }
 
@@ -252,10 +250,7 @@ struct PhoneNotificationsSection: View {
             sections(s.push)
         } else {
             Section {
-                HStack(spacing: 10) {
-                    ProgressView().controlSize(.small)
-                    Text("Asking your Mac…").foregroundStyle(Trek.muted)
-                }
+                MachineWaiting(link: link, asking: "Asking your Mac…")
             } header: {
                 Text("Notifications")
             }

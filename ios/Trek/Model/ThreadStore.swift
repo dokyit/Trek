@@ -182,6 +182,9 @@ final class ThreadStore {
     private(set) var showsWorking = false
     /// Nothing to show under the transcript.
     var footerEmpty: Bool { !showsWorking && (summary?.runningSubAgents.isEmpty ?? true) }
+    /// All of the transcript is in and there's nothing in it, nor anything at work: the list
+    /// says so rather than stay blank.
+    var nothingYet: Bool { loaded && !more && blocks.isEmpty && footerEmpty }
 
     @ObservationIgnored private(set) var items: [TItem] = []
     @ObservationIgnored private var index: [String: Int] = [:]

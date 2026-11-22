@@ -153,6 +153,63 @@ struct ConnectionStateTests {
         #expect(model.pairingError == nil)
     }
 
+    // MARK: Leaving the demo
+
+    /// Settings › Pair with a Mac in the demo: the next launch opens on pairing, not back in the
+    /// demo (it left `demoMode` set, and a relaunch before pairing dropped the user back in).
+    @Test func pairWithAMacLeavesTheDemoForGood() throws {
+        let defaults = UserDefaults.standard
+        let was = defaults.object(forKey: "demoMode")
+        defer { defaults.set(was, forKey: "demoMode") }
+
+        let model = AppModel()
+        model.startDemo()
+        #expect(defaults.bool(forKey: "demoMode") && model.mode == .demo)
+        model.endDemo()
+        #expect(!defaults.bool(forKey: "demoMode"))
+        #expect(model.mode != .demo)
+        #expect(model.link(id: PairedMac.demo.hostId) == nil)
+
+        // Leaving the last machine by hand (the old way out) forgets the demo too.
+        model.startDemo()
+        model.leave(try #require(model.link(id: PairedMac.demo.hostId)))
+        #expect(!defaults.bool(forKey: "demoMode"))
+        #expect(model.mode == .unpaired)
+    }
+
+    // MARK: Waiting on a machine
+
+    /// What a page says while what it asked for hasn't come: a spinner only while the machine can
+    /// answer ("Asking your Mac…" spun for ever while it was offline).
+    @Test func aPageWaitingOnAnOfflineMachineDoesntSpin() {
+        let link = HostLink(paired: PairedMac(address: "10.0.0.2:7420", token: "t", hostName: "Studio", hostId: "studio", transport: .plain),
+                            backend: DeadBackend())
+        link.connection = .connected
+        #expect(link.waiting("Asking your Mac…") == ("Asking your Mac…", true))
+        link.connection = .offline("")
+        let away = link.waiting("Reading the trail…")
+        #expect(away.text == "Shown once \(MachineTag.short("Studio")) is connected" && !away.spins)
+        link.connection = .connecting
+        #expect(!link.waiting("Asking your agents…").spins)
+    }
+
+    // MARK: Local Network off
+
+    /// With Local Network off for Trek, the words send the user to iOS Settings and the banner
+    /// offers Open Settings; while Tailscale is still being tried, or for anything else, it doesn't.
+    @Test func localNetworkOffOffersSettings() {
+        let wifi = NetworkPath(kind: .wifi)
+        let alone = ReachStatus.searching(ReachFacts(mac: "Studio", path: wifi, localDenied: true))
+        #expect(alone.opensSettings && !alone.trying)
+        #expect(alone.text.contains("Local Network"))
+        let tailnetDown = ReachStatus.searching(ReachFacts(mac: "Studio", path: wifi, localDenied: true, hasTailnet: true, tailnetFailed: true))
+        #expect(tailnetDown.opensSettings && !tailnetDown.trying)
+        let tryingTailnet = ReachStatus.searching(ReachFacts(mac: "Studio", path: wifi, localDenied: true, hasTailnet: true))
+        #expect(!tryingTailnet.opensSettings && tryingTailnet.trying)
+        let isolated = ReachStatus.searching(ReachFacts(mac: "Studio", path: wifi, hasLocal: true, localFailed: true, elapsed: 30))
+        #expect(!isolated.opensSettings)
+    }
+
     // MARK: Notes
 
     @Test func noNotesIsTheMacsWordNotSilence() throws {

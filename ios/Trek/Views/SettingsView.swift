@@ -466,7 +466,7 @@ struct MachineView: View {
 
             Section {
                 if model.mode == .demo {
-                    Button("Pair with a Mac") { model.leave(link) }
+                    Button("Pair with a Mac") { model.endDemo() }
                 } else {
                     Button("Unpair this iPhone", role: .destructive) { confirmUnpair = true }
                 }
@@ -658,6 +658,35 @@ extension HostLink {
     /// machine to be reachable (a row that said "Asking…" for an offline Mac would wait for ever).
     var waitingWords: String {
         connection == .connected ? "Asking \(name)…" : "Shown once \(MachineTag.short(name)) is connected"
+    }
+
+    /// What a page says in place of what it asked this machine for: `asking` with a spinner while
+    /// it's connected, else when it will show (and no spinner: nothing is coming until then).
+    func waiting(_ asking: String) -> (text: String, spins: Bool) {
+        connection == .connected ? (asking, true) : (waitingWords, false)
+    }
+}
+
+/// A page's stand-in for what it asked a machine for: "Asking your Mac…" with a spinner, or, while
+/// the machine isn't connected, "Shown once … is connected". The page asks again when it is.
+struct MachineWaiting: View {
+    var link: HostLink?
+    var asking: String
+
+    var body: some View {
+        let (text, spins) = link?.waiting(asking) ?? (asking, true)
+        HStack(spacing: 10) {
+            if spins { ProgressView().controlSize(.small) }
+            Text(text).foregroundStyle(Trek.muted)
+        }
+    }
+}
+
+extension View {
+    /// Runs `ask` again when `link` connects (back from offline, or after launch): what a page
+    /// asked for while it couldn't be reached never came.
+    func asksAgainOnConnect(_ link: HostLink?, _ ask: @escaping () -> Void) -> some View {
+        onChange(of: link?.connection == .connected) { _, up in if up { ask() } }
     }
 }
 

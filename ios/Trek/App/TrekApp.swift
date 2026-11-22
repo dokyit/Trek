@@ -54,7 +54,7 @@ struct TrekApp: App {
                         }
                     }
                     // The banners for a machine that can't be used (`-TrekDemoConnection identity`,
-                    // `refused`, `connecting`, `offline`), once the demo has connected.
+                    // `refused`, `connecting`, `local-network`, `offline`), once the demo has connected.
                     if let how = Launch.demoConnection {
                         try? await Task.sleep(for: .seconds(0.6))
                         if let link = model.links.first {
@@ -64,6 +64,11 @@ struct TrekApp: App {
                             case "connecting":
                                 link.connectionDetail = "Looking for \(link.name) on this Wi-Fi…"
                                 link.connection = .connecting
+                            case "local-network":
+                                let s = ReachStatus.searching(ReachFacts(mac: link.name, path: NetworkPath(kind: .wifi), localDenied: true))
+                                link.connectionDetail = s.text
+                                link.detailOpensSettings = s.opensSettings
+                                link.connection = .offline(s.text)
                             default:
                                 link.connectionDetail = "This Wi-Fi may not let devices see each other. Trying Tailscale…"
                                 link.connection = .offline("")
