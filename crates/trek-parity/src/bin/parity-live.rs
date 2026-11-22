@@ -143,15 +143,17 @@ impl App {
     /// Whether its process still runs (`None`: no process to ask about).
     fn alive(&self) -> Option<bool> {
         let pid = self.pid?;
-        #[cfg(unix)]
-        let alive = std::process::Command::new("kill")
+        #[cfg(target_os = "linux")]
+        let alive = std::path::Path::new(&format!("/proc/{pid}")).exists();
+        #[cfg(all(unix, not(target_os = "linux")))]
+        let alive = std::process::Command::new("/bin/kill")
             .args(["-0", &pid.to_string()])
             .stderr(std::process::Stdio::null())
             .status()
             .ok()?
             .success();
         #[cfg(windows)]
-        let alive = std::process::Command::new("tasklist")
+        let alive = std::process::Command::new("tasklist") // spawn: trek-parity has no trek-core, and runs in a console already
             .args(["/FI", &format!("PID eq {pid}"), "/NH"])
             .output()
             .ok()

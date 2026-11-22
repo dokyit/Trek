@@ -294,7 +294,7 @@ fn native_build() -> anyhow::Result<()> {
     // Linux: the processor the kernel reports (uname) is the one Trek was built for.
     #[cfg(target_os = "linux")]
     {
-        let machine = std::process::Command::new("uname")
+        let machine = trek_core::procs::command("uname")
             .arg("-m")
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())?;
