@@ -205,4 +205,14 @@ gh release view "$tag" --repo "$repo" --json assets --jq '.assets[].name' | whil
     gh release delete-asset "$tag" "$a" --repo "$repo" -y
   fi
 done
+# Linux's bullet in the body's install block, now its downloads are there (the Mac writes the body
+# without it, so a release whose Linux build failed doesn't offer them). Already there: unchanged.
+# shellcheck source=script/lib/notes.sh
+. script/lib/notes.sh
+gh release view "$tag" --repo "$repo" --json body --jq .body > "$work/body.md"
+trek_add_linux_line "$work/body.md" "$version" > "$work/body-linux.md"
+if ! cmp -s "$work/body.md" "$work/body-linux.md"; then
+  gh release edit "$tag" --repo "$repo" --notes-file "$work/body-linux.md"
+  say "the release's install block has the Linux line"
+fi
 say "published Trek $version for Linux on $channel: https://github.com/$repo/releases/tag/$tag"

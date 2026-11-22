@@ -95,6 +95,11 @@ jobs:
   # it). When the diff proves it changes nothing but the version (script/lib/release-finish.sh
   # is-bump), CI on its parent counts. A dry run isn't held up (it publishes nothing; it says what
   # the check found), nor a release whose skip_ci_check says it can't wait.
+  #
+  # Linux is a preview, so its CI jobs (those with "Linux" in their names) don't hold the Mac and
+  # Windows back: the check wants a run where every other job passed, and says in `linux` whether
+  # the Linux jobs passed too. Without that the Linux build says why and makes nothing, and
+  # "Every platform released" names Linux as missing.
   ci-passed:
     name: CI passed on this commit
     runs-on: ubuntu-latest
@@ -102,6 +107,8 @@ jobs:
     permissions:
       actions: read
       contents: read
+    outputs:
+      linux: ${{ steps.ci.outputs.linux }}
     steps:
       # Two deep: the commit and its parent, for the bump check.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -110,6 +117,7 @@ jobs:
           persist-credentials: false
 
       - name: CI's runs of this commit
+        id: ci
         env:
           GH_TOKEN: ${{ github.token }}
           DRY_RUN: ${{ inputs.dry_run }}
@@ -117,32 +125,50 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          passed() { # commit: has a CI run of it succeeded?
-            local conclusions
-            conclusions=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$1&status=completed&per_page=20" --jq '[.workflow_runs[].conclusion] | join(" ")')
-            echo "CI on $1: ${conclusions:-no completed run}"
-            [[ " $conclusions " == *" success "* ]]
+          # commit: "<others> <linux>", each yes when some completed CI run of it passed every job
+          # of that group (passed or skipped; a group with no jobs hasn't passed).
+          judge() {
+            local runs id jobs others=no linux=no
+            runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$1&status=completed&per_page=20" --jq '.workflow_runs[].id')
+            for id in $runs; do
+              jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?per_page=100" --jq '.jobs[] | "\(.conclusion)\t\(.name)"')
+              group() { awk -F'\t' -v linux="$1" '($2 ~ /Linux/) == linux { n++; if ($1 != "success" && $1 != "skipped") bad = 1 } END { exit !(n && !bad) }' <<< "$jobs"; }
+              group 0 && others=yes
+              group 1 && linux=yes
+            done
+            echo "CI on $1 (${runs//$'\n'/ }): macOS and Windows $others, Linux $linux" >&2
+            echo "$others $linux"
+          }
+          # Linux's verdict, for the Linux build; a run that isn't enforced builds it as before.
+          finish() { # linux
+            echo "linux=$1" >> "$GITHUB_OUTPUT"
+            if [[ $1 != yes ]]; then
+              echo "::warning::CI's Linux jobs haven't passed on this commit: the Mac and Windows release goes on, without the Linux preview."
+            fi
+            exit 0
           }
           verdict() { # what the check found; enforced only for a real release without skip_ci_check
             if [[ $DRY_RUN == true || $SKIP == true ]]; then
               echo "Not enforced: dry run ($DRY_RUN), skip_ci_check ($SKIP). $1"
-              exit 0
+              finish yes
             fi
             echo "::error::$1"
             exit 1
           }
-          if passed "$GITHUB_SHA"; then exit 0; fi
+          read -r others linux < <(judge "$GITHUB_SHA")
+          if [[ $others == yes ]]; then finish "$linux"; fi
           if why=$(script/lib/release-finish.sh is-bump "$GITHUB_SHA" "$VERSION" 2>&1); then
             echo "$why"
             parent=$(git rev-parse "$GITHUB_SHA^1")
-            if passed "$parent"; then
+            read -r others linux < <(judge "$parent")
+            if [[ $others == yes ]]; then
               echo "Released on CI's pass of $parent, the commit this version bump is on."
-              exit 0
+              finish "$linux"
             fi
             verdict "CI hasn't passed on $GITHUB_SHA's parent $parent either (this commit is only the version bump). Release a commit CI passed on, or run again with skip_ci_check for an emergency fix."
           fi
           echo "Not only the v${VERSION#v} bump, so its parent's CI doesn't count: $why"
-          verdict "CI hasn't passed on $GITHUB_SHA (macOS, Windows and Linux). Release a commit it passed on, or run again with skip_ci_check for an emergency fix."
+          verdict "CI hasn't passed on $GITHUB_SHA (macOS and Windows). Release a commit it passed on, or run again with skip_ci_check for an emergency fix."
 
   macos:
     name: macOS app
@@ -835,6 +861,10 @@ jobs:
   # a runner of its own architecture (Ubuntu 22.04: the oldest glibc Trek's Linux builds support),
   # the AppImage minisigned with the same key (script/release-linux.sh --build-only). Only the
   # manifest merge needs the Mac's release, so the upload waits for publish-linux.
+  #
+  # Linux is a preview: nothing the Mac, Intel or Windows jobs do waits for these two or for
+  # publish-linux, so a Linux build that fails (or CI's Linux jobs having failed) leaves their
+  # release whole and only Linux missing, which "Every platform released" says in its own step.
   linux:
     name: Linux build (${{ matrix.arch }})
     needs: ci-passed
@@ -849,6 +879,15 @@ jobs:
           - arch: aarch64
             runner: ubuntu-22.04-arm
     steps:
+      - name: CI's Linux jobs passed
+        env:
+          LINUX_CI: ${{ needs.ci-passed.outputs.linux }}
+        run: |
+          if [[ $LINUX_CI != yes ]]; then
+            echo "::error::CI's Linux jobs haven't passed on this commit, so there's no Linux build of it. The Mac and Windows release goes on without it."
+            exit 1
+          fi
+
       # The commit this run started from, as the Windows build: the version tag doesn't exist yet.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
@@ -1099,58 +1138,85 @@ jobs:
 
   # Every platform's downloads are on the release, and in its manifest: v0.4.6, v0.4.9 and v0.4.10
   # went out without their Windows ones. Run whatever became of the publish jobs, so a release left
-  # without a platform says which, in red, rather than looking whole.
+  # without a platform says which, in red, rather than looking whole. The Mac and Windows have one
+  # step and the Linux preview its own, so a release without Linux says that much and no more: its
+  # Mac and Windows halves are whole or the first step says what they lack.
   complete:
     name: Every platform released
     needs: [publish, publish-intel, publish-linux]
     if: ${{ !cancelled() && inputs.dry_run != true }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ inputs.version }}
+      CHANNEL: ${{ inputs.channel }}
     steps:
-      - name: Downloads and manifest
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ inputs.version }}
-          CHANNEL: ${{ inputs.channel }}
+      - name: The release and its manifest
+        id: release
         run: |
           set -euo pipefail
           version=${VERSION#v}
           tag=$CHANNEL
           [[ $CHANNEL == stable ]] && tag="v$version"
-          resume="gh run rerun $GITHUB_RUN_ID --failed"
-          if ! assets=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'); then
-            echo "::error::there's no release $tag: the macOS job didn't publish it. Its summary says what it left; re-running the failed jobs carries on from there: $resume"
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' > "$RUNNER_TEMP/assets.txt"; then
+            echo "::error::there's no release $tag: the macOS job didn't publish it. Its summary says what it left; re-running the failed jobs carries on from there: gh run rerun $GITHUB_RUN_ID --failed"
             exit 1
           fi
           gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$CHANNEL.json" --output "$RUNNER_TEMP/release.json" --clobber
-          missing=()
-          # The symbols too (docs/RELEASING.md, "Symbols"): without them this build's crash reports
-          # and freezes can't be named.
-          wanted=(
-            "Trek-$version-darwin-aarch64.app.tar.gz" "Trek-$version-darwin-aarch64.app.tar.gz.minisig" "Trek-$version-darwin-aarch64.dmg"
-            "Trek-$version-darwin-x86_64.app.tar.gz" "Trek-$version-darwin-x86_64.app.tar.gz.minisig" "Trek-$version-darwin-x86_64.dmg"
-            "Trek-$version-windows-x86_64.zip" "Trek-$version-windows-x86_64.zip.minisig" "Trek-Setup-x86_64.exe"
-            "Trek-$version-darwin-aarch64.dSYM.zip" "Trek-$version-darwin-x86_64.dSYM.zip" "Trek-$version-windows-x86_64.pdb.zip"
-          )
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+          } >> "$GITHUB_ENV"
+          # One check for both steps: the files that aren't on the release, the platforms that
+          # aren't in the manifest, and what to do about them. The publish jobs add or replace only
+          # their own platform's files and entry, so re-running the failed ones finishes it.
+          cat > "$RUNNER_TEMP/want.sh" <<'EOF'
+          want() { # what (for the messages), then the files; TREK_PLATFORMS: the manifest's entries
+            local what=$1 missing=() f p
+            shift
+            for f in "$@"; do grep -qxF "$f" "$RUNNER_TEMP/assets.txt" || missing+=("$f"); done
+            for p in $TREK_PLATFORMS; do
+              jq -e --arg p "$p" --arg v "$version" '.version == $v and (.platforms[$p] != null)' "$RUNNER_TEMP/release.json" > /dev/null ||
+                missing+=("$p in $CHANNEL.json")
+            done
+            if (( ${#missing[@]} )); then
+              for m in "${missing[@]}"; do echo "::error::$tag ($what) is missing $m"; done
+              echo "$what: re-run the failed jobs to finish $tag: \`gh run rerun $GITHUB_RUN_ID --failed\`" >> "$GITHUB_STEP_SUMMARY"
+              return 1
+            fi
+            echo "$tag has $what's downloads and manifest entries."
+          }
+          EOF
+
+      # The symbols too (docs/RELEASING.md, "Symbols"): without them this build's crash reports and
+      # freezes can't be named.
+      - name: macOS and Windows
+        env:
+          TREK_PLATFORMS: darwin-aarch64 darwin-x86_64 windows-x86_64
+        run: |
+          set -euo pipefail
+          . "$RUNNER_TEMP/want.sh"
+          v=$version
+          want "macOS and Windows" \
+            "Trek-$v-darwin-aarch64.app.tar.gz" "Trek-$v-darwin-aarch64.app.tar.gz.minisig" "Trek-$v-darwin-aarch64.dmg" \
+            "Trek-$v-darwin-x86_64.app.tar.gz" "Trek-$v-darwin-x86_64.app.tar.gz.minisig" "Trek-$v-darwin-x86_64.dmg" \
+            "Trek-$v-windows-x86_64.zip" "Trek-$v-windows-x86_64.zip.minisig" "Trek-Setup-x86_64.exe" \
+            "Trek-$v-darwin-aarch64.dSYM.zip" "Trek-$v-darwin-x86_64.dSYM.zip" "Trek-$v-windows-x86_64.pdb.zip"
+
+      # Whatever became of the step above: the Linux preview's verdict is its own.
+      - name: Linux (preview)
+        if: ${{ !cancelled() && steps.release.outcome == 'success' }}
+        env:
+          TREK_PLATFORMS: linux-x86_64 linux-aarch64
+        run: |
+          set -euo pipefail
+          . "$RUNNER_TEMP/want.sh"
           # Debian orders 0.4.1~beta.2 before 0.4.1: the .deb's version (script/bundle-linux.sh).
           deb=${version/-/\~}
+          files=()
           for arch in x86_64 aarch64; do
             debarch=amd64; [[ $arch == aarch64 ]] && debarch=arm64
-            wanted+=("Trek-$version-linux-$arch.AppImage" "Trek-$version-linux-$arch.AppImage.minisig" "Trek-$version-linux-$arch.tar.gz" "trek_${deb}_$debarch.deb" "Trek-$version-linux-$arch.debug.tar.gz")
+            files+=("Trek-$version-linux-$arch.AppImage" "Trek-$version-linux-$arch.AppImage.minisig" "Trek-$version-linux-$arch.tar.gz" "trek_${deb}_$debarch.deb" "Trek-$version-linux-$arch.debug.tar.gz")
           done
-          for want in "${wanted[@]}"; do
-            grep -qxF "$want" <<< "$assets" || missing+=("$want")
-          done
-          for platform in darwin-aarch64 darwin-x86_64 windows-x86_64 linux-x86_64 linux-aarch64; do
-            jq -e --arg p "$platform" --arg v "$version" '.version == $v and (.platforms[$p] != null)' "$RUNNER_TEMP/release.json" > /dev/null ||
-              missing+=("$platform in $CHANNEL.json")
-          done
-          if (( ${#missing[@]} )); then
-            for m in "${missing[@]}"; do
-              echo "::error::$tag is missing $m"
-            done
-            # The publish jobs add or replace only their own platform's files and entry.
-            echo "Re-run the failed jobs to finish $tag: \`$resume\`" >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-          echo "$tag has every platform's downloads and manifest entry."
+          want "the Linux preview" "${files[@]}"

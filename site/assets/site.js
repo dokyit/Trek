@@ -144,7 +144,7 @@
         other.textContent = ".deb for Ubuntu";
       }
       const size = assets[who.build].size ? `, ${megabytes(assets[who.build].size)}` : "";
-      fine.textContent = `Free and open source. Version ${release.version}, ${CHIP[who.build]}${size}. Make it executable, then run it.`;
+      fine.textContent = `Free and open source. Version ${release.version}, ${CHIP[who.build]}${size}. A preview. Make it executable, then run it.`;
     } else if (who.build) {
       const windows = who.os === "windows";
       primary.href = href(who.build);

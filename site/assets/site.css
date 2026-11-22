@@ -282,6 +282,8 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
 /* With Linux there: the three computers on a row, the two phone ways under them. */
 .builds.has-linux { grid-template-columns: repeat(3, 1fr); row-gap: 44px; }
 .build h3 { font-size: 1.35rem; }
+/* A word beside a platform's name (Linux's "Preview"): quieter than the name, on its line. */
+.build-note { margin-left: 8px; font-family: var(--text); font-size: 13px; font-weight: 600; color: var(--mute); vertical-align: 2px; }
 .build p { margin-top: 10px; font-size: 15px; color: var(--ink-2); flex: 1; }
 .build .links { display: flex; flex-wrap: nowrap; gap: 8px; margin-top: 18px; }
 .build .links .btn { padding: 0 13px; }

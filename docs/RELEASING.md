@@ -446,6 +446,27 @@ which put one install under `OneDrive\Documents`, where Controlled folder access
 updater. Now every body carries the block from `trek_install_block`, and a `--notes` file that has its own
 keeps it.
 
+## Linux (a preview)
+
+The `linux` jobs (x86_64 and Arm) build with `script/release-linux.sh --build-only` alongside the others,
+and `publish-linux` joins the release last, after the Intel publish. Nothing the Mac, Intel or Windows
+jobs do waits for them, so a Linux failure leaves those whole and Linux missing:
+
+- **CI.** The gate (`ci-passed`) wants a CI run of the commit where every job without "Linux" in its
+  name passed. Whether the Linux ones passed too goes to the `linux` jobs, whose first step stops
+  them, saying why, when they didn't.
+- **Both or neither.** `publish-linux` runs only when both architectures built, so the release
+  carries Linux whole or not at all.
+- **The body.** The Mac writes the install block without Linux's bullet; `release-linux.sh --publish`
+  adds it (`trek_add_linux_line`, once, after Windows') when its downloads are up, so a release
+  without them doesn't offer them. A beta's body is rewritten by each Mac publish and gets it back
+  from that beta's Linux publish.
+- **The check.** "Every platform released" has a step for the Mac and Windows and one for Linux
+  (preview). Without Linux the second is red and the first says the rest is whole. A Linux build
+  that failed on its own (a runner, a download) finishes with `gh run rerun <run id> --failed`; when
+  CI's Linux jobs had failed, this commit has no Linux build, and the next release carries it.
+- **The site** shows its Linux card, marked Preview, only once the latest release has a Linux AppImage.
+
 ## Symbols
 
 What ships is stripped, so Trek's own frames in a freeze file (`freeze-<time>.txt`), a panic's
