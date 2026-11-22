@@ -44,12 +44,17 @@ fn a_deb_install_says_a_new_version_is_out_and_opens_its_release_page() {
                 (blocker.message(), Some(UpdateAction::Check))
             );
 
-            // It does check (a dev build or a read-only place wouldn't).
+            // It does check (a dev build or a read-only place wouldn't): still asking, or already
+            // told nothing answers there.
             trek.click(cx, "update-action");
-            assert_eq!(
-                trek.read(cx, |ws, _| ws.updater.status.clone()),
-                UpdateStatus::Checking,
-                "{blocker:?}: the check ran"
+            let status = trek.read(cx, |ws, _| ws.updater.status.clone());
+            assert!(
+                match &status {
+                    UpdateStatus::Checking => true,
+                    UpdateStatus::Failed(e) => e.starts_with("Couldn't check for updates"),
+                    _ => false,
+                },
+                "{blocker:?}: the check ran ({status:?})"
             );
 
             // What a check found: said, with the page to download it from, and not downloaded

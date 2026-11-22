@@ -764,6 +764,11 @@ fn resolve(raw: &str, cwd: Option<&Path>) -> Option<PathBuf> {
 
 /// [`resolve`], asking `exists` of the disk.
 fn resolve_by(raw: &str, cwd: Option<&Path>, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    // The whole text first: a GVFS mount's name has colons in it (`smb-share:server=…`), which
+    // `path_part` would take for a line number's and cut the server off.
+    if trek_core::paths::reaches_out(Path::new(raw.trim()), cwd) {
+        return None;
+    }
     let raw = path_part(raw);
     let p = if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix(r"~\")) {
         trek_core::paths::home().join(rest)
