@@ -69,9 +69,10 @@
 
   function mount(box, opts = {}) {
     if (!box) return null;
-    const narrow = Boolean(opts.narrow);
+    const narrow = Boolean(opts.narrow), compact = Boolean(opts.compact);
     box.classList.add("tk-box");
     box.classList.toggle("tk-narrow", narrow);
+    box.classList.toggle("tk-compact", compact);
     box.innerHTML = html(narrow);
     const scaler = box.querySelector(".tk-scale");
     const list = box.querySelector(".tk-rows");
@@ -82,7 +83,7 @@
     const comp = box.querySelector("[data-comp]");
     const allow = box.querySelector("[data-allow]");
     const tabdot = box.querySelector("[data-tabdot]");
-    const W = narrow ? 300 : 760;
+    const W = compact ? 340 : narrow ? 300 : 760;
     const fit = () => scaler.style.setProperty("--tk-k", String(box.clientWidth / W));
     new ResizeObserver(fit).observe(box);
     fit();

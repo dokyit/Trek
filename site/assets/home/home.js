@@ -26,7 +26,16 @@
 
   /* ---------- 2. The window ---------- */
   const box = document.querySelector("[data-inbox]");
-  const inbox = window.TrekInbox && box ? window.TrekInbox.mount(box, { narrow: narrowQ.matches }) : null;
+  const inbox = window.TrekInbox && box ? window.TrekInbox.mount(box, { compact: narrowQ.matches }) : null;
+  // The window's height for the line, measured once per width: on a phone the browser's toolbar
+  // grows and shrinks the window as you scroll, and the line must not jump when it does.
+  const probe = document.createElement("div");
+  probe.setAttribute("aria-hidden", "true");
+    probe.className = "vh-probe";
+  document.body.appendChild(probe);
+  let VH = innerHeight, lastW = innerWidth;
+  const measureVH = () => { VH = probe.getBoundingClientRect().height || innerHeight; };
+  measureVH();
   if (inbox) {
     const PLAN = [[0, 1800], [1, 3800], [2, 2000], [3, 3000]];
     let i = 0, timer = 0, seen = false;
@@ -105,11 +114,11 @@
     const q = (s) => document.querySelector(s);
     const head = rect(q(".every-head h2"));
     const rowsBox = rect(q(".rows"));
-    const sL = head.x - (narrow ? 20 : 40);
-    const sR = narrow ? W - 9 : Math.min(W - 24, rowsBox.r + 40);
+    const sL = head.x - (narrow ? 22 : 40);
+    const sR = narrow ? W - 14 : Math.min(W - 24, rowsBox.r + 40);
     const R = narrow ? 16 : 26;
     const screen = rect(q("[data-screen]"));
-    const deskY = screen.b + (narrow ? 42 : 58);
+    const deskY = screen.b + (narrow ? 22 : 58);
     // The front phone where it comes to rest, not where its arrival has it now.
     const frontEl = q("[data-phone]");
     const held = frontEl.style.transform;
@@ -135,8 +144,8 @@
 
     // The screen's stand: a neck, and a foot that rests on the desk.
     const nw = narrow ? 12 : 22, fw = narrow ? 64 : 120, fh = narrow ? 7 : 9;
-    add(el("path", { class: "stand", d: `M${f(cx - nw)} ${f(screen.b - 2)}L${f(cx - nw * 1.25)} ${f(deskY - fh)}H${f(cx + nw * 1.25)}L${f(cx + nw)} ${f(screen.b - 2)}` }, svg), false);
-    add(el("rect", { class: "stand", x: f(cx - fw), y: f(deskY - fh), width: f(fw * 2), height: f(fh), rx: f(fh / 2) }, svg), false);
+    if (!narrow) add(el("path", { class: "stand", d: `M${f(cx - nw)} ${f(screen.b - 2)}L${f(cx - nw * 1.25)} ${f(deskY - fh)}H${f(cx + nw * 1.25)}L${f(cx + nw)} ${f(screen.b - 2)}` }, svg), false);
+    if (!narrow) add(el("rect", { class: "stand", x: f(cx - fw), y: f(deskY - fh), width: f(fw * 2), height: f(fh), rx: f(fh / 2) }, svg), false);
 
     // Your computer and phone: a closed outline, drawn whole; the spine runs down its left side.
     const BR = narrow ? 18 : 30;
@@ -175,11 +184,11 @@
     // The bead moves at a steady pace with the scroll: from the stand's foot at the top of the
     // page, to the phone as the phone sits low on the screen, then on to the end.
     const top = page.getBoundingClientRect().top + scrollY;
-    const maxScroll = Math.max(1, document.documentElement.scrollHeight - innerHeight);
+    const maxScroll = Math.max(1, document.documentElement.scrollHeight - VH);
     const keys = [];
     let prev = 0;
     for (let i = 0; i < L.len.length; i++) {
-      const level = L.top[i] + top - innerHeight * 0.6;               // when this sample meets the reading line
+      const level = L.top[i] + top - VH * 0.6;               // when this sample meets the reading line
       const pace = i ? prev + (L.len[i] - L.len[i - 1]) * 0.45 : 0;   // across, at a steady pace
       prev = Math.max(level, pace, i ? prev : 0);
       keys.push(prev);
@@ -210,15 +219,16 @@
     const W = page.clientWidth;
     const flat = Math.abs(n.x - p.x) >= Math.abs(n.y - p.y);
     // Under the line where it runs flat, beside it where it runs down: never on it.
-    const x = flat ? clamp(p.x + 12, 12, W - tw - 12) : p.x - 16 - tw;
+    const x = flat ? clamp(p.x - tw / 2, 12, W - tw - 12) : p.x - 16 - tw;
     const y = flat ? p.y + 25 : p.y + 4;
     tag.setAttribute("x", f(x)); tag.setAttribute("y", f(y));
+    tag.classList.toggle("off", narrowQ.matches && !flat);
   }
 
   function paint() {
     if (!main) return;
     const top = page.getBoundingClientRect().top;
-    const t = still.matches ? Infinity : -top + innerHeight * 0.93;
+    const t = still.matches ? Infinity : -top + VH * 0.93;
     const s = still.matches ? paths[1].lut.total : beadAt();
     for (const p of paths) {
       if (p.lut) {
@@ -279,11 +289,18 @@
   function together() {
     if (!phones || !back || !frontP) return;
     const r = phones.getBoundingClientRect();
-    const k = still.matches ? 1 : clamp((innerHeight - r.top) / (innerHeight * 0.7));
+    const k = still.matches ? 1 : clamp((VH - r.top) / (VH * 0.7));
     const e = 1 - Math.pow(1 - k, 3), a = 1 - e;
     const narrow = narrowQ.matches;
-    back.style.setProperty("--bx", `${f((narrow ? -80 : -90) * a)}px`); back.style.setProperty("--by", `${f((narrow ? 8 : 46) * a)}px`); back.style.setProperty("--br", `${f(1 * a)}deg`);
-    frontP.style.setProperty("--fx", `${f((narrow ? 90 : 110) * a)}px`); frontP.style.setProperty("--fy", `${f((narrow ? 14 : 70) * a)}px`); frontP.style.setProperty("--fr", `${f(6 * a)}deg`);
+    if (narrow) {
+      back.style.setProperty("--bx", "0px"); back.style.setProperty("--by", `${f(40 * a)}px`); back.style.setProperty("--br", "0deg");
+      frontP.style.setProperty("--fx", "0px"); frontP.style.setProperty("--fy", `${f(28 * a)}px`); frontP.style.setProperty("--fr", "0deg");
+      phones.style.setProperty("--fade", f(0.35 + 0.65 * e));
+    } else {
+      back.style.setProperty("--bx", `${f(-90 * a)}px`); back.style.setProperty("--by", `${f(46 * a)}px`); back.style.setProperty("--br", `${f(1 * a)}deg`);
+      frontP.style.setProperty("--fx", `${f(110 * a)}px`); frontP.style.setProperty("--fy", `${f(70 * a)}px`); frontP.style.setProperty("--fr", `${f(6 * a)}deg`);
+      phones.style.setProperty("--fade", "1");
+    }
   }
   // Drawings and phones pause their loops while off screen.
   const pause = new IntersectionObserver((es) => { for (const e of es) e.target.classList.toggle("is-off", !e.isIntersecting); });
@@ -293,7 +310,12 @@
   addEventListener("scroll", () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; paint(); together(); }); }, { passive: true });
   together();
   let rt = 0;
-  addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(build, 120); });
+  // A resize that only changes the height (a phone's toolbar) changes nothing here.
+  addEventListener("resize", () => {
+    if (innerWidth === lastW) return;
+    lastW = innerWidth; measureVH();
+    clearTimeout(rt); rt = setTimeout(build, 120);
+  });
   addEventListener("load", start);
   const relay = () => { clearTimeout(rt); rt = setTimeout(build, 120); };
   document.querySelectorAll("img").forEach((im) => { if (!im.complete) im.addEventListener("load", relay, { once: true }); });

@@ -5,6 +5,17 @@
 .tk-box { position: relative; aspect-ratio: 760 / 476; overflow-anchor: none; }
 .tk-box [hidden] { display: none !important; }
 .tk-box.tk-narrow { aspect-ratio: 300 / 476; }
+.tk-box.tk-compact { aspect-ratio: 340 / 500; }
+.tk-compact .tk-scale { width: 340px; height: 500px; }
+.tk-compact .tk-body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+.tk-compact .tk-side { border-right: 0; border-bottom: 1px solid var(--tk-line); padding: 8px 8px 10px; }
+.tk-compact .tk-nav, .tk-compact .tk-proj, .tk-compact .tk-tabs, .tk-compact .tk-crumb { display: none; }
+.tk-compact .tk-inbox { margin-top: 0; }
+.tk-compact .tk-pane { grid-template-rows: 1fr auto; }
+.tk-compact .tk-log { padding: 12px 14px 6px; gap: 8px; }
+.tk-compact .tk-act { display: none; }
+.tk-compact .tk-msg { max-width: none; }
+.tk-compact .tk-comp { margin: 0 10px 10px; }
 .tk-scale { position: absolute; left: 0; top: 0; width: 760px; height: 476px; transform-origin: 0 0; transform: scale(var(--tk-k, 1)); }
 .tk-narrow .tk-scale { width: 300px; }
 
