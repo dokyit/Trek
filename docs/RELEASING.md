@@ -446,6 +446,27 @@ which put one install under `OneDrive\Documents`, where Controlled folder access
 updater. Now every body carries the block from `trek_install_block`, and a `--notes` file that has its own
 keeps it.
 
+## Linux (a preview)
+
+The `linux` jobs (x86_64 and Arm) build with `script/release-linux.sh --build-only` alongside the others,
+and `publish-linux` joins the release last, after the Intel publish. Nothing the Mac, Intel or Windows
+jobs do waits for them, so a Linux failure leaves those whole and Linux missing:
+
+- **CI.** The gate (`ci-passed`) wants a CI run of the commit where every job without "Linux" in its
+  name passed. Whether the Linux ones passed too goes to the `linux` jobs, whose first step stops
+  them, saying why, when they didn't.
+- **Both or neither.** `publish-linux` runs only when both architectures built, so the release
+  carries Linux whole or not at all.
+- **The body.** The Mac writes the install block without Linux's bullet; `release-linux.sh --publish`
+  adds it (`trek_add_linux_line`, once, after Windows') when its downloads are up, so a release
+  without them doesn't offer them. A beta's body is rewritten by each Mac publish and gets it back
+  from that beta's Linux publish.
+- **The check.** "Every platform released" has a step for the Mac and Windows and one for Linux
+  (preview). Without Linux the second is red and the first says the rest is whole. A Linux build
+  that failed on its own (a runner, a download) finishes with `gh run rerun <run id> --failed`; when
+  CI's Linux jobs had failed, this commit has no Linux build, and the next release carries it.
+- **The site** shows its Linux card, marked Preview, only once the latest release has a Linux AppImage.
+
 ## Symbols
 
 What ships is stripped, so Trek's own frames in a freeze file (`freeze-<time>.txt`), a panic's
@@ -456,6 +477,7 @@ keeps the symbols that name them, outside the app, so it costs users nothing:
 | Platform | File | Made by |
 | --- | --- | --- |
 | Apple silicon, Intel | `Trek-<version>-darwin-<arch>.dSYM.zip`: `trek.dSYM`, `trek-mcp.dSYM` | rustc runs `dsymutil` on each executable before it strips it (`[profile.release]`: `debug = "line-tables-only"`, `split-debuginfo = "packed"`); `release.sh` checks each dSYM's UUID against the executable in the app and zips them |
+| Linux, x86_64 and Arm | `Trek-<version>-linux-<arch>.debug.tar.gz`: `trek.debug`, `trek-mcp.debug` | `objcopy` splits them out of an unstripped build in `release-linux.sh` before the packages are made, each executable keeping a debuglink and its build ID |
 | Windows | `Trek-<version>-windows-x86_64.pdb.zip`: the `.pdb` of `trek.exe`, `trek-mcp.exe`, `trek-update.exe` | the linker, as `release.ps1` builds unstripped (`CARGO_PROFILE_RELEASE_STRIP=false`; the `.exe` gains only the `.pdb`'s name); `warm-release.yml` builds the dependencies the same way |
 
 Line tables only: function names, files and lines, inlined calls; no variables. The shipped executables
@@ -468,9 +490,11 @@ zipping the dSYMs (113 MB for Apple silicon, 465 MB unpacked) about half a minut
 **Where they live.** On the GitHub release, beside the build they name, for good (a beta or nightly
 replaces the previous build's, as it does its archives), and as the release run's artifact
 `trek-symbols-<version>-<platform>` for 90 days (the most GitHub keeps one in a public repository, and
-this repository's setting); a dry run's for a week. Their names end in `.dSYM.zip` and `.pdb.zip`, which
+this repository's setting); a dry run's for a week. Their names end in `.dSYM.zip`, `.pdb.zip` and `.debug.tar.gz`, which
 nothing that looks for a download matches: the updater reads only `<channel>.json`, and the site and the
-clean-ups go by `.dmg`, `.app.tar.gz`, `-windows-x86_64.zip` and `Trek-Setup-x86_64.exe`. The repository
+clean-ups go by `.dmg`, `.app.tar.gz`, `-windows-x86_64.zip`, `Trek-Setup-x86_64.exe` and, for Linux,
+`.AppImage` and `.deb` (Linux's own `.debug.tar.gz` ends like its tarball, which nothing downloads by
+pattern). The repository
 is public, so the names in them say nothing its source doesn't. The last job, "Every platform released",
 fails when one is missing, without holding the update back.
 
@@ -495,12 +519,17 @@ By hand: `dwarfdump --uuid` on the report's binary and the dSYM must agree, then
 Rust's `_R…` names. On Windows the `.pdb` beside `trek.exe` lets WinDbg or Visual Studio name a dump's
 frames.
 
-**Linux** (its packaging is still to come): build with `CARGO_PROFILE_RELEASE_STRIP=false` as Windows
-does, then for each executable, before packing it: `objcopy --only-keep-debug trek trek.debug`, `objcopy
---strip-all trek`, `objcopy --add-gnu-debuglink=trek.debug trek` (the GNU build ID, which a symbolicator
-matches as the UUID is matched here, stays in both; `-C link-arg=-Wl,--build-id` where the linker doesn't add one). Keep the `.debug` files as
-`Trek-<version>-linux-<arch>.debug.tar.gz` the same two ways: on the release, and as
-`trek-symbols-<version>-linux-<arch>`, and add the file to "Every platform released".
+**Linux**: `script/release-linux.sh --build-only` builds unstripped with the DWARF inside the
+executables (`CARGO_PROFILE_RELEASE_STRIP=false`, `CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=off`;
+`warm-release.yml` builds the dependencies the same way), then for `trek` and `trek-mcp`, before
+packing them: `objcopy --only-keep-debug`, `objcopy --strip-all` and `objcopy --add-gnu-debuglink`,
+checking that the GNU build ID (Ubuntu's linker adds one; it matches a `.debug` as a UUID matches a
+dSYM) is the same in both. The AppImage, .deb and tarball get the stripped ones. `trek.debug` and
+`trek-mcp.debug` go into `Trek-<version>-linux-<arch>.debug.tar.gz`, on the release (publish-linux
+uploads it with the packages) and as `trek-symbols-<version>-linux-<arch>`; "Every platform
+released" wants it. `agent-cli symbolicate` reads Mac reports only: for a Linux backtrace,
+`addr2line -e trek.debug -f -i -C <offset>…` (the offsets from the backtrace's addresses minus the
+load address in `/proc/<pid>/maps`), or `gdb trek` with the `.debug` beside it.
 
 ## How an update installs
 

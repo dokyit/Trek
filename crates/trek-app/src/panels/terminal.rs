@@ -266,10 +266,12 @@ fn shell_args(flavor: Flavor, command: Option<&str>) -> Vec<String> {
 }
 
 /// The capture build asked for a real shell in an isolated run, for a live check of the terminal
-/// (`TREK_VERIFY_SHELL`): on Windows only, where it starts without the user's profile
-/// (`without_profile`); a Mac's login shell has no one flag for that.
+/// (`TREK_VERIFY_SHELL`): on Windows, where it starts without the user's profile
+/// (`without_profile`), and on Linux, whose capture runs are CI's and containers' (thrown away
+/// after, so a profile is no one's); a Mac's login shell has no one flag for that.
 fn verify_shell() -> bool {
-    cfg!(all(feature = "shots", windows)) && std::env::var_os("TREK_VERIFY_SHELL").is_some()
+    cfg!(all(feature = "shots", any(windows, target_os = "linux")))
+        && std::env::var_os("TREK_VERIFY_SHELL").is_some()
 }
 
 /// The arguments that keep a `flavor` shell from running the user's start-up scripts: its

@@ -263,6 +263,23 @@ Trek drives each vendor's own CLI, so your subscriptions work as they do in the 
 
 </details>
 
+**Linux**, a preview (Ubuntu 22.04, Debian 12, Fedora 36 or later; x86_64 or Arm), from the first release that carries Linux downloads:
+
+1. Ubuntu or Debian: download `trek_<version>_amd64.deb` (`_arm64.deb` on Arm) and run `sudo apt install ./trek_<version>_amd64.deb`, which brings what Trek needs. Trek says in **Settings › Updates** when a new version is out; download its `.deb` to update.
+2. Anywhere else: download `Trek-<version>-linux-x86_64.AppImage` (`linux-aarch64` on Arm), `chmod +x` it and run it. It needs GTK 3 and WebKitGTK 4.1 from your package manager (it names them if they're missing), adds itself to your app menu, and updates itself from **Settings › Updates**.
+
+<details>
+<summary>How Linux differs</summary>
+<br>
+
+- Trek runs as an X11 window, in a Wayland session through Xwayland, so the desktop frames it and the Browser can work; `TREK_WAYLAND=1` opts into native Wayland, without them.
+- A tray icon where the desktop shows them (Ubuntu does; GNOME elsewhere needs the AppIndicator extension). No menu bar: the palette (Ctrl+K), Settings and context menus have every command.
+- Keys are kept in your desktop's keyring (GNOME Keyring or KWallet).
+- Not on Linux: dictation, snapshots, computer use, the iOS Simulator and iPhone tools, the Browser's ad blocker and extensions, and the video watcher.
+- Every feature, platform by platform: [docs/PARITY.md](docs/PARITY.md).
+
+</details>
+
 **iPhone**: build it from source in Xcode ([ios/README.md](ios/README.md)), then pair it in **Settings › Phone & Machines**.
 
 **Updates**: Trek updates itself from **Settings › Updates** (Stable, Beta or Nightly). Each update is checked against a minisign signature and installed when you restart Trek, never while an agent is working.
@@ -294,7 +311,7 @@ On Xcode 26+, a missing Metal compiler is one command away: `xcodebuild -downloa
 ## Status
 
 Trek is **0.x**: used every day, moving fast. Expect rough edges.
-Mac (Apple silicon and Intel) and Windows x64 only (no Linux yet). History import covers Claude Code, Codex and OpenCode.
+Mac (Apple silicon and Intel), Windows x64, and Linux (x86_64 and Arm, a preview) from the first release that carries it. History import covers Claude Code, Codex and OpenCode.
 Trek asks once before sharing anonymous usage data, and sends nothing without a yes. What is sent is in [docs/PRIVACY.md](docs/PRIVACY.md).
 See [open issues](https://github.com/dokyit/Trek/issues).
 

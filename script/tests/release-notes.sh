@@ -109,6 +109,21 @@ no_open_anyway() { ! grep -q 'Open Anyway' "$1"; }
 ensure "install block, notarized: no Open Anyway step" no_open_anyway "$out/release-notes.md"
 ensure "install block, notarized: one install block" one_block "$out/release-notes.md"
 
+# Linux's bullet joins the body only when its downloads do (script/release-linux.sh): the Mac's
+# body has none, and adding it puts it after Windows' once, however often it's added.
+linux_count() { grep -c '^- \*\*Linux\*\*' "$1" || true; }
+out="$WORK/auto-beta"
+ensure "install block: no Linux bullet until Linux publishes" [ "$(linux_count "$out/release-notes.md")" -eq 0 ]
+trek_add_linux_line "$out/release-notes.md" 0.2.0-beta.2 > "$WORK/with-linux.md"
+trek_add_linux_line "$WORK/with-linux.md" 0.2.0-beta.2 > "$WORK/with-linux-twice.md"
+ensure "Linux bullet: added once" [ "$(linux_count "$WORK/with-linux-twice.md")" -eq 1 ]
+ensure "Linux bullet: right after Windows'" sh -c "grep -A1 '^- \*\*Windows\*\*' '$WORK/with-linux.md' | grep -q '^- \*\*Linux\*\* (a preview'"
+ensure "Linux bullet: the .deb's Debian version" grep -q 'trek_0.2.0~beta.2_amd64.deb' "$WORK/with-linux.md"
+ensure "Linux bullet: the rest of the body kept" sh -c "grep -v '^- \*\*Linux\*\*' '$WORK/with-linux.md' | diff -q - '$out/release-notes.md' > /dev/null"
+printf -- '- Only notes, no block' > "$WORK/bare.md"
+trek_add_linux_line "$WORK/bare.md" 0.2.0 > "$WORK/bare-linux.md"
+ensure "Linux bullet: a body without Windows' gets it at the end" sh -c "tail -1 '$WORK/bare-linux.md' | grep -q '^- \*\*Linux\*\*' && head -1 '$WORK/bare-linux.md' | grep -qx -- '- Only notes, no block'"
+
 # Nothing since the last tag: the maintenance line.
 git tag v0.2.1
 out="$WORK/maintenance"; mkdir "$out"

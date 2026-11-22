@@ -555,7 +555,7 @@ impl Onboarding {
             last_step_change: std::time::Instant::now() - Duration::from_secs(1),
             all_missing: false,
             all_providers: false,
-            pair_in_browser: crate::words::is_windows(),
+            pair_in_browser: !crate::words::is_mac(),
             key_inputs,
             glass_slider,
             perms: HashMap::new(),

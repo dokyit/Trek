@@ -291,7 +291,21 @@ fn native_build() -> anyhow::Result<()> {
         );
         Ok(())
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    // Linux: the processor the kernel reports (uname) is the one Trek was built for.
+    #[cfg(target_os = "linux")]
+    {
+        let machine = trek_core::procs::command("uname")
+            .arg("-m")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())?;
+        let built = std::env::consts::ARCH;
+        anyhow::ensure!(
+            machine == built || (machine == "arm64" && built == "aarch64"),
+            "native: this computer's processor is {machine}, and Trek was built for {built}"
+        );
+        Ok(())
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     anyhow::bail!("native: Windows and macOS only")
 }
 
@@ -791,7 +805,7 @@ async fn shot(
             .ok_or_else(|| anyhow::anyhow!("no main window"))?;
         main.update(cx, |_, window, cx| {
             park_pointer(window, cx);
-            window.render_to_image()
+            frame_image(window)
         })?
     })?;
     let path2 = path.clone();
@@ -1273,16 +1287,32 @@ async fn browser(
             let answer = cx
                 .update(|cx| panel.read(cx).shots_eval(rest, cx))
                 .ok_or_else(|| anyhow::anyhow!("browser eval: no page"))?;
-            let json = answer
-                .recv()
-                .await
-                .map_err(|_| anyhow::anyhow!("browser eval: the page closed"))?;
+            // A page held by a dialog runs no script until it's answered: a bounded wait, so the
+            // command says so rather than holding every later one (Linux's Live run waited out
+            // its two hours behind a page WebKitGTK had stopped for an alert).
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            let json = loop {
+                match answer.try_recv() {
+                    Ok(json) => break json,
+                    Err(async_channel::TryRecvError::Closed) => {
+                        anyhow::bail!("browser eval: the page closed")
+                    }
+                    Err(async_channel::TryRecvError::Empty) => {}
+                }
+                anyhow::ensure!(
+                    std::time::Instant::now() < deadline,
+                    "browser eval: the page didn't answer in 30 s (a dialog holding it?)"
+                );
+                cx.background_executor()
+                    .timer(Duration::from_millis(50))
+                    .await;
+            };
             std::fs::write(dir.join("browser-eval.json"), json)?;
             Ok(())
         }
         // `browser crash`: end the page's own process, as a crash would (WebView2's renderer,
         // WebKit's web content process).
-        #[cfg(any(windows, target_os = "macos"))]
+        #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
         "crash" => {
             let ended = cx
                 .update(|cx| panel.read(cx).shots_crash(cx))
@@ -1586,7 +1616,7 @@ fn start_recording(
                     .ok_or_else(|| anyhow::anyhow!("no main window"))?;
                 main.update(cx, |_, window, cx| {
                     park_pointer(window, cx);
-                    window.render_to_image()
+                    frame_image(window)
                 })?
             })?;
             times.push(started.elapsed().as_secs_f64());
@@ -5634,6 +5664,70 @@ fn underlay(w: u32, h: u32) -> image::RgbaImage {
         image: image.clone(),
     });
     image
+}
+
+/// The window's last frame as an image. macOS and Windows draw the frame's scene again offscreen;
+/// GPUI's renderer on Linux (wgpu) can't, so there it's the window's pixels as the X server has
+/// them: what's on screen, the web views inside it included (as `trek-dev screenshot --real`
+/// is on a Mac). A Wayland window can't be read from outside: run the capture build on X11.
+fn frame_image(window: &Window) -> anyhow::Result<image::RgbaImage> {
+    #[cfg(target_os = "linux")]
+    {
+        x11_window_image(window)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        window.render_to_image()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn x11_window_image(window: &Window) -> anyhow::Result<image::RgbaImage> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
+    let id = match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
+        Ok(RawWindowHandle::Xcb(h)) => h.window.get(),
+        Ok(RawWindowHandle::Xlib(h)) => h.window as u32,
+        _ => anyhow::bail!(
+            "shot: Linux captures X11 windows only (start Trek with DISPLAY set and WAYLAND_DISPLAY unset)"
+        ),
+    };
+    let (conn, _) = x11rb::connect(None)?;
+    let geometry = conn.get_geometry(id)?.reply()?;
+    let (w, h) = (u32::from(geometry.width), u32::from(geometry.height));
+    let reply = conn
+        .get_image(
+            ImageFormat::Z_PIXMAP,
+            id,
+            0,
+            0,
+            geometry.width,
+            geometry.height,
+            !0,
+        )?
+        .reply()?;
+    let setup = conn.setup();
+    let bits = setup
+        .pixmap_formats
+        .iter()
+        .find(|f| f.depth == reply.depth)
+        .map(|f| f.bits_per_pixel)
+        .unwrap_or(32);
+    anyhow::ensure!(
+        bits == 32 && setup.image_byte_order == x11rb::protocol::xproto::ImageOrder::LSB_FIRST,
+        "shot: an X server with {bits}-bit pixels in another byte order"
+    );
+    // Little-endian 32-bit pixels: blue, green, red, then alpha (or padding at depth 24). What
+    // shows on screen is opaque either way: X has no compositor here to blend it.
+    let mut rgba = reply.data;
+    anyhow::ensure!(rgba.len() >= (w * h * 4) as usize, "shot: a short image");
+    rgba.truncate((w * h * 4) as usize);
+    for px in rgba.chunks_exact_mut(4) {
+        px.swap(0, 2);
+        px[3] = 255;
+    }
+    image::RgbaImage::from_raw(w, h, rgba).ok_or_else(|| anyhow::anyhow!("shot: a bad image"))
 }
 
 /// Write `image`, with its see-through parts over the blurred `$TREK_SHOT_UNDER` (else a

@@ -1973,7 +1973,7 @@ fn quit_now(cx: &mut App) {
         ws.quitting = true;
         ws.shutdown_sessions()
     });
-    if cfg!(windows) || crate::test_display::id().is_some() {
+    if !cfg!(target_os = "macos") || crate::test_display::id().is_some() {
         cx.defer(|cx| {
             for window in cx.windows() {
                 let _ = window.update(cx, |_, window, _| window.remove_window());

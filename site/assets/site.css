@@ -278,7 +278,12 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
 .get-head p { margin-top: 16px; font-size: 19px; color: var(--ink-2); }
 .builds { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0 clamp(20px, 3vw, 40px); margin-top: 52px; }
 .build { display: flex; flex-direction: column; padding-top: 22px; border-top: 1px solid color-mix(in srgb, var(--ink) 22%, transparent); }
+.build[hidden] { display: none; }
+/* With Linux there: the three computers on a row, the two phone ways under them. */
+.builds.has-linux { grid-template-columns: repeat(3, 1fr); row-gap: 44px; }
 .build h3 { font-size: 1.35rem; }
+/* A word beside a platform's name (Linux's "Preview"): quieter than the name, on its line. */
+.build-note { margin-left: 8px; font-family: var(--text); font-size: 13px; font-weight: 600; color: var(--mute); vertical-align: 2px; }
 .build p { margin-top: 10px; font-size: 15px; color: var(--ink-2); flex: 1; }
 .build .links { display: flex; flex-wrap: nowrap; gap: 8px; margin-top: 18px; }
 .build .links .btn { padding: 0 13px; }
@@ -326,7 +331,7 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
   .phone-in { grid-template-columns: 1fr; }
   .phone-text { padding-bottom: 0; }
   .phones { height: 600px; }
-  .builds { grid-template-columns: repeat(2, 1fr); gap: 40px 32px; }
+  .builds, .builds.has-linux { grid-template-columns: repeat(2, 1fr); gap: 40px 32px; }
 }
 @media (max-width: 767px) {
   .bar-links { display: none; }
@@ -343,7 +348,7 @@ html { scrollbar-color: color-mix(in srgb, var(--ink) 28%, transparent) transpar
   .phones { height: 520px; }
   .phone-front { --w: 220px; margin-left: -64px; }
   .phone-back { --w: 190px; margin-left: -176px; }
-  .builds { grid-template-columns: 1fr; }
+  .builds, .builds.has-linux { grid-template-columns: 1fr; }
   .foot .who { margin-left: 0; width: 100%; order: 2; }
   .page { padding: 108px 0 88px; }
   .page .wrap { width: calc(100% - 32px); }

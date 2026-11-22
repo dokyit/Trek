@@ -284,10 +284,10 @@ fn the_tools_page_switches_background_use_and_its_picture() {
             gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(2400.)),
         );
         trek.render(cx);
-        if trek_app::words::is_windows() {
+        if !trek_app::words::is_mac() {
             assert!(
                 !trek.visible(cx, "computer-background"),
-                "Windows' computer use works in front"
+                "Windows' computer use works in front; Linux has none"
             );
             return;
         }

@@ -603,6 +603,13 @@ fn runs_when_opened(path: &Path) -> bool {
         "appimage",
         "run",
         "bin",
+        // Linux's packages: opening one starts an installer.
+        "deb",
+        "rpm",
+        "snap",
+        "flatpak",
+        "flatpakref",
+        "flatpakrepo",
     ];
     let by_name = path
         .extension()
@@ -757,6 +764,11 @@ fn resolve(raw: &str, cwd: Option<&Path>) -> Option<PathBuf> {
 
 /// [`resolve`], asking `exists` of the disk.
 fn resolve_by(raw: &str, cwd: Option<&Path>, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    // The whole text first: a GVFS mount's name has colons in it (`smb-share:server=…`), which
+    // `path_part` would take for a line number's and cut the server off.
+    if trek_core::paths::reaches_out(Path::new(raw.trim()), cwd) {
+        return None;
+    }
     let raw = path_part(raw);
     let p = if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix(r"~\")) {
         trek_core::paths::home().join(rest)
@@ -1448,13 +1460,26 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("trek-md-run-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("Tool.app")).unwrap();
-        for name in ["run.command", "setup.sh", "report.pdf", "notes.md"] {
+        let linux = [
+            "Trek.AppImage",
+            "trek.desktop",
+            "trek_0.4.1_amd64.deb",
+            "app.flatpakref",
+        ];
+        for name in ["run.command", "setup.sh", "report.pdf", "notes.md"]
+            .into_iter()
+            .chain(linux)
+        {
             std::fs::write(dir.join(name), b"x").unwrap();
         }
         let at = |name: &str| click(name, Some(&dir), Path::exists);
         assert_eq!(at("run.command"), Click::AskOpen(dir.join("run.command")));
         assert_eq!(at("setup.sh"), Click::AskOpen(dir.join("setup.sh")));
         assert_eq!(at("Tool.app"), Click::AskOpen(dir.join("Tool.app")));
+        // Linux's: an AppImage, a desktop entry, a package whose installer opening it starts.
+        for name in linux {
+            assert_eq!(at(name), Click::AskOpen(dir.join(name)), "{name}");
+        }
         assert_eq!(at("report.pdf"), Click::Open(dir.join("report.pdf")));
         assert_eq!(at("notes.md"), Click::Open(dir.join("notes.md")));
         #[cfg(unix)]
@@ -1499,6 +1524,12 @@ mod tests {
         assert!(link_path_by(&far.replace("x.png", "x%20y.png"), None, exists).is_none());
         assert!(resolve_by(far, Some(here), exists).is_none());
         assert!(resolve_by(far, None, exists).is_none());
+        // Linux's file manager's mounts (GVFS) of another computer's share.
+        if !cfg!(windows) {
+            let gvfs = "/run/user/1000/gvfs/smb-share:server=attacker.example,share=s/x.png";
+            assert!(link_path_by(gvfs, Some(here), exists).is_none());
+            assert!(resolve_by(gvfs, Some(here), exists).is_none());
+        }
         assert!(asked.borrow().is_empty(), "looked at {:?}", asked.borrow());
         // The thread's own share is looked at, as any project's folder is.
         assert_eq!(

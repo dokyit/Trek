@@ -393,7 +393,7 @@ enum Signal {
     Kill,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn signal(group: i32, s: Signal) {
     if group > 1 {
         let s = match s {
@@ -405,11 +405,11 @@ fn signal(group: i32, s: Signal) {
     }
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(unix, windows)))]
 fn signal(_group: i32, _s: Signal) {}
 
 /// Some process is still in `group`.
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn group_exists(group: i32) -> bool {
     // SAFETY: signal 0 only checks; nothing is sent.
     group > 1
@@ -417,7 +417,7 @@ fn group_exists(group: i32) -> bool {
             || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(unix, windows)))]
 fn group_exists(_group: i32) -> bool {
     false
 }
@@ -522,7 +522,21 @@ fn start_time(pid: i32) -> Option<i64> {
     win::Proc::open(pid).map(|p| win::unix_secs(p.created))
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+/// Linux: from `/proc/<pid>/stat`, in clock ticks after boot.
+#[cfg(target_os = "linux")]
+fn start_time(pid: i32) -> Option<i64> {
+    if pid <= 0 {
+        return None;
+    }
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let ticks: i64 = linux::stat_field(&stat, 22)?.parse().ok()?;
+    // SAFETY: takes a constant, reads a system setting.
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    let boot = boot_time();
+    (hz > 0 && boot > 0).then(|| boot + ticks / hz as i64)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn start_time(_pid: i32) -> Option<i64> {
     None
 }
@@ -561,7 +575,27 @@ fn members(group: i32) -> Vec<i32> {
     pids
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+/// Linux: every process in `/proc` whose process group (`stat`'s fifth field) is `group`.
+#[cfg(target_os = "linux")]
+fn members(group: i32) -> Vec<i32> {
+    if group <= 1 {
+        return vec![];
+    }
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return vec![];
+    };
+    dir.flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|pid| {
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|s| linux::stat_field(&s, 5)?.parse::<i32>().ok())
+                == Some(group)
+        })
+        .collect()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn members(_group: i32) -> Vec<i32> {
     vec![]
 }
@@ -598,9 +632,48 @@ fn boot_time() -> i64 {
     (now.as_millis() as i64 - up as i64) / 1000
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+/// Linux: `btime` in `/proc/stat`.
+#[cfg(target_os = "linux")]
+fn boot_time() -> i64 {
+    std::fs::read_to_string("/proc/stat")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("btime ")?.trim().parse().ok())
+        })
+        .unwrap_or(0)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn boot_time() -> i64 {
     0
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    /// Field `n` (1-based, as proc(5) numbers them) of a `/proc/<pid>/stat` line. The second is
+    /// the command in parentheses, which may hold spaces and parentheses of its own: the fields
+    /// after it are counted from its last `)`.
+    pub fn stat_field(stat: &str, n: usize) -> Option<&str> {
+        match n {
+            0 => None,
+            1 => stat.split_whitespace().next(),
+            2 => Some(&stat[stat.find('(')? + 1..stat.rfind(')')?]),
+            _ => stat[stat.rfind(')')? + 1..].split_whitespace().nth(n - 3),
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn a_stat_line_is_read_past_a_command_with_spaces_and_parentheses() {
+        let line = "4242 (trek (a b)) S 1 4240 4240 0 -1 4194560 0 0 0 0 1 2 0 0 20 0 9 0 31337 0";
+        assert_eq!(stat_field(line, 1), Some("4242"));
+        assert_eq!(stat_field(line, 2), Some("trek (a b)"));
+        assert_eq!(stat_field(line, 3), Some("S"));
+        assert_eq!(stat_field(line, 5), Some("4240"));
+        assert_eq!(stat_field(line, 22), Some("31337"));
+        assert_eq!(stat_field(line, 40), None);
+    }
 }
 
 /// Windows processes, told apart by when they were created: Windows hands a process's id out
@@ -853,11 +926,11 @@ mod win {
     }
 }
 
-#[cfg(all(test, any(target_os = "macos", windows)))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     fn sleeper() -> std::process::Child {
         use std::os::unix::process::CommandExt as _;
         std::process::Command::new("/bin/sleep")
@@ -1077,7 +1150,7 @@ mod tests {
         // The shell waits for the sleeper it starts (the `;` keeps it from exec'ing it away).
         #[cfg(windows)]
         let mut parent = quiet("cmd.exe", &["/d", "/c", "ping -n 30 127.0.0.1 >nul"]);
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
         let mut parent = std::process::Command::new("/bin/sh")
             .args(["-c", "/bin/sleep 30; true"])
             .spawn()
@@ -1124,9 +1197,9 @@ mod tests {
         }
     }
 
-    /// The Mac's grace, as the Windows test below has its own: a group that ignores TERM (a script
+    /// The Mac's and Linux's grace, as the Windows test below has its own: a group that ignores TERM (a script
     /// that traps it; an agent still saving its session) is given the grace, then killed.
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     #[test]
     fn end_all_gives_a_group_that_ignores_term_its_grace_then_kills_it() {
         use std::os::unix::process::CommandExt as _;
@@ -1243,7 +1316,7 @@ mod tests {
 
     /// On both platforms: each has its own reading of a process's start and the boot (the Mac's
     /// exact, Windows' within a few seconds).
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(any(unix, windows))]
     #[test]
     fn this_process_and_boot_are_dated() {
         let now = chrono::Utc::now().timestamp();

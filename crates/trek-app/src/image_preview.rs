@@ -89,7 +89,7 @@ fn show(
 pub enum Viewer {
     /// macOS's Quick Look.
     QuickLook,
-    /// The app the system opens that kind of file with (Windows has no Quick Look).
+    /// The app the system opens that kind of file with (Windows and Linux have no Quick Look).
     DefaultApp,
 }
 
@@ -107,7 +107,7 @@ fn quick_look(path: &Path, cx: &mut App) {
     #[cfg(any(test, feature = "test-support"))]
     QUICK_LOOKED.with(|q| q.borrow_mut().push(path.to_path_buf()));
     #[cfg(not(any(test, feature = "test-support")))]
-    match viewer(cfg!(windows)) {
+    match viewer(!cfg!(target_os = "macos")) {
         Viewer::DefaultApp => cx.open_with_system(path),
         Viewer::QuickLook => {
             let child = std::process::Command::new("/usr/bin/qlmanage")

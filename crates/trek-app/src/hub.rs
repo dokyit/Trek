@@ -807,6 +807,7 @@ fn start_git(
 /// registry and PATH (`trek_core::open_in`) and started with the folder as its argument.
 type Opener = (SharedString, Rc<dyn Fn(&mut App)>);
 
+#[cfg_attr(target_os = "linux", allow(unreachable_code))]
 fn openers(dir: &Path) -> Vec<Opener> {
     let mut out: Vec<Opener> = vec![];
     let folder = dir.to_path_buf();
@@ -830,6 +831,17 @@ fn openers(dir: &Path) -> Vec<Opener> {
                         tracing::warn!("open in {label}: {e}");
                     }
                 }),
+            ));
+        }
+        return out;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        for opener in crate::linux_open_in::openers() {
+            let dir = dir.to_path_buf();
+            out.push((
+                opener.label.into(),
+                Rc::new(move |_: &mut App| opener.open(&dir)),
             ));
         }
         return out;

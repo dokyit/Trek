@@ -79,6 +79,9 @@ pub enum UpdateAction {
     RemoveOldCopy,
     /// After a move: leave the old copy where it is, and stop offering to remove it.
     DismissOldCopy,
+    /// Linux's .deb and tarball, which don't update themselves: open the release's page, where
+    /// the user downloads it (`trek_core::update::download_page`).
+    OpenDownloadPage,
 }
 
 impl UpdateAction {
@@ -94,6 +97,7 @@ impl UpdateAction {
             UpdateAction::MoveNow => "Move now",
             UpdateAction::RemoveOldCopy => "Remove old copy",
             UpdateAction::DismissOldCopy => "Dismiss",
+            UpdateAction::OpenDownloadPage => "Open the download page",
         }
     }
 
@@ -589,6 +593,22 @@ pub fn describe_update(
         progress: None,
         choices: None,
     };
+    // Linux's .deb and tarball still check: a newer version is said, with the page to download
+    // it from, and the rest reads as anywhere else. Nothing downloads, so there's nothing to
+    // restart into.
+    if let Some(blocker) = blocker.filter(|b| b.notify_only()) {
+        return match status {
+            UpdateStatus::Available { version } => view(
+                blocker.out_message(version),
+                Some(UpdateAction::OpenDownloadPage),
+            ),
+            UpdateStatus::Checking
+            | UpdateStatus::UpToDate
+            | UpdateStatus::Coming { .. }
+            | UpdateStatus::Failed(_) => describe_update(status, auto_check, None, channel),
+            _ => view(blocker.message(), Some(UpdateAction::Check)),
+        };
+    }
     if let Some(blocker) = blocker {
         // Windows: Trek can move itself out of where it is, in one click.
         if trek_words::is_windows() && blocker.movable() {
@@ -702,6 +722,52 @@ mod tests {
             None
         );
         path
+    }
+
+    /// A .deb or tarball install checks like any other: a newer version is said with the page to
+    /// download it from, and the rest (checking, up to date, a build on its way, a failed check)
+    /// reads as anywhere else. Idle, it says why it doesn't update itself, with Check now.
+    #[test]
+    fn a_copy_that_only_notifies_says_what_is_out_and_where_to_get_it() {
+        for blocker in [Blocker::Packaged, Blocker::NotAppImage] {
+            let of = |s: UpdateStatus| describe_update(&s, true, Some(blocker), Channel::Stable);
+            let out = of(UpdateStatus::Available {
+                version: "0.4.64".into(),
+            });
+            assert_eq!(out.line, blocker.out_message("0.4.64"));
+            assert_eq!(out.action, Some(UpdateAction::OpenDownloadPage));
+            assert!(!out.action.unwrap().is_primary());
+            for s in [
+                UpdateStatus::Checking,
+                UpdateStatus::UpToDate,
+                UpdateStatus::Coming {
+                    version: "0.4.64".into(),
+                },
+                UpdateStatus::Failed("Couldn't check for updates: offline".into()),
+            ] {
+                assert_eq!(
+                    of(s.clone()),
+                    describe_update(&s, true, None, Channel::Stable),
+                    "{blocker:?} {s:?}"
+                );
+            }
+            let idle = of(UpdateStatus::Idle);
+            assert_eq!(
+                (idle.line, idle.action),
+                (blocker.message(), Some(UpdateAction::Check))
+            );
+        }
+        // The others still say only why they can't.
+        let dev = describe_update(
+            &UpdateStatus::Available {
+                version: "0.4.64".into(),
+            },
+            true,
+            Some(Blocker::DevBuild),
+            Channel::Stable,
+        );
+        assert_eq!(dev.line, Blocker::DevBuild.message());
+        assert_eq!(dev.action, None);
     }
 
     #[test]

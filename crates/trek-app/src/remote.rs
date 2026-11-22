@@ -776,8 +776,31 @@ pub(crate) fn computer_name() -> String {
     }
 }
 
+/// The computer's pretty name where systemd keeps one ("Tobias's Laptop", `hostnamectl
+/// set-hostname --pretty`), else its host name.
+#[cfg(target_os = "linux")]
+pub(crate) fn computer_name() -> String {
+    let pretty = std::fs::read_to_string("/etc/machine-info")
+        .ok()
+        .and_then(|info| {
+            info.lines().find_map(|l| {
+                let v = l.strip_prefix("PRETTY_HOSTNAME=")?.trim();
+                Some(v.trim_matches(|c| c == '"' || c == '\'').to_string())
+            })
+        })
+        .filter(|s| !s.is_empty());
+    pretty
+        .or_else(|| {
+            std::fs::read_to_string("/proc/sys/kernel/hostname")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| crate::words::words().computer.to_string())
+}
+
 /// "Tobias's MacBook Pro", as Sharing settings name it.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub(crate) fn computer_name() -> String {
     trek_core::procs::command("scutil")
         .args(["--get", "ComputerName"])

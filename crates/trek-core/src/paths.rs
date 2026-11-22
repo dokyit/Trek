@@ -238,8 +238,9 @@ fn tildify_with(path: &std::path::Path, sep: &str) -> String {
 
 /// The other computer that looking at `path` would reach: on Windows a share's server
 /// (`\\server\share\…`, `//server/…`, `\\?\UNC\server\…`), or any other `\\?\` or `\\.\` device
-/// path but a drive's (`device`); elsewhere the automounter's `/net/<host>/…`. `None` for a path
-/// on this one. Asking whether such a path exists connects to that computer, and on Windows offers
+/// path but a drive's (`device`); elsewhere the automounter's `/net/<host>/…`, and on Linux a share
+/// GVFS (the file manager) mounted, `/run/user/<uid>/gvfs/smb-share:server=<host>,…/…` (`host=`
+/// for sftp, dav, ftp and the rest). `None` for a path on this one. Asking whether such a path exists connects to that computer, and on Windows offers
 /// it the user's sign-in (NTLM), so text an agent or a web page wrote mustn't make Trek look.
 pub fn other_machine(path: &std::path::Path) -> Option<String> {
     other_machine_on(&path.to_string_lossy(), WINDOWS)
@@ -252,9 +253,11 @@ const WINDOWS: bool = cfg!(windows);
 pub fn other_machine_on(raw: &str, windows: bool) -> Option<String> {
     let lower = |s: &str| s.to_ascii_lowercase();
     if !windows {
-        let rest = raw.strip_prefix("/net/")?;
-        let host = rest.split('/').next().unwrap_or_default();
-        return (!host.is_empty()).then(|| lower(host));
+        if let Some(rest) = raw.strip_prefix("/net/") {
+            let host = rest.split('/').next().unwrap_or_default();
+            return (!host.is_empty()).then(|| lower(host));
+        }
+        return gvfs_host(raw).map(|h| lower(&h));
     }
     let sep = |c: char| c == '\\' || c == '/';
     let mut chars = raw.chars();
@@ -288,6 +291,28 @@ pub fn other_machine_on(raw: &str, windows: bool) -> Option<String> {
     } else {
         lower(first)
     })
+}
+
+/// The server of a GVFS mount's path, `/run/user/<uid>/gvfs/<backend>:<key>=<value>,…/…`: its
+/// `server=` (an SMB share) or `host=` (sftp, dav, ftp, nfs, afp…). A phone's mount (`mtp:`,
+/// `gphoto2:`, `afc:`, whose `host=` is the device) or one with neither key (`trash:`) is this
+/// computer's, as is anything that isn't under a user's runtime folder.
+fn gvfs_host(raw: &str) -> Option<String> {
+    let rest = raw.strip_prefix("/run/user/")?;
+    let mut parts = rest.split('/');
+    let uid = parts.next()?;
+    if uid.is_empty() || !uid.bytes().all(|b| b.is_ascii_digit()) || parts.next()? != "gvfs" {
+        return None;
+    }
+    let (backend, keys) = parts.next()?.split_once(':')?;
+    if matches!(backend, "mtp" | "gphoto2" | "afc") {
+        return None;
+    }
+    keys.split(',')
+        .filter_map(|kv| kv.split_once('='))
+        .find(|(k, _)| *k == "server" || *k == "host")
+        .map(|(_, v)| v.to_string())
+        .filter(|v| !v.is_empty())
 }
 
 /// Whether looking at `path` reaches another computer ([`other_machine`]) that `cwd`, the folder
@@ -519,6 +544,44 @@ mod tests {
         assert!(out(r"\\evil\s\a.rs", share, true));
         assert!(out(r"\\evil\s\a.rs", None, true));
         assert!(!out(r"C:\code\a.rs", None, true));
+        // GVFS's mounts (Linux's file manager): a share's server, an sftp or WebDAV host; a
+        // phone or the trash isn't another computer.
+        for (raw, machine) in [
+            (
+                "/run/user/1000/gvfs/smb-share:server=NAS.local,share=code/a.png",
+                "nas.local",
+            ),
+            (
+                "/run/user/1000/gvfs/sftp:host=example.com,user=me/x",
+                "example.com",
+            ),
+            (
+                "/run/user/42/gvfs/dav:host=dav.example,ssl=true/x",
+                "dav.example",
+            ),
+        ] {
+            assert_eq!(other(raw, false).as_deref(), Some(machine), "{raw}");
+        }
+        for raw in [
+            "/run/user/1000/gvfs/mtp:host=Google_Pixel_123/x",
+            "/run/user/1000/gvfs/trash:/x",
+            "/run/user/1000/gvfs",
+            "/run/user/me/gvfs/smb-share:server=nas,share=c/x",
+            "/home/me/run/user/1000/gvfs/sftp:host=h/x",
+        ] {
+            assert_eq!(other(raw, false), None, "{raw}");
+        }
+        let gvfs = Some("/run/user/1000/gvfs/smb-share:server=nas,share=code/proj");
+        assert!(!out(
+            "/run/user/1000/gvfs/smb-share:server=nas,share=code/proj/a.rs",
+            gvfs,
+            false
+        ));
+        assert!(out(
+            "/run/user/1000/gvfs/sftp:host=evil.example/a",
+            gvfs,
+            false
+        ));
         let net = Some("/net/nas/code");
         assert!(!out("/net/nas/code/a.rs", net, false));
         assert!(out("/net/evil/a", net, false));

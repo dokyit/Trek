@@ -65,6 +65,19 @@ fn load_text_system() {
     std::mem::forget(platform);
 }
 
+/// Linux: cosmic-text, as the app's X11 and Wayland windows use it. The headless platform makes
+/// the same text system without a display (gpui-kit turns on its x11 and wayland features, which
+/// is what gives it cosmic-text rather than a no-op). Made before `main` and kept for the process,
+/// as on the other platforms.
+#[cfg(target_os = "linux")]
+#[ctor::ctor(unsafe)]
+fn load_text_system() {
+    let platform = gpui_linux::current_platform(true);
+    let _ = TEXT.set(platform.text_system());
+    add_fonts();
+    std::mem::forget(platform);
+}
+
 /// Every test in this process, UI or not, is isolated before any of them runs: the unit tests
 /// that share the binary with these never reach the user's data folder or Keychain either. Home
 /// moves too, so anything that slips past Trek's own guards (an agent CLI, a login shell) finds
@@ -204,10 +217,13 @@ pub fn mock() -> AgentId {
     AgentId::Direct(trek_core::catalog::MOCK_PROVIDER.into())
 }
 
-/// What the updater says when the install goes ahead and can't: no app bundle runs here (macOS), or
-/// the staged update the tests name isn't there (Windows checks that before anything else).
+/// What the updater says when the install goes ahead and can't: no app bundle runs here (macOS), the
+/// staged update the tests name isn't there (Windows checks that before anything else), or this
+/// isn't the AppImage (Linux, where only that replaces itself).
 pub const INSTALL_BLOCKED: &str = if cfg!(windows) {
     "the downloaded update is gone"
+} else if cfg!(target_os = "linux") {
+    "only the AppImage updates itself"
 } else {
     "not running from an app bundle"
 };

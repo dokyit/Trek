@@ -67,9 +67,13 @@ use trek_core::detect::Availability;
 use trek_core::import::{ImportedThread, Skip};
 use trek_core::settings::{Settings, secrets};
 
-/// What the iOS Simulator section says where Windows has nothing to show.
-const SIMULATOR_NEEDS_A_MAC: &str =
-    "The iOS Simulator needs macOS, so Trek doesn't offer it on Windows.";
+/// What the iOS Simulator section says where there's no Mac: Windows, Linux.
+fn simulator_needs_a_mac() -> String {
+    format!(
+        "The iOS Simulator needs macOS, so Trek doesn't offer it on {}.",
+        crate::words::words().os_name
+    )
+}
 
 pub fn page_icon(p: SettingsPage) -> Icon {
     match p {
@@ -137,6 +141,13 @@ pub fn pages() -> impl Iterator<Item = SettingsPage> {
     NAV_GROUPS
         .iter()
         .flat_map(|(_, pages)| pages.iter().copied())
+        .filter(|p| offered(*p))
+}
+
+/// Whether this platform has page `p`: Linux has no App Snapshots (no capture tool Trek drives
+/// there; see `Composer::snapshots_offered`).
+pub fn offered(p: SettingsPage) -> bool {
+    p != SettingsPage::Snapshots || crate::composer::Composer::snapshots_offered()
 }
 
 /// A settings page by its label, case-insensitive with dashes for spaces ("updates", "api-keys").
@@ -173,7 +184,9 @@ pub fn page_blurb(p: SettingsPage) -> std::borrow::Cow<'static, str> {
         SettingsPage::Skills => "Instructions your agents can load on demand. Turn a skill off and every agent stops seeing it; turn it on to bring it back.".into(),
         SettingsPage::Shortcuts => "Every keyboard shortcut in Trek, each yours to change.".into(),
         SettingsPage::Agents => "Trek runs each vendor's own agent with the login you already have, so your subscriptions just work. Trek never reads or stores those credentials.".into(),
-        // Windows has no iOS Simulator, so its blurb doesn't promise one.
+        // Windows has no iOS Simulator, so its blurb doesn't promise one; Linux has neither it
+        // nor computer use.
+        SettingsPage::Tools if crate::words::is_linux() => "The browser, and the MCP servers, skills and plugins your agents can call.".into(),
         SettingsPage::Tools if crate::words::is_windows() => "Computer use, and the MCP servers, skills and plugins your agents can call.".into(),
         SettingsPage::Tools => "Computer use, the iOS Simulator, and the MCP servers, skills and plugins your agents can call.".into(),
         SettingsPage::Permissions => "How much each agent may do without asking.".into(),
@@ -251,7 +264,7 @@ impl Render for SettingsNav {
                             .text_color(theme.muted_foreground.opacity(0.8))
                             .child(*group),
                     )
-                    .children(pages.iter().map(|&p| {
+                    .children(pages.iter().copied().filter(|p| offered(*p)).map(|p| {
                         let label: &'static str = p.label();
                         // Agents: how many CLI updates are out (while Trek keeps checking: with checks
                         // off, what the last check found isn't fresh enough to badge).
@@ -805,7 +818,7 @@ impl SettingsView {
             local: Probe::default(),
             icon_file: Probe::default(),
             firewall: Probe::default(),
-            pair_in_browser: crate::words::is_windows(),
+            pair_in_browser: !crate::words::is_mac(),
             data_dir: trek_core::paths::data_dir(),
             installing_agents: Started::default(),
             signing_in_agents: Started::default(),
@@ -1047,6 +1060,11 @@ impl SettingsView {
     fn adblock_rows(&self, s: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
         use crate::panels::browser_adblock::{self, AdBlocker};
         use gpui_kit::component::Disableable as _;
+        // Linux's WebKitGTK takes neither the content rules macOS compiles uBlock Origin's lists
+        // into nor WebView2's extensions: nothing to import them into.
+        if crate::words::is_linux() {
+            return vec![];
+        }
         let blocker = AdBlocker::get(cx);
         let blocker = blocker.read(cx);
         let (imported, busy, error) = (
@@ -2310,68 +2328,72 @@ impl SettingsView {
         let ax = probe.as_ref().map(|p| p.accessibility);
         let sr = probe.as_ref().map(|p| p.screen_recording);
         out.extend(self.connections(cx));
-        out.push(Self::heading("Computer use", cx));
-        let mut computer_use = vec![Self::row(
-            "Computer use tools",
-            "Off until you turn it on. Agents can then see the screen, click, type and switch apps through Trek's MCP tools, following your hand-holding level.",
-            self.switch("computer-use", s.tools.computer_use, |s, v| {
-                s.tools.computer_use = v
-            }),
-            cx,
-        )];
-        let permissions_note = crate::words::words().computer_use_note;
-        // Where the system asks for no permission, a sentence says so instead of two rows that could only say Allowed.
-        if permissions_note.is_none() {
-            computer_use.push(Self::row(
-                "Accessibility",
-                with_note("Lets Trek click and type for the agent.", ax),
-                permission(
-                    "ax-perm",
+        // Linux has no computer use: no screenshots or input of other apps' windows to give.
+        let linux = crate::words::is_linux();
+        if !linux {
+            out.push(Self::heading("Computer use", cx));
+            let mut computer_use = vec![Self::row(
+                "Computer use tools",
+                "Off until you turn it on. Agents can then see the screen, click, type and switch apps through Trek's MCP tools, following your hand-holding level.",
+                self.switch("computer-use", s.tools.computer_use, |s, v| {
+                    s.tools.computer_use = v
+                }),
+                cx,
+            )];
+            let permissions_note = crate::words::words().computer_use_note;
+            // Where the system asks for no permission, a sentence says so instead of two rows that could only say Allowed.
+            if permissions_note.is_none() {
+                computer_use.push(Self::row(
                     "Accessibility",
-                    ax,
-                    crate::integrations::ACCESSIBILITY_PANE,
+                    with_note("Lets Trek click and type for the agent.", ax),
+                    permission(
+                        "ax-perm",
+                        "Accessibility",
+                        ax,
+                        crate::integrations::ACCESSIBILITY_PANE,
+                        cx,
+                    ),
                     cx,
-                ),
-                cx,
-            ));
-            computer_use.push(Self::row(
-                "Screen Recording",
-                with_note("Lets Trek take screenshots of other apps.", sr),
-                permission(
-                    "sr-perm",
+                ));
+                computer_use.push(Self::row(
                     "Screen Recording",
-                    sr,
-                    crate::integrations::SCREEN_RECORDING_PANE,
+                    with_note("Lets Trek take screenshots of other apps.", sr),
+                    permission(
+                        "sr-perm",
+                        "Screen Recording",
+                        sr,
+                        crate::integrations::SCREEN_RECORDING_PANE,
+                        cx,
+                    ),
                     cx,
-                ),
-                cx,
-            ));
-        }
-        // The Mac's agents can work behind the user's windows; Windows' work in front.
-        if !crate::words::is_windows() {
-            computer_use.push(Self::row(
+                ));
+            }
+            // The Mac's agents can work behind the user's windows; Windows' work in front.
+            if !crate::words::is_windows() {
+                computer_use.push(Self::row(
                 "Work in the background",
                 "Agents click and type in an app's window behind yours, so you keep the pointer and keyboard, and what they open stays behind. The app in front is yours while you're at the Mac, even if you're only reading: if they need it, they wait and ask you instead of taking it over. They use an app that's already open rather than open a second copy. Off: they use the real pointer and keyboard, in front. Applies to new sessions.",
                 self.switch("computer-background", s.tools.computer_background, |s, v| s.tools.computer_background = v),
                 cx,
             ));
-            if s.tools.computer_background {
-                computer_use.push(Self::row(
+                if s.tools.computer_background {
+                    computer_use.push(Self::row(
                     "Show what they're doing",
                     &format!("A small floating picture of the window an agent works in, live, with Stop. Fold it to a pill or put it away; bring it back from the {}.", crate::words::words().tray_label.to_lowercase()),
                     self.switch("background-pip", s.tools.background_pip, |s, v| s.tools.background_pip = v),
                     cx,
                 ));
+                }
+            }
+            out.push(ui::group(computer_use, cx));
+            if let Some(note) = permissions_note {
+                out.push(div().pt_3().child(Self::note(note, cx)).into_any_element());
             }
         }
-        out.push(ui::group(computer_use, cx));
-        if let Some(note) = permissions_note {
-            out.push(div().pt_3().child(Self::note(note, cx)).into_any_element());
-        }
         out.push(Self::heading("iOS Simulator", cx));
-        if crate::words::is_windows() {
+        if !crate::words::is_mac() {
             // Xcode's tools are all it has to run on: nothing to switch, install or allow.
-            out.push(Self::note(SIMULATOR_NEEDS_A_MAC, cx));
+            out.push(Self::note(&simulator_needs_a_mac(), cx));
         } else {
             let axe_control: AnyElement = match probe.as_ref().map(|p| p.axe) {
                 None => checking("install-axe"),
@@ -2474,30 +2496,33 @@ impl SettingsView {
                 cx,
             ));
         }
-        out.push(Self::heading("Video", cx));
-        let ffmpeg_row = self.media_tool_row(
-            trek_core::media_tools::Tool::Ffmpeg,
-            probe.as_ref().map(|p| (p.ffmpeg, p.package_manager)),
-            cx,
-        );
-        let ytdlp_row = self.media_tool_row(
-            trek_core::media_tools::Tool::YtDlp,
-            probe.as_ref().map(|p| (p.ytdlp, p.package_manager)),
-            cx,
-        );
-        out.push(ui::group(
-            vec![
-                Self::row(
-                    "Video watcher",
-                    crate::words::words().video_watcher_note,
-                    self.switch("video-tools", s.tools.video, |s, v| s.tools.video = v),
-                    cx,
-                ),
-                ffmpeg_row,
-                ytdlp_row,
-            ],
-            cx,
-        ));
+        // Linux: the video watcher (`trek-mcp video`) runs on macOS and Windows only.
+        if !linux {
+            out.push(Self::heading("Video", cx));
+            let ffmpeg_row = self.media_tool_row(
+                trek_core::media_tools::Tool::Ffmpeg,
+                probe.as_ref().map(|p| (p.ffmpeg, p.package_manager)),
+                cx,
+            );
+            let ytdlp_row = self.media_tool_row(
+                trek_core::media_tools::Tool::YtDlp,
+                probe.as_ref().map(|p| (p.ytdlp, p.package_manager)),
+                cx,
+            );
+            out.push(ui::group(
+                vec![
+                    Self::row(
+                        "Video watcher",
+                        crate::words::words().video_watcher_note,
+                        self.switch("video-tools", s.tools.video, |s, v| s.tools.video = v),
+                        cx,
+                    ),
+                    ffmpeg_row,
+                    ytdlp_row,
+                ],
+                cx,
+            ));
+        }
         out.push(Self::heading("Sub-agents", cx));
         out.push(ui::group(
             vec![

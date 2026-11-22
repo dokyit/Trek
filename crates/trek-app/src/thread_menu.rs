@@ -543,6 +543,7 @@ fn open_in_submenu(
 /// The "Open in" targets for `dir`, as items of `menu`. On a Mac the apps are launched through
 /// `open -a`; on Windows each is found through the registry and PATH (`trek_core::open_in`) and
 /// started with the folder as its argument. Checked when the menu opens, not on every frame.
+#[cfg_attr(target_os = "linux", allow(unreachable_code))]
 pub fn open_in_items(mut menu: PopupMenu, dir: PathBuf) -> PopupMenu {
     if cfg!(windows) {
         let folder = dir.clone();
@@ -563,6 +564,20 @@ pub fn open_in_items(mut menu: PopupMenu, dir: PathBuf) -> PopupMenu {
                     tracing::warn!("open in {label}: {e}");
                 }
             }));
+        }
+        return menu;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let folder = dir.clone();
+        menu = menu.item(
+            PopupMenuItem::new(crate::words::words().file_manager)
+                .on_click(move |_, _, cx| cx.open_with_system(&folder)),
+        );
+        for opener in crate::linux_open_in::openers() {
+            let dir = dir.clone();
+            menu = menu
+                .item(PopupMenuItem::new(opener.label).on_click(move |_, _, _| opener.open(&dir)));
         }
         return menu;
     }

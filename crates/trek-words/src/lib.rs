@@ -1,6 +1,7 @@
 //! The platform's own names for the things Trek mentions: the file manager, the taskbar or Dock,
-//! the credential store, "this Mac" or "this PC". Every visible string that names one of them
-//! reads from here, so a Windows window never says Finder and a Mac never says File Explorer.
+//! the credential store, "this Mac", "this PC" or "this computer". Every visible string that names
+//! one of them reads from here, so a Windows window never says Finder, a Mac never says File
+//! Explorer, and Linux says neither.
 //!
 //! Fields are named for what they mean, not for the macOS word. A sentence that needs more than
 //! a word swapped is held whole. The macOS table is today's wording, character for character.
@@ -232,46 +233,167 @@ const WINDOWS: Words = Words {
     banners_off_note: "Windows has Trek's notifications turned off, so no banners show; sounds still play. Turn them on in Settings › System › Notifications.",
 };
 
-/// The wording for a platform: Windows, or macOS (which is also what every other platform gets).
+// Linux: the desktop varies (GNOME, KDE, Xfce...), so the words are the ones every desktop
+// shares: the file manager, the keyring, the tray. No Dock badge, no Preview, no Win+H.
+const LINUX: Words = Words {
+    os_name: "Linux",
+
+    file_manager: "File Manager",
+    show_in_file_manager: "Show in File Manager",
+    show_folder_in_file_manager: "Show folder in File Manager",
+    reveal_in_file_manager: "Reveal in File Manager",
+
+    match_system_theme: "Match system",
+
+    package_manager: "your package manager",
+
+    badge_label: "Launcher badge",
+    badge_note: "Count of threads waiting on you, on Trek's launcher icon where the desktop shows one (Ubuntu's dock, KDE's task manager).",
+    app_icon_note: "Shown in the task switcher and the window list while Trek runs. The launcher keeps Night.",
+    tray_label: "Tray icon",
+
+    glass_note: "Your desktop shows through the window, under translucent panels, where the desktop composites windows (KDE blurs it too). Leave it off on a desktop without a compositor, where what shows through is black.",
+
+    your_credential_store: "your keyring",
+    api_keys_blurb: "Pay-as-you-go models outside your subscriptions. Keys live in your desktop's keyring (GNOME Keyring or KWallet, through the Secret Service); keys exported in your shell are used automatically.",
+
+    this_computer: "this computer",
+    the_computer: "the computer",
+    computer: "Computer",
+    computer_fingerprint: "This computer's fingerprint",
+
+    keep_awake_label: "Keep the computer awake while agents work",
+    stay_in_tray: Some((
+        "Keep Trek in the tray when its window closes",
+        "Agents keep working and banners still come. The tray icon, or opening Trek, brings the window back. Off, or with no tray on the desktop, closing quits once nothing is at work.",
+    )),
+
+    firewall_note: Some(
+        "If a firewall runs on this computer (ufw, firewalld), let it accept Trek's port on your private network, or your iPhone can't reach this computer.",
+    ),
+
+    window_shadow_note: None,
+    screen_recording: None,
+    snipping_tool_note: None,
+
+    computer_use_note: None,
+
+    trash: "Trash can",
+
+    open_in_viewer: "Open in default app",
+
+    dictate_fallback: None,
+
+    browser_unavailable: "The embedded browser needs WebKitGTK and an X11 display (Xwayland in a Wayland session), which Trek couldn't start here.",
+
+    quit_app: "Quit Trek",
+
+    build_name: "Linux",
+
+    video_watcher_note: "Agents can watch a video file or link: they get its frames and a transcript of its audio, and you get a player with the frames they saw. YouTube and X links use yt-dlp, with ffmpeg; on Linux install both with your package manager. Transcripts use whisper when it's installed. Applies to new sessions.",
+
+    local_servers: "Ollama, LM Studio and llama.cpp",
+
+    banners_off_note: "Your desktop has Trek's notifications turned off or no notification service runs, so no banners show; sounds still play. Turn them on in your desktop's notification settings.",
+};
+
+/// The platforms whose words differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Os {
+    Mac,
+    Windows,
+    Linux,
+}
+
+impl Os {
+    /// The platform this was built for.
+    pub const fn here() -> Os {
+        if cfg!(windows) {
+            Os::Windows
+        } else if cfg!(target_os = "linux") {
+            Os::Linux
+        } else {
+            Os::Mac
+        }
+    }
+}
+
+/// The wording for a platform: Windows, or macOS.
 pub const fn for_platform(windows: bool) -> Words {
     if windows { WINDOWS } else { MACOS }
 }
 
-static MAC: Words = for_platform(false);
-static WIN: Words = for_platform(true);
+/// The wording for `os`.
+pub const fn for_os(os: Os) -> Words {
+    match os {
+        Os::Mac => MACOS,
+        Os::Windows => WINDOWS,
+        Os::Linux => LINUX,
+    }
+}
+
+static MAC: Words = for_os(Os::Mac);
+static WIN: Words = for_os(Os::Windows);
+static LIN: Words = for_os(Os::Linux);
+
+/// The platform whose wording `words()` gives: this one, or the one a test pretends to be on.
+pub fn os() -> Os {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(os) = PRETEND.with(std::cell::Cell::get) {
+        return os;
+    }
+    Os::here()
+}
 
 /// The wording of the platform running.
 pub fn words() -> &'static Words {
-    #[cfg(any(test, feature = "test-support"))]
-    if let Some(windows) = PRETEND.with(std::cell::Cell::get) {
-        return if windows { &WIN } else { &MAC };
+    match os() {
+        Os::Mac => &MAC,
+        Os::Windows => &WIN,
+        Os::Linux => &LIN,
     }
-    if cfg!(windows) { &WIN } else { &MAC }
 }
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    /// The platform a test is pretending to be on, so one run sees both tables (each GPUI test
+    /// The platform a test is pretending to be on, so one run sees every table (each GPUI test
     /// runs on its own thread).
-    static PRETEND: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static PRETEND: std::cell::Cell<Option<Os>> = const { std::cell::Cell::new(None) };
 }
 
 /// Whether the platform whose words `words()` gives is Windows: for what a Mac has and Windows
 /// hasn't (the iOS Simulator), which the table can't hold as a word.
 pub fn is_windows() -> bool {
-    std::ptr::eq(words(), &WIN)
+    os() == Os::Windows
+}
+
+/// Whether it's Linux: for what neither Apple's tools nor Windows' reach there (the iPhone tool,
+/// computer use).
+pub fn is_linux() -> bool {
+    os() == Os::Linux
+}
+
+/// Whether it's a Mac: for what only Apple's tools do (the iOS Simulator, Xcode).
+pub fn is_mac() -> bool {
+    os() == Os::Mac
 }
 
 /// Until the guard drops, `words()` answers for Windows (`true`) or the Mac (`false`).
 #[cfg(any(test, feature = "test-support"))]
 pub fn pretend(windows: bool) -> impl Drop {
-    struct Restore(Option<bool>);
+    pretend_os(if windows { Os::Windows } else { Os::Mac })
+}
+
+/// Until the guard drops, `words()` answers for `os`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn pretend_os(os: Os) -> impl Drop {
+    struct Restore(Option<Os>);
     impl Drop for Restore {
         fn drop(&mut self) {
             PRETEND.with(|p| p.set(self.0));
         }
     }
-    Restore(PRETEND.with(|p| p.replace(Some(windows))))
+    Restore(PRETEND.with(|p| p.replace(Some(os))))
 }
 
 #[cfg(test)]
@@ -545,16 +667,76 @@ mod tests {
 
     #[test]
     fn this_platform_gets_its_own_table() {
-        assert_eq!(*words(), for_platform(cfg!(windows)));
+        assert_eq!(*words(), for_os(Os::here()));
         assert_eq!(is_windows(), cfg!(windows));
+        assert_eq!(is_linux(), cfg!(target_os = "linux"));
+        assert_eq!(is_mac(), cfg!(target_os = "macos"));
     }
 
     #[test]
-    fn a_test_can_pretend_to_be_either_platform() {
+    fn a_test_can_pretend_to_be_any_platform() {
         for windows in [true, false] {
             let _guard = pretend(windows);
             assert_eq!(is_windows(), windows);
             assert_eq!(*words(), for_platform(windows));
+        }
+        for pretended in [Os::Mac, Os::Windows, Os::Linux] {
+            let _guard = pretend_os(pretended);
+            assert_eq!(os(), pretended);
+            assert_eq!(*words(), for_os(pretended));
+        }
+    }
+
+    #[test]
+    fn the_linux_table_names_nothing_from_the_mac_or_windows() {
+        for (field, text) in strings(&for_os(Os::Linux)) {
+            for word in [
+                "Finder",
+                "Dock",
+                "Keychain",
+                "macOS",
+                "Mac",
+                "Spotlight",
+                "menu bar",
+                "Menu bar",
+                "Homebrew",
+                "File Explorer",
+                "Taskbar",
+                "taskbar",
+                "Credential Manager",
+                "Windows",
+                "WinGet",
+                "PC",
+                "Recycle Bin",
+                "Snipping Tool",
+                "Win+H",
+                "WebView2",
+            ] {
+                assert!(!text.contains(word), "Linux `{field}` says {word}: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn linux_names_its_own_things() {
+        let w = for_os(Os::Linux);
+        assert_eq!(w.os_name, "Linux");
+        assert_eq!(
+            format!("Runs on {}", w.this_computer),
+            "Runs on this computer"
+        );
+        assert_eq!(
+            format!("Saved in {}", w.your_credential_store),
+            "Saved in your keyring"
+        );
+        assert_eq!(format!("the {} build", w.build_name), "the Linux build");
+        assert_eq!(w.dictate_fallback, None, "no system dictation to point at");
+        assert!(w.stay_in_tray.is_some(), "no Dock keeps Trek up");
+        assert!(w.browser_unavailable.contains("WebKitGTK"));
+        assert_eq!(w.screen_recording, None);
+        assert_eq!(w.snipping_tool_note, None);
+        for (field, text) in strings(&w) {
+            assert!(!text.is_empty(), "`{field}` is blank");
         }
     }
 

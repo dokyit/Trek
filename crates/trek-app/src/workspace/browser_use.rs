@@ -50,9 +50,11 @@ pub(super) fn answered(request_id: &str, decision: Decision) -> bool {
 }
 
 impl Workspace {
-    /// Whether sessions get Trek's browser tools: on in settings, and a Browser to drive.
+    /// Whether sessions get Trek's browser tools: on in settings. Every platform has a Browser to
+    /// drive (WebView2, WKWebView, WebKitGTK); where it can't be made (Linux on native Wayland,
+    /// no WebKitGTK) a call says so.
     pub(super) fn browser_tools(&self) -> bool {
-        self.settings.tools.browser && cfg!(any(target_os = "macos", windows))
+        self.settings.tools.browser
     }
 
     /// A browser tool call from `call.thread`'s agent: to the main window's Browser.

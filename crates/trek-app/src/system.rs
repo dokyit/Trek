@@ -249,10 +249,46 @@ fn set_dock_badge(count: usize, main: Option<AnyWindowHandle>, cx: &mut App) -> 
 
 #[cfg(all(
     not(target_os = "macos"),
+    not(target_os = "linux"),
     not(windows),
     not(any(test, feature = "test-support"))
 ))]
 fn set_dock_badge(_: usize, _: Option<AnyWindowHandle>, _: &mut App) -> bool {
+    true
+}
+
+/// The desktop entry Trek's launcher icon is (the packages install `dev.trek.Trek.desktop`, whose
+/// `StartupWMClass` is the windows' app id).
+#[cfg(target_os = "linux")]
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
+pub const DESKTOP_ENTRY: &str = "dev.trek.Trek.desktop";
+
+/// Linux: the count on Trek's launcher icon, through Unity's LauncherEntry signal on the session
+/// bus, which Ubuntu's dock, KDE's task manager, Plank and Dash to Dock show (GNOME's own dash
+/// shows none). Said, not asked: nothing answers, so it counts as shown once sent.
+#[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
+fn set_dock_badge(count: usize, _main: Option<AnyWindowHandle>, _cx: &mut App) -> bool {
+    use gtk::gio;
+    use gtk::glib::{self, ToVariant as _};
+    let Ok(bus) = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) else {
+        return true;
+    };
+    let props = glib::VariantDict::new(None);
+    props.insert_value("count", &(count as i64).to_variant());
+    props.insert_value("count-visible", &(count > 0).to_variant());
+    let body = glib::Variant::tuple_from_iter([
+        format!("application://{DESKTOP_ENTRY}").to_variant(),
+        props.end(),
+    ]);
+    if let Err(e) = bus.emit_signal(
+        None,
+        "/dev/trek/Trek",
+        "com.canonical.Unity.LauncherEntry",
+        "Update",
+        Some(&body),
+    ) {
+        tracing::debug!("launcher badge: {e}");
+    }
     true
 }
 
