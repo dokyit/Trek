@@ -547,6 +547,21 @@ impl DeviceRegistry {
         removed
     }
 
+    /// Unpair `device_id` in the devices file at `path` while no server has it open (the phone
+    /// server off): its token's hash goes from the file, so a server started on that file later
+    /// turns the device away. Saved before it returns, and an error if it couldn't be; whether it
+    /// was paired.
+    pub fn revoke_saved(path: impl Into<PathBuf>, device_id: &str) -> io::Result<bool> {
+        let mut registry = Self::load(path)?;
+        let before = registry.devices.len();
+        registry.devices.retain(|d| d.device_id != device_id);
+        if registry.devices.len() == before {
+            return Ok(false);
+        }
+        registry.save()?;
+        Ok(true)
+    }
+
     /// Send the device's notifications to `push` from now on (`None`: none). Returns whether it's
     /// paired.
     pub fn set_push(

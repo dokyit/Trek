@@ -80,6 +80,7 @@ pub mod thinking_timeline;
 pub mod thread_menu;
 pub mod thread_view;
 pub mod thread_window;
+pub mod wipe;
 pub use trek_time as time;
 pub mod toast;
 pub mod tray;
@@ -162,7 +163,11 @@ actions!(
         TerminalSmaller,
         TerminalActualSize,
         PreviewActualPixels,
-        PreviewFit
+        PreviewFit,
+        AllowRequest,
+        AllowRequestForSession,
+        AlwaysAllowRequest,
+        DenyRequest
     ]
 );
 

@@ -655,6 +655,37 @@ impl Store {
         Ok(store)
     }
 
+    /// Let go of the database file, for this store and every clone of it (they share its
+    /// connections): from now on they all read and write a database in memory, empty, and keep
+    /// their transcripts' logs in the data folder as it is now. For "Delete all Trek data", which
+    /// deletes the file next (Windows won't delete a file that's open).
+    pub fn close(&self) -> Result<()> {
+        let fresh = Store::in_memory()?;
+        let lock = |m: &Arc<Mutex<Connection>>| {
+            let mut guard = m.lock().unwrap_or_else(PoisonError::into_inner);
+            std::mem::replace(&mut *guard, Connection::open_in_memory()?)
+                .close()
+                .map_err(|(_, e)| e)?;
+            drop(guard);
+            anyhow::Ok(())
+        };
+        {
+            let mut mine = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut theirs = fresh.conn.lock().unwrap_or_else(PoisonError::into_inner);
+            std::mem::swap(&mut *mine, &mut *theirs);
+        }
+        // The file's connection, now in `fresh`, closes with it.
+        drop(fresh);
+        if let Some(reader) = &self.reader {
+            lock(reader)?;
+        }
+        if let Some(logs) = &self.logs {
+            *logs.lock().unwrap_or_else(PoisonError::into_inner) =
+                crate::session_log::Logs::new(crate::paths::transcripts_dir());
+        }
+        Ok(())
+    }
+
     pub fn open_default() -> Result<Store> {
         Store::open(&crate::paths::database_file())
     }
@@ -2290,6 +2321,27 @@ mod tests {
         }
         assert!(s.thread(&other.id).unwrap().is_some());
         assert_eq!(s.checkpoints(&other.id).unwrap().len(), 1);
+    }
+
+    /// Closed, a store and its clones let go of the file (so it can be deleted, on Windows too)
+    /// and go on working in memory.
+    #[test]
+    fn a_closed_store_lets_go_of_its_file_for_every_clone() {
+        let dir = std::env::temp_dir().join(format!("trek-close-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("trek.sqlite");
+        let s = Store::open(&path).unwrap();
+        let clone = s.clone();
+        s.ensure_project(Path::new("/tmp/before")).unwrap();
+        s.close().unwrap();
+        std::fs::remove_dir_all(&dir).expect("nothing holds the file");
+        assert!(
+            clone.projects().unwrap().is_empty(),
+            "an empty database now"
+        );
+        clone.ensure_project(Path::new("/tmp/after")).unwrap();
+        assert_eq!(s.projects().unwrap().len(), 1, "the clones share it");
+        assert!(!dir.exists(), "and none of it went back to the folder");
     }
 
     #[test]

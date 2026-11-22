@@ -243,7 +243,8 @@ pub fn written_text(text: &str) -> String {
     text.replace("<data>", &data).replace("<trek>", &trek)
 }
 
-fn disabled_root() -> PathBuf {
+/// Where the user's own skills wait while they're switched off in Trek.
+pub fn disabled_root() -> PathBuf {
     paths::data_dir().join("disabled-skills")
 }
 

@@ -367,9 +367,14 @@ impl SettingsView {
         }
         out.extend(self.push_section(s, cx));
         let Some((offer, addresses, advertise, routes, devices, connected)) = running else {
+            // The paired phones stay listed with the server off, so a lost one can be unpaired
+            // without letting phones connect first.
+            let devices = self.workspace.read(cx).paired_devices();
             out.push(div().h(px(16.)).into_any_element());
             out.push(Self::note(PHONE_APP_NOTE, cx));
-            out.extend(self.phone_update_section(&[], cx));
+            let phone_update = self.phone_update_section(&[], cx);
+            out.extend(self.paired_sections(devices, &Default::default(), false, cx));
+            out.extend(phone_update);
             out.extend(self.machines_section(cx));
             return out;
         };
@@ -516,9 +521,33 @@ impl SettingsView {
             }
         }
 
+        let phone_update = self.phone_update_section(&devices, cx);
+        out.extend(self.paired_sections(devices, &connected, true, cx));
+        out.extend(phone_update);
+        out.push(div().h(px(16.)).into_any_element());
+        out.push(Self::note(
+            &format!("Connections are encrypted, and each phone checks it's talking to {this} (its certificate is in the pairing code). A phone can answer and steer threads but can't change how much agents may do or run Trek's own commands, and nothing is ever answered for you."),
+            cx,
+        ));
+        out.extend(self.machines_section(cx));
+        out
+    }
+
+    /// Paired phones, then the machines that paired with this one, each with Unpair: shown
+    /// whether or not the phone server runs (`running`). Off, an unpaired device can't be told,
+    /// so the page says what happens instead: it's turned away when it next connects.
+    fn paired_sections(
+        &mut self,
+        devices: Vec<trek_remote::DeviceInfo>,
+        connected: &std::collections::HashSet<String>,
+        running: bool,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let theme = cx.theme().clone();
+        let this = crate::words::words().this_computer;
+        let mut out = vec![];
         // Paired phones: the iPhone app's pairings. A machine that paired with this one (to start
         // threads here) is a machine, not a phone: it's listed apart, where it can be unpaired too.
-        let phone_update = self.phone_update_section(&devices, cx);
         let (phones, machines) = phones_then_machines(devices);
         let paired_row = |d: trek_remote::DeviceInfo, cx: &mut Context<Self>| {
             let online = connected.contains(&d.device_id);
@@ -553,9 +582,23 @@ impl SettingsView {
                 cx,
             )
         };
+        let any = !phones.is_empty() || !machines.is_empty();
         out.push(Self::heading("Paired phones", cx));
         if phones.is_empty() {
-            out.push(Self::note("None yet.", cx));
+            out.push(
+                div()
+                    .id("mobile-paired-none")
+                    .test_support()
+                    .child(Self::note(
+                        &if running {
+                            format!("None yet. A paired phone shows your threads and answers what they ask, from Trek on iPhone or a phone's browser, while the agents keep running on {this}. Show pairing code above, then scan it with the phone.")
+                        } else {
+                            format!("None yet. A paired phone shows your threads and answers what they ask, from Trek on iPhone or a phone's browser, while the agents keep running on {this}. To pair one, turn on Let your phone connect above, then Show pairing code.")
+                        },
+                        cx,
+                    ))
+                    .into_any_element(),
+            );
         } else {
             let rows = phones.into_iter().map(|d| paired_row(d, cx)).collect();
             out.push(ui::group(rows, cx));
@@ -565,13 +608,19 @@ impl SettingsView {
             let rows = machines.into_iter().map(|d| paired_row(d, cx)).collect();
             out.push(ui::group(rows, cx));
         }
-        out.extend(phone_update);
-        out.push(div().h(px(16.)).into_any_element());
-        out.push(Self::note(
-            &format!("Connections are encrypted, and each phone checks it's talking to {this} (its certificate is in the pairing code). A phone can answer and steer threads but can't change how much agents may do or run Trek's own commands, and nothing is ever answered for you."),
-            cx,
-        ));
-        out.extend(self.machines_section(cx));
+        if any && !running {
+            out.push(div().h(px(8.)).into_any_element());
+            out.push(
+                div()
+                    .id("mobile-unpair-offline")
+                    .test_support()
+                    .child(Self::note(
+                        "Let your phone connect is off, so an unpaired phone or machine can't be told now. It's turned away the next time it tries to connect.",
+                        cx,
+                    ))
+                    .into_any_element(),
+            );
+        }
         out
     }
 

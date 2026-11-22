@@ -4,7 +4,7 @@
 
 use crate::composer::Composer;
 use crate::scale::{radius, text, to_rems};
-use crate::thread_view::ThreadView;
+use crate::thread_view::{CardKey, ThreadView};
 use crate::working_bar::WorkingBar;
 use crate::workspace::{Route, Scope, SettingsPage, Workspace, WorkspaceEvent};
 use crate::*;
@@ -96,6 +96,16 @@ impl ThreadWindow {
         &self.composer
     }
 
+    /// Answer this window's approval card with `key`; with none to answer, the keys go on.
+    fn answer_card(&mut self, key: CardKey, window: &mut Window, cx: &mut Context<Self>) {
+        let answered = self
+            .thread_view
+            .update(cx, |v, cx| v.answer_card(key, window, cx));
+        if !answered {
+            cx.propagate();
+        }
+    }
+
     fn new(
         workspace: Entity<Workspace>,
         id: String,
@@ -116,6 +126,8 @@ impl ThreadWindow {
             )
         });
         let composer = cx.new(|cx| Composer::new(workspace.clone(), scope, window, cx));
+        let card = thread_view.read(cx).card_reach();
+        composer.update(cx, |c, _| c.reach_card(card));
         let preview = cx.new(|cx| crate::image_preview::ImagePreview::new(window, cx));
         let title = workspace
             .read(cx)
@@ -429,6 +441,22 @@ impl Render for ThreadWindow {
             .on_action(cx.listener(|this, _: &Interrupt, _, cx| {
                 let id = this.id.clone();
                 this.workspace.update(cx, |ws, cx| ws.interrupt(&id, cx))
+            }))
+            .on_action(cx.listener(|this, _: &crate::AllowRequest, window, cx| {
+                this.answer_card(CardKey::Allow, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &crate::AllowRequestForSession, window, cx| {
+                    this.answer_card(CardKey::AllowForSession, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::AlwaysAllowRequest, window, cx| {
+                    this.answer_card(CardKey::AlwaysAllow, window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &crate::DenyRequest, window, cx| {
+                this.answer_card(CardKey::Deny, window, cx)
             }))
             .on_action(cx.listener(|this, _: &CycleHandHolding, _, cx| {
                 let scope = Scope::Thread(this.id.clone());

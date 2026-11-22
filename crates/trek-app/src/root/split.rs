@@ -86,6 +86,8 @@ impl TrekWindow {
             let background_strip =
                 cx.new(|cx| BackgroundStrip::new(ws.clone(), Scope::Beside, window, cx));
             let composer = cx.new(|cx| Composer::new(ws.clone(), Scope::Beside, window, cx));
+            let card = thread_view.read(cx).card_reach();
+            composer.update(cx, |c, _| c.reach_card(card));
             let main = self.composer.clone();
             composer.update(cx, |c, cx| c.share_drafts_with(&main, window, cx));
             let _watch = cx.observe(&composer, |this, _, _| {
@@ -118,6 +120,24 @@ impl TrekWindow {
             });
         }
         self.beside.as_mut().expect("just made")
+    }
+
+    /// Answer the approval card in front of the keys (the pane with them) with `key`; with none
+    /// there to answer, the keys go on to whatever else has them.
+    pub(super) fn answer_card(
+        &mut self,
+        key: crate::thread_view::CardKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = match self.workspace.read(cx).harness_scope() {
+            Scope::Beside => self.beside.as_ref().map(|p| p.thread_view.clone()),
+            _ => Some(self.thread_view.clone()),
+        };
+        let answered = view.is_some_and(|v| v.update(cx, |v, cx| v.answer_card(key, window, cx)));
+        if !answered {
+            cx.propagate();
+        }
     }
 
     /// The composer of the pane with the focus: what "the composer" means to the window's keys and

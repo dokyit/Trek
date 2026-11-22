@@ -708,6 +708,11 @@ fn mobile_dir() -> PathBuf {
     trek_core::paths::data_dir().join("mobile")
 }
 
+/// The paired devices' file, which the phone server keeps (`ServerConfig::devices_path`).
+fn devices_file() -> PathBuf {
+    mobile_dir().join("devices.json")
+}
+
 /// The web remote's side of the phone server: its certificates beside the server's own, and the
 /// page at trekdesktop.com/remote, or the copy `TREK_WEB_REMOTE_PAGE` names
 /// (`http://localhost:8080/remote/`, one served on this machine while it's worked on or checked),
@@ -875,7 +880,7 @@ impl Workspace {
                                 link::describe(peer.ip(), local.ip(), tailscale, interface_of(local).as_deref())
                             })
                     });
-                    config.devices_path = Some(mobile_dir().join("devices.json"));
+                    config.devices_path = Some(devices_file());
                     // What a Trek that quit mid-upload left of a phone's file.
                     uploads::sweep_stale(&uploads::uploads_dir(), uploads::STALE);
                     config.tls = Some(identity);
@@ -930,6 +935,11 @@ impl Workspace {
                         remote.announce = Some((name, id));
                         remote.policy = policy;
                         remote.web = Some(web);
+                        // Unpaired from Settings while this server read the devices file.
+                        for id in std::mem::take(&mut ws.unpaired_while_starting) {
+                            remote.handle.revoke(&id);
+                        }
+                        remote.devices = remote.handle.devices();
                         ws.remote = Some(remote);
                         // A port or address changed while it started (`sync_remote` waits for a start
                         // to finish): start again with the new one.
@@ -1018,7 +1028,7 @@ impl Workspace {
         config.bind = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
         config.advertise = Some(address.clone());
         config.routes = vec![address.clone()];
-        config.devices_path = Some(mobile_dir().join("devices.json"));
+        config.devices_path = Some(devices_file());
         config.tls = Some(identity);
         config.features = server_features();
         let web = self.settings.mobile.web;
@@ -1054,6 +1064,7 @@ impl Workspace {
         if let Some(remote) = self.remote.take() {
             remote.handle.shutdown();
         }
+        *self.saved_devices.borrow_mut() = None;
         cx.notify();
     }
 
@@ -1095,13 +1106,44 @@ impl Workspace {
         }
     }
 
+    /// Unpair a phone or machine. With the phone server on, it's dropped and its live connection
+    /// told. With it off, nothing can tell the device, so it comes off the devices file instead:
+    /// its token's hash goes, and the server turns it away the next time it starts and the device
+    /// connects. A server starting just then takes it off too, once it's up.
     pub fn revoke_device(&mut self, device_id: &str, cx: &mut Context<Self>) {
         if let Some(remote) = self.remote.as_mut() {
             remote.handle.revoke(device_id);
             remote.devices = remote.handle.devices();
             remote.connected.remove(device_id);
             cx.notify();
+            return;
         }
+        if self.remote_starting {
+            self.unpaired_while_starting.push(device_id.to_string());
+        }
+        if let Err(e) = tr::DeviceRegistry::revoke_saved(devices_file(), device_id) {
+            cx.emit(WorkspaceEvent::Failure {
+                message: format!("Couldn't unpair it: {e}."),
+            });
+        }
+        *self.saved_devices.borrow_mut() = None;
+        cx.notify();
+    }
+
+    /// The paired phones and machines: the server's list while it runs, else the devices file's
+    /// (read once, and again after an unpair or the server stopping).
+    pub fn paired_devices(&self) -> Vec<tr::DeviceInfo> {
+        if let Some(remote) = &self.remote {
+            return remote.devices.clone();
+        }
+        self.saved_devices
+            .borrow_mut()
+            .get_or_insert_with(|| {
+                tr::DeviceRegistry::load(devices_file())
+                    .map(|r| r.list())
+                    .unwrap_or_default()
+            })
+            .clone()
     }
 
     // ---- requests from phones ----

@@ -51,6 +51,7 @@ pub mod update;
 pub mod verification;
 pub mod visualization;
 pub mod winget;
+pub mod wipe;
 pub mod worktree;
 
 pub use types::*;

@@ -78,6 +78,19 @@ live_skip = "Linux: not seen live yet: it's Windows' hand-over (`single_instance
 code = ["crates/trek-app/src/single_instance.rs", "crates/trek-ipc/src/instance.rs", "crates/trek-ipc/src/server.rs"]
 
 [[feature]]
+id = "delete-all-data"
+area = "App"
+what = "Delete all Trek data: everything Trek keeps for the profile goes (keys in the system's secret store included), the projects, Trek's worktrees and the agents' own data stay, and Trek quits"
+macos = "yes"
+windows = "yes"
+linux = "partial"
+note = "Linux: the data, log and cache folders and the keyring's accounts Trek's settings name go (the Secret Service can't list, as on Windows), but WebKitGTK keeps the Browser's data in a folder of its own choosing that Trek doesn't name yet; it would need the Browser to give WebKitGTK a data folder under Trek's."
+live = ["route settings:general", "wait 300", "reveal delete-all-data", "click delete-all-data", "wait 400", "count wipe-confirm 1", "count wipe-delete 1", "click wipe-cancel", "wait 300", "count wipe-confirm 0"]
+how = { macos = "The Keychain lists Trek's accounts, so every one goes; WebKit's site data, cookies and saved window state (by the bundle id) go with the rest.", windows = "Credential Manager can't list, so the accounts Trek's settings name go; the web views' profiles beside the logs (%LOCALAPPDATA%\\Trek) go with the rest. A file still open is named and tried again as Trek quits.", linux = "The keyring's accounts the settings name go through the same keyring delete (the Secret Service and its kernel-keyring cache)." }
+code = ["crates/trek-app/src/wipe.rs", "crates/trek-core/src/wipe.rs"]
+tests = ["crates/trek-app/tests/wipe.rs"]
+
+[[feature]]
 id = "trek-links"
 area = "App"
 what = "trek:// links open in Trek"
