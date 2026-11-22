@@ -1,6 +1,6 @@
 """The website's own icons and share picture, from the signpost in site/assets/img/mark.svg (the only
 copy of its shape on the site, the app's own geometry): favicon.svg, favicon.ico, the touch icon,
-the manifest's icons and og.jpg. The .ico's 16 and 32 px frames are the app icon's own
+the manifest's icons (the share picture, og.jpg, is make_og.mjs's). The .ico's 16 and 32 px frames are the app icon's own
 pixel-by-pixel art (assets/brand/trek-icon-paper-{16,32}.svg). Needs Google Chrome for rendering
 and Pillow for the .ico and the .jpg:
 
@@ -70,14 +70,5 @@ render(tile(DAY, 192), 192, 192, f"{site}/assets/img/icon-192.png")
 render(tile(DAY, 512), 512, 512, f"{site}/assets/img/icon-512.png")
 render(tile(DAY, 512, 0.76, rounded=False), 512, 512, f"{site}/assets/img/icon-maskable-512.png")
 
-# The share picture: the lavender sky, the signpost and the line, in the site's own type.
-font = f"file://{site}/assets/fonts/BricolageGrotesque.woff2"
-og = f"""<style>@font-face{{font-family:B;src:url({font})}}
-.og{{width:1200px;height:630px;box-sizing:border-box;padding:0 96px;display:flex;align-items:center;gap:56px;
-background:linear-gradient(180deg,#C9C1DE,#DCD6EA);font-family:B;color:#1F1714}}
-.og svg{{width:250px;height:250px;flex:none}} .og h1{{margin:0;font-weight:680;font-size:96px;line-height:.95;letter-spacing:-.04em}}
-.og p{{margin:22px 0 0;font-weight:500;font-size:38px;letter-spacing:-.02em;color:#463C47}}</style>
-<div class="og"><svg viewBox="13 13 70 70">{art(DAY)}</svg><div><h1>Every agent.<br>One trail.</h1><p>trekdesktop.com</p></div></div>"""
-render(og, 1200, 630, f"{scratch}/og.png")
-Image.open(f"{scratch}/og.png").convert("RGB").save(f"{site}/assets/img/og.jpg", quality=90, optimize=True)
+# The share picture (og.jpg) is drawn from the home page itself: script/site/make_og.mjs.
 print("icons written")

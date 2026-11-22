@@ -3,26 +3,26 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Trek: one inbox for your coding agents on Mac and Windows</title>
-<meta name="description" content="Trek is a free, open-source Mac and Windows app that runs your coding agents from one inbox: Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models.">
+<title>Trek: one inbox for your coding agents on Mac, Windows and Linux</title>
+<meta name="description" content="Trek is a free, open-source app for Mac, Windows and Linux that runs your coding agents side by side: Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models. When one needs you, it finds you, at your desk or on your phone.">
 <link rel="canonical" href="https://trekdesktop.com/">
-<meta name="theme-color" content="#B3B3C7" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#0E1227" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#F2EFF6" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#17151F" media="(prefers-color-scheme: dark)">
 
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Trek">
 <meta property="og:url" content="https://trekdesktop.com/">
-<meta property="og:title" content="Trek: one inbox for your coding agents on Mac and Windows">
-<meta property="og:description" content="A native desktop app that runs your coding agents from one inbox. Free and open source.">
-<meta property="og:image" content="https://trekdesktop.com/assets/img/og.jpg?v=1af0dde6">
+<meta property="og:title" content="Trek: one inbox for your coding agents on Mac, Windows and Linux">
+<meta property="og:description" content="Every agent. One trail. A free, open-source desktop app that runs your coding agents side by side, and finds you when one needs you.">
+<meta property="og:image" content="https://trekdesktop.com/assets/img/og.jpg?v=17d9dd23">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="Trek's signpost and the line Every agent. One trail.">
+<meta property="og:image:alt" content="Every agent. One trail. A field of characters over one ink line that ends in an ember dot.">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Trek: one inbox for your coding agents on Mac and Windows">
-<meta name="twitter:description" content="A native desktop app that runs your coding agents from one inbox. Free and open source.">
-<meta name="twitter:image" content="https://trekdesktop.com/assets/img/og.jpg?v=1af0dde6">
-<meta name="twitter:image:alt" content="Trek's signpost and the line Every agent. One trail.">
+<meta name="twitter:title" content="Trek: one inbox for your coding agents on Mac, Windows and Linux">
+<meta name="twitter:description" content="Every agent. One trail. A free, open-source desktop app that runs your coding agents side by side, and finds you when one needs you.">
+<meta name="twitter:image" content="https://trekdesktop.com/assets/img/og.jpg?v=17d9dd23">
+<meta name="twitter:image:alt" content="Every agent. One trail. A field of characters over one ink line that ends in an ember dot.">
 
 <link rel="icon" href="/favicon.ico?v=8bcf0ae8" sizes="48x48">
 <link rel="icon" href="/favicon.svg?v=acedc7a9" type="image/svg+xml">
@@ -30,12 +30,13 @@
 <link rel="manifest" href="/site.webmanifest?v=3e8b1bb9">
 <link rel="preload" href="/assets/fonts/BricolageGrotesque.woff2?v=a79fdb52" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/assets/fonts/HankenGrotesk.woff2?v=e9201edd" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="/assets/site.css?v=0f30d46e">
-<link rel="preload" as="image" type="image/avif" media="(prefers-color-scheme: dark) and (max-width: 700px)" imagesrcset="/assets/img/backdrop/hill-tall-night-720.avif?v=3666a866 720w, /assets/img/backdrop/hill-tall-night-1080.avif?v=0dd51b57 1080w" imagesizes="100vw">
-<link rel="preload" as="image" type="image/avif" media="(prefers-color-scheme: dark) and (min-width: 701px)" imagesrcset="/assets/img/backdrop/hill-wide-night-1280.avif?v=206d57c3 1280w, /assets/img/backdrop/hill-wide-night-1920.avif?v=68704ba7 1920w, /assets/img/backdrop/hill-wide-night-2560.avif?v=c8c15de1 2560w" imagesizes="100vw">
-<link rel="preload" as="image" type="image/avif" media="(prefers-color-scheme: light) and (max-width: 700px)" imagesrcset="/assets/img/backdrop/hill-tall-day-720.avif?v=40330573 720w, /assets/img/backdrop/hill-tall-day-1080.avif?v=a8ec99af 1080w" imagesizes="100vw">
-<link rel="preload" as="image" type="image/avif" media="(prefers-color-scheme: light) and (min-width: 701px)" imagesrcset="/assets/img/backdrop/hill-wide-day-1280.avif?v=4627ced9 1280w, /assets/img/backdrop/hill-wide-day-1920.avif?v=32312d78 1920w, /assets/img/backdrop/hill-wide-day-2560.avif?v=eef707f4 2560w" imagesizes="100vw">
-<script src="/assets/site.js?v=bb63d57b" defer></script>
+<link rel="preload" href="/assets/fonts/JetBrainsMono-Regular.woff2?v=8a06596f" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/assets/home/home.css?v=39ac82f3">
+<link rel="stylesheet" href="/assets/home/inbox.css?v=b3ad3e88">
+<script src="/assets/home/inbox.js?v=1f08fea1" defer></script>
+<script src="/assets/home/dl.js?v=7b3ce0d4" defer></script>
+<script src="/assets/home/field.js?v=a4e4cd4b" defer></script>
+<script src="/assets/home/home.js?v=860c6f63" defer></script>
 
 <script type="application/ld+json">
 {
@@ -52,9 +53,9 @@
   "@type": "SoftwareApplication",
   "name": "Trek",
   "alternateName": "Trek for coding agents",
-  "description": "A native desktop app that runs your coding agents from one inbox: Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models.",
+  "description": "A native desktop app that runs your coding agents side by side, from one inbox: Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models.",
   "applicationCategory": "DeveloperApplication",
-  "operatingSystem": "macOS 13 or later (Apple silicon and Intel), Windows 11 (x64)",
+  "operatingSystem": "macOS 13 or later (Apple silicon and Intel), Windows 11 (x64), Linux (preview: Ubuntu 22.04, Debian 12, Fedora 36 or later; x86_64 and Arm)",
   "url": "https://trekdesktop.com/",
   "image": "https://trekdesktop.com/assets/img/icon-512.png?v=2977f318",
   "downloadUrl": "https://github.com/dokyit/Trek/releases/latest",
@@ -68,231 +69,178 @@
 }
 </script>
 </head>
-<body class="home">
+<body>
 <a class="skip" href="#main">Skip to the page</a>
+<div class="page" data-page>
+<svg class="trail" data-trail aria-hidden="true" focusable="false"></svg>
+
 <header class="bar"><div class="bar-in">
-  <a class="lockup" href="/" aria-label="Trek, home"><svg class="mark" viewBox="13 13 70 70" aria-hidden="true"><use class="post" href="/assets/img/mark.svg?v=7cbb7d26#post"/><use class="board" href="/assets/img/mark.svg?v=7cbb7d26#board-a"/><use class="board" href="/assets/img/mark.svg?v=7cbb7d26#board-b"/></svg><span>trek</span></a>
-  <nav class="bar-links" aria-label="Trek">
-    <a href="#features">Features</a>
+  <a class="lockup" href="#top" aria-label="Trek, back to the top"><svg class="mark" viewBox="13 13 70 70" aria-hidden="true"><use class="post" href="/assets/img/mark.svg?v=7cbb7d26#post"/><use class="board" href="/assets/img/mark.svg?v=7cbb7d26#board-a"/><use class="board" href="/assets/img/mark.svg?v=7cbb7d26#board-b"/></svg><span>trek</span></a>
+  <nav class="bar-links" aria-label="On this page">
+    <a href="#features">Everything</a>
+    <a href="#private">Privacy</a>
     <a href="https://github.com/dokyit/Trek">GitHub</a>
   </nav>
-  <a class="btn btn-ink btn-small" href="#install">Download</a>
+  <a class="btn btn-ink btn-small" data-dl href="https://github.com/dokyit/Trek/releases/latest"><span data-dl-label data-dl-short>Download</span></a>
 </div></header>
 
 <main id="main">
-<section class="hero" data-hero>
-<picture class="scene" aria-hidden="true">
-  <source media="(prefers-color-scheme: dark) and (max-width: 700px)" type="image/avif" srcset="/assets/img/backdrop/hill-tall-night-720.avif?v=3666a866 720w, /assets/img/backdrop/hill-tall-night-1080.avif?v=0dd51b57 1080w" sizes="100vw">
-  <source media="(prefers-color-scheme: dark) and (min-width: 701px)" type="image/avif" srcset="/assets/img/backdrop/hill-wide-night-1280.avif?v=206d57c3 1280w, /assets/img/backdrop/hill-wide-night-1920.avif?v=68704ba7 1920w, /assets/img/backdrop/hill-wide-night-2560.avif?v=c8c15de1 2560w" sizes="100vw">
-  <source media="(prefers-color-scheme: dark) and (max-width: 700px)" srcset="/assets/img/backdrop/hill-tall-night-1080.jpg?v=ca49303a">
-  <source media="(prefers-color-scheme: dark) and (min-width: 701px)" srcset="/assets/img/backdrop/hill-wide-night-1920.jpg?v=c5478f23">
-  <source media="(prefers-color-scheme: light) and (max-width: 700px)" type="image/avif" srcset="/assets/img/backdrop/hill-tall-day-720.avif?v=40330573 720w, /assets/img/backdrop/hill-tall-day-1080.avif?v=a8ec99af 1080w" sizes="100vw">
-  <source media="(prefers-color-scheme: light) and (min-width: 701px)" type="image/avif" srcset="/assets/img/backdrop/hill-wide-day-1280.avif?v=4627ced9 1280w, /assets/img/backdrop/hill-wide-day-1920.avif?v=32312d78 1920w, /assets/img/backdrop/hill-wide-day-2560.avif?v=eef707f4 2560w" sizes="100vw">
-  <source media="(prefers-color-scheme: light) and (max-width: 700px)" srcset="/assets/img/backdrop/hill-tall-day-1080.jpg?v=98e42c0b">
-  <img src="/assets/img/backdrop/hill-wide-day-1920.jpg?v=f0934671" width="2560" height="1600" alt="" fetchpriority="high" decoding="async">
-</picture>
-  <div class="hero-copy">
-    <svg class="mark mark-hero" viewBox="13 13 70 70" aria-hidden="true"><use class="post" href="/assets/img/mark.svg?v=7cbb7d26#post"/><use class="board board-a" href="/assets/img/mark.svg?v=7cbb7d26#board-a"/><use class="board board-b" href="/assets/img/mark.svg?v=7cbb7d26#board-b"/></svg>
+<section class="hero" id="top">
+  <div class="field field-top" data-field="top" aria-hidden="true"></div>
+  <div class="hero-text">
     <h1>Every agent. One trail.</h1>
-    <p class="lede">A native desktop app that runs your coding agents from one inbox.</p>
+    <p class="lede">Trek runs your coding agents side by side on your Mac or PC. When one needs you, it finds you, at your desk or in your pocket.</p>
     <div class="cta">
-      <a class="btn btn-ember btn-big" data-dl-primary href="https://github.com/dokyit/Trek/releases/latest"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/></svg><span data-dl-label>Download for macOS</span></a>
-      <a class="btn btn-quiet btn-big" data-dl-other href="#install">Other builds</a>
+      <a class="btn btn-ember btn-big" data-dl href="https://github.com/dokyit/Trek/releases/latest"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/></svg><span data-dl-label>Download for macOS</span></a>
     </div>
     <p class="fine" data-dl-fine>Free and open source. macOS 13+ and Windows 11.</p>
   </div>
-  <figure class="hero-window" data-window>
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="/assets/img/window-night.webp?v=381ee848">
-      <img src="/assets/img/window-paper.webp?v=6eda071e" width="1086" height="746" fetchpriority="high" decoding="async" alt="Trek on a Mac. The Inbox lists three threads that are waiting, each with its reason, and one that has finished. The open thread shows Claude Code's plan with the buttons Keep planning and Approve and start.">
-    </picture>
-    <figcaption>The real app, with staged threads.</figcaption>
-  </figure>
+  <div class="desk">
+    <div class="screen" data-screen><div class="win" data-inbox role="img" aria-label="Trek's window: the Inbox lists four threads at work. Migrate the schema stops to ask to run ./migrate and goes to the top, with Claude Code's question beside it."></div></div>
+    <p class="staged">Trek, redrawn here with staged threads.</p>
+  </div>
 </section>
 
-<section class="features" id="features">
-  <header class="features-head reveal">
-    <h2>Your agents, side by side.</h2>
-    <p>Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models. With the logins you already have.</p>
+<section class="walk" id="phone">
+  <div class="walk-text">
+    <h2>Walk away. It finds you.</h2>
+    <p>The thread that needs you comes down the trail to your phone. Answer it there. Your agents keep running on your computer.</p>
+    <p class="note">The iPhone app is built from source for now. Any phone’s browser works as <a class="text-link" href="/remote/">the remote</a>, with nothing to install.</p>
+  </div>
+  <div class="phones" data-phones>
+    <figure class="phone phone-back">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/iphone-threads-night.webp?v=a91d0bf3">
+        <img src="/assets/img/features/iphone-threads-paper.webp?v=a7ee221d" width="295" height="638" loading="lazy" decoding="async" alt="Trek for iPhone: Threads, with the ones that need you on top.">
+      </picture>
+    </figure>
+    <figure class="phone phone-front" data-phone>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/iphone-night.webp?v=e1403d80">
+        <img src="/assets/img/features/iphone-poster.webp?v=8d5e3001" width="295" height="638" loading="lazy" decoding="async" alt="Trek for iPhone: Claude Code wants to run ./migrate, with Deny and Allow.">
+      </picture>
+      <span class="press" aria-hidden="true"></span><span class="tap" aria-hidden="true"></span>
+    </figure>
+  </div>
+</section>
+
+<section class="every" id="features" aria-labelledby="every-h">
+  <header class="every-head">
+    <h2 id="every-h">All of it, along one line.</h2>
+    <p>Grouped the way the app is. A tag marks what is Mac only, partial, or a preview. On Linux, a preview, some of it is still to come.</p>
   </header>
-
-  <article class="feat feat-split feat-inbox reveal">
-    <div class="feat-text">
-      <h3>One inbox</h3>
-      <p>Running and waiting threads on top. One stops to ask, goes to the top, and gets back to work once you answer.</p>
-      <!-- ill:inbox --><svg class="ill ill-inbox" viewBox="-105 -150 268 297" width="268" height="297" aria-hidden="true" focusable="false"><path class="e" d="M0.0 -13.0 L144.1 70.2 L45.0 127.4 L-99.1 44.2 Z" pathLength="1"/><path class="e" d="M45.0 140.4 L-99.1 57.2 L-99.1 44.2 L45.0 127.4 Z" pathLength="1"/><path class="e" d="M144.1 83.2 L45.0 140.4 L45.0 127.4 L144.1 70.2 Z" pathLength="1"/><path class="e" d="M0.0 -26.0 L144.1 57.2 L45.0 114.4 L-99.1 31.2 Z" pathLength="1"/><path class="e" d="M45.0 127.4 L-99.1 44.2 L-99.1 31.2 L45.0 114.4 Z" pathLength="1"/><path class="e" d="M144.1 70.2 L45.0 127.4 L45.0 114.4 L144.1 57.2 Z" pathLength="1"/><path class="e" d="M0.0 -39.0 L144.1 44.2 L45.0 101.4 L-99.1 18.2 Z" pathLength="1"/><path class="e" d="M45.0 114.4 L-99.1 31.2 L-99.1 18.2 L45.0 101.4 Z" pathLength="1"/><path class="e" d="M144.1 57.2 L45.0 114.4 L45.0 101.4 L144.1 44.2 Z" pathLength="1"/><path class="e" d="M0.0 -52.0 L144.1 31.2 L45.0 88.4 L-99.1 5.2 Z" pathLength="1"/><path class="e" d="M45.0 101.4 L-99.1 18.2 L-99.1 5.2 L45.0 88.4 Z" pathLength="1"/><path class="e" d="M144.1 44.2 L45.0 101.4 L45.0 88.4 L144.1 31.2 Z" pathLength="1"/><path class="e" d="M0.0 -65.0 L144.1 18.2 L45.0 75.4 L-99.1 -7.8 Z" pathLength="1"/><path class="e" d="M45.0 88.4 L-99.1 5.2 L-99.1 -7.8 L45.0 75.4 Z" pathLength="1"/><path class="e" d="M144.1 31.2 L45.0 88.4 L45.0 75.4 L144.1 18.2 Z" pathLength="1"/><path class="ae" d="M15.5 -144.3 L157.4 -33.4 L58.3 23.8 L-83.6 -87.1 Z" pathLength="1"/><path class="ae" d="M56.4 35.4 L-85.6 -75.4 L-83.6 -87.1 L58.3 23.8 Z" pathLength="1"/><path class="ae" d="M155.4 -21.8 L56.4 35.4 L58.3 23.8 L157.4 -33.4 Z" pathLength="1"/></svg><!-- /ill:inbox -->
+  <div class="rows">
+    <div class="row">
+      <h3>Agents <span class="n">11</span></h3>
+      <ul class="run"><li>Your CLI agents, with the logins you have</li><li>Any ACP agent, from the registry or your own</li><li>API keys and local models</li><li>Several accounts for one agent</li><li>Agents ask agents for a second opinion</li><li>Sub-agents, shown in their thread</li><li>Hand work off to a fresh thread</li><li>Four hand-holding levels, plus Plan mode</li><li>Rules that allow, ask or refuse commands</li><li>Your MCP servers and skills, for every agent</li><li>Agent CLIs kept up to date</li></ul>
     </div>
-    <div class="panel panel-tall" data-drift>
-      <picture><source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/inbox-night-poster.webp?v=d4e72c69"><img class="shot" data-loop="/assets/img/features/inbox.mp4?v=f4103dd4" data-loop-dark="/assets/img/features/inbox-night.mp4?v=d1aa43dd" src="/assets/img/features/inbox-poster.webp?v=740d08fe" width="274" height="330" loading="lazy" decoding="async" alt="Trek's sidebar: threads at work, and one that stops to ask goes to the top of the Inbox with its question."></picture>
+    <div class="row">
+      <h3>Inbox and threads <span class="n">15</span></h3>
+      <ul class="run"><li>One inbox, with what needs you on top</li><li>The reason in words: a question, a plan, a command</li><li>Answer an approval from the keyboard</li><li>Pin, snooze, rename and settle</li><li>Search everything, and a command palette</li><li>Undo any turn, and files roll back</li><li>Edit, retry or fork a turn</li><li>Two threads side by side</li><li>A side chat that leaves the thread alone</li><li>Your history from Claude Code, Codex and OpenCode</li><li>Share a thread as a link</li><li>Basecamp, today across every agent</li><li>Notes, with pictures</li><li>What an agent left running, with its output</li><li>Agents keep working with the window closed</li></ul>
     </div>
-  </article>
-
-  <article class="feat feat-wide reveal">
-    <div class="feat-text feat-text-row">
-      <h3>Agents consult agents</h3>
-      <p>Codex reviews Claude’s plan, and back. Here Claude Code asks GPT-5.6 Luna for a second opinion and waits for it.</p>
+    <div class="row">
+      <h3>Code and review <span class="n">9</span></h3>
+      <ul class="run"><li>Each turn’s changes, to review or undo</li><li>Comment on lines and send them to the agent</li><li>Keep or undo, hunk by hunk</li><li>A worktree for a thread</li><li>Commit, push and pull requests</li><li>Failing checks go back to the agent</li><li>Live cards for pull requests and CI runs</li><li>An editor with language servers</li><li>A file explorer and a real terminal</li></ul>
     </div>
-    <div class="panel panel-wide panel-bleed">
-      <img class="shot" data-loop="/assets/img/features/consult.mp4?v=052c6e6c" src="/assets/img/features/consult-poster.webp?v=f081344d" width="900" height="450" loading="lazy" decoding="async" alt="A thread in Trek: Claude Code is asked for a second opinion, hands the review to GPT-5.6 Luna, and waits on it while it runs.">
+    <div class="row">
+      <h3>Tools <span class="n">11</span></h3>
+      <ul class="run"><li>A browser your agents can drive</li><li>Devtools and element picking</li><li>Tracker blocking and extensions <em class="tag">Fuller on Mac</em></li><li>The iOS Simulator <em class="tag">Mac</em></li><li>Your real iPhone, for you and your agents</li><li>Computer use, by element or screenshot</li><li>Computer use in the background <em class="tag">Mac</em></li><li>Agents watch videos, with a transcript</li><li>Charts, math and live pages in answers</li><li>Dictation</li><li>Snapshots of a window or the screen</li></ul>
     </div>
-  </article>
-
-  <div class="feat-pair">
-    <article class="feat feat-card feat-7 reveal">
-      <div class="panel panel-mid" data-drift>
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/access-night.webp?v=7a3f086c">
-          <img class="shot" src="/assets/img/features/access-paper.webp?v=ffe0e94f" width="346" height="328" loading="lazy" decoding="async" alt="The access menu: Supervised, Auto-accept edits, Auto, and Full access, with the Plan button beside it.">
-        </picture>
-      </div>
-      <div class="feat-text">
-        <h3>You stay in charge</h3>
-        <p>Four hand-holding levels, plus Plan mode.</p>
-      </div>
-    </article>
-    <article class="feat feat-card feat-5 reveal">
-      <div class="panel panel-mid" data-drift>
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/worktree-night.webp?v=877a0b73">
-          <img class="shot shot-worktree" src="/assets/img/features/worktree-paper.webp?v=dd0750d2" width="250" height="130" loading="lazy" decoding="async" alt="The menu for where a new thread runs: Local, the project folder, or New worktree, a branch of its own.">
-        </picture>
-      </div>
-      <div class="feat-text">
-        <h3>Worktrees</h3>
-        <p>Give a thread its own branch.</p>
-        <!-- ill:worktrees --><svg class="ill ill-worktrees" viewBox="-30 -26 296 226" width="296" height="226" aria-hidden="true" focusable="false"><path class="e" d="M0.0 -20.0 L259.8 130.0 L235.6 144.0 L-24.2 -6.0 Z" pathLength="1"/><path class="e" d="M235.6 164.0 L-24.2 14.0 L-24.2 -6.0 L235.6 144.0 Z" pathLength="1"/><path class="e" d="M259.8 150.0 L235.6 164.0 L235.6 144.0 L259.8 130.0 Z" pathLength="1"/><path class="ae" d="M31.2 78.0 L207.8 180.0 L207.8 160.0 L31.2 58.0 Z" pathLength="1"/><path class="ae" d="M183.6 194.0 L-17.3 78.0 L-17.3 58.0 L183.6 174.0 Z" pathLength="1"/><path class="ae" d="M207.8 180.0 L183.6 194.0 L183.6 174.0 L207.8 160.0 Z" pathLength="1"/><path class="ae" d="M34.6 28.0 L58.9 42.0 L31.2 58.0 L207.8 160.0 L183.6 174.0 L-17.3 58.0 Z" pathLength="1"/></svg><!-- /ill:worktrees -->
-      </div>
-    </article>
-  </div>
-</section>
-
-<section class="phone-band" id="iphone">
-  <div class="phone-in reveal">
-    <div class="phone-text">
-      <h2>Trek for iPhone</h2>
-      <p>Answer approvals away from your desk. The agents keep running on your computer.</p>
-      <p class="note">Built from source for now. No iPhone? Any phone’s browser gets <a class="text-link" href="/remote/">the remote</a>.</p>
+    <div class="row">
+      <h3>Away from your desk <span class="n">5</span></h3>
+      <ul class="run"><li>Trek for iPhone <em class="tag">Built from source</em></li><li>A remote in any phone’s browser</li><li>Notifications on your phone, if you want them</li><li>Threads on your other computers</li><li>Pairing over your network or Tailscale</li></ul>
     </div>
-    <div class="phones">
-      <figure class="phone phone-back" data-drift="-1">
-        <picture><source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/iphone-threads-night.webp?v=a91d0bf3"><img class="phone-screen" src="/assets/img/features/iphone-threads-paper.webp?v=a7ee221d" width="295" height="638" loading="lazy" decoding="async" alt="Trek for iPhone: Threads, with the ones that need you on top."></picture>
-      </figure>
-      <figure class="phone phone-front">
-        <picture><source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/iphone-night.webp?v=e1403d80"><img class="phone-screen" data-loop="/assets/img/features/iphone.mp4?v=ca859399" data-loop-dark="" src="/assets/img/features/iphone-poster.webp?v=8d5e3001" width="295" height="638" loading="lazy" decoding="async" alt="Trek for iPhone: Claude Code wants to run a command, with Deny and Allow."></picture>
-      </figure>
+    <div class="row">
+      <h3>Make it yours <span class="n">7</span></h3>
+      <ul class="run"><li>Four themes, Paper or Night</li><li>Glass, and painted or ASCII backgrounds</li><li>Plugins. Ask an agent for one</li><li>Every shortcut can change</li><li>Zoom the whole window</li><li>One setting turns motion off</li><li>Study, with an agent as your tutor</li></ul>
+    </div>
+    <div class="row row-ill">
+      <h3>Native <span class="n">8</span></h3>
+      <ul class="run"><li>A menu bar or tray icon: idle, working, needs you</li><li>A badge and notifications</li><li>Updates itself, never mid-turn</li><li>Rust, drawn on the GPU</li><li>macOS 13 or later, Apple silicon and Intel</li><li>Windows 11, x64</li><li>Linux <em class="tag">Preview</em></li><li>Delete all Trek data in one step</li></ul>
+      <svg class="ill ill-native" data-ill="native" viewBox="-6 -6 452 278" data-join="16 266" role="img" aria-label="A computer with Trek on it: a notification slides out of the screen's corner, Migrate the schema, wants to run ./migrate, and goes again.">
+        <defs><clipPath id="display"><rect x="44" y="20" width="352" height="214" rx="6"/></clipPath></defs>
+        <rect class="e" x="30" y="6" width="380" height="242" rx="16"/>
+        <rect class="e thin" x="44" y="20" width="352" height="214" rx="6"/>
+        <path class="e thin" d="M44 38H396"/>
+        <text class="ui ui-mute" x="378" y="33" text-anchor="end">9:41</text>
+        <rect class="e thin" x="72" y="58" width="214" height="152" rx="7"/>
+        <path class="e thin" d="M72 76H286M128 76V210"/>
+        <path class="e faint" d="M84 92H116M84 106H112M84 120H118M140 92H262M140 104H248M140 116H256"/>
+        <path class="e" d="M0 248H440L424 266H16Z"/>
+        <path class="e thin" d="M188 248V254H252V248"/>
+        <g clip-path="url(#display)">
+          <g class="banner">
+            <rect class="banner-card" x="202" y="46" width="186" height="58" rx="12"/>
+            <rect class="banner-icon" x="214" y="58" width="22" height="22" rx="6"/>
+            <text class="ui ui-app" x="246" y="62">Trek</text>
+            <text class="ui ui-title" x="246" y="78">Migrate the schema</text>
+            <text class="ui ui-body" x="246" y="93">Wants to run ./migrate</text>
+          </g>
+        </g>
+      </svg>
     </div>
   </div>
 </section>
 
-<section class="features features-more">
-  <div class="strip reveal">
-    <article class="feat feat-mini">
-      <div class="mini-media">
-        <ul class="menubar" role="list" aria-label="Trek's menu bar icon in its three states">
-          <li><img src="/assets/img/features/menubar-idle.svg?v=05e09857" width="44" height="44" alt="">Idle</li>
-          <li><img src="/assets/img/features/menubar-working.svg?v=f959e5fd" width="44" height="44" alt="">Working</li>
-          <li><img src="/assets/img/features/menubar-attention.svg?v=469af26b" width="44" height="44" alt="">Needs you</li>
-        </ul>
-      </div>
-      <h3>Menu bar and tray</h3>
-      <p>Idle, working or needs you. A Dock or taskbar badge, and notifications.</p>
-    </article>
-    <article class="feat feat-mini">
-      <div class="mini-media">
-        <picture><source media="(prefers-color-scheme: dark)" srcset="/assets/img/features/undo-night.webp?v=6128bafa"><img class="shot" src="/assets/img/features/undo-paper.webp?v=9fcdf9b5" width="410" height="110" loading="lazy" decoding="async" alt="The end of an agent's turn, with its buttons: copy, undo, retry, retry with another model, and fork."></picture>
-      </div>
-      <h3>Undo any turn</h3>
-      <p>Edit, retry or fork. Files roll back too.</p>
-    </article>
-    <article class="feat feat-mini">
-      <div class="mini-media">
-        <img class="shot" src="/assets/img/features/plugins.webp?v=97fa6052" width="420" height="115" loading="lazy" decoding="async" alt="A plugin at work: a focus timer on the composer, with the hiker walking along its edge.">
-      </div>
-      <h3>Plugins</h3>
-      <p>Themes, mods and pages that change how Trek looks and works. Ask an agent for one.</p>
-    </article>
+<section class="private" id="private" aria-labelledby="private-h">
+  <div class="private-in">
+    <div class="private-text">
+      <h2 id="private-h">No account. No Trek server.</h2>
+      <dl class="facts">
+        <div><dt>Your agents, your providers</dt><dd>Prompts and code go to the agents you choose, through their own tools, as they do in a terminal. Trek never reads their logins.</dd></div>
+        <div><dt>Usage data only with a yes</dt><dd>Trek asks once. Say no and it sends nothing but feedback you choose to send. Settings shows exactly what was sent last.</dd></div>
+        <div><dt>Never sent</dt><dd>Prompts, code, file names, paths, transcripts, keys and account emails.</dd></div>
+        <div><dt>Phone to computer, directly</dt><dd>Over your Wi-Fi or Tailscale, with pinned TLS. Phone notifications are off until you turn them on.</dd></div>
+        <div><dt>Gone when you say</dt><dd>Delete all Trek data, in Settings, lists what goes before it goes.</dd></div>
+      </dl>
+      <p class="private-more"><a class="text-link" href="/privacy/">Everything Trek and this site send</a></p>
+    </div>
+    <svg class="ill ill-private" data-ill="private" viewBox="0 0 460 300" role="img" aria-label="Your computer and your phone, talking straight to each other over your Wi-Fi. Between them, where a server would be, nothing: no Trek server.">
+      <rect class="slot" x="193" y="30" width="148" height="82" rx="12"/>
+      <text class="ui ui-slot" x="267" y="67" text-anchor="middle">No Trek server</text>
+      <text class="ui ui-slot-sub" x="267" y="90" text-anchor="middle">nothing in between</text>
+      <rect class="e" x="20" y="120" width="148" height="100" rx="10"/>
+      <rect class="e thin" x="30" y="130" width="128" height="80" rx="4"/>
+      <path class="e thin" d="M30 142H158M62 142V210"/>
+      <path class="e faint" d="M38 154H56M38 164H54M70 154H140M70 164H132M70 174H146"/>
+      <path class="e" d="M6 220H182L172 232H16Z"/>
+      <rect class="e" x="366" y="122" width="62" height="112" rx="14"/>
+      <rect class="e thin" x="372" y="134" width="50" height="88" rx="6"/>
+      <path class="link" d="M168 178H366"/>
+      <circle class="pulse" cx="176" cy="178" r="5"/>
+      <text class="ui ui-link" x="267" y="204" text-anchor="middle">Direct, over your Wi-Fi</text>
+      <text class="ui ui-cap" x="94" y="256" text-anchor="middle">Your computer</text>
+      <text class="ui ui-cap" x="397" y="256" text-anchor="middle">Your phone</text>
+    </svg>
   </div>
-
-  <article class="feat feat-split feat-split-flip reveal">
-    <div class="panel panel-mid" data-drift>
-      <img class="shot shot-study" src="/assets/img/features/study.webp?v=e5332ba9" width="790" height="550" loading="lazy" decoding="async" alt="Study in Trek: a question it set, What does the derivative f prime of x tell you, with four answers, a box for your thinking and how sure you are.">
-    </div>
-    <div class="feat-text">
-      <h3>Study</h3>
-      <p>Learn or practise with an agent. It starts from what you already know.</p>
-      <!-- ill:study --><svg class="ill ill-study" viewBox="-93 -100 185 206" width="185" height="206" aria-hidden="true" focusable="false"><path class="e" d="M0.0 -52.0 L86.6 -2.0 L0.0 48.0 L-86.6 -2.0 Z" pathLength="1"/><path class="e" d="M86.6 50.0 L0.0 100.0 L0.0 48.0 L86.6 -2.0 Z" pathLength="1"/><path class="e" d="M0.0 100.0 L-86.6 50.0 L-86.6 -2.0 L0.0 48.0 Z" pathLength="1"/><path class="e" d="M0.0 -72.0 L52.0 -42.0 L0.0 -12.0 L-52.0 -42.0 Z" pathLength="1"/><path class="e" d="M52.0 -2.0 L0.0 28.0 L0.0 -12.0 L52.0 -42.0 Z" pathLength="1"/><path class="e" d="M0.0 28.0 L-52.0 -2.0 L-52.0 -42.0 L0.0 -12.0 Z" pathLength="1"/><path class="dash" d="M27.7 -42.0 L0.0 -26.0 L0.0 -62.0 L27.7 -78.0 Z"/><path class="dash" d="M0.0 -26.0 L-27.7 -42.0 L-27.7 -78.0 L0.0 -62.0 Z"/><path class="dash" d="M0.0 -94.0 L27.7 -78.0 L0.0 -62.0 L-27.7 -78.0 Z"/></svg><!-- /ill:study -->
-    </div>
-  </article>
-
-  <article class="feat feat-wide feat-themes reveal">
-    <div class="feat-text feat-text-row">
-      <h3>Themes and backgrounds</h3>
-      <p>Four themes, Paper or Night, glass. Painted and ASCII art.</p>
-    </div>
-    <div class="panel panel-wide panel-bleed">
-      <img class="shot" data-loop="/assets/img/features/themes.mp4?v=cb1030e8" src="/assets/img/features/themes-poster.webp?v=b4be0ee5" width="1000" height="625" loading="lazy" decoding="async" alt="One Trek window changing through its themes, glass and painted backgrounds.">
-    </div>
-  </article>
-  <p class="staged">The real app, with staged threads.</p>
 </section>
 
-<section class="get" id="install">
-  <div class="get-in reveal">
-    <header class="get-head">
-      <h2>Get Trek.</h2>
-      <p>Free and open source. <span data-release></span></p>
-    </header>
+<section class="get" id="install" aria-labelledby="get-h">
+  <div class="get-in">
+    <h2 id="get-h">Get Trek.</h2>
+    <p class="get-lede">For macOS and Windows, with Linux as a preview.</p>
+    <div class="get-act"><a class="btn btn-ember btn-big" data-dl data-end href="https://github.com/dokyit/Trek/releases/latest"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/></svg><span data-dl-label>Download for macOS</span></a></div>
+    <p class="fine" data-dl-fine>Free and open source. macOS 13+ and Windows 11.</p>
     <ul class="builds">
-      <li class="build">
-        <h3>macOS</h3>
-        <p>13 or later. The first launch needs one extra step: open System Settings, Privacy &amp; Security, and choose Open Anyway.</p>
-        <div class="links"><a class="btn btn-line btn-small" data-build="mac-arm" href="https://github.com/dokyit/Trek/releases/latest">Apple silicon <small data-size></small></a><a class="btn btn-line btn-small" data-build="mac-intel" href="https://github.com/dokyit/Trek/releases/latest">Intel <small data-size></small></a></div>
-      </li>
-      <li class="build">
-        <h3>Windows</h3>
-        <p>11, x64. SmartScreen asks once: choose More info, then Run anyway.</p>
-        <div class="links"><a class="btn btn-line btn-small" data-build="win-setup" href="https://github.com/dokyit/Trek/releases/latest/download/Trek-Setup-x86_64.exe">Installer <small data-size></small></a><a class="btn btn-line btn-small" data-build="win-zip" href="https://github.com/dokyit/Trek/releases/latest">Zip <small data-size></small></a></div>
-      </li>
-      <li class="build" data-linux hidden>
-        <h3>Linux <span class="build-note">Preview</span></h3>
-        <p>Ubuntu 22.04, Debian 12, Fedora 36 or later. A first version, with fewer features than on a Mac. The AppImage updates itself.</p>
-        <div class="links"><a class="btn btn-line btn-small" data-build="linux-appimage" href="https://github.com/dokyit/Trek/releases/latest">AppImage <small data-size></small></a><a class="btn btn-line btn-small" data-build="linux-deb" href="https://github.com/dokyit/Trek/releases/latest">.deb</a><a class="btn btn-line btn-small" data-build="linux-arm" href="https://github.com/dokyit/Trek/releases/latest">Arm</a></div>
-      </li>
-      <li class="build">
-        <h3>iPhone</h3>
-        <p>iOS 26. Built from source for now.</p>
-        <div class="links"><a class="btn btn-line btn-small" href="https://github.com/dokyit/Trek/blob/main/ios/README.md">How to build it</a></div>
-      </li>
-      <li class="build">
-        <h3>Any phone’s browser</h3>
-        <p>The remote, with nothing to install. Open it on the phone, then in Trek choose Settings, Phone &amp; Machines, Show pairing code, A phone’s browser.</p>
-        <div class="links"><a class="btn btn-line btn-small" href="/remote/">Open the remote</a></div>
-      </li>
+      <li><h3>macOS</h3><p>13 or later. The first launch asks once: System Settings, Privacy &amp; Security, Open Anyway.</p><div class="links"><a class="btn btn-line" data-build="mac-arm" href="https://github.com/dokyit/Trek/releases/latest">Apple silicon <small data-size></small></a><a class="btn btn-line" data-build="mac-intel" href="https://github.com/dokyit/Trek/releases/latest">Intel <small data-size></small></a></div></li>
+      <li><h3>Windows</h3><p>11, x64. SmartScreen asks once: More info, then Run anyway.</p><div class="links"><a class="btn btn-line" data-build="win-setup" href="https://github.com/dokyit/Trek/releases/latest/download/Trek-Setup-x86_64.exe">Installer <small data-size></small></a><a class="btn btn-line" data-build="win-zip" href="https://github.com/dokyit/Trek/releases/latest">Zip <small data-size></small></a></div></li>
+      <li><h3>Phone</h3><p>The iPhone app builds from source. Any phone’s browser gets the remote.</p><div class="links"><a class="btn btn-line" href="https://github.com/dokyit/Trek/blob/main/ios/README.md">Build for iPhone</a><a class="btn btn-line" href="/remote/">Remote</a></div></li>
+      <li data-linux><h3>Linux <em class="tag">Preview</em></h3><p>Ubuntu 22.04, Debian 12, Fedora 36 or later. A first version, with fewer features than on a Mac. The AppImage updates itself.</p><div class="links"><a class="btn btn-line" data-build="linux-appimage" href="https://github.com/dokyit/Trek/releases/latest">AppImage <small data-size></small></a><a class="btn btn-line" data-build="linux-deb" href="https://github.com/dokyit/Trek/releases/latest">.deb <small data-size></small></a></div><p class="arm">Arm</p><div class="links"><a class="btn btn-line" data-build="linux-arm" href="https://github.com/dokyit/Trek/releases/latest">AppImage <small data-size></small></a><a class="btn btn-line" data-build="linux-deb-arm" href="https://github.com/dokyit/Trek/releases/latest">.deb <small data-size></small></a></div></li>
     </ul>
   </div>
+  <div class="closing" aria-hidden="true"><div class="field field-end" data-field="end"></div></div>
 </section>
 </main>
 
 <footer class="foot">
-<picture class="closing-land" aria-hidden="true">
-  <source media="(prefers-color-scheme: dark) and (max-width: 700px)" type="image/avif" srcset="/assets/img/backdrop/dusk-tall-night-720.avif?v=926ca1f4 720w, /assets/img/backdrop/dusk-tall-night-1080.avif?v=2eb3325b 1080w" sizes="100vw">
-  <source media="(prefers-color-scheme: dark) and (min-width: 701px)" type="image/avif" srcset="/assets/img/backdrop/dusk-wide-night-1280.avif?v=8e728d93 1280w, /assets/img/backdrop/dusk-wide-night-1920.avif?v=750b1dd2 1920w, /assets/img/backdrop/dusk-wide-night-2560.avif?v=f562c9e3 2560w" sizes="100vw">
-  <source media="(prefers-color-scheme: dark) and (max-width: 700px)" srcset="/assets/img/backdrop/dusk-tall-night-1080.jpg?v=cbbf3170">
-  <source media="(prefers-color-scheme: dark) and (min-width: 701px)" srcset="/assets/img/backdrop/dusk-wide-night-1920.jpg?v=193b906d">
-  <source media="(prefers-color-scheme: light) and (max-width: 700px)" type="image/avif" srcset="/assets/img/backdrop/dusk-tall-dusk-720.avif?v=7e244da2 720w, /assets/img/backdrop/dusk-tall-dusk-1080.avif?v=8709420f 1080w" sizes="100vw">
-  <source media="(prefers-color-scheme: light) and (min-width: 701px)" type="image/avif" srcset="/assets/img/backdrop/dusk-wide-dusk-1280.avif?v=9d9837bd 1280w, /assets/img/backdrop/dusk-wide-dusk-1920.avif?v=6c78dbb0 1920w, /assets/img/backdrop/dusk-wide-dusk-2560.avif?v=04dffbb9 2560w" sizes="100vw">
-  <source media="(prefers-color-scheme: light) and (max-width: 700px)" srcset="/assets/img/backdrop/dusk-tall-dusk-1080.jpg?v=85bbdc85">
-  <img src="/assets/img/backdrop/dusk-wide-dusk-1920.jpg?v=23e28aba" width="2560" height="1600" alt="" loading="lazy" decoding="async">
-</picture>
-  <div class="foot-in">
-    <a class="lockup" href="/" aria-label="Trek, home"><svg class="mark" viewBox="13 13 70 70" aria-hidden="true"><use class="post" href="/assets/img/mark.svg?v=7cbb7d26#post"/><use class="board" href="/assets/img/mark.svg?v=7cbb7d26#board-a"/><use class="board" href="/assets/img/mark.svg?v=7cbb7d26#board-b"/></svg><span>trek</span></a>
-    <span class="who">© 2026 Toby Dokyi</span>
-    <a class="text-link" href="https://github.com/dokyit/Trek">GitHub</a>
-    <a class="text-link" href="https://github.com/dokyit/Trek/releases">Releases</a>
-    <a class="text-link" href="/privacy/">Privacy</a>
-    <a class="text-link" href="/terms/">Terms</a>
-    <!--email_off--><a class="text-link" href="mailto:support@trekdesktop.com">support@trekdesktop.com</a><!--/email_off-->
-  </div>
+  <a class="lockup" href="#top" aria-label="Trek, back to the top"><svg class="mark" viewBox="13 13 70 70" aria-hidden="true"><use class="post" href="/assets/img/mark.svg?v=7cbb7d26#post"/><use class="board" href="/assets/img/mark.svg?v=7cbb7d26#board-a"/><use class="board" href="/assets/img/mark.svg?v=7cbb7d26#board-b"/></svg><span>trek</span></a>
+  <span class="who">© 2026</span>
+  <a class="text-link" href="https://github.com/dokyit/Trek">GitHub</a>
+  <a class="text-link" href="https://github.com/dokyit/Trek/releases">Releases</a>
+  <a class="text-link" href="/privacy/">Privacy</a>
+  <a class="text-link" href="/terms/">Terms</a>
+  <!--email_off--><a class="text-link" href="mailto:support@trekdesktop.com">support@trekdesktop.com</a><!--/email_off-->
 </footer>
+</div>
 </body>
 </html>
