@@ -39,7 +39,7 @@ A panic also leaves `crash-reports/panic-*.json` in the data folder (the newest 
 
 ## The install id
 
-A random UUID, made at the first yes. It's the event's `distinct_id`; nothing else about the install or the person is known. Every event sets `$process_person_profile: false` (PostHog makes no person profile) and `$geoip_disable: true` (no country or city from the address it came from). For no IP at all, turn on *Discard client IP data* in the PostHog project's settings. **Reset** in Settings › Privacy makes a new id and drops what was waiting under the old one.
+A random UUID, made at the first yes. It's the event's `distinct_id`; nothing else about the install or the person is known. Every event sets `$process_person_profile: false` (PostHog makes no person profile) and `$geoip_disable: true` (no country or city from the address it came from). The PostHog project Trek's releases send to has *Discard client IP data* on (checked in its settings on 21 November 2026) and a one-year retention, so no address is stored; a build that sends to another project depends on that project's own settings. **Reset** in Settings › Privacy makes a new id and drops what was waiting under the old one.
 
 ## Events
 
@@ -82,6 +82,7 @@ A crash report, and the log lines in feedback, go through `trek_telemetry::Scrub
 - Secrets agents were given this run (`trek_core::session_secrets`) become `[NAME hidden]`; a panic's report is scrubbed of them when it's written, too.
 - Anything shaped like a key or token (Anthropic, OpenAI, GitHub, Slack, AWS, Google, GitLab, npm, JWTs, `API_KEY=…`, `https://user:pass@…`, private keys) becomes `[redacted]` (the same matcher as Share's "Hide file paths and secrets").
 - Email addresses become `[email]`.
+- Web addresses (from 0.4.64): any `scheme://…` (the browser's pages, a `file://` path, one with a login in it) becomes `[url]`. The exception is an `http(s)` address whose host is one Trek or its model providers contact (`KNOWN_HOSTS` in `scrub.rs`: GitHub, the npm and Homebrew feeds, the agent registry, PostHog, ntfy, Hugging Face, the providers' API hosts, `localhost`): it keeps its scheme and host, never its path or query. The host alone says which of Trek's own requests failed, and where someone's browser went is theirs. Before 0.4.64 addresses were left in.
 - A project's folder, and whatever path follows it, becomes `[path]`. So does any other absolute path, except the system's (`/usr/…`, `/opt/homebrew/…`, `/Applications/…`, `C:\Windows\…`); one under the home folder is `~/[path]`.
 - Trek's own data and log folders become `[Trek data]` and `[Trek logs]`; a crate in cargo's registry is named from the crate (`gpui-pre-0.3.7/src/window.rs`).
 - The home folder anywhere else is `~`.
@@ -124,7 +125,7 @@ Apart from PostHog, and apart from the agents' and model providers' own servers 
 | `huggingface.co` | The Windows dictation model, on the first click of the mic. |
 | `clients2.google.com`, `edge.microsoft.com` | A browser extension's download, when the user installs one. |
 | `www.google.com` | The built-in Browser's start page asks for six sites' icons (`/s2/favicons`) when it opens; its address bar searches Google for text that isn't an address. |
-| `cdn.jsdelivr.net` | Study question cards load KaTeX (`study_card.html`) every time one is drawn. |
+| `cdn.jsdelivr.net` | Before 0.4.64, study question cards loaded KaTeX from it every time one was drawn; since then it is bundled (`crates/trek-assets/assets/katex`, served by the card's own origin at `/_trek/katex/`) and the card asks no host. A `trek-html` page an agent writes may still load from any CDN by design. |
 | Any `https` host | A note's remote images (fetched by the Mac, and by the iPhone itself); a `trek-html` artifact's own scripts, styles and fonts, which its card names. |
 | `ntfy.sh` or the user's own server | Phone notifications, off by default. A note says the kind of news and carries a `trek://` link; it names the thread and project only when the `push_names` setting is on (off by default). ntfy reads whatever is sent through it. |
 | The browser's push service (`fcm.googleapis.com`, `web.push.apple.com`, `updates.push.services.mozilla.com`) | Web Push to the web remote, when the user turns its notifications on. Encrypted. |
@@ -133,9 +134,8 @@ The web remote (`site/remote`) loads nothing from another host. Its dictation us
 
 ## Known gaps
 
-- `log_tail` and `recent_errors` are scrubbed of paths, emails and key-shaped strings, not of web addresses: Trek's own browser logs the addresses it opens (`panels/browser.rs`), so a feedback report with diagnostics can carry them. The form shows everything before it goes, and the privacy page says so.
-- Study cards fetch KaTeX from `cdn.jsdelivr.net` instead of bundling it.
-- The 1-year retention and the discarding of client IPs are settings of the PostHog project, not of the code (see "The install id"); the privacy page says only what the code guarantees about the address, and a year for retention.
+- Error text an agent printed can still appear in `log_tail` and `recent_errors`, whatever it says (a thread title, a host name without a scheme). The form shows everything before it goes, and the privacy page says so.
+- The one-year retention and the discarding of client IPs are settings of the PostHog project, not of the code (see "The install id"); the privacy page states them as they were found on 21 November 2026. Session replay and autocapture are off in the code (there is no SDK), but that project's own toggles for them were not looked at.
 
 ## Download counts
 

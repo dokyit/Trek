@@ -74,19 +74,20 @@
       </div>
 
       <h2>Who you are to Trek</h2>
-      <p>A random install id, made the first time you say yes. Nothing else about you or the install is known. Each event tells PostHog not to make a profile of a person and not to look up a country or city from the address it came from. The request itself still reaches PostHog from your IP address, as any request does. <strong>Reset</strong> in Settings, Privacy makes a new id and drops whatever was waiting to be sent under the old one.</p>
+      <p>A random install id, made the first time you say yes. Nothing else about you or the install is known. Each event tells PostHog not to make a profile of a person and not to look up a country or city from the address it came from. The request itself reaches PostHog from your IP address, as any request does, and PostHog is set to discard the address as it arrives. <strong>Reset</strong> in Settings, Privacy makes a new id and drops whatever was waiting to be sent under the old one.</p>
 
       <h2>What is removed before a crash report or a log is sent</h2>
       <ul>
         <li>Secrets you gave an agent during the run.</li>
         <li>Anything shaped like a key or a token, including private keys and passwords inside web addresses.</li>
         <li>Email addresses.</li>
+        <li>Web addresses (from version 0.4.64), apart from the host of Trek’s own services and the model providers.</li>
         <li>Your project folders and any other path on your disk, apart from system locations such as <code>/usr</code> or <code>/Applications</code>. Your home folder becomes <code>~</code>.</li>
       </ul>
 
       <h2>Feedback</h2>
       <p>Help, Send Feedback opens a form: what happened, whether it is a bug or an idea, an optional email for a reply, and <strong>Include diagnostics</strong>, which is on by default. The form says in a line what it will send, and shows all of it on request before anything goes. Sending it is the consent, so it works even if you said no to usage data.</p>
-      <p>With diagnostics, feedback carries the app version, operating system and architecture, up to 20 recent warning and error lines, and the last 200 lines of Trek’s log, cleaned as described above. Those lines can include web addresses opened in Trek’s own browser and error text from your agents, so look at the preview before you send. Without diagnostics it carries none of that. If you said no to usage data, feedback is sent under a new random id each time, so it can’t be tied to anything.</p>
+      <p>With diagnostics, feedback carries the app version, operating system and architecture, up to 20 recent warning and error lines, and the last 200 lines of Trek’s log, cleaned as described above. From version 0.4.64 the web addresses in those lines are cut down: the whole address goes, except the host (without its path) of Trek’s own services and the model providers, such as <code>github.com</code>. Before that they were left in, and Trek’s own browser logs the addresses it opens. Error text from your agents can still appear, so look at the preview before you send. Without diagnostics it carries none of that. If you said no to usage data, feedback is sent under a new random id each time, so it can’t be tied to anything.</p>
       <p>The form can also open a new issue on GitHub with your message and diagnostics filled in. It never includes your email there, because an issue is public.</p>
 
       <h2>What stays on your computer</h2>
@@ -99,7 +100,7 @@
       <p>Trek for iPhone sends no usage data and no crash reports. It has the same feedback form. Feedback goes only when you press Send: your message, your email address if you give one, and, unless you turn it off, the app’s version, the iOS version and the architecture. It goes to PostHog under a new random id each time and is not used for tracking.</p>
 
       <h2>Having your data deleted</h2>
-      <p>Saying no in Settings, Privacy stops everything from that moment and drops what was waiting to be sent. PostHog keeps what was sent for one year. Trek tells it not to use the address a request came from to place you.</p>
+      <p>Saying no in Settings, Privacy stops everything from that moment and drops what was waiting to be sent. PostHog keeps what was sent for one year. Its project for Trek is set to discard the address each request came from, so none is stored.</p>
       <p>To have what was sent deleted sooner, open Settings, Privacy in Trek, copy your install id, and write to <!--email_off--><a href="mailto:support@trekdesktop.com">support@trekdesktop.com</a><!--/email_off--> with it. Trek’s usage data is tied to nothing but that id, so it is all that can be found and deleted. Feedback is found by the email address you gave, or by the install id if you had said yes to usage data when you sent it. Feedback sent with no email under a random id can’t be matched to anyone, so it can’t be looked up.</p>
 
       <h2>Children</h2>
@@ -113,7 +114,7 @@
         <li>Things you ask for. Add agent reads a public list of agents from <code>cdn.agentclientprotocol.com</code> when you open it. Setting up Node.js, ffmpeg or yt-dlp downloads them from their own sites. Installing a browser extension downloads it from the Chrome or Edge store. Asking an agent to watch a video fetches it from the site it is on. The Windows dictation model comes from Hugging Face. Each of these starts when you click.</li>
         <li>Dictation. On a Mac it uses Apple’s speech recognition, on the Mac where the system can and on Apple’s servers where it can’t. On Windows it runs Whisper on your PC, and the 141 MB model downloads once, the first time you click the mic. A Trek installed as a Windows package uses Windows’ online speech instead, which goes to Microsoft. For the iPhone and the phone remote, see below.</li>
         <li>The built-in browser. Its start page asks Google for the icons of its six sites, and text you type in its address bar that isn’t an address is searched on Google. Pages you open load from their own sites, as in any browser.</li>
-        <li>Images and formulas. An image in a note or a thread loads from the address it names, fetched by your Mac or, on the iPhone, by the phone itself, so the site that hosts it sees your IP address. Study questions that show formulas load their formula font from <code>cdn.jsdelivr.net</code>. A page an agent makes may load from other hosts, and its card says which.</li>
+        <li>Images and formulas. An image in a note or a thread loads from the address it names, fetched by your Mac or, on the iPhone, by the phone itself, so the site that hosts it sees your IP address. Study questions that show formulas draw them with a copy of KaTeX inside Trek (before version 0.4.64 they loaded it from <code>cdn.jsdelivr.net</code>). A page an agent makes may load from other hosts, and its card says which.</li>
         <li>Your phone. The iPhone app connects straight to your computer over your Wi-Fi or Tailscale. No Trek server sits in between. Push notifications go through ntfy (<code>ntfy.sh</code>, unless you name your own server), only if you turn them on. A notification carries the kind of news and a link, and the thread’s and project’s names only if you turn names on in Settings; ntfy can read what is sent through it.</li>
         <li>The phone remote. For an Android phone or another browser, <a href="/remote/">trekdesktop.com/remote</a> loads from this site and then talks only to your computer. The computers you pair and their tokens stay in that browser’s storage on the phone. It may ask for the microphone, to dictate, which uses your browser’s own speech service (Google’s, in Chrome and on Android), and the camera, to send a photo. If you turn on its notifications, your computer sends them through the browser’s own push service.</li>
       </ul>

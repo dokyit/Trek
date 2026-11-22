@@ -118,7 +118,7 @@ Remove-TrekKeys -Classes "HKCU:\Software\Classes" -Exe (Join-Path $InstallDir "t
 # The folder may be one the user picked (Documents, C:\Tools...), so remove only the files the
 # installer put there, and the folder itself only if nothing else is left in it.
 if (Test-Path -LiteralPath $InstallDir) {
-    foreach ($f in @("trek.exe", "trek-mcp.exe", "trek-update.exe")) {
+    foreach ($f in @("trek.exe", "trek-mcp.exe", "trek-update.exe", "LICENSE", "NOTICE.txt")) {
         Remove-Item -LiteralPath (Join-Path $InstallDir $f) -Force -ErrorAction SilentlyContinue
     }
 

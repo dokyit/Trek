@@ -50,6 +50,8 @@ Third-party materials bundled in this repository:
   agent or provider a thread or setting uses; no endorsement or affiliation is
   implied, and Trek claims no rights in those marks. Trademark holders may
   request removal via a GitHub issue.
+  The PNG files themselves were added on 2 October 2026 with no record of where each was taken
+  from; the one-colour glyphs below are the ones whose source is known.
 * site/remote/vendor — the web remote's libraries, as their authors publish them: Preact
   (Jason Miller), MIT; htm (Google), Apache-2.0; marked (Christopher Jeffrey and contributors), MIT;
   DOMPurify (Cure53 and contributors), Apache-2.0 or MPL-2.0; and KaTeX (Khan Academy and other
@@ -66,6 +68,19 @@ Third-party materials bundled in this repository:
 * ios/Trek/Assets.xcassets/Glyphs — one-colour agent marks from Lobe Icons
   (@lobehub/icons-static-svg 1.95.1), MIT, with each path's arc flags written out; the marks
   themselves belong to their owners, as the logos above do.
+* crates/trek-assets/assets/katex — KaTeX 0.16.11 (Khan Academy and other contributors), as the
+  npm package publishes it (katex.min.js, contrib/auto-render.min.js, katex.min.css and the
+  woff2 fonts), MIT (LICENSE in that folder) with the fonts under the SIL Open Font License 1.1
+  (OFL-KaTeX.txt). Study question cards draw their formulas with it, served from the app itself.
+* ios/Trek/Assets.xcassets/Cards — the glyphs on the iPhone's cards (git merge, pull request,
+  rocket, workflow and the like) are Lucide icons (Lucide Icons and Contributors), ISC (the
+  licence text is docs/assets/icons/features/LICENSE), with their stroke widths changed.
+* Made for Trek and under its licence, with nothing taken from elsewhere: the drawings in
+  plugins/examples/*/art; the four sounds in plugins/examples/soft-sounds/sounds, which were
+  synthesised for that plugin (plain tones with a fading tail, each peaking at the same level,
+  added 17 November 2026); crates/trek-assets/assets/icons/hub.svg; assets/dmg/background.svg
+  (drawn by script/dmg-background.sh); and the demo recordings and screenshots under ios/screenshots,
+  site/assets/img/features and site/assets/img/window-*, which are captures of Trek itself.
 * Model metadata (context windows, pricing) is sourced from models.dev.
 * docs/assets/icons/features — Lucide icons (Lucide Icons and Contributors), ISC
   (docs/assets/icons/features/LICENSE), recoloured. docs/assets/icons/tech and

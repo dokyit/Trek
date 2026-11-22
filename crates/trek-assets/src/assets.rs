@@ -40,6 +40,27 @@ impl AssetSource for Assets {
     }
 }
 
+/// A file of the KaTeX that study question cards draw their formulas with (version 0.16.11 of
+/// the `katex` package, as published: `assets/katex/`), and its content type. Only those files:
+/// the script, the auto-render script, the stylesheet and the `KaTeX_*.woff2` fonts it names.
+pub fn katex_file(name: &str) -> Option<(&'static str, Cow<'static, [u8]>)> {
+    let kind = match name {
+        "katex.min.js" | "auto-render.min.js" => "text/javascript",
+        "katex.min.css" => "text/css",
+        font if font
+            .strip_prefix("fonts/KaTeX_")
+            .and_then(|rest| rest.strip_suffix(".woff2"))
+            .is_some_and(|stem| {
+                !stem.is_empty() && stem.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            }) =>
+        {
+            "font/woff2"
+        }
+        _ => return None,
+    };
+    Embedded::get(&format!("katex/{name}")).map(|file| (kind, file.data))
+}
+
 /// The kit's radii on Windows: its controls take 4 px corners and its dialogs and notifications 8,
 /// as `fluent` gives Trek's own.
 const WINDOWS_RADIUS: u32 = 4;
@@ -207,5 +228,37 @@ mod tests {
             missing.is_empty(),
             "not embedded (add to TrekIcons): {missing:#?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod katex_tests {
+    use super::katex_file;
+
+    #[test]
+    fn the_bundled_katex_is_there_and_only_it() {
+        for (name, kind) in [
+            ("katex.min.js", "text/javascript"),
+            ("auto-render.min.js", "text/javascript"),
+            ("katex.min.css", "text/css"),
+            ("fonts/KaTeX_Main-Regular.woff2", "font/woff2"),
+            ("fonts/KaTeX_Size4-Regular.woff2", "font/woff2"),
+        ] {
+            let (got, bytes) = katex_file(name).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(got, kind);
+            assert!(bytes.len() > 1000, "{name}");
+        }
+        // The licences travel in the folder but aren't served; nor is anything outside it.
+        for name in [
+            "LICENSE",
+            "OFL-KaTeX.txt",
+            "fonts/../LICENSE",
+            "../fonts/Inter-Regular.ttf",
+            "fonts/KaTeX_Main-Regular.ttf",
+            "fonts/KaTeX_/../x.woff2",
+            "",
+        ] {
+            assert!(katex_file(name).is_none(), "{name}");
+        }
     }
 }
