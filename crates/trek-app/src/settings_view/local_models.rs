@@ -108,7 +108,7 @@ impl SettingsView {
             .child(div().text_size(px(text::TITLE)).font_medium().child(s.name));
         let detail = if s.running {
             let used = if s.models.is_empty() {
-                "Running. Pull a model, e.g. ollama pull qwen3-coder".to_string()
+                s.no_models_yet()
             } else {
                 s.models.join(", ")
             };

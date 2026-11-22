@@ -130,11 +130,41 @@ pub trait Observer: Send + Sync {
 /// The error for a failed request, by what can be done about it (`failure`): one worth waiting out
 /// is sent again by the session, a usage limit with a far-off reset is said with
 /// `AgentEvent::LimitReached`.
+/// What a request that never reached the provider says: its host and what to check, rather than
+/// reqwest's "error sending request for url (…)". `connect`: the connection itself failed or timed
+/// out; anything else keeps reqwest's words.
+fn unreachable(host: Option<&str>, connect: bool, raw: &str) -> String {
+    match host.filter(|_| connect) {
+        Some(host) => format!("Couldn't reach {host}. Check the internet connection"),
+        None => format!("Couldn't reach the provider: {raw}"),
+    }
+}
+
+/// What a key the provider turned down (a 401, or a 400 or 403 that says the key isn't valid)
+/// adds to its words: where to put that right.
+const KEY_REFUSED: &str =
+    "Check the key in Settings → API Keys, or paste a new one there if it was revoked.";
+
+fn key_refused(status: u16, message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    status == 401
+        || matches!(status, 400 | 403)
+            && lower.contains("api key")
+            && ["invalid", "not valid", "incorrect"]
+                .iter()
+                .any(|w| lower.contains(w))
+}
+
 fn request_error(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
     message: String,
 ) -> anyhow::Error {
+    let message = if key_refused(status.as_u16(), &message) {
+        format!("{message}\n\n{KEY_REFUSED}")
+    } else {
+        message
+    };
     let mut failed =
         failure::classify_status(status.as_u16(), &message, failure::retry_after(headers));
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -3954,7 +3984,12 @@ async fn send_request(
                         }
                         .into();
                     }
-                    RequestFailure::transient(format!("Couldn't reach the provider: {e}")).into()
+                    RequestFailure::transient(unreachable(
+                        e.url().and_then(|u| u.host_str()),
+                        e.is_connect() || e.is_timeout(),
+                        &e.to_string(),
+                    ))
+                    .into()
                 });
             }
             _ = &mut sleep => {
@@ -5435,6 +5470,55 @@ pub fn load_all_cached_direct_models() -> HashMap<String, Vec<ModelInfo>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A key the provider turns down says where to change it; other refusals don't.
+    #[test]
+    fn a_refused_key_points_at_settings() {
+        assert!(key_refused(401, "invalid x-api-key"));
+        assert!(key_refused(
+            400,
+            "API key not valid. Please pass a valid API key."
+        ));
+        assert!(key_refused(403, "Incorrect API key provided"));
+        assert!(!key_refused(400, "max_tokens: too large"));
+        assert!(!key_refused(403, "model not allowed"));
+        let e = request_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            &reqwest::header::HeaderMap::new(),
+            "Anthropic API 401 Unauthorized: invalid x-api-key".into(),
+        );
+        let said = e.to_string();
+        assert!(said.starts_with("Anthropic API 401 Unauthorized"), "{said}");
+        assert!(said.ends_with(KEY_REFUSED), "{said}");
+        let e = request_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            &reqwest::header::HeaderMap::new(),
+            "400 Bad Request: max_tokens: too large".into(),
+        );
+        assert!(!e.to_string().contains("API Keys"));
+    }
+
+    /// No connection says which host and what to check, not reqwest's "error sending request for
+    /// url (…)".
+    #[test]
+    fn an_unreachable_provider_is_named_in_plain_words() {
+        assert_eq!(
+            unreachable(
+                Some("api.anthropic.com"),
+                true,
+                "error sending request for url"
+            ),
+            "Couldn't reach api.anthropic.com. Check the internet connection"
+        );
+        assert_eq!(
+            unreachable(Some("api.anthropic.com"), false, "body error"),
+            "Couldn't reach the provider: body error"
+        );
+        assert_eq!(
+            unreachable(None, true, "builder error"),
+            "Couldn't reach the provider: builder error"
+        );
+    }
 
     /// One request as these tests want to make it: the parts that vary, the rest from defaults.
     #[allow(clippy::too_many_arguments)]

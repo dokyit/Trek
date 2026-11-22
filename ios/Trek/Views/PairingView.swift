@@ -19,6 +19,8 @@ struct PairingView: View {
                             .scaledToFit()
                             .frame(width: 72, height: 72)
                             .shadow(color: Color(hex: 0xFF8A3D).opacity(0.5), radius: 24)
+                            // The word beside it says it.
+                            .accessibilityHidden(true)
                         Text("Trek")
                             .font(.ui(size: 40, weight: .bold))
                             .tracking(-0.8)

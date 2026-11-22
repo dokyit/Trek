@@ -172,8 +172,8 @@ final class TrekClient: Backend {
     var onMessage: ((ServerMessage) -> Void)?
     var onState: ((ConnectionState) -> Void)?
     /// What's going on, in words ("Looking for … on this Wi-Fi…", "Connected over Tailscale"),
-    /// for the Threads list and Settings.
-    var onDetail: ((String) -> Void)?
+    /// for the Threads list and Settings, and whether they send the user to iOS Settings.
+    var onDetail: ((String, Bool) -> Void)?
     /// Called once when pairing succeeds, with the device token to keep and the transport to keep
     /// using (for TLS, pinned to the full fingerprint seen while pairing).
     var onPaired: ((String, HostInfo, Transport) -> Void)?
@@ -241,6 +241,7 @@ final class TrekClient: Backend {
     private var beat = 0
     private(set) var state: ConnectionState = .idle
     private(set) var detail: String?
+    private var detailOpensSettings = false
     /// What the connection runs over (USB, Wi-Fi, Tailscale…), while connected.
     private(set) var connectedOver: LinkKind?
 
@@ -839,7 +840,7 @@ final class TrekClient: Backend {
             return
         }
         let status = ReachStatus.searching(facts())
-        setDetail(status.text)
+        setDetail(status.text, opensSettings: status.opensSettings)
         // Pairing ends on what the round says (`roundLost`), not on the words on the way.
         if case .pair = auth {
             if state == .idle { setState(.connecting) }
@@ -854,10 +855,11 @@ final class TrekClient: Backend {
         onState?(s)
     }
 
-    private func setDetail(_ text: String) {
-        guard text != detail else { return }
+    private func setDetail(_ text: String, opensSettings: Bool = false) {
+        guard text != detail || opensSettings != detailOpensSettings else { return }
         detail = text
-        onDetail?(text)
+        detailOpensSettings = opensSettings
+        onDetail?(text, opensSettings)
     }
 }
 

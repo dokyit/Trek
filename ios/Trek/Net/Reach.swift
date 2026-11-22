@@ -462,6 +462,9 @@ nonisolated enum ReachStatus {
         var text: String
         /// Still trying something that may work (a spinner), rather than waiting to retry.
         var trying: Bool
+        /// The words send the user to iOS Settings (Local Network is off for Trek): the banner
+        /// offers Open Settings.
+        var opensSettings = false
     }
 
     static func connected(over kind: Address.Kind) -> String {
@@ -527,9 +530,9 @@ nonisolated enum ReachStatus {
         }
         if f.localDenied {
             let fix = "Turn on Local Network for Trek in iOS Settings › Privacy & Security."
-            guard f.hasTailnet else { return Status(text: "Trek can't look on this Wi-Fi. \(fix)", trying: false) }
+            guard f.hasTailnet else { return Status(text: "Trek can't look on this Wi-Fi. \(fix)", trying: false, opensSettings: true) }
             return f.tailnetFailed
-                ? Status(text: "Trek can't look on this Wi-Fi and Tailscale didn't answer. \(fix)", trying: false)
+                ? Status(text: "Trek can't look on this Wi-Fi and Tailscale didn't answer. \(fix)", trying: false, opensSettings: true)
                 : Status(text: "Trek can't look on this Wi-Fi. Trying Tailscale…", trying: true)
         }
         // Paired over Tailscale alone, and nothing of the Mac on this Wi-Fi: no Wi-Fi to talk of.

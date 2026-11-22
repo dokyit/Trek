@@ -1430,12 +1430,20 @@ pub fn open_main(workspace: Entity<Workspace>, focus: bool, cx: &mut App) -> any
     Ok(())
 }
 
+/// What the dialog says when the database at `file` couldn't be opened: why, that nothing is
+/// saved now, and what to do, for a damaged file too (it used to speak only of another Trek).
+pub fn database_error_detail(error: &str, file: &std::path::Path) -> String {
+    let first = error.lines().next().unwrap_or(error).trim();
+    format!(
+        "{first}\n\nAnything you do now won't be saved. Quit, close any other copy of Trek, and open it again. If it still can't open it, the file may be damaged: it's {}. Moving it somewhere else lets Trek start with a new, empty one, and keeps the old one for help getting your threads back.",
+        trek_core::paths::tildify(file)
+    )
+}
+
 /// Trek's database couldn't be opened (another Trek holding it, a damaged file): this session
 /// saves nothing, so ask before the user starts working in it.
 fn database_error(error: &str, window: &mut Window, cx: &mut App) {
-    let detail = format!(
-        "{error}\n\nAnything you do now won't be saved. Quit, close any other copy of Trek, and open it again."
-    );
+    let detail = database_error_detail(error, &trek_core::paths::database_file());
     let answer = window.prompt(
         gpui_kit::PromptLevel::Critical,
         "Trek couldn't open its database",
@@ -2371,6 +2379,7 @@ pub fn toast_button_label(action: &UndoAction) -> &'static str {
         UndoAction::OpenPlugins => "Manage",
         UndoAction::RevealFile(_) => crate::words::words().show_in_file_manager,
         UndoAction::OpenPrivacy(_) => "Open Settings",
+        UndoAction::SendFeedback => "Send feedback…",
         UndoAction::RestartToUpdate => "Restart",
         UndoAction::InstallWhenFree => "When they finish",
         _ => "Undo",

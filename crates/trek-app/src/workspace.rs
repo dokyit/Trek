@@ -614,6 +614,41 @@ pub fn worktree_missing(t: &Thread) -> bool {
     t.worktree.as_ref().is_some_and(|w| w.is_missing())
 }
 
+/// How often a failing save is told of, at most.
+pub const SAVE_WARNING_EVERY: Duration = Duration::from_secs(120);
+
+/// What the user is told when Trek couldn't save, from what went wrong (`error`).
+pub fn save_failure_message(error: &str) -> String {
+    let lower = error.to_lowercase();
+    let why = if lower.contains("disk is full")
+        || lower.contains("no space left")
+        || lower.contains("os error 28")
+        || lower.contains("os error 112")
+    {
+        "the disk is full. Free some space and Trek saves again as you go".to_string()
+    } else if lower.contains("readonly")
+        || lower.contains("read-only")
+        || lower.contains("permission denied")
+    {
+        format!(
+            "it can't write to its data folder ({}). Check that the folder is yours and not read-only",
+            trek_core::paths::tildify(&trek_core::paths::data_dir())
+        )
+    } else {
+        let first = error.lines().next().unwrap_or(error).trim();
+        format!("{first}. Until it can, what changes now may be gone after a restart")
+    };
+    format!("Trek couldn't save your work: {why}.")
+}
+
+/// What a turn says when the folder its thread works in isn't there.
+pub fn folder_gone_message(folder: &std::path::Path) -> String {
+    format!(
+        "The folder this thread works in isn't there any more: {}. If it was moved or renamed, put it back and send again, or start a new thread in the folder where it is now.",
+        trek_core::paths::tildify(folder)
+    )
+}
+
 /// Whether `cwd` is in a git repository (as checkpoints see it).
 pub fn in_repo(cwd: Option<&std::path::Path>) -> bool {
     cwd.is_some_and(|c| trek_core::store::project_root(c).join(".git").exists())
@@ -1818,6 +1853,8 @@ pub enum UndoAction {
     RevealFile(PathBuf),
     /// Not an undo: open the system's pane where `Permission` is turned on for Trek.
     OpenPrivacy(crate::permissions::Permission),
+    /// Not an undo: open Send feedback (the last run ended in an internal error).
+    SendFeedback,
     /// Not an undo: restart into the update that's staged (`Workspace::restart_to_update`).
     RestartToUpdate,
     /// Not an undo: chats are running, so the same restart, once they finish.
@@ -2259,6 +2296,9 @@ pub struct Workspace {
     /// A restart asked for to get Trek's permissions back (its bundle was replaced on disk:
     /// `permissions::Status::Replaced`), waiting for agents like a restart to update.
     restart_wanted: bool,
+    /// When a save last failed in a way the user was told of (`save_failed`): once in a while,
+    /// not on every streamed word.
+    save_warned: Option<Instant>,
     /// Trek is on its way out: what sessions say from here on isn't news (`root::quit`).
     pub quitting: bool,
     /// Chats a quit or a crash cut off, by thread, until they're dealt with (`resume`).
@@ -2365,9 +2405,8 @@ impl Workspace {
             .detach();
         let mut launch_toasts: Vec<String> =
             settings_problem.map(|p| p.message()).into_iter().collect();
-        launch_toasts.extend(crate::logging::take_crash_note(
-            &trek_core::paths::data_dir(),
-        ));
+        // The last run ended in an internal error: said once, with a way to report it.
+        let crash = crate::logging::take_crash_note(&trek_core::paths::data_dir());
         if store.newer_schema().is_some() {
             launch_toasts.push("This data folder was last used by a newer Trek. Threads it saved may show only in part here, and rewinding or editing them is off until you update.".into());
         }
@@ -2432,6 +2471,7 @@ impl Workspace {
         };
         // Toasts with a button: a move out of where Trek is, and the old copy it left.
         let mut launch_actions: Vec<(String, UndoAction)> = vec![];
+        launch_actions.extend(crash.map(|note| (note, UndoAction::SendFeedback)));
         let windows = crate::words::is_windows();
         // Where Trek runs now, and the old copy: told by a toast and the Updates page (`arrived`),
         // once the user's shortcuts have been looked through.
@@ -2734,6 +2774,7 @@ impl Workspace {
             tasks: vec![],
             restart_countdown: None,
             restart_wanted: false,
+            save_warned: None,
             quitting: false,
             interrupted: HashMap::new(),
             unsent: Default::default(),
@@ -3195,6 +3236,7 @@ impl Workspace {
             }
             if let Err(e) = self.store.save_thread(t) {
                 tracing::warn!("save thread: {e}");
+                self.save_failed(&e, cx);
             }
             cx.notify();
         }
@@ -3203,6 +3245,7 @@ impl Workspace {
     pub fn save_settings(&mut self, cx: &mut Context<Self>) {
         if let Err(e) = self.settings.save() {
             tracing::warn!("save settings: {e}");
+            self.save_failed(&e, cx);
         }
         #[cfg(windows)]
         self.sync_update_task(cx);
@@ -3684,9 +3727,9 @@ impl Workspace {
                             "git switch failed",
                         ),
                     }),
-                    Err(e) => cx.emit(WorkspaceEvent::Toast {
-                        message: format!("git: {e}"),
-                        undo: None,
+                    // No git here: how to get one, rather than "No such file or directory".
+                    Err(e) => cx.emit(WorkspaceEvent::Failure {
+                        message: format!("{:#}", trek_core::git::run_error(e)),
                     }),
                 }
                 this.refresh_checkout(cwd, cx);
@@ -5688,7 +5731,12 @@ impl Workspace {
             _ => None,
         };
         let cwd = self.thread(&id).and_then(|t| t.cwd.clone());
-        self.ensure_session(&id, cx);
+        // Its folder was moved or deleted: no agent can start there (each said "No such file or
+        // directory", as if it weren't installed). The message stays, and the turn fails saying so.
+        let gone = (!running).then(|| self.folder_gone(&id)).flatten();
+        if gone.is_none() {
+            self.ensure_session(&id, cx);
+        }
         let live = self.live.entry(id.clone()).or_default();
         live.drop_after_turn();
         let ix = live.items.push(Item::User {
@@ -5735,6 +5783,17 @@ impl Workspace {
         }
         live.last_active = Some(cx.background_executor().now());
         live.revision += 1;
+        if let Some(folder) = gone {
+            self.apply_events(
+                &id,
+                vec![AgentEvent::TurnComplete {
+                    error: Some(folder_gone_message(&folder)),
+                }],
+                cx,
+            );
+            self.persist_items(&id, cx);
+            return;
+        }
         let text = self.resume_prompt(&id, text);
         crate::privacy::count_agent(self, &id);
         self.dispatch(&id, Command::Prompt { text, images });
@@ -5799,6 +5858,20 @@ impl Workspace {
                 .thread(id)
                 .is_some_and(|t| t.worktree.as_ref().is_some_and(|w| w.is_missing()))
             || self.agent_updates.held.contains_key(id)
+    }
+
+    /// The folder `id` works in, when it has one and it's gone (moved, renamed or deleted since).
+    /// A worktree's own folder has its own way back (`worktree_missing`), and a thread on another
+    /// machine runs in a folder there.
+    pub fn folder_gone(&self, id: &str) -> Option<PathBuf> {
+        if crate::machines::is_remote(id) {
+            return None;
+        }
+        let t = self.thread(id)?;
+        if t.worktree.is_some() {
+            return None;
+        }
+        t.cwd.clone().filter(|c| !c.is_dir())
     }
 
     /// Send what was queued while nothing ran (a thread whose history was loading): the first
@@ -5876,6 +5949,7 @@ impl Workspace {
         // and no CLI to run while it's being updated.
         if thread.worktree.as_ref().is_some_and(|w| w.is_missing())
             || self.agent_updating(&thread.agent.key())
+            || self.folder_gone(id).is_some()
         {
             return;
         }
@@ -6179,6 +6253,7 @@ impl Workspace {
         // chat's requests to change things.
         let events = self.screen_advice(id, events);
         let events = self.screen_ask(id, events);
+        let events = self.screen_sign_in(id, events, cx);
         // Background tasks' output is read while it runs (polled): it goes to whatever shows it,
         // and changes nothing else.
         let (outputs, events): (Vec<AgentEvent>, Vec<AgentEvent>) = events
@@ -7830,8 +7905,26 @@ impl Workspace {
         match saved {
             Ok(true) => self.index_for_search(cx),
             Ok(false) => {}
-            Err(e) => tracing::warn!("save transcript: {e}"),
+            Err(e) => {
+                tracing::warn!("save transcript: {e}");
+                self.save_failed(&e, cx);
+            }
         }
+    }
+
+    /// A save failed: the user is told, once in a while, why and what to do, rather than finding
+    /// the work gone at the next launch (a full disk failed every save in silence).
+    pub fn save_failed(&mut self, e: &dyn std::fmt::Display, cx: &mut Context<Self>) {
+        if self
+            .save_warned
+            .is_some_and(|at| at.elapsed() < SAVE_WARNING_EVERY)
+        {
+            return;
+        }
+        self.save_warned = Some(Instant::now());
+        cx.emit(WorkspaceEvent::Failure {
+            message: save_failure_message(&format!("{e:#}")),
+        });
     }
 
     pub fn respond(
@@ -9628,6 +9721,7 @@ impl Workspace {
             }
             UndoAction::RevealFile(path) => cx.reveal_path(&path),
             UndoAction::OpenPrivacy(permission) => crate::permissions::open_pane(permission, cx),
+            UndoAction::SendFeedback => crate::feedback::open_in_main(cx),
             UndoAction::RestartToUpdate | UndoAction::InstallWhenFree => {
                 self.updater.later = None;
                 self.restart_to_update(cx)

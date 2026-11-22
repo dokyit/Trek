@@ -11,6 +11,7 @@
 
 use super::{Workspace, WorkspaceEvent};
 use std::time::{Duration, Instant};
+use trek_agents::AgentEvent;
 use trek_core::AgentId;
 use trek_core::detect::Availability;
 
@@ -201,5 +202,103 @@ impl Workspace {
             .iter()
             .find(|(_, s)| s.command == command && s.at.elapsed() < SAID_FOR)?;
         Some(done.words(&AgentId::from_key(key).display_name()))
+    }
+
+    /// A Claude Code or Codex error that says the login is gone says where to sign in again, and
+    /// what Trek knows of the agent is read again, so Settings offers its Sign in.
+    pub(super) fn screen_sign_in(
+        &mut self,
+        id: &str,
+        events: Vec<AgentEvent>,
+        cx: &mut gpui_kit::Context<Self>,
+    ) -> Vec<AgentEvent> {
+        let Some(agent) = self
+            .thread(id)
+            .map(|t| t.agent.clone())
+            .filter(|a| matches!(a, AgentId::ClaudeCode | AgentId::Codex))
+        else {
+            return events;
+        };
+        let hint = sign_in_hint(&agent.display_name());
+        let mut seen = false;
+        let mut add = |text: String| {
+            if signed_out(&text) && !text.contains(&hint) {
+                seen = true;
+                format!("{text}\n\n{hint}")
+            } else {
+                text
+            }
+        };
+        let events = events
+            .into_iter()
+            .map(|e| match e {
+                AgentEvent::Error(text) => AgentEvent::Error(add(text)),
+                AgentEvent::TurnComplete { error: Some(text) } => AgentEvent::TurnComplete {
+                    error: Some(add(text)),
+                },
+                e => e,
+            })
+            .collect();
+        if seen {
+            self.detect_agents(cx);
+        }
+        events
+    }
+}
+
+/// Whether an agent's error says its login is gone (signed out, a key or token revoked or
+/// expired), in Claude Code's and Codex's words. They tell the user to run their own command
+/// (`/login`, `codex login`), which in Trek means its Sign in.
+pub fn signed_out(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    [
+        "/login",
+        "codex login",
+        "not logged in",
+        "not signed in",
+        "invalid api key",
+        "oauth token has expired",
+        "oauth token revoked",
+        "authentication_error",
+        "401 unauthorized",
+    ]
+    .iter()
+    .any(|said| lower.contains(said))
+}
+
+/// What a sign-in error of `name`'s adds: where Trek signs it in again.
+pub fn sign_in_hint(name: &str) -> String {
+    format!("Sign in to {name} again in Settings › Agents & Subscriptions.")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sign_in_hint, signed_out};
+
+    /// Claude Code's and Codex's own ways of saying the login has gone are read as such; other
+    /// failures aren't.
+    #[test]
+    fn a_gone_login_is_read_from_the_agent_s_words() {
+        for said in [
+            "Invalid API key · Please run /login",
+            "Not logged in · Please run /login",
+            "OAuth token has expired. Please obtain a new token or refresh your existing token.",
+            "API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\"}}",
+            "You're not signed in. Run codex login to sign in.",
+            "unexpected status 401 Unauthorized: Missing bearer",
+        ] {
+            assert!(signed_out(said), "{said}");
+        }
+        for said in [
+            "The mock agent hit an error: the build failed",
+            "Claude Code exited unexpectedly",
+            "Usage limit reached",
+        ] {
+            assert!(!signed_out(said), "{said}");
+        }
+        assert_eq!(
+            sign_in_hint("Claude Code"),
+            "Sign in to Claude Code again in Settings › Agents & Subscriptions."
+        );
     }
 }

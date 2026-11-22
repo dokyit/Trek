@@ -127,7 +127,7 @@ struct SettingsHeader: View {
             }
             if demo {
                 Button {
-                    if let link = model.links.first { model.leave(link) }
+                    model.endDemo()
                 } label: {
                     Text("Pair with a Mac").frame(maxWidth: .infinity)
                 }
@@ -340,6 +340,7 @@ struct PushSettingsView: View {
         .navigationSubtitle(model.links.count > 1 ? link.name : "")
         .navigationBarTitleDisplayMode(.inline)
         .task { model.loadSettings(on: link) }
+        .asksAgainOnConnect(link) { model.loadSettings(on: link) }
     }
 }
 

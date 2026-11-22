@@ -94,7 +94,7 @@ its files, one ticked viewed; `t-limit`: Continue on Work; `t-worktree`: the Com
 `-TrekSheet switch-preview` what goes with it; `-TrekOpen t-flaky -TrekSheet always-allow`: an
 approval's Always allow; `-TrekTab settings -TrekSheet rules`: the permission rules), `-TrekDemoRelease newer` (the update card),
 `-TrekDemoOffline demo-pc` (debug builds: that machine can't be reached, its banner over the threads),
-`-TrekDemoConnection identity|refused|connecting|offline` (debug builds: the demo Mac's own banner),
+`-TrekDemoConnection identity|refused|connecting|local-network|offline` (debug builds: the demo Mac's own banner),
 `-TrekDemoEmpty none|quiet` (a Mac with no threads and no notes, or with everything settled),
 `-TrekGallery YES` (debug builds: chips, tables, status pills, the hiker and the effort picker on
 one page), `-TrekSheet sharing` (the question asked before the first message goes to an agent, for

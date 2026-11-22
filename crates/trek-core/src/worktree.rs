@@ -50,7 +50,7 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String> {
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", "true")
         .output()
-        .context("couldn't run git")?;
+        .map_err(crate::git::run_error)?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
@@ -102,16 +102,24 @@ pub fn slug(text: &str) -> String {
 
 /// The branch HEAD is on in `repo`, or why a worktree can't start from it.
 pub fn current_branch(repo: &Path) -> Result<String> {
-    if !ok(repo, &["rev-parse", "--verify", "--quiet", "HEAD"]) {
-        bail!(
-            "The repository has no commits yet. Commit something first, then start a thread in a worktree."
-        );
-    }
+    git(repo, &["rev-parse", "--verify", "--quiet", "HEAD"]).map_err(no_head)?;
     match git(repo, &["symbolic-ref", "--short", "-q", "HEAD"]) {
         Ok(b) if !b.trim().is_empty() => Ok(b.trim().to_string()),
         _ => bail!(
             "The project folder isn't on a branch (detached HEAD). Switch to a branch to start a thread in a worktree."
         ),
+    }
+}
+
+/// Why there's no HEAD to start a worktree from, given what `git rev-parse HEAD` said. No git at
+/// all isn't a repository without commits: that says how to get git.
+fn no_head(e: anyhow::Error) -> anyhow::Error {
+    if e.is::<crate::git::GitMissing>() {
+        e
+    } else {
+        anyhow!(
+            "The repository has no commits yet. Commit something first, then start a thread in a worktree."
+        )
     }
 }
 
@@ -819,6 +827,21 @@ pub fn main_checkout(dir: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With no git on the computer, starting a worktree says how to get git, not that the
+    /// repository has no commits (which is what any failed `rev-parse HEAD` used to say).
+    #[test]
+    fn no_git_is_not_a_repository_without_commits() {
+        let missing = no_head(anyhow::Error::new(crate::git::GitMissing));
+        assert_eq!(missing.to_string(), crate::git::GitMissing::MESSAGE);
+        let empty = no_head(anyhow!("fatal: needed a single revision"));
+        assert!(
+            empty
+                .to_string()
+                .starts_with("The repository has no commits yet"),
+            "{empty}"
+        );
+    }
 
     /// This test run's temp folder: repos, their worktrees and remotes all live in it. Folders
     /// earlier runs left are cleared on first use.

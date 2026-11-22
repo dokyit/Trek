@@ -218,6 +218,7 @@ struct ThreadMenu: View, nonisolated Equatable {
         } label: {
             Image(systemName: "ellipsis")
         }
+        .accessibilityLabel(shown?.subAgent == true ? "Sub-agent actions" : "Thread actions")
     }
 }
 
