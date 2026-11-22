@@ -1109,6 +1109,66 @@ fn a_plugins_look_is_off_when_another_look_is_chosen_and_comes_back_when_it_is_t
     });
 }
 
+/// With motion, a switch's frames can come late (Linux CI draws in software): the first after
+/// the start may find the switch over. The plugin's look still goes into the settings, another
+/// look chosen over it still turns it off, and so does one chosen before its switch's middle.
+#[test]
+fn a_plugins_look_keeps_its_settings_and_its_switch_when_the_frames_come_late() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    run(async |cx| {
+        let trek = start(cx);
+        cx.update(|cx| cx.set_reduce_motion(false));
+        let running =
+            |cx: &mut TestAppContext| cx.update(|cx| trek_app::plugins::running("dusk", cx));
+        let shown = |cx: &mut TestAppContext| cx.update(|cx| trek_app::themes::shown_id(cx));
+        let chosen = |cx: &mut TestAppContext| {
+            trek.read(cx, |ws, _| ws.settings.appearance.trek_theme.clone())
+        };
+        let late = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                trek_app::themes::frame_late(std::time::Duration::from_secs(2), &trek.ws, cx)
+            });
+            cx.run_until_parked();
+        };
+        let on_disk = || trek_core::settings::Settings::load().appearance.trek_theme;
+
+        write_dusk_plugin();
+        watch_tick(&trek, cx);
+        assert!(listed("dusk", cx));
+
+        // Turned on: its look comes up, and the settings keep it.
+        cx.update(|cx| trek_app::plugins::set_on("dusk", true, &trek.ws, cx));
+        late(cx);
+        assert_eq!(shown(cx), "dusk");
+        assert_eq!(chosen(cx), "dusk", "the settings name the look on screen");
+        assert_eq!(on_disk(), "dusk");
+
+        // Another look over it: the plugin is off, the other look kept.
+        cx.update(|cx| trek_app::themes::switch_to("console", &trek.ws, cx));
+        late(cx);
+        assert_eq!(shown(cx), "console");
+        assert_eq!(chosen(cx), "console");
+        assert!(
+            !running(cx),
+            "a plugin's look is on only while it's on screen"
+        );
+        assert_eq!(state_on_disk().choice("dusk").look.as_deref(), Some("dusk"));
+
+        // Back on, then another look before its switch's middle: off again, nothing half on.
+        cx.update(|cx| trek_app::plugins::set_on("dusk", true, &trek.ws, cx));
+        assert!(running(cx));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(50));
+        cx.run_until_parked();
+        cx.update(|cx| trek_app::themes::switch_to("console", &trek.ws, cx));
+        late(cx);
+        assert_eq!(shown(cx), "console");
+        assert_eq!(chosen(cx), "console");
+        assert_eq!(on_disk(), "console");
+        assert!(!running(cx), "its look never got on screen");
+    });
+}
+
 #[test]
 fn a_loose_theme_file_in_the_themes_folder_is_listed_switches_and_deletes_like_a_plugin() {
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());

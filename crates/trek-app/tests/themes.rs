@@ -142,6 +142,59 @@ fn with_motion_the_switch_takes_its_time_and_changes_light_for_dark_at_the_middl
     });
 }
 
+/// A frame that comes late, past the switch's end (a busy main thread, a slow renderer: Linux CI
+/// draws in software), still puts the new theme's settings on and saves them: the look on screen
+/// is the one the next launch puts up. And quick switches, one cut short by the next, keep the
+/// last.
+#[test]
+fn a_switch_whose_frames_come_late_still_keeps_the_look_it_shows() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    run(async |cx| {
+        let trek = open_with(cx, |s| s.appearance.theme = ThemeChoice::Night);
+        cx.update(|cx| {
+            trek_app::themes::init(&trek.ws, cx);
+            trek_app::apply_theme(ThemeChoice::Night, None, cx);
+            cx.set_reduce_motion(false);
+        });
+        let chosen = |cx: &mut TestAppContext| {
+            trek.read(cx, |ws, _| ws.settings.appearance.trek_theme.clone())
+        };
+        let on_disk = || trek_core::settings::Settings::load().appearance.trek_theme;
+
+        let late = |cx: &mut TestAppContext| {
+            cx.update(|cx| trek_app::themes::frame_late(Duration::from_secs(2), &trek.ws, cx));
+            cx.run_until_parked();
+        };
+
+        // The first frame after the start comes when the switch is long over.
+        cx.update(|cx| trek_app::themes::switch_to("journal", &trek.ws, cx));
+        assert!(cx.update(|cx| trek_app::themes::switching(cx)));
+        assert_eq!(chosen(cx), "trek", "nothing kept before the middle");
+        late(cx);
+        assert!(!cx.update(|cx| trek_app::themes::switching(cx)));
+        assert_eq!(cx.update(|cx| trek_app::themes::shown_id(cx)), "journal");
+        assert_eq!(
+            chosen(cx),
+            "journal",
+            "the settings name the look on screen"
+        );
+        assert_eq!(on_disk(), "journal", "and keep it for the next launch");
+        assert!(!look(cx).0, "Journal is light, as its settings have it");
+
+        // Quick switches, each cut short before its middle, then one left to finish late.
+        for id in ["console", "trek", "console"] {
+            cx.update(|cx| trek_app::themes::switch_to(id, &trek.ws, cx));
+            cx.executor().advance_clock(Duration::from_millis(50));
+            cx.run_until_parked();
+        }
+        cx.update(|cx| trek_app::themes::switch_to("trek", &trek.ws, cx));
+        late(cx);
+        assert_eq!(cx.update(|cx| trek_app::themes::shown_id(cx)), "trek");
+        assert_eq!(chosen(cx), "trek");
+        assert_eq!(on_disk(), "trek");
+    });
+}
+
 #[test]
 fn the_themes_folder_is_read_again_with_bad_files_named_and_apply_requests_followed() {
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
