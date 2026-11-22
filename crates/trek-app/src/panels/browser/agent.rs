@@ -124,8 +124,9 @@ pub(super) struct Driver {
     turns: HashMap<String, Option<Instant>>,
     /// Bumped by Stop: a call under way checks it between steps.
     stops: u64,
-    /// What each thread's user allowed for the rest of the run ("Allow for this session").
-    allowed: HashSet<(String, core::Sensitive)>,
+    /// What each thread's user allowed for the rest of the run ("Allow for this session"): a kind
+    /// of action, on one site (`core::Ask::site`).
+    allowed: HashSet<(String, core::Sensitive, String)>,
     shots: u64,
     evals: u64,
     linger: Option<Task<()>>,
@@ -851,13 +852,20 @@ impl Run<'_> {
                 (
                     p.agent
                         .allowed
-                        .contains(&(thread.clone(), ask.kind.clone())),
+                        .contains(&(thread.clone(), ask.kind.clone(), ask.site.clone())),
                     p.workspace.clone(),
                 )
             })
             .map_err(gone)?;
         if allowed {
             return Ok(());
+        }
+        if ask.hidden > 0 {
+            return Err(format!(
+                "That script is longer than the approval card shows ({} characters; {} at most), and the user can't allow what they can't read. Run a shorter script, or several.",
+                core::SCRIPT_SHOWN + ask.hidden,
+                core::SCRIPT_SHOWN
+            ));
         }
         let (request, rx) = workspace.update(self.cx, |ws, cx| {
             ws.browser_ask(&thread, ask.title.clone(), ask.detail.clone(), cx)
@@ -885,10 +893,10 @@ impl Run<'_> {
         match decision {
             Decision::Allow => Ok(()),
             Decision::AllowForSession => {
-                let kind = ask.kind.clone();
+                let key = (thread, ask.kind.clone(), ask.site.clone());
                 let _ = self
                     .this
-                    .update(self.cx, |p, _| p.agent.allowed.insert((thread, kind)));
+                    .update(self.cx, |p, _| p.agent.allowed.insert(key));
                 Ok(())
             }
             Decision::Deny => Err(format!(
@@ -1047,11 +1055,11 @@ impl Run<'_> {
         if js.trim().is_empty() {
             return Err("Run what? Give the script in js.".into());
         }
-        let page = self.page()?.url;
+        let asked = self.page()?;
         self.approve(
             "browser_eval",
             &self.call.params.clone(),
-            Some(&json!({ "page": page })),
+            Some(&json!({ "page": asked.url })),
         )
         .await?;
         let id = self
@@ -1062,6 +1070,15 @@ impl Run<'_> {
             })
             .map_err(gone)?;
         self.settle(Duration::from_secs(10), false).await?;
+        // The user allowed a script in the page the card named: while it was up, that page may
+        // have sent itself elsewhere, or another tab come to the front.
+        let now = self.page()?;
+        if !core::same_page((asked.tab, &asked.url), (now.tab, &now.url)) {
+            return Err(format!(
+                "The page in front changed while waiting ({} is in front now, not {}), so the script didn't run. Call browser_eval again for the page in front now.",
+                now.url, asked.url
+            ));
+        }
         // An expression, or statements that return: whichever parses.
         let started = match self.run_js(core::eval_script(&id, js, true)).await {
             Err(e) if e.contains("didn't run") => {
