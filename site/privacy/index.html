@@ -92,6 +92,7 @@
 
       <h2>What stays on your computer</h2>
       <p>In a <code>telemetry</code> folder in Trek’s data folder: your answers, the install id, today’s counts and token totals, events waiting to be sent (at most 500; each is dropped after five failed tries or a week), and a copy of the last request exactly as it was sent. A crash also leaves a report in the data folder. Until you answer the question it waits there; with a yes the next launch sends it, and with a no it is deleted.</p>
+      <p>From version 0.4.64, Settings, General, <strong>Delete all Trek data</strong> deletes these and everything else Trek keeps on your computer, its keys in the system’s secret store included, then quits. It lists what goes and what stays first. Your projects and their files stay.</p>
 
       <h2>The iPhone app</h2>
       <p>What you type, dictate or attach in the iPhone app goes to your paired computer, over your local network or your own Tailscale network. From there it goes to the agent you chose on that computer. Claude Code sends it to Anthropic and Codex sends it to OpenAI, for example, under the account you use there and that provider’s terms. A model server on your own computer keeps it there unless you set it up otherwise. Trek has no servers in between and keeps no copy on servers of its own. The iPhone keeps threads and files you opened on the phone itself, so they open quickly.</p>

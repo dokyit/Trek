@@ -20,7 +20,7 @@ pub use feedback::{Diagnostics, Feedback, Kind, NotSent};
 pub use global::{
     Answer, Start, answered, changes, consent, count, feedback_destination, platform,
     reset_install_id, send_feedback, set_consent, set_setup, set_shared, set_totals, should_ask,
-    should_ask_totals, start, status, tokens,
+    should_ask_totals, start, status, stop, tokens,
 };
 pub use queue::Outcome;
 pub use scrub::Scrubber;

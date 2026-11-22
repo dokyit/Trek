@@ -42,6 +42,7 @@ pub fn init() {
     let file = DailyFile::open(log_dir());
     let file_layer = file.map(|f| {
         let f: &'static DailyFile = Box::leak(Box::new(f));
+        let _ = FILE.set(f);
         tracing_subscriber::fmt::layer()
             .with_ansi(false)
             .with_writer(move || f.writer())
@@ -415,6 +416,21 @@ pub fn take_crash_note(data_dir: &Path) -> Option<String> {
     ))
 }
 
+/// The log files are closed for good (`stop_files`).
+static STOPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Stop writing log files, for the rest of this process: "Delete all Trek data" is deleting them,
+/// and the log mustn't make them again on the way out. The log still goes to stderr.
+pub fn stop_files() {
+    STOPPED.store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Some(file) = FILE.get() {
+        *file.current.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+}
+
+/// The day's file the log writes to, once `init` opened its folder.
+static FILE: std::sync::OnceLock<&'static DailyFile> = std::sync::OnceLock::new();
+
 /// `trek-<date>.log` in a folder, a new file each day, older ones pruned.
 struct DailyFile {
     dir: PathBuf,
@@ -436,6 +452,9 @@ impl DailyFile {
     }
 
     fn write(&self, buf: &[u8]) -> std::io::Result<()> {
+        if STOPPED.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(());
+        }
         let today = chrono::Local::now().date_naive();
         let day = today.format("%Y-%m-%d").to_string();
         let mut current = self.current.lock().unwrap_or_else(PoisonError::into_inner);

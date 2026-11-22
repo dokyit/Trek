@@ -2134,6 +2134,8 @@ pub struct Workspace {
     pub saved_devices: std::cell::RefCell<Option<Vec<trek_remote::DeviceInfo>>>,
     /// Devices unpaired while the server was starting: the server it started takes them off too.
     pub unpaired_while_starting: Vec<String>,
+    /// What "Delete all Trek data" planned and what it couldn't delete, once it has run (`wipe`).
+    pub wiped: Option<(trek_core::wipe::Plan, trek_core::wipe::Outcome)>,
     /// Why the phone server last failed to start; it's tried again shortly (`remote::RETRY`).
     pub remote_error: Option<String>,
     /// An update of the iPhone app run from here (`remote::phone_update`).
@@ -2711,6 +2713,7 @@ impl Workspace {
             remote_starting: false,
             saved_devices: Default::default(),
             unpaired_while_starting: Vec::new(),
+            wiped: None,
             remote_error: None,
             phone_update: Default::default(),
             remote_retry: None,

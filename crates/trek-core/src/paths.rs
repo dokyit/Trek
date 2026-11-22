@@ -4,6 +4,9 @@ use std::sync::OnceLock;
 
 static ISOLATED: OnceLock<PathBuf> = OnceLock::new();
 
+/// Where everything goes once this process has deleted its profile (`leave`).
+static LEFT: OnceLock<PathBuf> = OnceLock::new();
+
 thread_local! {
     /// A data folder of the calling thread's own, inside an isolated process (`isolate_thread`).
     static THREAD_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
@@ -28,6 +31,9 @@ pub fn isolate_thread(dir: PathBuf) {
 /// The folder `isolate` set up. trek-core's own tests are isolated from the start, whichever
 /// of them runs first: none of them may reach the user's folder.
 fn isolated_dir() -> Option<&'static PathBuf> {
+    if let Some(left) = LEFT.get() {
+        return Some(left);
+    }
     #[cfg(test)]
     ISOLATED.get_or_init(|| std::env::temp_dir().join("trek-core-tests"));
     ISOLATED.get()
@@ -36,6 +42,34 @@ fn isolated_dir() -> Option<&'static PathBuf> {
 /// Whether [`isolate`] is in effect.
 pub fn isolated() -> bool {
     isolated_dir().is_some()
+}
+
+/// Leave the profile this process had, for good: "Delete all Trek data" deleted it, and Trek
+/// quits next. Whatever is still saved on the way out (a thread, the settings, the window's place)
+/// goes to `dir`, a throwaway folder, and secrets stay in memory, as in an isolated process: the
+/// deleted folders aren't made again. The first call wins.
+pub fn leave(dir: PathBuf) {
+    let _ = LEFT.set(dir);
+}
+
+/// Whether the data folder is somewhere other than the user's own: a test, the verify app, or
+/// `TREK_DATA_DIR`. Such a profile shares the system's places (the Keychain, the platform's cache
+/// folder) with the user's own Trek, so they aren't its to empty.
+pub fn moved() -> bool {
+    isolated_dir().is_some() || std::env::var_os("TREK_DATA_DIR").is_some_and(|d| !d.is_empty())
+}
+
+/// The platform's cache folder for Trek (`~/Library/Caches/dev.trek.Trek` on a Mac,
+/// `%LOCALAPPDATA%\trek\Trek\cache`, `~/.cache/trek`), or `cache` in the data folder when that's
+/// been moved.
+pub fn cache_dir() -> PathBuf {
+    (!moved())
+        .then(|| {
+            directories::ProjectDirs::from("dev", "trek", "Trek")
+                .map(|p| p.cache_dir().to_path_buf())
+        })
+        .flatten()
+        .unwrap_or_else(|| data_dir().join("cache"))
 }
 
 static REAL_AGENTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -64,9 +98,12 @@ fn reaches_real_agents(isolated: bool, allowed: bool) -> bool {
 /// `~/Library/Application Support/Trek` on macOS (platform equivalent elsewhere).
 pub fn data_dir() -> PathBuf {
     if let Some(dir) = isolated_dir() {
-        let dir = THREAD_DIR
-            .with(|d| d.borrow().clone())
-            .unwrap_or_else(|| dir.clone());
+        let dir = match LEFT.get() {
+            Some(left) => left.clone(),
+            None => THREAD_DIR
+                .with(|d| d.borrow().clone())
+                .unwrap_or_else(|| dir.clone()),
+        };
         let _ = std::fs::create_dir_all(&dir);
         return dir;
     }

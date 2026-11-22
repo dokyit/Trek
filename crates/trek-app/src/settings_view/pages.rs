@@ -594,6 +594,18 @@ impl SettingsView {
                             })),
                         cx,
                     )),
+                    Some(Self::row(
+                        "Delete all Trek data",
+                        "Threads, settings, notes, keys, pairings, logs and everything else Trek keeps on this computer, then Trek quits. Your projects and their files stay. It lists what goes and what stays before anything is deleted.",
+                        Button::new("delete-all-data")
+                            .small()
+                            .outline()
+                            .label("Delete all Trek data…")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                crate::wipe::confirm(this.workspace.clone(), window, cx)
+                            })),
+                        cx,
+                    )),
                 ]
                 .into_iter()
                 .flatten()

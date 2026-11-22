@@ -236,6 +236,13 @@ pub fn delete(account: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Every account saved under [`SERVICE`] (their names only, never a prompt): the Keychain lists
+/// them, as does an isolated process's memory; `None` where the store can't list (Windows'
+/// Credential Manager, Linux's secret service), so a caller names what it knows of instead.
+pub fn accounts() -> Option<Vec<String>> {
+    with_store(|s| s.accounts()).map(|a| a.into_iter().collect())
+}
+
 /// Whether the last read of `account` found it locked.
 pub fn is_locked(account: &str) -> bool {
     locked_set().contains(account)
