@@ -5058,11 +5058,10 @@ impl ThreadView {
                                             .small()
                                             .text_color(ink),
                                     )
-                                    .child(
-                                        div()
-                                            .font_semibold()
-                                            .child(format!("{agent} wants to: {}", p.title)),
-                                    )
+                                    .child(div().font_semibold().child(format!(
+                                        "{agent} wants to: {}",
+                                        trek_core::approval_text::shown(&p.title)
+                                    )))
                                     .when(waiting > 1, |el| {
                                         el.child(
                                             div()
@@ -5074,7 +5073,11 @@ impl ThreadView {
                                     }),
                             )
                             .when(!p.detail.is_empty(), |el| {
-                                // A long command scrolls here: the buttons stay in reach.
+                                // What runs, drawn so nothing in it reads as something else
+                                // (`approval_text`). A long command scrolls here: the buttons
+                                // stay in reach, and a line under it says there's more.
+                                let shown = trek_core::approval_text::shown(&p.detail);
+                                let lines = shown.lines().count();
                                 el.child(
                                     div()
                                         .id("permission-detail")
@@ -5087,7 +5090,22 @@ impl ThreadView {
                                         .bg(theme.muted)
                                         .font_family(theme.mono_font_family.clone())
                                         .text_size(to_rems(text::META))
-                                        .child(p.detail.clone()),
+                                        .child(shown),
+                                )
+                                .when(
+                                    lines > PERMISSION_DETAIL_LINES,
+                                    |el| {
+                                        el.child(
+                                            div()
+                                                .id("permission-detail-lines")
+                                                .test_support()
+                                                .text_size(to_rems(text::META))
+                                                .text_color(theme.muted_foreground)
+                                                .child(format!(
+                                                    "{lines} lines: scroll to read them all"
+                                                )),
+                                        )
+                                    },
                                 )
                             })
                             .when_some(asked_by.clone(), |el, rule| {
@@ -5296,6 +5314,8 @@ fn thought_after(items: &[Item], reasoning: Option<usize>, members: &[usize]) ->
 const ERROR_MAX: f32 = 160.;
 /// The tallest an approval card's command grows before it scrolls.
 const PERMISSION_DETAIL_MAX: f32 = 160.;
+/// Lines of a command the card's box holds at once, about: more, and a line under it says so.
+const PERMISSION_DETAIL_LINES: usize = 8;
 /// How strong a row's chevron is: on Windows' opaque window the Mac's falls under 3:1 on Paper.
 const CHEVRON: f32 = fluent::pick(0.8, 0.6);
 /// A button in a card on Windows is this tall; the kit's small one is under Windows' 28 px.

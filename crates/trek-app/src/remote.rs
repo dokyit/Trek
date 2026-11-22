@@ -2071,8 +2071,8 @@ impl Workspace {
             ask: live
                 .and_then(|l| l.permissions.first())
                 .filter(|p| p.prompt.is_none())
-                .map(|p| (p, clip_text_to(&p.detail, tr::MAX_ASK_DETAIL)))
-                .filter(|(p, detail)| *detail == p.detail)
+                .map(|p| (p, trek_core::approval_text::shown(&p.detail)))
+                .filter(|(_, shown)| clip_text_to(shown, tr::MAX_ASK_DETAIL) == *shown)
                 .map(|(p, detail)| tr::RowAsk {
                     request_id: p.request_id.clone(),
                     detail,
@@ -3223,8 +3223,12 @@ fn request_cards(ws: &Workspace, id: &str) -> Vec<(String, tr::ItemBody)> {
             let body = match &p.prompt {
                 None => tr::ItemBody::Approval {
                     request_id: p.request_id.clone(),
-                    title: clip_text_to(&p.title, 64 << 10),
-                    detail: clip_text_to(&p.detail, MAX_PHONE_ITEM_TEXT - (64 << 10)),
+                    // Drawn as the Mac's card draws them: nothing in them reads as something else.
+                    title: clip_text_to(&trek_core::approval_text::shown(&p.title), 64 << 10),
+                    detail: clip_text_to(
+                        &trek_core::approval_text::shown(&p.detail),
+                        MAX_PHONE_ITEM_TEXT - (64 << 10),
+                    ),
                     state: tr::ApprovalState::Pending,
                     // No "Allow for session" on the phone for what a rule asks about every time.
                     asked_by: ws
@@ -3332,7 +3336,9 @@ fn restore_phone_answers(answers: &mut [tr::QA], questions: &[trek_agents::Quest
 
 /// An approval in a few plain words, as a sentence of its own: "Run cargo test?".
 fn asking_words(title: &str, detail: &str) -> String {
-    let words = crate::workspace::attention::approval_words(title, detail);
+    let words = trek_core::approval_text::shown(&crate::workspace::attention::approval_words(
+        title, detail,
+    ));
     let mut chars = words.trim_end_matches('?').chars();
     match chars.next() {
         Some(first) => format!("{}{}?", first.to_uppercase(), chars.as_str()),
