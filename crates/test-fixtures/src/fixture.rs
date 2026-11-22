@@ -190,7 +190,8 @@ fn copied_as(name: &str) -> Option<std::path::PathBuf> {
 }
 
 /// A made-up `gh` answering from files in `dir`, its own folder: `pr view` prints `view.json`,
-/// `run view` `log.txt`, `api rate_limit` `rate.json`, and every call is noted in `calls`
+/// `run view` `log.txt` (`run.json` asked with `--json`, when there is one), `run list`
+/// `runs.json`, `api rate_limit` `rate.json`, and every call is noted in `calls`
 /// (its arguments joined by spaces). With `offline` there, it fails as `gh` does with no
 /// connection.
 fn fake_gh(dir: &std::path::Path, args: &[String]) -> i32 {
@@ -204,12 +205,16 @@ fn fake_gh(dir: &std::path::Path, args: &[String]) -> i32 {
         eprintln!("error connecting to api.github.com");
         return 1;
     }
+    let json = args.iter().any(|a| a == "--json");
     let file = match (
         args.first().map(String::as_str),
         args.get(1).map(String::as_str),
     ) {
         (Some("pr"), Some("view")) => "view.json",
+        // A run's state (`--json`) when there's a `run.json`, else its log.
+        (Some("run"), Some("view")) if json && dir.join("run.json").exists() => "run.json",
         (Some("run"), Some("view")) => "log.txt",
+        (Some("run"), Some("list")) => "runs.json",
         (Some("api"), Some("rate_limit")) => "rate.json",
         _ => return 0,
     };

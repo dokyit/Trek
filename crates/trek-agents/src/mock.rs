@@ -43,6 +43,7 @@
 //! | `mock:limit` [dur]           | a usage limit that resets `dur` from now (default 5s)        |
 //! | `mock:write [file]`          | adds a line to `NOTES.md` (or `file`) in its folder (for real) |
 //! | `mock:watch-run` id          | runs `gh run watch id` (for real) as a command call           |
+//! | `mock:checks` n              | runs `gh pr checks n` (for real, a read) as a command call    |
 //! | `recall`                     | the messages it remembers from this conversation             |
 //! | `mock:told`                  | what Trek told the session besides its messages (its          |
 //! |                              | `SessionConfig::instructions`)                                |
@@ -313,6 +314,8 @@ enum Script {
     Look,
     /// `gh run watch <id>` run for real, as an agent's command call (Trek's run card).
     WatchRun(String),
+    /// `gh pr checks <n>` run for real (a read), as an agent's command call (the PR's card).
+    Checks(String),
     /// Edit lines of a file in place, as Trek's ⌘K inline edit asks (`trek_core::inline_edit`).
     InlineEdit {
         path: String,
@@ -490,6 +493,12 @@ impl Script {
                     }
                     _ => return None,
                 },
+                "checks" if w.starts_with("mock:") => match words.get(i + 1) {
+                    Some(n) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => {
+                        Script::Checks(n.clone())
+                    }
+                    _ => return None,
+                },
                 // A plugin written into Trek's plugins folder, as the trek-plugin skill has an agent
                 // do it: only by its full name.
                 "plugin" if w.starts_with("mock:") => Script::Plugin,
@@ -650,6 +659,7 @@ pub fn title(request: &str) -> String {
         Script::Plugin => "Make a trail notes plugin",
         Script::Look => "Make a Trek look called Dusk",
         Script::WatchRun(_) => "Watch the CI run",
+        Script::Checks(_) => "Check the pull request",
         Script::InlineEdit { .. } => "Edit the selection",
         Script::Compact => "Compacted the conversation",
         Script::Recall => "What was said",
@@ -1373,6 +1383,11 @@ impl Session {
                     "The run didn't pass: see its output above."
                 })
                 .await?
+            }
+            Script::Checks(n) => {
+                self.say("Checking the pull request's checks.").await?;
+                self.run(&format!("gh pr checks {n}")).await?;
+                self.say("Those are its checks.").await?
             }
             Script::InlineEdit { path, lines } => self.inline_edit(&path, lines).await?,
             Script::Compact => self.compact().await?,
@@ -4528,6 +4543,15 @@ mod tests {
             Script::parse("mock:watch-run 1;rm", false),
             Script::WatchRun("1;rm".into()),
             "only an id goes on the command line"
+        );
+        assert_eq!(
+            Script::parse("mock:checks 43", false),
+            Script::Checks("43".into())
+        );
+        assert_ne!(
+            Script::parse("mock:checks 43;rm", false),
+            Script::Checks("43;rm".into()),
+            "only a number goes on the command line"
         );
         assert_eq!(
             Script::parse("Start one: mock:write docs/Notes.md.", false),

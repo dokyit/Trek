@@ -113,11 +113,11 @@ fn finds_the_calls_it_cards() {
         pr_card::call("Run command", "gh pr checks 128 --watch"),
         Some(Call::PrChecks(Some("128".into())))
     );
-    // Looking at runs isn't watching one.
+    // Listing runs names none; looking at one is about that run.
     assert_eq!(pr_card::call("Run command", "gh run list --limit 3"), None);
     assert_eq!(
         pr_card::call("Run command", "gh run view 39779843418 --json jobs"),
-        None
+        Some(Call::RunView("39779843418".into()))
     );
     assert_eq!(pr_card::call("Run command", "gh pr list"), None);
     assert_eq!(
@@ -143,8 +143,13 @@ fn finds_the_calls_it_cards() {
             tag: "v0.4.1".into()
         })
     );
-    // Other gh calls, and calls that aren't commands, make no card.
-    assert_eq!(pr_card::call("Run command", "gh pr view 128"), None);
+    // A look at a PR it names is about that PR; other gh calls, and calls that aren't
+    // commands, make no card.
+    assert_eq!(
+        pr_card::call("Run command", "gh pr view 128"),
+        Some(Call::PrView("128".into()))
+    );
+    assert_eq!(pr_card::call("Run command", "gh pr view --json url"), None);
     assert_eq!(pr_card::call("Read", "gh pr create"), None);
     assert_eq!(
         pr_card::call(
@@ -282,7 +287,7 @@ fn an_agents_run_watch_puts_a_run_card_in_the_transcript() {
         cx.run_until_parked();
         assert_eq!(cards(&trek, cx, &id).len(), 1);
 
-        // Listing or viewing runs makes none.
+        // Listing runs makes none; viewing the same run is its card again.
         trek.update(cx, |ws, cx| {
             ws.apply_events(
                 &id,
@@ -375,10 +380,21 @@ fn a_release_that_publishes_nothing_makes_no_card() {
         "script/release.sh 0.4.14 --dry-run",
         "script/release.sh --dry-run 0.4.14 --channel beta",
         "script/release.sh --help",
-        "gh workflow run release.yml -f version=0.4.1-beta.4 -f channel=beta -f dry_run=true",
     ] {
         assert_eq!(pr_card::call("Run command", d), None, "{d}");
     }
+    // A workflow dry run publishes nothing either, but it runs on GitHub for most of an hour:
+    // its run is followed, as a run.
+    assert_eq!(
+        pr_card::call(
+            "Run command",
+            "gh workflow run release.yml -f version=0.4.1-beta.4 -f channel=beta -f dry_run=true"
+        ),
+        Some(Call::WorkflowRun {
+            workflow: "release.yml".into(),
+            dry_run: Some("0.4.1-beta.4".into())
+        })
+    );
     // A real run, with the flag spelled false, still is one.
     assert_eq!(
         pr_card::call(
@@ -537,4 +553,497 @@ fn a_card_nothing_can_finish_settles() {
     };
     assert!(!pr_card::settle(&mut ready));
     assert_eq!(ready.phase, Phase::Ready);
+}
+
+// ---------- the calls of a real thread ----------
+//
+// The command strings below are verbatim from a thread whose agent (Claude Code, Bash tool)
+// checked, merged and dispatched without a card: `gh pr checks 43` on a PR the thread had carded
+// the day before, merges chained after `gh pr checks`, a release dry run and background polling
+// loops.
+
+fn calls(d: &str) -> Vec<Call> {
+    pr_card::calls("Run command", d)
+}
+
+#[test]
+fn the_calls_a_thread_made_without_a_card_are_each_found() {
+    // Bash's `{"command":"gh pr checks 43","description":"Show pull request 43's checks"}`
+    // comes as "Run command" with the command (the description is not the detail).
+    assert_eq!(
+        calls("gh pr checks 43"),
+        [Call::PrChecks(Some("43".into()))]
+    );
+    // A merge chained after the checks it waited on is the merge.
+    assert_eq!(
+        calls(
+            r#"gh pr view 49 --json mergeable,mergeStateStatus,additions,deletions,changedFiles --jq . && gh pr checks 49 | awk -F'\t' '{print $2}' | sort | uniq -c && gh pr merge 49 --merge 2>&1 | tail -2 && git fetch -q origin && git log --oneline -1 origin/main"#
+        ),
+        [Call::PrMerge(Some("49".into()))]
+    );
+    assert_eq!(
+        calls(
+            r#"gh pr view 53 --json mergeable,mergeStateStatus --jq . && gh pr checks 53 | awk -F'\t' '{print $2}' | sort | uniq -c && gh pr merge 53 --merge 2>&1 | tail -1; gh pr view 53 --json state --jq .state"#
+        ),
+        [Call::PrMerge(Some("53".into()))]
+    );
+    // Two PRs on one line: one call each.
+    assert_eq!(
+        calls(
+            r#"gh pr merge 50 --merge 2>&1 | tail -1; gh pr view 50 --json state --jq .state; gh pr checks 48 2>&1 | grep -E "\tfail\t" | cut -f1,3"#
+        ),
+        [
+            Call::PrMerge(Some("50".into())),
+            Call::PrChecks(Some("48".into()))
+        ]
+    );
+    // The release dry run, by itself and at the end of a wait in the background.
+    assert_eq!(
+        calls(
+            r#"gh workflow run release.yml --ref main -f version=0.4.64-beta.2 -f channel=beta -f dry_run=true && n=0; until id=$(gh run list --workflow release.yml --limit 1 --json databaseId,createdAt --jq '.[0]|select(.createdAt>"2026-11-22T08")|.databaseId' 2>/dev/null) && [ -n "$id" ]; do n=$((n+1)); [ $n -gt 20 ] && break; sleep 5; done; echo "dry run: $id""#
+        ),
+        [Call::WorkflowRun {
+            workflow: "release.yml".into(),
+            dry_run: Some("0.4.64-beta.2".into()),
+        }]
+    );
+    assert_eq!(
+        calls(
+            r#"sha=$(git rev-parse origin/main) && until [ "$(gh run list --workflow ci.yml --commit $sha --json status --jq '.[0].status' 2>/dev/null)" = "completed" ]; do sleep 60; done; c=$(gh run list --workflow ci.yml --commit $sha --json conclusion --jq '.[0].conclusion'); echo "CI on $sha: $c"; if [ "$c" = "success" ]; then gh workflow run release.yml --ref main -f version=0.4.64-beta.1 -f channel=beta -f dry_run=true && sleep 15 && gh run list --workflow release.yml --limit 1 --json databaseId,status,displayTitle --jq '.[0]'; fi"#
+        ),
+        [Call::WorkflowRun {
+            workflow: "release.yml".into(),
+            dry_run: Some("0.4.64-beta.1".into()),
+        }]
+    );
+    // Polling a run in a loop, its id in a substitution or a variable.
+    let run = |id: &str| vec![Call::RunView(id.into())];
+    assert_eq!(
+        calls(
+            r#"ls ~/.claude/bin/watch-run.sh >/dev/null 2>&1; until [ "$(gh run view 44997571408 --json status --jq .status 2>/dev/null)" = "completed" ]; do sleep 90; done; gh run view 44997571408 --json conclusion,jobs --jq '{conclusion, jobs:[.jobs[]|[.name,.conclusion]|@tsv]}'"#
+        ),
+        run("44997571408")
+    );
+    assert_eq!(
+        calls(
+            r#"id=45009652043; while :; do s=$(gh run view $id --json status --jq .status 2>/dev/null); [ "$s" = "completed" ] && break; sleep 90; done; gh run view $id --json conclusion,jobs --jq '{conclusion, jobs:[.jobs[]|[.name,.conclusion]|@tsv]}'"#
+        ),
+        run("45009652043")
+    );
+    assert_eq!(
+        calls(
+            r#"until gh run view 44997789293 --json status -q .status | grep -q completed; do sleep 30; done; gh run view 44997789293 --json conclusion,jobs -q '.conclusion, ([.jobs[] | .name] | length)'"#
+        ),
+        run("44997789293")
+    );
+    // A run looked at through the API, and a job (not a run) that isn't one.
+    assert_eq!(
+        calls(
+            r#"gh api repos/dokyit/Trek/actions/runs/44997571408/artifacts --jq '.artifacts[]|[.name,(.size_in_bytes/1048576|floor)]|@tsv'"#
+        ),
+        run("44997571408")
+    );
+    assert_eq!(
+        calls(
+            r#"date -u; gh api repos/dokyit/Trek/actions/jobs/136980045904 --jq '{started_at, steps:[.steps[]|[.name,.status,.conclusion,.started_at]|@tsv]}'"#
+        ),
+        []
+    );
+    // Many runs through a variable the loop sets: no run is named, so no card for each.
+    assert_eq!(
+        calls(
+            r#"for r in $(gh run list -R dokyit/Trek --workflow release.yml -L 60 --json databaseId --jq '.[].databaseId'); do s=$(gh run view $r -R dokyit/Trek --json jobs --jq '[.jobs[] | .name]'); echo "$r $s"; done"#
+        ),
+        []
+    );
+    // More of what waits on CI.
+    assert_eq!(
+        calls("gh pr view 43 --json statusCheckRollup"),
+        [Call::PrView("43".into())]
+    );
+    assert_eq!(
+        calls("gh run rerun 45030254358 --failed"),
+        [Call::RunRerun("45030254358".into())]
+    );
+    assert_eq!(
+        calls("gh api -X POST repos/o/r/actions/runs/45030254358/rerun-failed-jobs"),
+        [Call::RunRerun("45030254358".into())]
+    );
+    // `--interval`'s value isn't the run.
+    assert_eq!(
+        calls("gh run watch --interval 5 39779843418"),
+        [Call::RunWatch(Some("39779843418".into()))]
+    );
+    assert_eq!(
+        calls("(cd repo && gh pr checks 7 --watch)"),
+        [Call::PrChecks(Some("7".into()))]
+    );
+    assert_eq!(
+        calls("gh workflow run live.yml --ref feat/x"),
+        [Call::WorkflowRun {
+            workflow: "live.yml".into(),
+            dry_run: None
+        }]
+    );
+}
+
+/// A made-up `gh` (test-fixtures' `fake_gh`) for these: `pr view` says what `pr` set,
+/// `run list` and `run view --json` what `run` set.
+struct FakeGh {
+    dir: std::path::PathBuf,
+}
+
+impl FakeGh {
+    fn new(name: &str) -> FakeGh {
+        let dir = common::new_project(&format!("gh-card-{name}"));
+        std::fs::copy(
+            trek_test_fixtures::bin("fixture"),
+            dir.join(format!("gh{}", std::env::consts::EXE_SUFFIX)),
+        )
+        .unwrap();
+        let gh = FakeGh { dir };
+        gh.pr(43, "OPEN");
+        gh
+    }
+
+    fn path(&self) -> std::path::PathBuf {
+        self.dir.join(format!("gh{}", std::env::consts::EXE_SUFFIX))
+    }
+
+    /// What `pr view` says next: PR `n` in `state`, its checks green.
+    fn pr(&self, n: u64, state: &str) {
+        let check = |name: &str| {
+            serde_json::json!({"__typename": "CheckRun", "name": name, "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "detailsUrl": "https://github.com/acme/web/actions/runs/45030254358/job/1"})
+        };
+        let view = serde_json::json!({
+            "number": n, "title": "A motion pass",
+            "url": format!("https://github.com/acme/web/pull/{n}"),
+            "state": state, "mergeable": "MERGEABLE", "headRefName": "feat/motion-pass",
+            "baseRefName": "main", "headRefOid": "11de3be",
+            "statusCheckRollup": [check("Clippy"), check("Check (Linux, Arm)")], "commits": [],
+        });
+        std::fs::write(self.dir.join("view.json"), view.to_string()).unwrap();
+    }
+
+    /// The dispatched run: listed as started now, and finished `conclusion`.
+    fn run(&self, id: u64, conclusion: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        let url = format!("https://github.com/acme/web/actions/runs/{id}");
+        let list = serde_json::json!([{"databaseId": id, "status": "completed",
+            "conclusion": conclusion, "url": url, "createdAt": now}]);
+        std::fs::write(self.dir.join("runs.json"), list.to_string()).unwrap();
+        let view = serde_json::json!({"workflowName": "Release", "displayTitle": "Release",
+            "headBranch": "main", "event": "workflow_dispatch", "status": "completed",
+            "conclusion": conclusion, "url": url,
+            "jobs": [{"name": "macOS", "status": "completed", "conclusion": conclusion,
+                "startedAt": now, "completedAt": now}],
+            "startedAt": now, "updatedAt": now});
+        std::fs::write(self.dir.join("run.json"), view.to_string()).unwrap();
+    }
+
+    fn calls(&self, what: &str) -> usize {
+        std::fs::read_to_string(self.dir.join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains(what))
+            .count()
+    }
+}
+
+/// Long enough for a card's watcher to look (its first look is a second in) and land.
+fn let_watchers_look(cx: &mut gpui_kit::TestAppContext) {
+    for _ in 0..4 {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(1_500));
+        cx.run_until_parked();
+    }
+}
+
+/// The checks `gh pr checks 43` printed (three of its 29 lines, as they came).
+const CHECKS_43: &str = "Check (Linux, Arm)\tpass\t1m30s\thttps://github.com/dokyit/Trek/actions/runs/45030254358/job/137232074456\t\nClippy\tpass\t5m4s\thttps://github.com/dokyit/Trek/actions/runs/45030254358/job/137232074189\t\nClippy (Linux)\tpass\t3m28s\thttps://github.com/dokyit/Trek/actions/runs/45030254358/job/137232074441\t\n";
+
+/// A thread that never made the PR runs `gh pr checks 43` (Claude Code's Bash, as "Run
+/// command"): it gets the PR's card, filled from `gh`, and once `gh` says the PR is green and
+/// ready the card stops asking (it's not the thread's PR to follow for an hour).
+#[test]
+fn a_thread_that_didnt_make_the_pr_gets_a_card_for_its_checks() {
+    run(async |cx| {
+        let trek = open(cx);
+        let gh = FakeGh::new("checks");
+        let id = trek.quiet_thread(cx);
+        let path = gh.path();
+        trek.update(cx, |ws, cx| {
+            ws.pr_checks.set_gh_path(Some(path));
+            ws.apply_events(
+                &id,
+                vec![
+                    tool("toolu_01TAnPamNW8wWgPPfoe4pzX8", "gh pr checks 43"),
+                    finished("toolu_01TAnPamNW8wWgPPfoe4pzX8", CHECKS_43),
+                ],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let found = cards(&trek, cx, &id);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].1.number, Some(43));
+        assert!(!found[0].1.opened, "a look, not the thread's own PR");
+        assert!(
+            trek.rows(cx).iter().any(|r| r == "pr-card"),
+            "{:?}",
+            trek.rows(cx)
+        );
+
+        let_watchers_look(cx);
+        let found = cards(&trek, cx, &id);
+        let card = &found[0].1;
+        assert_eq!(card.title, "A motion pass");
+        assert_eq!(card.phase, Phase::Ready, "{card:?}");
+        assert_eq!(card.checks.len(), 2);
+        assert!(
+            trek.read(cx, |ws, _| ws.live[&id].pr_watching.is_empty()),
+            "a PR looked at stops being asked about once it's said where it stands"
+        );
+        let asked = gh.calls("pr view");
+        assert!(asked >= 1);
+        let_watchers_look(cx);
+        assert_eq!(gh.calls("pr view"), asked);
+    });
+}
+
+/// The reported case: the thread carded PR 43 a turn and many rows ago, then ran
+/// `gh pr checks 43`. Its one card comes down to the call, rather than being updated up there
+/// where nobody looks, and there's still one.
+#[test]
+fn checks_on_a_pr_carded_long_ago_bring_its_card_to_the_call() {
+    run(async |cx| {
+        let trek = open(cx);
+        let gh = FakeGh::new("moved");
+        let id = trek.quiet_thread(cx);
+        let path = gh.path();
+        trek.update(cx, |ws, cx| {
+            ws.pr_checks.set_gh_path(Some(path));
+            ws.apply_events(
+                &id,
+                vec![
+                    tool("c1", "gh pr create --title \"A motion pass\" --base main"),
+                    finished("c1", "https://github.com/acme/web/pull/43\n"),
+                ],
+                cx,
+            );
+            let live = ws.live.get_mut(&id).unwrap();
+            live.items.push(Item::User {
+                text: "next".into(),
+                images: vec![],
+                at: None,
+                resume: None,
+                aside: false,
+            });
+            for i in 0..30 {
+                live.items.push(Item::Tool {
+                    id: format!("t{i}"),
+                    title: "Run command".into(),
+                    detail: "cargo test".into(),
+                    output: String::new(),
+                    status: trek_core::store::ToolStatus::Done,
+                });
+            }
+        });
+        let before = cards(&trek, cx, &id);
+        assert_eq!(before.len(), 1);
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(&id, vec![tool("k", "gh pr checks 43")], cx)
+        });
+        cx.run_until_parked();
+        let after = cards(&trek, cx, &id);
+        assert_eq!(after.len(), 1, "{after:?}");
+        assert_eq!(after[0].0, before[0].0, "the same card, by its row id");
+        let last = trek.read(cx, |ws, _| match ws.live[&id].items.last() {
+            Some(Item::Tool { id, .. }) => id.clone(),
+            other => format!("{other:?}"),
+        });
+        assert_eq!(last, before[0].0, "the card is at the call now");
+        assert_eq!(after[0].1.phase, Phase::Checking);
+
+        // Merging it right after leaves it where it is.
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![tool("m", "gh pr merge 43 --merge 2>&1 | tail -1")],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let merged = cards(&trek, cx, &id);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].1.phase, Phase::Merging);
+        let len = trek.read(cx, |ws, _| ws.live[&id].items.len());
+        let at = trek.read(cx, |ws, _| {
+            ws.live[&id]
+                .items
+                .iter()
+                .position(|i| matches!(i, Item::Tool { id, .. } if *id == before[0].0))
+        });
+        assert_eq!(at, Some(len - 2), "still just above the merge's own row");
+    });
+}
+
+/// `gh pr merge N` of a PR the thread has no card for gets the PR's card, merging, and `gh`
+/// says merged; the PR the same line looks at gets one too.
+#[test]
+fn merging_a_pr_the_thread_has_no_card_for_makes_one() {
+    run(async |cx| {
+        let trek = open(cx);
+        let gh = FakeGh::new("merge");
+        gh.pr(50, "MERGED");
+        let id = trek.quiet_thread(cx);
+        let path = gh.path();
+        trek.update(cx, |ws, cx| {
+            ws.pr_checks.set_gh_path(Some(path));
+            ws.apply_events(
+                &id,
+                vec![
+                    tool(
+                        "m",
+                        r#"gh pr merge 50 --merge 2>&1 | tail -1; gh pr view 50 --json state --jq .state; gh pr checks 48 2>&1 | grep -E "\tfail\t" | cut -f1,3"#,
+                    ),
+                    finished("m", "MERGED\n"),
+                ],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let found = cards(&trek, cx, &id);
+        assert_eq!(found.len(), 2, "PR 50's and PR 48's: {found:?}");
+        assert_eq!(found[0].1.number, Some(50));
+        assert_eq!(found[0].1.phase, Phase::Merging);
+        assert_eq!(found[1].1.number, Some(48));
+        let_watchers_look(cx);
+        let found = cards(&trek, cx, &id);
+        assert_eq!(found[0].1.phase, Phase::Merged, "{:?}", found[0].1);
+    });
+}
+
+/// A release dry run is followed as a run: the card finds the run its dispatch made and ends
+/// passed, not published.
+#[test]
+fn a_release_dry_run_is_followed_as_its_run() {
+    run(async |cx| {
+        let trek = open(cx);
+        let gh = FakeGh::new("dry");
+        let id = trek.quiet_thread(cx);
+        let path = gh.path();
+        trek.update(cx, |ws, cx| {
+            ws.pr_checks.set_gh_path(Some(path));
+            ws.apply_events(
+                &id,
+                vec![tool(
+                    "w",
+                    "gh workflow run release.yml --ref main -f version=0.4.64-beta.2 -f channel=beta -f dry_run=true",
+                )],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let found = cards(&trek, cx, &id);
+        assert_eq!(found.len(), 1, "{found:?}");
+        let card = &found[0].1;
+        assert_eq!(card.kind, Kind::Run);
+        assert_eq!(card.dispatch, "release.yml");
+        assert_eq!(card.subject, "Dry run of v0.4.64-beta.2");
+        gh.run(45009652043, "success");
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![finished(
+                    "w",
+                    "Created workflow_dispatch event for release.yml at main\n",
+                )],
+                cx,
+            )
+        });
+        let_watchers_look(cx);
+        let card = cards(&trek, cx, &id)[0].1.clone();
+        assert_eq!(card.number, Some(45009652043), "{card:?}");
+        assert_eq!(card.phase, Phase::Passed, "{card:?}");
+        assert_eq!(card.subject, "Dry run of v0.4.64-beta.2");
+        assert_eq!(pr_card::notes_url(&card), None);
+
+        // A dispatch GitHub refuses is a failed card, with what `gh` said.
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![
+                    tool("w2", "gh workflow run live.yml --ref nope"),
+                    failed("w2", "could not create workflow dispatch event: HTTP 422\n"),
+                ],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let found = cards(&trek, cx, &id);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[1].1.phase, Phase::Failed);
+    });
+}
+
+/// What a sub-agent waits on gets its card in the thread; what it only looks at once, and its
+/// `git` work, don't.
+#[test]
+fn a_sub_agents_wait_on_ci_shows_in_the_thread() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        let call = |n: &str, cmd: &str| AgentEvent::TaskLog {
+            task: "toolu_sub".into(),
+            entry: trek_agents::TaskEntry::Call {
+                id: n.into(),
+                title: "Run command".into(),
+                detail: cmd.into(),
+            },
+        };
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![
+                    call("a", "gh run view 45000121198 --json jobs"),
+                    call("b", "git push -u origin feat/x"),
+                    call(
+                        "c",
+                        r#"until [ "$(gh run view 45030254358 --json status --jq .status)" = completed ]; do sleep 30; done; gh run view 45030254358 --json conclusion,jobs --jq '.conclusion'"#,
+                    ),
+                ],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let found = cards(&trek, cx, &id);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].1.number, Some(45030254358));
+        assert_eq!(found[0].1.kind, Kind::Run);
+    });
+}
+
+/// A thread follows a few cards closely at most: one more and the longest followed stops.
+#[test]
+fn a_thread_follows_a_few_cards_at_most() {
+    run(async |cx| {
+        let trek = open(cx);
+        let gh = FakeGh::new("cap");
+        let id = trek.quiet_thread(cx);
+        let path = gh.path();
+        let runs: Vec<AgentEvent> = (0..9)
+            .map(|i| tool(&format!("r{i}"), &format!("gh run watch 4500000000{i}")))
+            .collect();
+        trek.update(cx, |ws, cx| {
+            ws.pr_checks.set_gh_path(Some(path));
+            ws.apply_events(&id, runs, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(cards(&trek, cx, &id).len(), 9);
+        let watching = trek.read(cx, |ws, _| ws.live[&id].pr_watching.len());
+        assert_eq!(watching, trek_app::workspace::PR_WATCHERS);
+    });
 }

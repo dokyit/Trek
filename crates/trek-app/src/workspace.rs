@@ -293,8 +293,9 @@ pub struct LiveThread {
     pub lines: HashMap<String, (u32, u32)>,
     /// Command calls moving a PR/release card (`pr_card`), call id → the card's `Item::Tool` id.
     pub pr_calls: HashMap<String, String>,
-    /// `gh` watchers for the thread's live cards, by card row id.
-    pub pr_watching: HashMap<String, Task<()>>,
+    /// `gh` watchers for the thread's live cards, by card row id, each with when it started
+    /// (a count: the oldest goes first when there are [`PR_WATCHERS`]).
+    pub pr_watching: HashMap<String, (u64, Task<()>)>,
     /// The group of tool calls folding into its summary row now that it's over (`activity`).
     pub fold: Option<crate::activity::Fold>,
     /// Shows the folded group in the transcript once the fold is over.
@@ -720,6 +721,10 @@ impl Background {
 
 /// Calls a sub-agent made that its row keeps, newest last (`SubTask::steps`).
 pub const SUB_STEPS: usize = 6;
+/// How many PR, run and release cards of one thread `gh` follows closely at once: a thread that
+/// touches seven PRs in an hour (merging them one after another, looking at others) would
+/// otherwise spend GitHub's limit, shared by every card and the slow watch, on all of them.
+pub const PR_WATCHERS: usize = 6;
 
 /// The most items a sub-agent's transcript keeps (`SubLog`): its latest.
 pub const SUB_LOG: usize = 300;
@@ -6515,6 +6520,31 @@ impl Workspace {
                         }
                     }
                     AgentEvent::TaskLog { task, entry } => {
+                        // What a sub-agent waits on (CI, a merge, a release) gets its card here,
+                        // where the user is looking (`pr_card::sub_tool_started`).
+                        let fx = match &entry {
+                            trek_agents::TaskEntry::Call { id, title, detail } => {
+                                crate::pr_card::sub_tool_started(
+                                    live,
+                                    &format!("{task}/{id}"),
+                                    title,
+                                    detail,
+                                    pr_cwd.as_deref(),
+                                )
+                            }
+                            trek_agents::TaskEntry::Result { id, output, ok } => {
+                                crate::pr_card::tool_finished(
+                                    live,
+                                    &format!("{task}/{id}"),
+                                    *ok,
+                                    output,
+                                    pr_cwd.as_deref(),
+                                )
+                            }
+                            _ => Default::default(),
+                        };
+                        pr_fx.watch.extend(fx.watch);
+                        pr_fx.changed.extend(fx.changed);
                         live.sub_logs.entry(task).or_default().add(entry);
                     }
                     AgentEvent::Background(tasks) => {
@@ -7418,7 +7448,7 @@ impl Workspace {
         };
         // A card whose command is still running (it arrived while the history loaded) is its
         // call's to finish; one nothing can follow any more stops instead of spinning for good.
-        let gh = trek_core::detect::which("gh").is_some();
+        let gh = trek_core::detect::which("gh").is_some() || self.pr_checks.gh_path().is_some();
         let rows: Vec<(String, bool)> = live
             .items
             .iter()
@@ -7473,9 +7503,11 @@ impl Workspace {
     }
 
     /// Follow the card row `row` (`Item::Tool` id) of `id` with `gh`: every few seconds at
-    /// first, slower later, until it's merged, closed or done, or the thread is gone.
+    /// first, slower later, until it's merged, closed or done, a PR the thread only looked at has
+    /// said where it stands (`pr_card::looked_enough`), or the thread is gone. A thread follows
+    /// [`PR_WATCHERS`] cards at most: one more and the longest followed stops.
     fn watch_pr(&mut self, id: &str, row: &str, cx: &mut Context<Self>) {
-        if trek_core::detect::which("gh").is_none() {
+        if trek_core::detect::which("gh").is_none() && self.pr_checks.gh_path().is_none() {
             return;
         }
         let Some(live) = self.live.get_mut(id) else {
@@ -7484,6 +7516,26 @@ impl Workspace {
         if live.pr_watching.contains_key(row) {
             return;
         }
+        let mut dropped = None;
+        if live.pr_watching.len() >= PR_WATCHERS {
+            let oldest = live
+                .pr_watching
+                .iter()
+                .min_by_key(|(_, (n, _))| *n)
+                .map(|(k, _)| k.clone());
+            if let Some(oldest) = oldest {
+                // Its task goes with it, and stops at its next wait.
+                live.pr_watching.remove(&oldest);
+                dropped = Some(oldest);
+            }
+        }
+        let seq = live
+            .pr_watching
+            .values()
+            .map(|(n, _)| *n)
+            .max()
+            .unwrap_or(0)
+            + 1;
         let tid = id.to_string();
         let row = row.to_string();
         let row_key = row.clone();
@@ -7589,7 +7641,7 @@ impl Workspace {
                                     cx.notify();
                                     this.persist_soon(&tid, cx);
                                 }
-                                !next.phase.terminal()
+                                !next.phase.terminal() && !crate::pr_card::looked_enough(&next)
                             }
                             None => true,
                         }
@@ -7610,8 +7662,11 @@ impl Workspace {
                 }
             });
         });
-        live.pr_watching.insert(row_ins.clone(), task);
+        live.pr_watching.insert(row_ins.clone(), (seq, task));
         self.pr_checks_note(id, &row_ins, cx);
+        if let Some(row) = dropped.filter(|r| !self.pr_checks.follows(id, r)) {
+            self.pr_settle(id, &row, cx);
+        }
     }
 
     /// The card's Merge button: `gh pr merge --merge --delete-branch` off the main thread, the

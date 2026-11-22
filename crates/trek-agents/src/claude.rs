@@ -2250,6 +2250,19 @@ mod tests {
         }})
     }
 
+    /// A Bash call's row is its command, which Trek's cards read (`pr_card::call`), not its
+    /// description (this one, from a real thread, made no card for other reasons).
+    #[test]
+    fn a_bash_call_is_its_command() {
+        assert_eq!(
+            tool_title(
+                "Bash",
+                &json!({"command":"gh pr checks 43","description":"Show pull request 43's checks"})
+            ),
+            ("Run command".to_string(), "gh pr checks 43".to_string())
+        );
+    }
+
     #[test]
     fn every_session_asks_for_the_rules_hook() {
         let hooks = rules_hook();
