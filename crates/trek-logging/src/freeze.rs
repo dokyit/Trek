@@ -48,7 +48,7 @@ const ASK_EVERY: Duration = Duration::from_secs(2);
 const MAX_SAMPLES_PER_RUN: usize = 3;
 #[cfg(target_os = "macos")]
 const SAMPLE_SECS: u32 = 2;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 const KEEP_FREEZE_FILES: usize = 10;
 
 /// The main thread's last sign of life (nanoseconds since `base`), and whether it was working
