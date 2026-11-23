@@ -1,0 +1,68 @@
+/* trekdesktop.com's reading pages (privacy, terms, not found), in the home page's system: they
+   load home.css for its tokens, type, paper, bar, buttons, field and footer, and this for the
+   reading column. The one line is a quiet rule down the column's left; its ember dot is how far
+   you have read. No inline styles (the CSP forbids them). */
+
+.read-head { position: relative; padding: 132px 0 40px; }
+.read-head .field { height: 100%; }
+.read-head .field-top { -webkit-mask-image: linear-gradient(to right, rgb(0 0 0 / 0.25) 30%, #000 70%); mask-image: linear-gradient(to right, rgb(0 0 0 / 0.25) 30%, #000 70%); }
+.read-in { position: relative; z-index: 1; max-width: calc(760px + 2 * var(--gutter)); margin: 0 auto; padding: 0 var(--gutter); }
+.read-head h1 { font-size: clamp(2.6rem, 5.4vw, 4.4rem); line-height: 1.02; font-weight: 680; letter-spacing: -0.026em; }
+.read-head .lede { margin-top: 18px; font-size: clamp(18px, 1.5vw, 20px); line-height: 1.5; color: var(--ink-2); max-width: 60ch; }
+
+/* The column, with the line down its left: drawn to the dot, the dot as far as you have read. */
+.read { position: relative; max-width: calc(760px + 2 * var(--gutter)); margin: 0 auto; padding: 8px var(--gutter) 96px; --k: 1; }
+.spine { position: absolute; left: calc(var(--gutter) - 30px); top: 0; bottom: 96px; width: 12px; pointer-events: none; }
+.spine-ink { position: absolute; left: 5px; top: 0; width: var(--w); height: calc(var(--k) * 100%); background: var(--stroke); border-radius: 2px; }
+.spine-dot { position: absolute; left: -2px; top: calc(var(--k) * 100%); width: 16px; height: 16px; margin-top: -8px; border-radius: 50%; background: var(--ember); box-shadow: 0 0 0 3px var(--paper); }
+
+.contents { margin: 0 0 40px; padding: 18px 0 20px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.contents h2 { font-size: 15px !important; margin: 0 0 10px !important; font-family: var(--text) !important; font-weight: 600 !important; letter-spacing: 0 !important; color: var(--ink-2); }
+.contents ol { margin: 0; padding: 0; list-style: none; columns: 2; column-gap: 32px; font-size: 16px; line-height: 1.5; }
+.contents li { break-inside: avoid; padding: 3px 0; }
+.contents a { text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 30%, transparent); text-underline-offset: 3px; }
+.contents a:hover { text-decoration-color: currentColor; }
+
+.doc { font-size: 17px; line-height: 1.65; max-width: 68ch; }
+.doc h2 { margin: 56px 0 14px; font-size: clamp(1.5rem, 2.4vw, 1.85rem); line-height: 1.15; scroll-margin-top: 96px; }
+.doc h2:first-child { margin-top: 0; }
+.doc p, .doc ul, .doc .table-scroll { margin: 0 0 16px; }
+.doc ul { padding-left: 1.2em; list-style: disc; }
+.doc li { margin: 0 0 10px; padding-left: 0.2em; }
+.doc li::marker { color: var(--ink-2); }
+.doc a:not(.btn) { text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 40%, transparent); text-underline-offset: 3px; }
+.doc a:not(.btn):hover { text-decoration-color: currentColor; }
+.doc code { font: 400 0.88em/1 "JetBrains Mono", ui-monospace, monospace; padding: 2px 5px; border-radius: 5px; background: color-mix(in srgb, var(--ink) 7%, transparent); }
+.doc strong { font-weight: 600; }
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.doc table { width: 100%; border-collapse: collapse; font-size: 15.5px; line-height: 1.5; }
+.doc th, .doc td { text-align: left; vertical-align: top; padding: 12px 14px 12px 0; border-top: 1px solid var(--line); }
+.doc thead th { font-weight: 600; color: var(--ink-2); border-top: 0; padding-top: 0; }
+.doc tbody th { font-family: var(--display); font-weight: 650; white-space: nowrap; padding-right: 20px; }
+.updated { margin-top: 40px !important; font-size: 15px; color: var(--ink-2); }
+
+/* Not found. */
+.lost { min-height: calc(100svh - 120px); display: flex; flex-direction: column; justify-content: center; padding-top: 120px; padding-bottom: 80px; }
+.lost h1 { font-size: clamp(2.8rem, 6vw, 5rem); line-height: 1; font-weight: 680; letter-spacing: -0.026em; }
+.lost .lede { margin-top: 18px; font-size: 19px; color: var(--ink-2); max-width: 40ch; }
+.lost .cta { margin-top: 30px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.lost .cta .text-link { font-weight: 600; padding: 12px 6px; }
+
+@media (max-width: 720px) {
+  .read-head { padding-top: 104px; }
+  .read-in, .read { padding-left: 44px; padding-right: 24px; }
+  .spine { left: 12px; }
+  .contents ol { columns: 1; }
+  .doc { font-size: 16.5px; }
+  .doc tbody th { white-space: normal; }
+}
+
+@media print {
+  .bar, .skip, .field, .spine, .contents, .foot .lockup { display: none !important; }
+  .page { background: #fff !important; }
+  body, .doc, .read-head .lede { color: #000 !important; }
+  .read-head { padding-top: 0; }
+  .doc a[href^="http"]::after { content: " (" attr(href) ")"; font-size: 0.85em; }
+  .doc h2 { break-after: avoid; }
+  .doc tr, .doc li { break-inside: avoid; }
+}
