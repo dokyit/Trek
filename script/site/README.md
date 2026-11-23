@@ -11,14 +11,11 @@ into the repository. `TREK_SITE_PYTHON` names a Python with Pillow and numpy (de
 |---|---|
 | `masters.sh` | Stages the isolated test app in its demo dress on the invisible test display and takes the Mac window masters at 2x (`all`, `stage`, `shoot W H`, `loop` for the Simulator scene, `stop`). |
 | `iphone_masters.sh` | Takes the iPhone app's demo frames from the simulator with `simctl` only. |
-| `site_assets.sh` | Converts the masters into `site/assets/img`. |
-| `make_hero.py` | Composes the first screen's photograph (`PHOTO OUT_DIR`): the day picture and its dusk grade, as `hero-day.png` and `hero-night.png` at 2880 px. The photograph and its licence are named in `site/README.md`. |
-| `make_hero_layers.py` | Cuts those two pictures into the planes the page moves (`HERO_DIR OUT_DIR`): `sky-*.png` and `land-*.png`, along the ridge, by the warmth of the grass. Then, for each of the four: `sips -Z 1600` for the small size, and `cwebp -q 80 -m 6 -sharp_yuv -alpha_q 90` into `site/assets/img/hero-{sky,land}-{day,night}-{1600,2880}.webp`, and write each origin with `impeccable embed-prompt`. Run it with `TREK_SITE_PYTHON` (it needs only Pillow and numpy). |
-| `make_icons.py` | Draws the signpost from `site/assets/img/mark.svg` into the site's favicons, touch and manifest icons and `og.jpg` (`uv run --with pillow python -I script/site/make_icons.py site SCRATCH_DIR`). |
-| `feature_media.sh` | Cuts the home page's feature pictures and loops into `site/assets/img/features/` from the screenshot atlas and the launch footage, preferring any file of the same name in the newest launch captures. |
-| `make_backdrops.py` | The home page's two photographs (the grass hill behind the first screen, the dusk grass at the end): framed wide and tall, graded for Paper and Night, encoded as AVIF with one JPEG into `site/assets/img/backdrop/` (`hill`, `dusk`, `encode`; the photographs and their Unsplash links are named in its docstring and in `site/README.md`). |
-| `make_illustrations.py` | The home page's line drawings (inbox, worktrees, study): isometric blocks drawn into `site/index.html` between `<!-- ill:NAME -->` markers. |
-| `themes_loop.py` | Stages, records and cuts the themes loop (`features/themes.mp4` and its poster) from the isolated test app: `scene`, `record`, `cut`, `states` (`TREK_REPO` names the tree the app is built from). |
+| `site_assets.sh` | Converts the masters into `site/assets/img` (the earlier home page's window pictures; the home page now redraws its window, so nothing on the site uses its output today). |
+| `make_icons.py` | Draws the mark from `site/assets/img/mark.svg` into the site's favicons, touch and manifest icons (`uv run --with pillow python -I script/site/make_icons.py site SCRATCH_DIR`). |
+| `feature_media.sh` | Cuts pictures and loops into `site/assets/img/features/` from the screenshot atlas and the launch footage, preferring any file of the same name in the newest launch captures. Of its output the home page uses only the iPhone pictures. |
+| `make_og.mjs` | Draws the share picture, `og.jpg`, from the home page itself in headless Chrome. |
+| `make_paper.py` | Writes the home page's paper tile, `site/assets/img/home/paper.webp`. |
 | `shoot_site.sh` | Serves `site/` for the length of the run and takes stills: desktop and phone, light and dark. |
 | `rec.sh`, `record.mjs` | A real-time recording of a page from headless Chrome. |
 | `check_links.py` | Checks every link in the site; `--online` asks outside addresses too. |

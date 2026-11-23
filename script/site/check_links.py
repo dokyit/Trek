@@ -87,7 +87,7 @@ for f, p in pages.items():
             print(f"BAD {f.name}: no symbol #{frag}"); bad += 1
 
 # css urls
-css = (site / "assets" / "site.css").read_text()
+css = "".join(f.read_text() for f in sorted((site / "assets" / "home").glob("*.css")))
 for u in re.findall(r'url\("([^"]+)"\)', css):
     if not local(u).exists():
         print("BAD css url", u); bad += 1

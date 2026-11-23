@@ -1,14 +1,29 @@
 {
   "name": "Trek",
   "short_name": "Trek",
-  "description": "A native desktop app that runs your coding agents from one inbox.",
+  "description": "Every agent. One trail. A free, open-source desktop app for Mac, Windows and Linux that runs your coding agents side by side.",
   "start_url": "/",
   "display": "browser",
-  "background_color": "#F1EFF6",
-  "theme_color": "#C9C1DE",
+  "background_color": "#F2EFF6",
+  "theme_color": "#F2EFF6",
   "icons": [
-    { "src": "/assets/img/icon-192.png?v=85d71c70", "sizes": "192x192", "type": "image/png", "purpose": "any" },
-    { "src": "/assets/img/icon-512.png?v=2977f318", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "/assets/img/icon-maskable-512.png?v=a4bbcfac", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+    {
+      "src": "/assets/img/icon-192.png?v=85d71c70",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/assets/img/icon-512.png?v=2977f318",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/assets/img/icon-maskable-512.png?v=a4bbcfac",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
   ]
 }
