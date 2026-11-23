@@ -195,7 +195,9 @@ main, .bar, .foot { position: relative; z-index: 1; }
 .walk h2 { font-size: clamp(2.4rem, 4.6vw, 4rem); line-height: 1.02; max-width: 10ch; }
 .walk p { margin-top: 18px; font-size: 19px; color: var(--ink-2); max-width: 32ch; }
 .walk .note { font-size: 15px; max-width: 40ch; }
-.phones { position: relative; justify-self: center; width: min(500px, 100%); }
+.phones { position: relative; justify-self: center; width: min(500px, 100%); opacity: var(--fade, 1); }
+.vh-probe { position: fixed; top: 0; left: 0; width: 0; height: 100vh; height: 100svh; visibility: hidden; pointer-events: none; }
+.trail .tag.off { opacity: 0; }
 .phone-front { position: relative; z-index: 2; margin: 0 8px 0 auto; transform: translate(var(--fx, 0px), var(--fy, 0px)) rotate(var(--fr, 0deg)); }
 .phone-back { position: absolute; z-index: 1; left: 0; bottom: 40px; width: min(250px, 50%) !important; transform: translate(var(--bx, 0px), var(--by, 0px)) rotate(calc(-6deg + var(--br, 0deg))); }
 .phone .press { position: absolute; left: calc(10px + (100% - 20px) * 0.42); top: calc(10px + (100% - 20px) * 0.757); width: calc((100% - 20px) * 0.322); height: calc((100% - 20px) * 0.06); border-radius: 999px; background: #fff; opacity: 0; pointer-events: none; }
@@ -267,19 +269,20 @@ main, .bar, .foot { position: relative; z-index: 1; }
   body { font-size: 16px; }
   .bar-links { display: none; }
   .bar-in { padding: 10px 16px; justify-content: space-between; }
-  .hero, .walk, .every, .private, .get-in { padding-right: 18px; }
+  .hero, .walk, .every, .private, .get-in { padding-left: 40px; padding-right: 30px; }
   .hero { padding-bottom: 120px; gap: 36px; }
   .hero h1 { font-size: clamp(2.6rem, 12vw, 3.4rem); }
   .cta .btn { width: 100%; justify-content: center; }
   .screen { padding: 8px; border-radius: 18px; }
   .desk .staged { align-self: flex-start; }
-  .win.tk-narrow { width: 100%; }
+  .win.tk-compact { width: 100%; }
+  .screen { max-width: 400px; }
   .walk { gap: 20px; }
   .walk p { font-size: 17px; }
   .phone { border-radius: 36px; padding: 6px; }
-  .phones { width: 100%; }
-  .phone-front { width: min(230px, 62%); margin-right: 0; }
-  .phone-back { width: min(180px, 46%) !important; bottom: 24px; }
+  .phones { width: 100%; max-width: 360px; padding-bottom: 4px; }
+  .phone-front { width: min(232px, 72%); margin: 0 0 0 auto; }
+  .phone-back { width: min(196px, 60%) !important; left: 0; bottom: 30px; transform: translate(var(--bx, 0px), var(--by, 0px)); }
   .phone .press { left: calc(6px + (100% - 12px) * 0.42); top: calc(6px + (100% - 12px) * 0.757); width: calc((100% - 12px) * 0.322); height: calc((100% - 12px) * 0.06); }
   .phone .tap { left: calc(6px + (100% - 12px) * 0.581); top: calc(6px + (100% - 12px) * 0.787); }
   .phone img { border-radius: 30px; }
