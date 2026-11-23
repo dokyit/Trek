@@ -1041,13 +1041,56 @@ struct Asked {
 /// A phone server whose host is a script: a home folder, a clone that says one line and makes
 /// project `p-1`, files taken, a thread `t-1` started and its transcript.
 fn scripted_machine(asked: Arc<Mutex<Asked>>) -> PairLink {
+    let (link, _) = scripted("Machine C", move |req, _| match req {
+        tr::HostRequest::CloneProject {
+            req,
+            progress,
+            reply,
+        } => {
+            progress.line("Cloning into 'trek'...");
+            asked.lock().unwrap().clone = Some(req);
+            let _ = reply.send(Ok("p-1".into()));
+        }
+        tr::HostRequest::PutFiles {
+            project_id,
+            files,
+            reply,
+        } => {
+            assert_eq!(project_id, "p-1");
+            asked.lock().unwrap().files.extend(files);
+            let _ = reply.send(Ok(()));
+        }
+        tr::HostRequest::NewThread { req, reply } => {
+            asked.lock().unwrap().new_thread = Some(req);
+            let _ = reply.send(Ok("t-1".into()));
+        }
+        tr::HostRequest::Transcript { reply, .. } => {
+            let _ = reply.send(Ok(transcript_of(&["build it there"])));
+        }
+        tr::HostRequest::MarkSeen { reply, .. } => {
+            let _ = reply.send(Ok(()));
+        }
+        _ => {}
+    });
+    link
+}
+
+/// A phone server named `name` (its id the name in lower case, with dashes) whose host is a
+/// script: it says what it is (a Mac with a home folder and the mock agent, no threads listed),
+/// and `answer` is asked everything else, with the server's handle to say things unasked
+/// (`push`). Its pairing link, and the handle (kept, the server runs for the rest of the test).
+fn scripted(
+    name: &'static str,
+    mut answer: impl FnMut(tr::HostRequest, &tr::RemoteHandle) + Send + 'static,
+) -> (PairLink, tr::RemoteHandle) {
     let rt = trek_core::runtime();
+    let id = name.to_lowercase().replace(' ', "-");
     let identity =
-        tr::TlsIdentity::load_or_create(&new_project("machine-c-tls"), "Machine C").unwrap();
+        tr::TlsIdentity::load_or_create(&new_project(&format!("{id}-tls")), name).unwrap();
     let fingerprint = identity.fingerprint.clone();
     let mut config = tr::ServerConfig::new(tr::HostInfo {
-        id: "machine-c".into(),
-        name: "Machine C".into(),
+        id,
+        name: name.into(),
         version: "0".into(),
     });
     config.bind = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
@@ -1059,8 +1102,8 @@ fn scripted_machine(asked: Arc<Mutex<Asked>>) -> PairLink {
         .unwrap();
     let route = handle.local_addr().to_string();
     let code = handle.pairing_offer().code;
+    let server = handle.clone();
     rt.spawn(async move {
-        let _handle = handle;
         let agent = tr::AgentOption {
             key: common::mock().key(),
             name: "Mock".into(),
@@ -1079,68 +1122,288 @@ fn scripted_machine(asked: Arc<Mutex<Asked>>) -> PairLink {
                 }
                 tr::HostRequest::MachineInfo { reply } => {
                     let _ = reply.send(Ok(tr::MachineInfo {
-                        name: "Machine C".into(),
+                        name: name.into(),
                         platform: "macos".into(),
                         trek_version: "0".into(),
                         home: "/Users/c".into(),
                     }));
                 }
-                tr::HostRequest::CloneProject {
-                    req,
-                    progress,
-                    reply,
-                } => {
-                    progress.line("Cloning into 'trek'...");
-                    asked.lock().unwrap().clone = Some(req);
-                    let _ = reply.send(Ok("p-1".into()));
-                }
-                tr::HostRequest::PutFiles {
-                    project_id,
-                    files,
-                    reply,
-                } => {
-                    assert_eq!(project_id, "p-1");
-                    asked.lock().unwrap().files.extend(files);
-                    let _ = reply.send(Ok(()));
-                }
-                tr::HostRequest::NewThread { req, reply } => {
-                    asked.lock().unwrap().new_thread = Some(req);
-                    let _ = reply.send(Ok("t-1".into()));
-                }
-                tr::HostRequest::Transcript { reply, .. } => {
-                    let item = tr::Item {
-                        id: "i0".into(),
-                        seq: 1,
-                        at: None,
-                        body: tr::ItemBody::User {
-                            text: "build it there".into(),
-                            images: 0,
-                            aside: false,
-                            videos: vec![],
-                            image_paths: vec![],
-                        },
-                    };
-                    let _ = reply.send(Ok(tr::Transcript {
-                        seq: 1,
-                        items: vec![item],
-                        base: 0,
-                        more: false,
-                    }));
-                }
-                tr::HostRequest::MarkSeen { reply, .. } => {
-                    let _ = reply.send(Ok(()));
-                }
-                _ => {}
+                req => answer(req, &server),
             }
         }
     });
-    PairLink {
-        routes: vec![route],
-        code,
-        fingerprint,
-        name: None,
-        host_id: None,
+    (
+        PairLink {
+            routes: vec![route],
+            code,
+            fingerprint,
+            name: None,
+            host_id: None,
+        },
+        handle,
+    )
+}
+
+/// What someone typed in a thread on a scripted machine, as its `ix`th item.
+fn typed(ix: usize, text: &str) -> tr::Item {
+    tr::Item {
+        id: format!("i{ix}"),
+        seq: ix as u64 + 1,
+        at: None,
+        body: tr::ItemBody::User {
+            text: text.into(),
+            images: 0,
+            aside: false,
+            videos: vec![],
+            image_paths: vec![],
+        },
     }
+}
+
+/// A scripted machine's thread in which `texts` were typed, as it answers `subscribe`.
+fn transcript_of(texts: &[&str]) -> tr::Transcript {
+    tr::Transcript {
+        seq: texts.len() as u64,
+        items: texts
+            .iter()
+            .enumerate()
+            .map(|(ix, text)| typed(ix, text))
+            .collect(),
+        base: 0,
+        more: false,
+    }
+}
+
+/// A scripted machine says `text` was typed in its thread `t-1`, as the thread's `ix`th item.
+fn says(machine: &tr::RemoteHandle, ix: usize, text: &str) {
+    machine.push(tr::HostEvent::Item {
+        thread_id: "t-1".into(),
+        item: typed(ix, text),
+    });
+}
+
+/// What was typed in the thread `id` open here, in order (nothing else is in a scripted
+/// machine's thread).
+fn typed_in(ws: &trek_app::workspace::Workspace, id: &str) -> Vec<String> {
+    ws.live
+        .get(id)
+        .map(|l| {
+            l.items
+                .iter()
+                .filter_map(|i| match i {
+                    Item::User { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Pair with the scripted machine `id` at `link` and wait until it has said what it is.
+async fn pair_scripted(trek: &Trek, cx: &mut TestAppContext, id: &str, link: PairLink) {
+    trek.update(cx, |ws, cx| {
+        ws.machines.pairing = None;
+        ws.pair_machine(link, cx)
+    });
+    trek.wait_explained(
+        cx,
+        "pairing",
+        REAL_TIME_LIMIT,
+        |ws| matches!(ws.machines.pairing, Some(Pairing::Done(_))),
+        |ws| format!("{:?}", ws.machines.pairing),
+    )
+    .await;
+    trek.wait(cx, "the machine's home folder", |ws| {
+        ws.machine_home(id).is_some()
+    })
+    .await;
+}
+
+/// What made `a_machine_paired_again_keeps_the_threads_open_here_followed` fail now and then on
+/// a loaded runner. A thread opening asked for its transcript, then asked the machine to mark it
+/// seen, and only put the transcript in once that was answered; what the machine said of the
+/// thread meanwhile came in ahead of it, and the transcript, older, then replaced it. A message
+/// sent as the thread opened (as that test sends one, the moment the machine is paired again)
+/// was in the thread on its machine and never showed here. Machine D says more of the thread
+/// while it's still to answer `mark_seen`: the transcript is here by then, and what follows it
+/// stays under it.
+#[test]
+fn what_a_machine_says_as_its_thread_opens_stays_under_the_transcript() {
+    run(async |cx| {
+        let trek = open(cx);
+        let (seen, answer_seen) = async_channel::bounded::<()>(1);
+        let (link, _d) = scripted("Machine D", move |req, d| match req {
+            tr::HostRequest::Transcript { reply, .. } => {
+                let _ = reply.send(Ok(transcript_of(&["build it there"])));
+            }
+            // Asked once the transcript has been sent: more is said, and this is answered when
+            // the test lets it be, then more again.
+            tr::HostRequest::MarkSeen { reply, .. } => {
+                says(d, 1, "and test it");
+                let (answer_seen, d) = (answer_seen.clone(), d.clone());
+                trek_core::runtime().spawn(async move {
+                    let _ = answer_seen.recv().await;
+                    let _ = reply.send(Ok(()));
+                    says(&d, 2, "then ship it");
+                });
+            }
+            _ => {}
+        });
+        pair_scripted(&trek, cx, "machine-d", link).await;
+        let id = local_id("machine-d", "t-1");
+        trek.update(cx, |ws, cx| ws.follow_machine_thread(&id, cx));
+
+        trek.wait_explained(
+            cx,
+            "what the machine said as the thread opened",
+            REAL_TIME_LIMIT,
+            |ws| typed_in(ws, &id).iter().any(|t| t == "and test it"),
+            |ws| open_thread(ws, &id),
+        )
+        .await;
+        let (loaded, typed) = trek.read(cx, |ws, _| {
+            (
+                ws.live.get(&id).is_some_and(|l| l.loaded),
+                typed_in(ws, &id),
+            )
+        });
+        assert_eq!(
+            typed,
+            ["build it there", "and test it"],
+            "the transcript is in before what follows it, whatever the machine has yet to answer"
+        );
+        assert!(loaded);
+
+        // Its answer to `mark_seen` changes nothing of what the thread shows.
+        seen.send(()).await.unwrap();
+        trek.wait_explained(
+            cx,
+            "what the machine said next",
+            REAL_TIME_LIMIT,
+            |ws| typed_in(ws, &id).iter().any(|t| t == "then ship it"),
+            |ws| open_thread(ws, &id),
+        )
+        .await;
+        assert_eq!(
+            trek.read(cx, |ws, _| typed_in(ws, &id)),
+            ["build it there", "and test it", "then ship it"]
+        );
+    });
+}
+
+/// A thread the old connection couldn't open (here the machine refused it; a connection that
+/// dropped as the thread opened, or one the machine no longer took, leaves it the same way)
+/// showed why, and went on showing it after the machine was paired again: only the threads that
+/// had opened were followed on the new connection, so this one heard nothing until it was left
+/// and opened again. Pairing again opens it.
+#[test]
+fn a_thread_that_couldnt_be_opened_opens_when_its_machine_is_paired_again() {
+    run(async |cx| {
+        let trek = open(cx);
+        let mut asked = 0;
+        let (link, d) = scripted("Machine D", move |req, _| match req {
+            tr::HostRequest::Transcript { reply, .. } => {
+                asked += 1;
+                let _ = reply.send(match asked {
+                    1 => Err(tr::HostError::other("It can't be read just now")),
+                    _ => Ok(transcript_of(&["build it there"])),
+                });
+            }
+            tr::HostRequest::MarkSeen { reply, .. } => {
+                let _ = reply.send(Ok(()));
+            }
+            _ => {}
+        });
+        pair_scripted(&trek, cx, "machine-d", link.clone()).await;
+        let id = local_id("machine-d", "t-1");
+        trek.update(cx, |ws, cx| ws.follow_machine_thread(&id, cx));
+        trek.wait_explained(
+            cx,
+            "the thread to say it couldn't be opened",
+            REAL_TIME_LIMIT,
+            |ws| {
+                ws.live.get(&id).is_some_and(|l| {
+                    l.items.iter().any(
+                        |i| matches!(i, Item::Error { text } if text.contains("It can't be read just now")),
+                    )
+                })
+            },
+            |ws| open_thread(ws, &id),
+        )
+        .await;
+
+        let again = PairLink {
+            code: d.pairing_offer().code,
+            ..link
+        };
+        pair_scripted(&trek, cx, "machine-d", again).await;
+        trek.wait_explained(
+            cx,
+            "the thread open on the new connection",
+            REAL_TIME_LIMIT,
+            |ws| typed_in(ws, &id) == ["build it there"],
+            |ws| open_thread(ws, &id),
+        )
+        .await;
+        // And followed there.
+        says(&d, 1, "and test it");
+        trek.wait_explained(
+            cx,
+            "what the machine said next",
+            REAL_TIME_LIMIT,
+            |ws| typed_in(ws, &id) == ["build it there", "and test it"],
+            |ws| open_thread(ws, &id),
+        )
+        .await;
+        assert!(
+            trek.items(cx, &id)
+                .iter()
+                .all(|i| !matches!(i, Item::Error { .. })),
+            "nothing left of why it couldn't be opened"
+        );
+    });
+}
+
+/// A thread still opening on a machine that is then forgotten: the connection closes, the
+/// request for its transcript ends unanswered, and that isn't said of the thread, which is gone
+/// from here with its machine (it came back as a thread of no machine, saying it couldn't be
+/// opened).
+#[test]
+fn a_thread_still_opening_goes_with_a_machine_forgotten() {
+    run(async |cx| {
+        let trek = open(cx);
+        // Machine D never answers `subscribe` (it keeps the question).
+        let mut kept = vec![];
+        let (link, _d) = scripted("Machine D", move |req, _| {
+            if let tr::HostRequest::Transcript { reply, .. } = req {
+                kept.push(reply);
+            }
+        });
+        pair_scripted(&trek, cx, "machine-d", link).await;
+        let id = local_id("machine-d", "t-1");
+        trek.update(cx, |ws, cx| ws.follow_machine_thread(&id, cx));
+        cx.run_until_parked();
+        let client = trek.read(cx, |ws, _| {
+            ws.machines
+                .get("machine-d")
+                .unwrap()
+                .client
+                .clone()
+                .unwrap()
+        });
+        trek.update(cx, |ws, cx| ws.forget_machine("machine-d", cx));
+        // Its connection closed, which is when the request ends.
+        trek.wait(cx, "the connection to close", |_| {
+            matches!(*client.state().borrow(), tr::client::State::Stopped(_))
+        })
+        .await;
+        cx.run_until_parked();
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.live.get(&id).map(|l| l.items.len())),
+            None,
+            "nothing of the machine's threads is kept"
+        );
+    });
 }
 
 /// A git project with an origin over SSH, and files git ignores: small ones, a big one, and a
@@ -1240,15 +1503,12 @@ fn add_to_another_machine_clones_copies_the_ticked_files_and_starts_the_thread_t
         trek.window(cx, |window, cx| {
             trek_app::machines::sheets::open_clone(ws, project.clone(), window, cx)
         });
-        for _ in 0..200 {
+        // Its list of what git ignores comes from git, off the main thread.
+        trek.wait_until(cx, "the sheet to list the ignored files", |trek, cx| {
             trek.render(cx);
-            if trek.visible(cx, ("clone-file", 2usize)) {
-                break;
-            }
-            cx.background_executor
-                .timer(Duration::from_millis(10))
-                .await;
-        }
+            trek.visible(cx, ("clone-file", 2usize))
+        })
+        .await;
         assert!(trek.visible(cx, "clone-sheet"));
         assert!(trek.visible(cx, "clone-url"));
         // Over HTTPS rather than the origin's SSH; debug.log stays behind.
@@ -1688,16 +1948,72 @@ fn a_machine_paired_again_keeps_the_threads_open_here_followed() {
         trek.update(cx, |ws, cx| {
             ws.machine_send(&id, "after pairing again".into(), vec![], None, cx)
         });
-        trek.wait(cx, "the message in the open thread", |ws| {
-            ws.live.get(&id).is_some_and(|l| {
-                said(
-                    &l.items.iter().cloned().collect::<Vec<_>>(),
-                    "after pairing again",
-                )
-            })
-        })
+        trek.wait_explained(
+            cx,
+            "the message in the open thread",
+            REAL_TIME_LIMIT,
+            |ws| {
+                ws.live.get(&id).is_some_and(|l| {
+                    said(
+                        &l.items.iter().cloned().collect::<Vec<_>>(),
+                        "after pairing again",
+                    )
+                })
+            },
+            |ws| open_thread(ws, &id),
+        )
         .await;
+        // And it stays there, under what the thread held before, with B's answer under it: the
+        // transcript the new connection opened with comes in ahead of what B said since (it
+        // could come in after, and replace the message and its answer: what failed this test
+        // now and then).
+        trek.wait_explained(
+            cx,
+            "B's answer to it, the turn over",
+            REAL_TIME_LIMIT,
+            |ws| {
+                ws.thread(&id)
+                    .is_some_and(|t| t.run_state == RunState::Idle)
+                    && ws.live.get(&id).is_some_and(|l| {
+                        l.turn_started.is_none()
+                            && l.items
+                                .iter()
+                                .skip_while(|i| !matches!(i, Item::User { text, .. } if text == "after pairing again"))
+                                .any(|i| matches!(i, Item::TurnEnd { .. }))
+                    })
+            },
+            |ws| open_thread(ws, &id),
+        )
+        .await;
+        assert_eq!(
+            trek.read(cx, |ws, _| typed_in(ws, &id)),
+            ["hello from A", "after pairing again"]
+        );
     });
+}
+
+/// What the open thread `id` on another machine shows, and how its machine stands: for a wait
+/// that timed out to say.
+fn open_thread(ws: &trek_app::workspace::Workspace, id: &str) -> String {
+    let items = ws.live.get(id).map(|l| {
+        (
+            l.loaded,
+            l.items
+                .iter()
+                .map(|i| match i {
+                    Item::User { text, .. } => format!("user {text:?}"),
+                    Item::Assistant { text } => format!("assistant {text:?}"),
+                    Item::Error { text } => format!("error {text:?}"),
+                    Item::TurnEnd { .. } => "turn end".to_string(),
+                    _ => "other".to_string(),
+                })
+                .collect::<Vec<_>>(),
+        )
+    });
+    let reach = machines::split_id(id)
+        .and_then(|(host, _)| ws.machines.get(host))
+        .map(|m| m.reach.clone());
+    format!("(loaded, items) {items:?}, its machine {reach:?}")
 }
 
 /// Machine C (scripted), paired and with its home folder known.

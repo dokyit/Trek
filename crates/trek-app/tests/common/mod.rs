@@ -654,6 +654,27 @@ impl Trek {
         }
     }
 
+    /// `wait`, for what the workspace alone can't say (what's on screen, an answer the test
+    /// holds): `until` is asked after each round of work, to the same limit. A test that counts
+    /// its own rounds instead (200 of 10 ms, say) gives work off the main thread two seconds,
+    /// which a loaded runner can take longer over, and then carries on without it.
+    pub async fn wait_until(
+        &self,
+        cx: &mut TestAppContext,
+        what: &str,
+        mut until: impl FnMut(&Trek, &mut TestAppContext) -> bool,
+    ) {
+        let deadline = Instant::now() + REAL_TIME_LIMIT;
+        loop {
+            cx.run_until_parked();
+            if until(self, cx) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            cx.background_executor.timer(Duration::from_millis(5)).await;
+        }
+    }
+
     /// Wait until `id`'s turn is over and the thread is settled in `state`.
     pub async fn wait_done(&self, cx: &mut TestAppContext, id: &str, state: RunState) {
         let id = id.to_string();

@@ -461,17 +461,15 @@ fn the_phone_opens_a_woken_sub_agent_from_its_row() {
                 cx,
             )
         });
+        // Answered once the thread's history is read, off the main thread.
         let mut transcript = None;
-        for _ in 0..400 {
-            cx.run_until_parked();
+        trek.wait_until(cx, "the transcript asked for", |_, _| {
             if let Ok(t) = rx.try_recv() {
                 transcript = Some(t.expect("a transcript"));
-                break;
             }
-            cx.background_executor
-                .timer(std::time::Duration::from_millis(5))
-                .await;
-        }
+            transcript.is_some()
+        })
+        .await;
         let transcript = transcript.expect("answered");
         let link = transcript
             .items

@@ -24,7 +24,7 @@
 //!     }
 //! }
 //! let info = client.machine_info().await?;
-//! let reply = client.request(ClientMessage::Subscribe { thread_id, after_seq: None, limit: Some(200) }).await?;
+//! client.subscribe(&thread_id, Some(200)).await?; // its `transcript` is among the events by now
 //! ```
 //!
 //! Its futures and channels are tokio's `sync` ones, which any executor can await (GPUI's
@@ -234,7 +234,8 @@ pub enum Event {
     Disconnected { reason: String },
     /// Something the machine sent unasked: `snapshot`, `thread`, `unlisted`, `thread_removed`,
     /// `item` (request cards among them), `transcript_reset`, `clone_progress`; and the
-    /// `transcript` answering a subscription made again after a reconnect.
+    /// `transcript` of a thread opened with [`Client::subscribe`], or answering a subscription
+    /// made again after a reconnect.
     Message(ServerMessage),
 }
 
@@ -260,7 +261,27 @@ pub enum ClientError {
     Invalid(String),
 }
 
-type Responder = oneshot::Sender<Result<ServerMessage, ClientError>>;
+/// Where a request's answer goes.
+enum Responder {
+    /// To whoever made it ([`Client::request`]).
+    Reply(oneshot::Sender<Result<ServerMessage, ClientError>>),
+    /// A thread being opened ([`Client::subscribe`]): its `transcript` goes out with the events,
+    /// and whoever opened it hears only that it's there, or why not.
+    Opened(oneshot::Sender<Result<(), ClientError>>),
+}
+
+impl Responder {
+    fn fail(self, err: ClientError) {
+        match self {
+            Self::Reply(tx) => {
+                let _ = tx.send(Err(err));
+            }
+            Self::Opened(tx) => {
+                let _ = tx.send(Err(err));
+            }
+        }
+    }
+}
 
 enum Cmd {
     Request {
@@ -362,10 +383,33 @@ impl Client {
 
     /// Send `msg` and wait for its reply: the machine's `error` is [`ClientError::Server`].
     /// Made while no connection is up, it goes once one is. `subscribe` and `unsubscribe` also
-    /// say which threads to subscribe to again after a reconnect. There's no timeout: wrap it in
-    /// one where it matters.
+    /// say which threads to subscribe to again after a reconnect (to open a thread and follow
+    /// it, use [`Client::subscribe`]: a `transcript` taken from here isn't in order with the
+    /// events). There's no timeout: wrap it in one where it matters.
     pub async fn request(&self, msg: ClientMessage) -> Result<ServerMessage, ClientError> {
         let (reply, rx) = oneshot::channel();
+        let reply = Responder::Reply(reply);
+        if self.cmds.send(Cmd::Request { msg, reply }).is_err() {
+            return Err(self.gone());
+        }
+        rx.await.unwrap_or_else(|_| Err(self.gone()))
+    }
+
+    /// Open `thread_id` and follow it: `subscribe`, for its last `limit` items (all of them
+    /// without one). Its `transcript` comes out of [`Client::events`], in its place among the
+    /// items the machine sends after it: handed back from here it would reach the caller by
+    /// another way than they do, and one read late would be put over items newer than it. This
+    /// returns once the transcript is among the events, or says why the machine refused. Made
+    /// while no connection is up, it goes once one is; the connection subscribes again after a
+    /// reconnect.
+    pub async fn subscribe(&self, thread_id: &str, limit: Option<u32>) -> Result<(), ClientError> {
+        let (reply, rx) = oneshot::channel();
+        let msg = ClientMessage::Subscribe {
+            thread_id: thread_id.to_string(),
+            after_seq: None,
+            limit,
+        };
+        let reply = Responder::Opened(reply);
         if self.cmds.send(Cmd::Request { msg, reply }).is_err() {
             return Err(self.gone());
         }
@@ -865,12 +909,12 @@ impl Driver {
         tracing::info!(%reason, "trek-remote client stopped");
         self.state.send_replace(State::Stopped(reason.clone()));
         for (_, reply) in self.waiting.drain(..) {
-            let _ = reply.send(Err(ClientError::Stopped(reason.clone())));
+            reply.fail(ClientError::Stopped(reason.clone()));
         }
         self.cmds.close();
         while let Ok(cmd) = self.cmds.try_recv() {
             if let Cmd::Request { reply, .. } = cmd {
-                let _ = reply.send(Err(ClientError::Stopped(reason.clone())));
+                reply.fail(ClientError::Stopped(reason.clone()));
             }
         }
     }
@@ -1118,10 +1162,10 @@ impl Driver {
         let ended = self.serve(ws, &mut pending).await;
         for (_, p) in pending {
             if let Some(reply) = p.reply {
-                let _ = reply.send(Err(match &ended {
+                reply.fail(match &ended {
                     Ended::Stop(reason) => ClientError::Stopped(reason.clone()),
                     Ended::Dropped(_) => ClientError::Disconnected,
-                }));
+                });
             }
         }
         ended
@@ -1256,7 +1300,7 @@ impl Driver {
         .expect("client messages always serialize");
         if text.len() > MAX_OUTBOUND {
             if let Some(reply) = reply {
-                let _ = reply.send(Err(ClientError::TooLarge(text.len())));
+                reply.fail(ClientError::TooLarge(text.len()));
             }
             return Ok(());
         }
@@ -1295,16 +1339,20 @@ impl Driver {
                     _ => {}
                 }
             }
-            match p.reply {
-                Some(reply) => {
-                    let _ = reply.send(match msg {
-                        ServerMessage::Error { code, message } => {
-                            Err(ClientError::Server { code, message })
-                        }
-                        msg => Ok(msg),
-                    });
+            match (p.reply, msg) {
+                (Some(reply), ServerMessage::Error { code, message }) => {
+                    reply.fail(ClientError::Server { code, message });
                 }
-                None => self.emit(Event::Message(msg)),
+                (Some(Responder::Reply(reply)), msg) => {
+                    let _ = reply.send(Ok(msg));
+                }
+                // The transcript first, in its place among the events; then the word that it's
+                // there.
+                (Some(Responder::Opened(opened)), msg) => {
+                    self.emit(Event::Message(msg));
+                    let _ = opened.send(Ok(()));
+                }
+                (None, msg) => self.emit(Event::Message(msg)),
             }
             return None;
         }

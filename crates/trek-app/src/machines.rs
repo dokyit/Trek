@@ -340,12 +340,16 @@ fn waits(r: &tr::ThreadSummary) -> bool {
 }
 
 /// A transcript open here: B's items as last sent, in order.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Followed {
     items: Vec<tr::Item>,
     loaded: bool,
     /// Earlier items stayed on the machine.
     more: bool,
+    /// The thread being opened on its machine's connection (`follow_machine_thread`). It goes
+    /// with this: what a connection since replaced (the machine paired again) or closed (the
+    /// machine forgotten) answers isn't said of a thread open on another, or on none.
+    _opening: Option<Task<()>>,
 }
 
 /// A paired machine and its connection.
@@ -1304,7 +1308,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let host = entry.id().to_string();
-        // The threads open here stay open: they're followed again on the new connection.
+        // The threads open here stay open: they're followed again on the new connection. So is
+        // one the old connection couldn't open (that connection refused, or dropped as the
+        // thread opened, may be why the machine is paired again): it showed why, and would have
+        // gone on showing it, hearing nothing, until it was left and opened again.
         let mut reopen: Vec<String> = vec![];
         if let Some(old) = self.machines.list.iter().position(|m| m.id() == host) {
             let old = self.machines.list.remove(old);
@@ -1312,6 +1319,14 @@ impl Workspace {
                 c.close();
             }
             reopen = old.followed.into_keys().collect();
+            for id in self.live.keys() {
+                if let Some((h, tid)) = split_id(id)
+                    && h == host
+                    && !reopen.iter().any(|t| t == tid)
+                {
+                    reopen.push(tid.to_string());
+                }
+            }
         }
         let connected = client.is_some();
         let made = match client {
@@ -1631,49 +1646,50 @@ impl Workspace {
         if m.followed.contains_key(&tid) {
             return;
         }
-        m.followed.insert(tid.clone(), Followed::default());
+        let local = id.to_string();
+        let thread = tid.clone();
+        // Its transcript comes with the machine's events (`machine_message`), in its place among
+        // the items the machine sends after it. Taken from the request and put in here, it could
+        // land after them (the more so while the machine was still to answer `mark_seen`), and
+        // the older transcript then replaced what the machine had said since: a message sent as
+        // the thread opened never showed.
+        let opening =
+            cx.spawn(
+                async move |this, cx| match client.subscribe(&tid, Some(OPEN_LIMIT)).await {
+                    Ok(()) => {
+                        let _ = client
+                            .request(tr::ClientMessage::MarkSeen { thread_id: tid })
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = this.update(cx, |ws, cx| {
+                            if let Some(m) = ws.machines.get_mut(&host) {
+                                m.followed.remove(&tid);
+                            }
+                            let live = ws.live.entry(local.clone()).or_default();
+                            live.loading = false;
+                            live.loaded = true;
+                            live.items = Transcript::stored(vec![(
+                                "error".into(),
+                                Item::Error {
+                                    text: format!("Couldn't open this thread: {e}"),
+                                },
+                            )]);
+                            live.revision += 1;
+                            cx.notify();
+                        });
+                    }
+                },
+            );
+        m.followed.insert(
+            thread,
+            Followed {
+                _opening: Some(opening),
+                ..Followed::default()
+            },
+        );
         let live = self.live.entry(id.to_string()).or_default();
         live.loading = !live.loaded;
-        let local = id.to_string();
-        cx.spawn(async move |this, cx| {
-            let seen = client.request(tr::ClientMessage::MarkSeen {
-                thread_id: tid.clone(),
-            });
-            let reply = client
-                .request(tr::ClientMessage::Subscribe {
-                    thread_id: tid.clone(),
-                    after_seq: None,
-                    limit: Some(OPEN_LIMIT),
-                })
-                .await;
-            let _ = seen.await;
-            let _ = this.update(cx, |ws, cx| match reply {
-                Ok(msg @ tr::ServerMessage::Transcript { .. }) => {
-                    ws.machine_message(&host, msg, cx)
-                }
-                other => {
-                    let why = match other {
-                        Err(e) => e.to_string(),
-                        Ok(_) => "it answered with something else".into(),
-                    };
-                    if let Some(m) = ws.machines.get_mut(&host) {
-                        m.followed.remove(&tid);
-                    }
-                    let live = ws.live.entry(local.clone()).or_default();
-                    live.loading = false;
-                    live.loaded = true;
-                    live.items = Transcript::stored(vec![(
-                        "error".into(),
-                        Item::Error {
-                            text: format!("Couldn't open this thread: {why}"),
-                        },
-                    )]);
-                    live.revision += 1;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
     }
 
     /// Why machine `host` can't be asked anything now (`None`: it can). A request made while it
