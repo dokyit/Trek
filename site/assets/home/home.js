@@ -225,7 +225,9 @@
     const x = flat ? clamp(p.x - tw / 2, 12, W - tw - 12) : p.x - 16 - tw;
     const y = flat ? p.y + 25 : p.y + 4;
     tag.setAttribute("x", f(x)); tag.setAttribute("y", f(y));
-    tag.classList.toggle("off", narrowQ.matches && !flat);
+    // Beside the line there is room for the words down the right edge only: down the left edge
+    // they would run off the page (between 721 and 1000 px wide they did), so there they rest.
+    tag.classList.toggle("off", !flat && (narrowQ.matches || x < 8));
   }
 
   function paint() {

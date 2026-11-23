@@ -53,6 +53,12 @@ body { margin: 0; background: var(--paper); color: var(--ink); font: 400 17px/1.
 h1, h2, h3, p, ul, figure { margin: 0; }
 ul { padding: 0; list-style: none; }
 img, svg { display: block; max-width: 100%; }
+/* A picture is drawn in its own proportions, whatever sets its width. Its width and height
+   attributes only hold its place while it loads: without this rule the height attribute stays in
+   force as a height in px while a stylesheet's width changes, and the picture is stretched (the
+   phone captures were, by 30% on a desktop and 66% on a phone). script/site/test/pictures.test.mjs
+   holds every page to it. */
+img { height: auto; }
 a { color: inherit; text-decoration: none; }
 h1, h2, h3 { font-family: var(--display); font-weight: 650; letter-spacing: -0.02em; text-wrap: balance; }
 p { text-wrap: pretty; }
@@ -190,7 +196,7 @@ main, .bar, .foot { position: relative; z-index: 1; }
 .win { width: 100%; }
 
 /* ---------- Walk away ---------- */
-.walk { display: grid; grid-template-columns: minmax(0, 6fr) minmax(0, 5fr); gap: clamp(24px, 4vw, 56px); align-items: end; padding-top: clamp(100px, 12vw, 170px); padding-bottom: clamp(110px, 12vw, 170px); }
+.walk { display: grid; grid-template-columns: minmax(0, 1fr) min(500px, 56%); gap: clamp(24px, 4vw, 56px); align-items: end; padding-top: clamp(100px, 12vw, 170px); padding-bottom: clamp(110px, 12vw, 170px); }
 .walk-text { align-self: start; }
 .walk h2 { font-size: clamp(2.4rem, 4.6vw, 4rem); line-height: 1.02; max-width: 10ch; }
 .walk p { margin-top: 18px; font-size: 19px; color: var(--ink-2); max-width: 32ch; }
@@ -199,7 +205,7 @@ main, .bar, .foot { position: relative; z-index: 1; }
 .vh-probe { position: fixed; top: 0; left: 0; width: 0; height: 100vh; height: 100svh; visibility: hidden; pointer-events: none; }
 .trail .tag.off { opacity: 0; }
 .phone-front { position: relative; z-index: 2; margin: 0 8px 0 auto; transform: translate(var(--fx, 0px), var(--fy, 0px)) rotate(var(--fr, 0deg)); }
-.phone-back { position: absolute; z-index: 1; left: 0; bottom: 40px; width: min(250px, 50%) !important; transform: translate(var(--bx, 0px), var(--by, 0px)) rotate(calc(-6deg + var(--br, 0deg))); }
+.phone-back { position: absolute; z-index: 1; left: 0; top: 50%; translate: 0 -50%; width: min(280px, 56%) !important; transform: translate(var(--bx, 0px), var(--by, 0px)) rotate(calc(-6deg + var(--br, 0deg))); }
 .phone .press { position: absolute; left: calc(10px + (100% - 20px) * 0.42); top: calc(10px + (100% - 20px) * 0.757); width: calc((100% - 20px) * 0.322); height: calc((100% - 20px) * 0.06); border-radius: 999px; background: #fff; opacity: 0; pointer-events: none; }
 .phone .tap { position: absolute; left: calc(10px + (100% - 20px) * 0.581); top: calc(10px + (100% - 20px) * 0.787); width: 46px; height: 46px; margin: -23px 0 0 -23px; border-radius: 50%; border: 2px solid var(--ink); opacity: 0; pointer-events: none; }
 .phone-front.tapped .tap { animation: phone-tap 900ms cubic-bezier(0.16, 1, 0.3, 1) both; }
@@ -263,9 +269,6 @@ main, .bar, .foot { position: relative; z-index: 1; }
   .ill-private { order: -1; max-width: none; }
   .row-ill { grid-template-columns: minmax(170px, 230px) minmax(0, 1fr); }
   .row-ill .ill-native { grid-column: 1 / -1; max-width: 460px; justify-self: end; }
-  /* A capture keeps its own proportions at any width: without this its height stays the 638 px of
-     its height attribute while its width follows the frame. */
-  .phone img { height: auto; }
 }
 @media (max-width: 720px) {
   :root { --gutter: 34px; }
@@ -289,7 +292,7 @@ main, .bar, .foot { position: relative; z-index: 1; }
   .phones { --P: min(360px, 100vw - 46px); width: var(--P); justify-self: end; margin-right: max(0px, (100vw - 430px) / 2); padding-bottom: 4px; }
   .phone { padding: 6px; border-radius: calc((var(--pw) - 16.5px) * 0.15 + 8.25px); }
   .phone-front { --pw: calc(var(--P) * 0.66); width: var(--pw); margin: 0 0 0 auto; }
-  .phone-back { --pw: calc(var(--P) * 0.54); width: var(--pw) !important; left: 0; bottom: 34px; transform: translate(var(--bx, 0px), var(--by, 0px)); }
+  .phone-back { --pw: calc(var(--P) * 0.54); width: var(--pw) !important; left: 0; top: auto; bottom: 34px; translate: none; transform: translate(var(--bx, 0px), var(--by, 0px)); }
   .phone .press { left: calc(6px + (100% - 12px) * 0.42); top: calc(6px + (100% - 12px) * 0.757); width: calc((100% - 12px) * 0.322); height: calc((100% - 12px) * 0.06); }
   .phone .tap { left: calc(6px + (100% - 12px) * 0.581); top: calc(6px + (100% - 12px) * 0.787); }
   .phone img { border-radius: calc((var(--pw) - 16.5px) * 0.15); }

@@ -19,6 +19,7 @@ into the repository. `TREK_SITE_PYTHON` names a Python with Pillow and numpy (de
 | `shoot_site.sh` | Serves `site/` for the length of the run and takes stills: desktop and phone, light and dark. |
 | `rec.sh`, `record.mjs` | A real-time recording of a page from headless Chrome. |
 | `check_links.py` | Checks every link in the site; `--online` asks outside addresses too. |
+| `test/` | The site's tests, `node script/site/test/run.mjs`. `pictures.test.mjs` draws every page in headless Chrome at five widths and fails if an image is out of its own proportions; `SITE_TEST_PLAYWRIGHT=<a folder with playwright-webkit installed>` adds WebKit, `SITE_TEST_NO_BROWSER=1` keeps to the checks that need no browser. |
 | `stamp.py` | Writes `?v=<hash of the file>` on every link to the site's own files (`SITE_DIR`), so a changed file is fetched at once and never served from an old copy. Run it after any change under `site/`; `--check` is what the pre-push hook runs. |
 
 Nothing here opens a window: Chrome runs headless, the test app stays on its own display, and
