@@ -507,6 +507,71 @@ async fn pushes_arrive_after_subscribe() {
     assert_eq!(row.title, "Renamed");
 }
 
+/// A thread opened with `subscribe` has its transcript among the events, ahead of every item the
+/// machine sends after it: one reader takes them in the order the machine sent them. (Handed back
+/// to the caller, as `request` hands a reply back, the transcript went another way than the items,
+/// and an app that read it after an item put the older transcript over the newer item.)
+#[tokio::test]
+async fn a_thread_opened_has_its_transcript_among_the_events_ahead_of_what_follows() {
+    let m = machine().await;
+    let (client, mut events, _) = paired_client(&m, "machine-a").await;
+    client.subscribe("t1", None).await.unwrap();
+    m.handle.push(HostEvent::Item {
+        thread_id: "t1".into(),
+        item: item("c", 3, "three"),
+    });
+    // It's there by the time `subscribe` returns: nothing more needs to come in for it.
+    let mut order = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let Event::Message(ServerMessage::Transcript {
+            thread_id,
+            seq,
+            items,
+            reset,
+            ..
+        }) = event
+        {
+            assert_eq!(
+                (thread_id.as_str(), seq, items.len(), reset),
+                ("t1", 2, 2, true)
+            );
+            order.push("transcript".to_string());
+        }
+    }
+    assert_eq!(order, ["transcript"]);
+    let got = next(&mut events, |e| match e {
+        Event::Message(ServerMessage::Transcript { .. }) => panic!("the transcript twice"),
+        Event::Message(ServerMessage::Item { item, .. }) => Some(item),
+        _ => None,
+    })
+    .await;
+    assert_eq!(got.id, "c");
+
+    // One the machine refuses: the caller hears why, nothing comes among the events, and it
+    // isn't a thread to subscribe to again.
+    let refused = client.subscribe("nope", None).await;
+    assert!(
+        matches!(
+            &refused,
+            Err(ClientError::Server {
+                code: ErrorCode::NotFound,
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(client.machine_info().await.unwrap().name, "Studio");
+    while let Ok(event) = events.try_recv() {
+        assert!(
+            !matches!(
+                event,
+                Event::Message(ServerMessage::Transcript { .. } | ServerMessage::Error { .. })
+            ),
+            "{event:?}"
+        );
+    }
+}
+
 /// A fixed address in front of a server that may go away and come back elsewhere (`None`: nothing
 /// answers): the machine's route, as the client sees it, without its port given up meanwhile for
 /// anything else on this computer to take.
@@ -542,14 +607,9 @@ async fn reconnects_after_the_server_drops_and_subscribes_again_after_welcome() 
     .unwrap();
     let mut events = client.events().unwrap();
     let (paired, _) = connected(&mut events).await;
-    client
-        .request(ClientMessage::Subscribe {
-            thread_id: "t1".into(),
-            after_seq: None,
-            limit: None,
-        })
-        .await
-        .unwrap();
+    // Opened as the app opens a thread (its first transcript is among the events passed over
+    // on the way to the item below).
+    client.subscribe("t1", None).await.unwrap();
     m.handle.push(HostEvent::Item {
         thread_id: "t1".into(),
         item: item("c", 3, "three"),

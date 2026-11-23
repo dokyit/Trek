@@ -113,7 +113,10 @@ Mirrors `TrekClient.swift`: dial every route at once (the one that answered last
 the next, and so on) and keep the first that answers, pin the fingerprint, `pair` or `hello`,
 request/reply matched by `id`, an event stream for pushes, app-level `ping` every 25 s, reconnect
 with exponential backoff capped at 30 s, stop on `unauthorized`, certificate mismatch on every route
-of its own, or protocol mismatch, and resubscribe after `welcome` (not before: the phone's bug). The
+of its own, or protocol mismatch, and resubscribe after `welcome` (not before: the phone's bug). A
+thread is opened with `subscribe()`, whose `transcript` comes out of the event stream, ahead of the
+items B sends after it: taken as the request's reply it reached the app by another way than they
+do, and one put in after them replaced what B had said since. The
 routes `welcome` names lead, the ones it named before follow (up to 8), so a tailnet address B left
 out while its Tailscale was down still reaches it later. `network_changed()` dials at once (or pings a
 connection that's up and drops it after 5 s of silence); `also_try()` adds guesses that are kept only
