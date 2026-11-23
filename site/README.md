@@ -19,9 +19,9 @@ site/
                         dot, the phones coming together), field.js (the character field and its
                         ripples), inbox.css and inbox.js (Trek's window, redrawn so it can act),
                         dl.js (the download for the visitor's computer, from GitHub's API)
-  assets/site.css       the privacy, terms and not-found pages' styles (no inline styles: the CSP
-                        forbids them)
-  assets/site.js        those pages' bar and download links
+  assets/home/page.css  the privacy, terms and not-found pages' reading column, on top of home.css
+  assets/home/page.js   their bar and the line down the column (the ember dot as far as you have
+                        read); they use field.js for the band of characters at their top
   assets/fonts/         Bricolage Grotesque, Hanken Grotesk and JetBrains Mono, with their OFL licences
   assets/img/           mark.svg (the shipping mark, the only copy of its shape), home/paper.webp
                         (the page's paper), features/ (the iPhone app's captures), icons, the
@@ -98,8 +98,8 @@ These places say a state in words, and should be read again when it changes:
   it when it is in TestFlight or the App Store.
 - `index.html`, the download list, the page's description and its structured data: the systems
   Trek needs (macOS 13 or later, Windows 11, iOS 26).
-- `assets/site.js`: the names of a release's files (`BUILDS`), and the line that says there is no
-  Linux build.
+- `assets/home/dl.js`: the names of a release's files (`BUILDS`); Linux is a preview, and the page
+  says so in the download list and the feature list.
 
 ## Type
 
@@ -133,7 +133,6 @@ staged in a line beside each picture.
 | `home/paper.webp` | A 512 px seamless paper tile, written by `script/site/make_paper.py` | Under the whole home page, soft-light |
 | `og.jpg` | The share image, 1200 by 630 px: the headline over the character field, one line ending in the ember dot, drawn from the page itself by `script/site/make_og.mjs` | In link previews |
 | `mark.svg`, the icons, `favicon.*`, `apple-touch-icon.png` | The shipping mark. `mark.svg` is the only copy of its shape; `script/site/make_icons.py` draws the icons from it | The bar, the footer, the browser and the web manifest |
-| `backdrop/grain.svg` | A 240 px noise tile | The privacy, terms and not-found pages |
 
 **Trek's window on the home page is redrawn**, in HTML (`assets/home/inbox.*`), so it can show one
 thread stop, rise to the top and be answered; its threads are staged and the page says it is
@@ -148,9 +147,14 @@ in a `.json` file of the same name beside it. Keep a picture's name when replaci
 privacy box) are inline SVG in `index.html`, ink lines on the page's paper with one ember part, and
 move by CSS alone.
 
-The scripts for the earlier home page's photographs, window captures and feature loops
-(`make_backdrops.py`, `make_illustrations.py`, `masters.sh`, `feature_media.sh`,
-`themes_loop.py`) are kept, but their files are no longer on the page.
+The privacy, terms and not-found pages are in the same system: home.css for the tokens, type,
+paper, bar and footer, page.css for a reading column of at most 68 characters, a short band of the
+character field at their top, and the line down the column's left with the ember dot as far as you
+have read. Privacy has a contents list; every heading has an id to link to.
+
+The earlier home page's photographs, illustrations and themes loop, and the scripts that made
+them, are gone. `masters.sh`, `site_assets.sh` and `feature_media.sh` stay for captures of the
+app.
 
 ## Rules for the look
 

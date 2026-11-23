@@ -76,7 +76,7 @@ crop $R3/raw/S_study_question.png study.webp 1580 1100 600 240
 crop $R3/raw/P_focus.png plugins.webp 1680 460 560 620
 
 # Themes and backgrounds: the window through its looks, glass and painted backgrounds. Reshot
-# 21 November 2026 by themes_loop.py from the isolated test app (the R3 take had the Focus walk
+# 21 November 2026 by themes_loop.py (since removed with the page that showed it) from the isolated test app (the R3 take had the Focus walk
 # plugin on the composer and the tools panel open), so it is not cut from R3 any more.
 
 # iPhone: the phone's own screens, framed alike by the page. Paper: Allow pressed (a loop) beside

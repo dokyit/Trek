@@ -71,8 +71,8 @@ the iPhone app.
   modern and a little minimal; nothing that reads as AI-made (default typefaces, italic or bold
   lead-ins); nobody should be able to say it copies a competitor's site; few product pictures, each a
   real capture of the app shown large and sharp; real animation or none.
-- Few words, in short plain sentences, claiming only what the README says. Decorative art is a
-  photograph or nothing. No letter marks, and any mark is checked against
+- Few words, in short plain sentences, claiming only what the README says. Decorative art is
+  drawn with craft in the page's own ink hand, or left out. No letter marks, and any mark is checked against
   competitors' and popular app icons before it is shown.
 - Public contact: support@trekdesktop.com.
 - No trackers and no analytics.

@@ -21,10 +21,6 @@
 # kept for an hour at most.
 /assets/img/*
   Cache-Control: public, max-age=3600
-/assets/site.css
-  Cache-Control: public, max-age=3600
-/assets/site.js
-  Cache-Control: public, max-age=3600
 /assets/home/*
   Cache-Control: public, max-age=3600
 /favicon.ico
