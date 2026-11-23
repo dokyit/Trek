@@ -57,8 +57,11 @@ Three views are worth a look before a change goes out:
 - **Without the script, and with Reduce Motion on.** Nothing is hidden waiting for the script:
   the window lies flat, every section is there, and each loop stays a still picture (its poster). Every download link leads to the latest release. The page must say the
   same things in both.
-- **Narrow, under 768 px.** The first screen's window keeps a near-real size and runs off the right
-  edge, so the sidebar and its Inbox stay readable.
+- **On a phone, under 720 px, in Safari itself** (the iOS Simulator will do; a desktop browser's
+  phone mode is not enough). The first screen's window is the same screen on its stand as on a
+  desktop, smaller: sidebar left, thread right, one shape (760 to 476). The two phones are upright
+  and in an iPhone's proportions. A capture whose `img` has `width` and `height` attributes needs
+  `height: auto` wherever CSS sets its width, or it is drawn at the attribute's height and stretched.
 
 ## How it is deployed
 

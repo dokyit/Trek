@@ -156,7 +156,8 @@ on the left, its items run together as a line of text with middots, the Native r
 drawing on the right. The privacy box holds the words and a list of what is true on the left and
 the drawing on the right. Downloads are four columns: macOS, Windows, Phone, Linux (Preview). Under
 1000 px the first screen stacks; under 720 px everything is one column and the line runs in the
-side margins.
+side margins. On a phone nothing changes its nature, only its size: the window is still a screen on
+a stand (16 px from each edge), the phones still two iPhones.
 
 ## Components
 
@@ -180,12 +181,19 @@ phones) send out a ring.
 ### Trek's window (`assets/home/inbox.*`)
 The real app's sidebar, Inbox and one thread, redrawn at 760 by 476 and scaled to its box. It goes
 through four steps while on screen: at work, one stops to ask and goes to the top with its question,
-answered, finished. Staged threads, and the page says "redrawn".
+answered, finished. Staged threads, and the page says "redrawn". Its shape never changes. In a box
+under 560 px wide (a phone) it is laid out at 540 wide instead, so its words are a third larger:
+the Inbox and Projects on the left, the thread, its card and the composer on the right, and a few
+words and one chip left out (marked `tk-x` in `inbox.js`) so that nothing wraps or is cut short.
+The stand and the desk's distance under it are in proportion to the screen's width.
 
 ### The phones
 The iPhone app's Threads list behind and its approval in front, coming together as their section
 arrives (played by the scroll, both ways). The front phone's Allow is tapped, a ring and a press, as
-the dot arrives under it.
+the dot arrives under it. A capture is always drawn in its own proportions (590 by 1276), so a frame
+is about 18.7 to 9, as an iPhone is. On a phone both stand upright inside the screen: the approval
+in front on the right at two thirds of the width, Threads behind it on the left, smaller, with five
+eighths of its width showing; each frame's corners follow its width.
 
 ### The drawings
 Native: a laptop from the front, a notification from Trek sliding out of the screen's corner
@@ -201,8 +209,9 @@ Ember (the one main action), ink (the bar's Download), line (each build). 56 px 
 Nothing a visitor reads is under 12 px at any width; the words inside the two drawings render at
 14 px or more on a phone (they scale with the drawing, so their own sizes are set for the narrowest
 column). Two things stay smaller on purpose: the redrawn window's text, at the real app's own sizes
-(11 to 13 px, scaled with the window), because it depicts Trek's interface and is labelled as a
-picture; and the character field, which is texture, hidden from assistive technology.
+(11 to 13 px, scaled with the window; on a phone its 13 px draws at 6.5 px at 320 wide, 8.3 at 393
+and 9.4 at 440), because it depicts Trek's interface and is labelled as a picture; and the character
+field, which is texture, hidden from assistive technology.
 
 ## Motion
 

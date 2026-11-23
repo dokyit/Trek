@@ -5,16 +5,22 @@
 .tk-box { position: relative; aspect-ratio: 760 / 476; overflow-anchor: none; }
 .tk-box [hidden] { display: none !important; }
 .tk-box.tk-narrow { aspect-ratio: 300 / 476; }
-.tk-box.tk-compact { aspect-ratio: 340 / 500; }
-.tk-compact .tk-scale { width: 340px; height: 500px; }
-.tk-compact .tk-body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
-.tk-compact .tk-side { border-right: 0; border-bottom: 1px solid var(--tk-line); padding: 8px 8px 10px; }
-.tk-compact .tk-nav, .tk-compact .tk-proj, .tk-compact .tk-tabs, .tk-compact .tk-crumb { display: none; }
+/* In a small box (a phone) the same window, laid out at 540 wide and scaled, not at 760: the shape
+   is the same, the words a third larger. The sidebar keeps its Inbox and Projects; the thread
+   keeps its message, the card and the composer. What is left out is marked tk-x in inbox.js. */
+.tk-compact .tk-scale { width: 540px; height: calc(540px * 476 / 760); }
+.tk-compact .tk-win { grid-template-rows: 32px 1fr; border-radius: 9px; }
+.tk-compact .tk-x, .tk-compact .tk-nav, .tk-compact .tk-tabs, .tk-compact .tk-act, .tk-compact .tk-row .w { display: none; }
+.tk-compact .tk-crumb { margin-left: 108px; }
+.tk-compact .tk-body { grid-template-columns: 222px 1fr; }
+.tk-compact .tk-side { padding: 8px; }
 .tk-compact .tk-inbox { margin-top: 0; }
+.tk-compact .tk-proj { margin-top: 7px; }
+.tk-compact .tk-row { grid-template-columns: 14px 1fr; }
+.tk-compact .tk-row .s { grid-column: 2; }
+.tk-compact .tk-row[data-state="waiting"] .s .p { display: none; }
 .tk-compact .tk-pane { grid-template-rows: 1fr auto; }
 .tk-compact .tk-log { padding: 12px 14px 6px; gap: 8px; }
-.tk-compact .tk-act { display: none; }
-.tk-compact .tk-msg { max-width: none; }
 .tk-compact .tk-comp { margin: 0 10px 10px; }
 .tk-scale { position: absolute; left: 0; top: 0; width: 760px; height: 476px; transform-origin: 0 0; transform: scale(var(--tk-k, 1)); }
 .tk-narrow .tk-scale { width: 300px; }

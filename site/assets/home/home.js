@@ -26,7 +26,7 @@
 
   /* ---------- 2. The window ---------- */
   const box = document.querySelector("[data-inbox]");
-  const inbox = window.TrekInbox && box ? window.TrekInbox.mount(box, { compact: narrowQ.matches }) : null;
+  const inbox = window.TrekInbox && box ? window.TrekInbox.mount(box) : null;
   // The window's height for the line, measured once per width: on a phone the browser's toolbar
   // grows and shrinks the window as you scroll, and the line must not jump when it does.
   const probe = document.createElement("div");
@@ -118,7 +118,10 @@
     const sR = narrow ? W - 14 : Math.min(W - 24, rowsBox.r + 40);
     const R = narrow ? 16 : 26;
     const screen = rect(q("[data-screen]"));
-    const deskY = screen.b + (narrow ? 22 : 58);
+    // On a phone the screen is a small picture of the same computer: its stand, and the desk's
+    // distance under it, are in proportion to the screen's width.
+    const st = narrow ? clamp(screen.w / 700, 0.42, 1) : 1;
+    const deskY = screen.b + Math.round(58 * st);
     // The front phone where it comes to rest, not where its arrival has it now.
     const frontEl = q("[data-phone]");
     const held = frontEl.style.transform;
@@ -143,9 +146,9 @@
     const mainP = add(main);
 
     // The screen's stand: a neck, and a foot that rests on the desk.
-    const nw = narrow ? 12 : 22, fw = narrow ? 64 : 120, fh = narrow ? 7 : 9;
-    if (!narrow) add(el("path", { class: "stand", d: `M${f(cx - nw)} ${f(screen.b - 2)}L${f(cx - nw * 1.25)} ${f(deskY - fh)}H${f(cx + nw * 1.25)}L${f(cx + nw)} ${f(screen.b - 2)}` }, svg), false);
-    if (!narrow) add(el("rect", { class: "stand", x: f(cx - fw), y: f(deskY - fh), width: f(fw * 2), height: f(fh), rx: f(fh / 2) }, svg), false);
+    const nw = 22 * st, fw = 120 * st, fh = Math.max(narrow ? 6 : 9, 9 * st);
+    add(el("path", { class: "stand", d: `M${f(cx - nw)} ${f(screen.b - 2)}L${f(cx - nw * 1.25)} ${f(deskY - fh)}H${f(cx + nw * 1.25)}L${f(cx + nw)} ${f(screen.b - 2)}` }, svg), false);
+    add(el("rect", { class: "stand", x: f(cx - fw), y: f(deskY - fh), width: f(fw * 2), height: f(fh), rx: f(fh / 2) }, svg), false);
 
     // Your computer and phone: a closed outline, drawn whole; the spine runs down its left side.
     const BR = narrow ? 18 : 30;
@@ -256,7 +259,7 @@
 
   window.__trailCheck = () => {
     if (!main) return null;
-    const total = paths[1].lut.total, off = Number(main.style.strokeDashoffset || 0);
+    const total = paths[1].lut.total, off = parseFloat(main.style.strokeDashoffset) || 0;   // WebKit gives "0px"
     const head = main.getPointAtLength(total - off);
     const dot = [Number(bead.getAttribute("cx")), Number(bead.getAttribute("cy"))];
     const nat = document.querySelector('[data-ill="native"]');
