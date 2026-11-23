@@ -778,9 +778,19 @@ pub fn switch_to(id: &str, ws: &Entity<Workspace>, cx: &mut App) {
         Some(s) => s.to.clone(),
         None => themes.shown.clone(),
     };
+    // A switch cut short before its middle never put its look on: a plugin it was bringing up is
+    // displaced all the same (on only while its look is the one on screen).
+    let cut_short = themes
+        .switch
+        .as_ref()
+        .filter(|s| !s.swapped && s.to.id != to.id)
+        .map(|s| s.to.id.clone());
     let appearance = ws.read(cx).settings.appearance.clone();
     if from == to && appearance.trek_theme == to.id {
         return;
+    }
+    if let Some(cut) = cut_short {
+        crate::plugins::look_changed(&cut, &to.id, ws, cx);
     }
     let pace = if appearance.motion_scale.is_finite() {
         appearance.motion_scale.clamp(0., 3.)
@@ -914,6 +924,45 @@ fn lerp_hsla(a: Hsla, b: Hsla, t: f32) -> Hsla {
     .into()
 }
 
+/// The middle of the switch: `to`'s settings go on and are saved, its fonts and look come up,
+/// and a plugin's look it displaces is off. Once per switch, on whichever frame first finds it
+/// past the middle, the last one included: a frame that comes late (a busy main thread, a slow
+/// renderer) can find the switch already over, and the look left on screen must still be the
+/// one the settings keep, or the next launch puts the old one back.
+fn swap(ws: &Entity<Workspace>, cx: &mut App) {
+    let Some(s) = cx.global_mut::<Themes>().switch.as_mut() else {
+        return;
+    };
+    if s.swapped {
+        return;
+    }
+    s.swapped = true;
+    let to = s.to.clone();
+    let from = ws.read(cx).settings.appearance.trek_theme.clone();
+    ws.update(cx, |ws, cx| {
+        core::apply(&to, &mut ws.settings.appearance);
+        ws.save_settings(cx);
+    });
+    cx.global_mut::<Themes>().shown = to.clone();
+    cx.set_global(ConversationFont(conversation(&to)));
+    show_look(&to, cx);
+    crate::plugins::look_changed(&from, &to.id, ws, cx);
+}
+
+/// Tests: the switch's next frame comes `late` after its start, as one does when the main thread
+/// was held (a slow renderer, a busy turn), and runs. The test clock steps a timer at its own
+/// deadline, so a late frame has to be made.
+#[cfg(any(test, feature = "test-support"))]
+pub fn frame_late(late: Duration, ws: &Entity<Workspace>, cx: &mut App) {
+    if let Some(s) = cx.global_mut::<Themes>().switch.as_mut() {
+        s.start = s
+            .start
+            .checked_sub(late)
+            .expect("the clock is further along than that");
+    }
+    step(ws, cx);
+}
+
 /// One frame of the switch; whether it's over.
 fn step(ws: &Entity<Workspace>, cx: &mut App) -> bool {
     let now = crate::motion::now(cx);
@@ -922,6 +971,20 @@ fn step(ws: &Entity<Workspace>, cx: &mut App) -> bool {
     };
     let t = (now.saturating_duration_since(s.start).as_secs_f32() / s.duration.as_secs_f32())
         .clamp(0., 1.);
+    let start = s.start;
+    if t >= 0.5 && !s.swapped {
+        swap(ws, cx);
+    }
+    // What `swap` set off (a plugin turned off, the folders read again) may have ended this
+    // switch or begun another, which steps itself: this one's frames are over.
+    let Some(s) = cx
+        .global::<Themes>()
+        .switch
+        .as_ref()
+        .filter(|s| s.start == start)
+    else {
+        return true;
+    };
     if t >= 1. {
         let to = cx.global_mut::<Themes>().switch.take().map(|s| s.to);
         if let Some(to) = to {
@@ -947,23 +1010,7 @@ fn step(ws: &Entity<Workspace>, cx: &mut App) -> bool {
         light: lerp_accent(s.from_accents.light, s.to_accents.light, e, past),
     };
     let corners = s.from_corners + (s.to_corners - s.from_corners) * e;
-    let swap = past && !s.swapped;
-    let to = s.to.clone();
     let config = config(&colours, dark, font, "Trek switching");
-    if swap {
-        if let Some(s) = cx.global_mut::<Themes>().switch.as_mut() {
-            s.swapped = true;
-        }
-        let from = ws.read(cx).settings.appearance.trek_theme.clone();
-        ws.update(cx, |ws, cx| {
-            core::apply(&to, &mut ws.settings.appearance);
-            ws.save_settings(cx);
-        });
-        cx.global_mut::<Themes>().shown = to.clone();
-        cx.set_global(ConversationFont(conversation(&to)));
-        show_look(&to, cx);
-        crate::plugins::look_changed(&from, &to.id, ws, cx);
-    }
     trek_palette::set_theme_accents(accents, cx);
     set_corner_scale(corners);
     if let Some(config) = config {
