@@ -60,8 +60,11 @@ Three views are worth a look before a change goes out:
 - **On a phone, under 720 px, in Safari itself** (the iOS Simulator will do; a desktop browser's
   phone mode is not enough). The first screen's window is the same screen on its stand as on a
   desktop, smaller: sidebar left, thread right, one shape (760 to 476). The two phones are upright
-  and in an iPhone's proportions. A capture whose `img` has `width` and `height` attributes needs
-  `height: auto` wherever CSS sets its width, or it is drawn at the attribute's height and stretched.
+  and in an iPhone's proportions.
+- **Pictures in their own proportions.** `home.css` says `img { height: auto }`: an `img` with
+  `width` and `height` attributes is otherwise drawn at the attribute's height whatever its width,
+  and stretched. `script/site/test/pictures.test.mjs` checks every image on every page, in Node
+  and in a browser at five widths.
 
 ## How it is deployed
 

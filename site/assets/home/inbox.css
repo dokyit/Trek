@@ -18,7 +18,6 @@
 .tk-compact .tk-proj { margin-top: 7px; }
 .tk-compact .tk-row { grid-template-columns: 14px 1fr; }
 .tk-compact .tk-row .s { grid-column: 2; }
-.tk-compact .tk-row[data-state="waiting"] .s .p { display: none; }
 .tk-compact .tk-pane { grid-template-rows: 1fr auto; }
 .tk-compact .tk-log { padding: 12px 14px 6px; gap: 8px; }
 .tk-compact .tk-comp { margin: 0 10px 10px; }
@@ -65,9 +64,9 @@
 .tk-side { background: var(--tk-side); padding: 10px 8px; display: flex; flex-direction: column; gap: 2px; border-right: 1px solid var(--tk-line); overflow: hidden; }
 .tk-nav { display: flex; align-items: center; gap: 9px; padding: 5px 8px; color: var(--tk-ink); }
 .tk-nav .n { margin-left: auto; color: var(--tk-mute); font-size: 12px; }
-.tk-nav.search { color: var(--tk-mute); margin-bottom: 4px; }
+.tk-nav.search { color: var(--tk-mute); margin-bottom: 2px; }
 
-.tk-inbox { margin-top: 8px; background: var(--tk-card); border-radius: 10px; padding: 7px 4px 6px; }
+.tk-inbox { margin-top: 6px; background: var(--tk-card); border-radius: 10px; padding: 7px 4px 6px; }
 .tk-inbox-h { display: flex; align-items: center; gap: 8px; padding: 2px 8px 6px; font-weight: 600; }
 .tk-inbox-h em { font-style: normal; color: var(--tk-mute); font-weight: 400; }
 .tk-inbox-h small { margin-left: auto; color: var(--tk-mute); font-size: 12px; font-weight: 400; }
@@ -79,6 +78,8 @@
 .tk-row .s { grid-column: 2 / 4; font-size: 12px; color: var(--tk-mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tk-row .s b { font-weight: 400; color: var(--tk-ember-ink); font-variant-numeric: tabular-nums; }
 .tk-row[data-state="waiting"] .s b { color: var(--tk-amber-ink); }
+/* The row that asks says what it asks, whole: with its project after it the line was cut short. */
+.tk-row[data-state="waiting"] .s .p { display: none; }
 .tk-row[data-state="done"] .s b { color: var(--tk-green-ink); }
 .tk-dot { width: 14px; height: 17px; display: grid; place-items: center; }
 .tk-dot i { width: 7px; height: 7px; border-radius: 50%; background: var(--tk-amber); }
@@ -86,7 +87,7 @@
 .tk-row[data-state="working"] .tk-dot i { width: 10px; height: 10px; background: none; border: 1.6px solid var(--tk-ember); border-right-color: transparent; animation: tk-spin 0.9s linear infinite; }
 @keyframes tk-spin { to { transform: rotate(360deg); } }
 
-.tk-proj { margin-top: 10px; padding: 0 8px; color: var(--tk-mute); font-size: 12px; }
+.tk-proj { margin-top: 6px; padding: 0 8px; color: var(--tk-mute); font-size: 12px; }
 .tk-proj p { margin: 0 0 6px; }
 .tk-proj div { display: flex; align-items: center; gap: 7px; color: var(--tk-ink); font-size: 13px; padding: 3px 0; }
 .tk-proj .n { margin-left: auto; color: var(--tk-mute); font-size: 12px; }

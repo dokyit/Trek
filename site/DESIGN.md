@@ -191,9 +191,10 @@ The stand and the desk's distance under it are in proportion to the screen's wid
 The iPhone app's Threads list behind and its approval in front, coming together as their section
 arrives (played by the scroll, both ways). The front phone's Allow is tapped, a ring and a press, as
 the dot arrives under it. A capture is always drawn in its own proportions (590 by 1276), so a frame
-is about 18.7 to 9, as an iPhone is. On a phone both stand upright inside the screen: the approval
-in front on the right at two thirds of the width, Threads behind it on the left, smaller, with five
-eighths of its width showing; each frame's corners follow its width.
+is about 18.7 to 9, as an iPhone is. At every width Threads is the smaller phone, behind on the left
+with five eighths of its width showing. On a desktop the approval is 315 px wide and Threads 280,
+leaning 6 degrees, their centres level, in a column of 500 px. On a phone both stand upright inside
+the screen, the approval at two thirds of the width; each frame's corners follow its width.
 
 ### The drawings
 Native: a laptop from the front, a notification from Trek sliding out of the screen's corner
