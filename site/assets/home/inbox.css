@@ -64,9 +64,9 @@
 .tk-side { background: var(--tk-side); padding: 10px 8px; display: flex; flex-direction: column; gap: 2px; border-right: 1px solid var(--tk-line); overflow: hidden; }
 .tk-nav { display: flex; align-items: center; gap: 9px; padding: 5px 8px; color: var(--tk-ink); }
 .tk-nav .n { margin-left: auto; color: var(--tk-mute); font-size: 12px; }
-.tk-nav.search { color: var(--tk-mute); margin-bottom: 4px; }
+.tk-nav.search { color: var(--tk-mute); margin-bottom: 2px; }
 
-.tk-inbox { margin-top: 8px; background: var(--tk-card); border-radius: 10px; padding: 7px 4px 6px; }
+.tk-inbox { margin-top: 6px; background: var(--tk-card); border-radius: 10px; padding: 7px 4px 6px; }
 .tk-inbox-h { display: flex; align-items: center; gap: 8px; padding: 2px 8px 6px; font-weight: 600; }
 .tk-inbox-h em { font-style: normal; color: var(--tk-mute); font-weight: 400; }
 .tk-inbox-h small { margin-left: auto; color: var(--tk-mute); font-size: 12px; font-weight: 400; }
