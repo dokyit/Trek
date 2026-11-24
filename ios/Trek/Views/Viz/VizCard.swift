@@ -231,7 +231,7 @@ struct VizCard: View {
     @ViewBuilder
     private func chart(_ ctx: VizContext) -> some View {
         switch viz.content {
-        case .bar(let bars, let x, let y): VizBars(bars: bars, xLabel: x, yLabel: y, ctx: ctx)
+        case .bar(let bars, let x, let y, let unit): VizBars(bars: bars, xLabel: x, yLabel: y, unit: unit, ctx: ctx)
         case .line(let xs, let series, let area, let y, let unit): VizLine(xLabels: xs, series: series, area: area, yLabel: y, unit: unit, ctx: ctx)
         case .donut(let parts, let unit): VizDonut(parts: parts, unit: unit, ctx: ctx)
         case .stats(let tiles): VizStats(tiles: tiles, ctx: ctx)
