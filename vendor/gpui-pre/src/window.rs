@@ -1210,6 +1210,10 @@ pub struct Window {
     pub(crate) element_opacity: f32,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
+    /// A window-level text selection is live. Virtual lists use this to keep
+    /// every selected row mounted until the selection is cleared, so copying
+    /// does not stop at their normal virtualization boundary.
+    text_selection_active: bool,
     /// The [`TextInputConfiguration`] most recently forwarded to the platform
     /// window, so that only actual changes are forwarded (reconfiguring a live
     /// input session can restart the IME connection).
@@ -2088,6 +2092,7 @@ impl Window {
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
             requested_autoscroll: None,
+            text_selection_active: false,
             last_text_input_configuration: None,
             focused_text_input_active: false,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
@@ -2337,6 +2342,16 @@ impl Window {
             self.refreshing = true;
             self.invalidator.set_dirty(true);
         }
+    }
+
+    #[doc(hidden)]
+    pub fn set_text_selection_active(&mut self, active: bool) {
+        self.text_selection_active = active;
+    }
+
+    #[doc(hidden)]
+    pub fn text_selection_active(&self) -> bool {
+        self.text_selection_active
     }
 
     /// Close this window.

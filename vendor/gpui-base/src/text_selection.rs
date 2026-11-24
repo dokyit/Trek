@@ -2562,6 +2562,9 @@ impl Element for TextSelectionLayer {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        let active = live_text_selection_state(window, cx)
+            .is_some_and(|state| state.read(cx).has_selection(cx));
+        window.set_text_selection_active(active);
         (window.request_layout(Style::default(), [], cx), ())
     }
 
