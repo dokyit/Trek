@@ -9465,6 +9465,7 @@ dependencies = [
  "trek-agents",
  "trek-app",
  "trek-assets",
+ "trek-banner",
  "trek-brand",
  "trek-core",
  "trek-dictate",
@@ -9515,6 +9516,18 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+]
+
+[[package]]
+name = "trek-banner"
+version = "0.4.64"
+dependencies = [
+ "block2 0.6.2",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "objc2-user-notifications",
+ "serde_json",
+ "trek-core",
 ]
 
 [[package]]

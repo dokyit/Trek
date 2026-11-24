@@ -26,6 +26,7 @@ trek-private.workspace = true
 trek-math = { path = "../trek-math" }
 trek-motion = { path = "../trek-motion" }
 trek-shortcuts = { path = "../trek-shortcuts" }
+trek-banner = { path = "../trek-banner" }
 trek-screenclip = { path = "../trek-screenclip" }
 trek-ipc-ui = { path = "../trek-ipc-ui" }
 trek-words = { path = "../trek-words" }

@@ -2240,6 +2240,9 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
     if verb == "privacy-demo" {
         return privacy_demo(ws, arg, cx);
     }
+    if verb == "banners-demo" {
+        return banners_demo(ws, arg, cx);
+    }
     if verb == "pr-demo" {
         pr_demo(ws, arg, cx);
         return Ok(());
@@ -5236,6 +5239,29 @@ fn secret_demo(ws: &Entity<Workspace>, cx: &mut App) -> anyhow::Result<()> {
         );
         Ok(())
     })
+}
+
+/// `banners-demo allowed|denied|quiet|focus|not-asked|off`: Settings › Notifications as it reads
+/// where the system allows Trek's banners, has them off, delivers them quietly, holds them back
+/// for a Focus, or hasn't asked yet; `off` is the system's own answer again (a capture run's is
+/// that it has no app bundle to post from). While one stands in, Send a test posts nothing and is
+/// answered as that system would answer it.
+fn banners_demo(ws: &Entity<Workspace>, arg: &str, cx: &mut App) -> anyhow::Result<()> {
+    use crate::banner::Os;
+    let os = match arg.trim() {
+        "allowed" => Some(Os::Allowed),
+        "denied" => Some(Os::Denied),
+        "quiet" => Some(Os::Quiet),
+        "focus" => Some(Os::Focus(Some("Do Not Disturb".into()))),
+        "not-asked" => Some(Os::NotAsked),
+        "off" | "" => None,
+        other => anyhow::bail!(
+            "banners-demo: unknown state {other:?} (allowed|denied|quiet|focus|not-asked|off)"
+        ),
+    };
+    crate::banner::demo(os);
+    ws.update(cx, |_, cx| cx.notify());
+    Ok(())
 }
 
 /// `privacy-demo card|totals|feedback|nokey|failed|sent`: the card asking about usage data, which a

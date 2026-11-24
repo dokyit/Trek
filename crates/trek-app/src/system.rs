@@ -896,12 +896,19 @@ pub fn play_alert_sound() {
         #[cfg(not(windows))]
         {
             use std::process::{Command, Stdio};
-            let _ = Command::new("/usr/bin/afplay")
+            // A player that couldn't start, or gave up, is said in the log: nothing else would
+            // tell a sound that was asked for from one that played.
+            match Command::new("/usr/bin/afplay")
                 .arg("/System/Library/Sounds/Glass.aiff")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .status();
+                .status()
+            {
+                Ok(status) if status.success() => {}
+                Ok(status) => tracing::warn!("alert sound: afplay ended with {status}"),
+                Err(e) => tracing::warn!("alert sound: couldn't run afplay: {e}"),
+            }
         }
         PLAYING.store(false, Ordering::SeqCst);
     });
@@ -1016,6 +1023,155 @@ pub fn alert_for(n: &trek_core::settings::Notifications, focused: bool, viewing:
         banner: wanted && matches!(n.mode, NotifyMode::Banner | NotifyMode::BannerAndSound),
         sound: wanted && matches!(n.mode, NotifyMode::Sound | NotifyMode::BannerAndSound),
     }
+}
+
+/// What an alert is about, for the log: its kind, never its words (a thread's name, what it asks).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlertEvent {
+    Finished,
+    Failed,
+    /// It waits on the user: an approval, a question, a plan, a secret.
+    NeedsYou,
+    /// It stopped at a usage limit.
+    Limit,
+    /// It carried on after a limit: at the reset, or on another account.
+    Resumed,
+    /// Settings › Notifications' "Send a test".
+    Test,
+}
+
+impl AlertEvent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AlertEvent::Finished => "finished",
+            AlertEvent::Failed => "failed",
+            AlertEvent::NeedsYou => "needs-you",
+            AlertEvent::Limit => "limit",
+            AlertEvent::Resumed => "resumed",
+            AlertEvent::Test => "test",
+        }
+    }
+}
+
+/// Where the user is, as far as the computer says: what `alert_for`'s `focused` is made of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Presence {
+    /// Trek is the app in front, as the system has it (`app_in_front`).
+    pub app_active: bool,
+    /// One of Trek's windows has the keys.
+    pub key_window: bool,
+    /// The screen is locked, or nobody has touched the keyboard or mouse for a while
+    /// (`push::user_away`): with Trek left in front, nobody is looking at it.
+    pub away: bool,
+}
+
+impl Presence {
+    /// Now, with `key_window` as GPUI has it.
+    pub fn now(key_window: bool) -> Self {
+        Presence {
+            app_active: app_in_front(),
+            key_window,
+            away: crate::push::user_away(),
+        }
+    }
+
+    /// The user is in Trek: it's the app in front, a window of its has the keys, and they're at
+    /// the computer. All three, as each alone has said yes when the user wasn't there: a window
+    /// keeps the keys in GPUI's books if its word that it lost them is dropped, a panel of Trek's
+    /// (the background-use picture) takes them while another app stays in front, and a Trek left
+    /// in front of a locked screen is in front of nobody.
+    pub fn focused(self) -> bool {
+        self.app_active && self.key_window && !self.away
+    }
+}
+
+/// Trek is the app in front, for an alert. Where the system can't say (Linux), a window with the
+/// keys is taken at its word. Tests have no app to be in front: theirs is in front unless one
+/// says otherwise (`fake_presence`).
+fn app_in_front() -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    return PRESENCE.with(|p| p.get().0);
+    #[cfg(not(any(test, feature = "test-support")))]
+    app_is_active()
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// (Trek is the app in front, the user is away), as tests say.
+    pub(crate) static PRESENCE: std::cell::Cell<(bool, bool)> = const { std::cell::Cell::new((true, false)) };
+    /// Every alert decided on this thread, as its log line says it.
+    pub static ALERT_LOG: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Tests: whether Trek is the app in front, and whether the user is away from the computer.
+#[cfg(any(test, feature = "test-support"))]
+pub fn fake_presence(app_active: bool, away: bool) {
+    PRESENCE.with(|p| p.set((app_active, away)));
+}
+
+/// A thread's id as the log has it: enough to find it by, short enough to read past.
+pub fn short_id(thread: &str) -> &str {
+    thread.get(..8).unwrap_or(thread)
+}
+
+/// The log's line for an alert as it was decided: which thread (its id cut short), what kind of
+/// event, where the user was, and what Trek did about it. No words of the thread's are in it.
+pub fn alert_line(
+    thread: &str,
+    event: AlertEvent,
+    n: &trek_core::settings::Notifications,
+    presence: Presence,
+    viewing: bool,
+    alert: Alert,
+) -> String {
+    let focused = presence.focused();
+    let did = match (alert.banner, alert.sound) {
+        (true, true) => "banner and sound",
+        (true, false) => "banner",
+        (false, true) => "sound",
+        (false, false) => "no banner or sound",
+    };
+    // Why the computer stayed quiet, when it did.
+    let why = if alert.banner || alert.sound {
+        ""
+    } else if n.mode == NotifyMode::Off {
+        ": alerts are off"
+    } else if focused && viewing {
+        ": the thread is on screen in the window in front"
+    } else {
+        ": Trek is in front and alerts wait for the background"
+    };
+    let toast = if alert.toast {
+        ", a note in the window"
+    } else {
+        ""
+    };
+    format!(
+        "alert thread={} event={} focused={focused} viewing={viewing} app_active={} key_window={} away={} mode={} only_when_unfocused={} -> {did}{why}{toast}",
+        short_id(thread),
+        event.as_str(),
+        presence.app_active,
+        presence.key_window,
+        presence.away,
+        mode_word(n.mode),
+        n.only_when_unfocused,
+    )
+}
+
+fn mode_word(mode: NotifyMode) -> &'static str {
+    match mode {
+        NotifyMode::BannerAndSound => "banner-and-sound",
+        NotifyMode::Banner => "banner",
+        NotifyMode::Sound => "sound",
+        NotifyMode::Off => "off",
+    }
+}
+
+/// Write an alert's line to the log (`alert_line`, `banner::post`'s answer from the system).
+pub fn log_alert(line: String) {
+    tracing::info!("{line}");
+    #[cfg(any(test, feature = "test-support"))]
+    ALERT_LOG.with(|l| l.borrow_mut().push(line));
 }
 
 #[cfg(test)]

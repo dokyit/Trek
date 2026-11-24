@@ -671,8 +671,22 @@ windows = "yes"
 linux = "yes"
 live_windows = ["route settings:notifications", "wait 300", "reveal notify-mode#1", "click notify-mode#1", "reveal notify-unfocused", "click notify-unfocused", "banners mark", "route project:{project}", "pace 1", "send mock:long 3s", "wait 600", "route basecamp", "wait idle 30000", "wait 2000", "pace 0", "banners new 1+", "route settings:notifications", "wait 300", "reveal notify-unfocused", "click notify-unfocused", "reveal notify-mode#3", "click notify-mode#3"]
 live_skip = "On a Mac a banner needs the installed app: an unbundled build has no notification center to post to (the notification tests cover it). Linux: the headless runs have no notification service; banners are shown on a desktop."
-how = { macos = "The notification center.", windows = "Toasts under the AppUserModelID Trek registers, protocol-activated with the thread's trek:// link: a click starts Trek if it has quit, or hands the link to the running one.", linux = "Desktop notifications over the freedesktop D-Bus interface (GPUI's); clicking one opens the thread while Trek runs." }
-code = ["crates/trek-app/src/root.rs", "vendor/gpui-pre-windows/src/system_notifications.rs"]
+how = { macos = "The notification center, which Trek posts to itself so the log has its answer to each banner (a click comes back through GPUI's delegate).", windows = "Toasts under the AppUserModelID Trek registers, protocol-activated with the thread's trek:// link: a click starts Trek if it has quit, or hands the link to the running one.", linux = "Desktop notifications over the freedesktop D-Bus interface (GPUI's); clicking one opens the thread while Trek runs." }
+note = "With Settings › Notifications › Only when Trek is in the background on (as it is unless turned off), the computer stays quiet while the user is in Trek: Trek is the app in front as the system has it (macOS's active app, Windows' foreground window; Linux has no such word, so a window with the keys is believed), a window of its has the keys, and the user is at the computer (the screen not locked, the keyboard or mouse touched in the last two minutes; Linux says neither, so the user counts as there). A turn that ends with a command of its still running in the background is finished and alerts; one whose agent has sub-agents of its own out isn't, and alerts when the turn their reports start ends."
+code = ["crates/trek-app/src/root.rs", "crates/trek-app/src/banner.rs", "crates/trek-banner/src/lib.rs", "crates/trek-banner/examples/probe.rs", "crates/trek-app/src/system.rs", "vendor/gpui-pre-windows/src/system_notifications.rs"]
+tests = ["crates/trek-app/tests/alerts.rs"]
+
+[[feature]]
+id = "banner-test"
+area = "Notifications"
+what = "A test of this computer's banner and sound from Settings, what the system says of Trek's banners, and a line in the log for every alert"
+macos = "yes"
+windows = "yes"
+linux = "partial"
+live = ["route settings:notifications", "wait 300", "reveal banner-test", "count banner-test 1", "count banner-test-status 1"]
+how = { macos = "Send a test posts a real banner and plays the sound five seconds after the click, whatever is in front. Under it: allowed, denied, delivered quietly (no banner style, or allowed provisionally) from the notification center's settings for Trek, and a Focus that's on from macOS's own record of them (read only with Full Disk Access; nothing is asked for), with a button to System Settings where one of them holds banners back. The log's line for a banner has the center's answer to the request and its settings for Trek.", windows = "The same test and log lines. Denied is Windows' switches for Trek (notification-permission); GPUI's toast call says nothing of how it went, so the log says the toast was handed over. Do Not Disturb isn't read.", linux = "The same test and log lines; the desktop's notification service says nothing of how it went, and no Focus is read." }
+note = "Linux: the alert sound has no player there yet (the Mac's afplay, Windows' PlaySound), so the test's sound is silent; a player that can't start is in the log."
+code = ["crates/trek-app/src/banner.rs", "crates/trek-app/src/settings_view/pages.rs", "crates/trek-app/src/system.rs"]
 tests = ["crates/trek-app/tests/alerts.rs"]
 
 [[feature]]

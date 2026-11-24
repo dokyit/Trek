@@ -1,7 +1,7 @@
 //! The hand-built settings pages: General, Appearance, Notifications, Shortcuts, API keys,
 //! Permissions, Updates and About. The rest live in settings_view.rs.
 
-use super::{LOCKED_KEYS_NOTE, SavedKey, SettingsView};
+use super::{BANNER_TEST_AFTER, BannerTest, LOCKED_KEYS_NOTE, SavedKey, SettingsView};
 use crate::palette;
 use crate::scale::{radius, text, to_rems};
 use crate::ui;
@@ -21,6 +21,63 @@ use trek_core::settings::{
     Channel, FollowUp, NotifyMode, OnUsageLimit, OpenLinks, RunIn, Settings, ThemeChoice, secrets,
 };
 use trek_core::{AgentId, Effort, HandHolding};
+
+/// What "Only when Trek is in the background" comes to, said under it: with it on, this computer
+/// stays quiet while Trek's window is in front, which is most of the time Trek is in use (a phone
+/// set to hear everything then seems to be the only thing that does).
+fn unfocused_words(on: bool) -> String {
+    let this = crate::words::words().this_computer;
+    if !on {
+        return format!(
+            "Off: the banner and sound come on {this} while you're in Trek too, for every thread but the one you're looking at."
+        );
+    }
+    // Linux doesn't say whether the screen is locked or how long it's been left alone.
+    let away = if crate::words::is_linux() {
+        ""
+    } else {
+        ", the screen is locked, or the keyboard and mouse have been still for 2 minutes"
+    };
+    format!(
+        "On: Trek stays quiet on {this} while its window is in front. A thread you aren't looking at shows a note in the window instead. The banner and sound come when another app is in front{away}."
+    )
+}
+
+/// The line under "Send a test": where the test stands, else what the system says of Trek's
+/// banners.
+fn banner_test_words(test: &BannerTest, os: &crate::banner::Os, mode: NotifyMode) -> String {
+    let system = crate::banner::system_name();
+    let held = if cfg!(target_os = "macos") {
+        "If no banner came, macOS is holding it back: it does while a Focus is on, and while the screen is shared or recorded."
+    } else if cfg!(windows) {
+        "If no banner came, Windows is holding it back: it does while Do Not Disturb is on."
+    } else {
+        "If no banner came, the desktop's notification service is holding it back, or none runs."
+    };
+    match test {
+        _ if mode == NotifyMode::Off => "Alerts are off, so there's nothing to send.".into(),
+        BannerTest::Waiting => "Sending in 5 seconds.".into(),
+        BannerTest::Sent { banner: false, .. } => {
+            "Played the sound. Alerts are set to sound alone, so no banner went.".into()
+        }
+        BannerTest::Sent {
+            answer: Some(Err(why)),
+            ..
+        } => format!("Not shown: {why}. {}", os.words(system))
+            .trim_end()
+            .to_string(),
+        // Blocked in the system's settings: that is why none came, whatever it said to the post.
+        BannerTest::Sent { .. } if os.blocked() => format!("Sent. {}", os.words(system)),
+        BannerTest::Sent {
+            answer: Some(Ok(())),
+            ..
+        } => format!("Sent, and {system} took it. {held}"),
+        BannerTest::Sent { answer: None, .. } => {
+            format!("Sent. {system} hasn't said what it did with it. {held}")
+        }
+        BannerTest::Idle => os.words(system),
+    }
+}
 
 /// A compact dropdown button that shows the current choice.
 fn picker<T: Clone + PartialEq + 'static>(
@@ -831,7 +888,7 @@ impl SettingsView {
                     ),
                     Self::row(
                         "Only when Trek is in the background",
-                        "While you're in Trek, other threads show a note in the window instead of a banner or sound.",
+                        unfocused_words(n.only_when_unfocused),
                         // With alerts off there's no banner or sound for it to hold back.
                         self.switch("notify-unfocused", n.only_when_unfocused, |s, v| {
                             s.notifications.only_when_unfocused = v
@@ -839,6 +896,7 @@ impl SettingsView {
                         .disabled(n.mode == NotifyMode::Off),
                         cx,
                     ),
+                    self.banner_test_row(n.mode, cx),
                 ],
                 cx,
             ),
@@ -866,6 +924,83 @@ impl SettingsView {
             ),
         ])
         .collect()
+    }
+
+    /// "Send a test" for this computer's banner and sound, as the phone's page has one for its
+    /// notifications: it goes five seconds after the click, so the user can bring another app to
+    /// the front, and goes whatever is in front then. Under it, what the system says of Trek's
+    /// banners (allowed, denied, delivered quietly, a Focus on) and of the test once it's gone;
+    /// where the system holds banners back, a button opens its settings there.
+    fn banner_test_row(&self, mode: NotifyMode, cx: &mut Context<Self>) -> AnyElement {
+        let os = crate::banner::os();
+        let status = banner_test_words(&self.banner_test, &os, mode);
+        #[cfg(any(test, feature = "test-support"))]
+        super::shown::text(&status);
+        let waiting = self.banner_test == BannerTest::Waiting;
+        let blocked = os.blocked().then(|| {
+            Button::new("banner-settings")
+                .small()
+                .outline()
+                .label("Open Settings")
+                .on_click(move |_, _, cx| crate::banner::open_settings(&os, cx))
+        });
+        Self::row_with(
+            format!("Test on {}", crate::words::words().this_computer),
+            "Sends the banner and sound 5 seconds after you click, whatever is in front then: time to switch to another app and see it as you would while you work.",
+            (!status.is_empty()).then(|| {
+                div()
+                    .id("banner-test-status")
+                    .test_support()
+                    .max_w(px(460.))
+                    .text_size(px(text::BODY))
+                    .line_height(relative(1.5))
+                    .child(status)
+                    .into_any_element()
+            }),
+            h_flex().gap_2().children(blocked).child(
+                Button::new("banner-test")
+                    .small()
+                    .outline()
+                    .label(if waiting { "Sending…" } else { "Send a test" })
+                    .disabled(waiting || mode == NotifyMode::Off)
+                    .on_click(cx.listener(|this, _, _, cx| this.send_banner_test(cx))),
+            ),
+            cx,
+        )
+    }
+
+    /// Wait `BANNER_TEST_AFTER`, send the test (`root::test_alert`), and show what the system
+    /// said to it, which it says a moment later.
+    fn send_banner_test(&mut self, cx: &mut Context<Self>) {
+        let ws = self.workspace.clone();
+        self.banner_test = BannerTest::Waiting;
+        self._banner_test = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(BANNER_TEST_AFTER).await;
+            let banner = cx.update(|cx| {
+                crate::root::test_alert(&ws, cx);
+                matches!(
+                    ws.read(cx).settings.notifications.mode,
+                    NotifyMode::Banner | NotifyMode::BannerAndSound
+                )
+            });
+            // The system's answer comes on a thread of its own: a few looks, a tenth apart.
+            for _ in 0..30 {
+                if !banner || crate::banner::test_answer().is_some() {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.banner_test = BannerTest::Sent {
+                    banner,
+                    answer: crate::banner::test_answer().filter(|_| banner),
+                };
+                cx.notify();
+            });
+        }));
+        cx.notify();
     }
 
     pub(super) fn api_keys_page(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
