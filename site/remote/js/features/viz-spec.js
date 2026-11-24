@@ -39,7 +39,7 @@ export const IMAGE_SHAPES = ['wide', 'square', 'tall'];
 
 /** The top-level fields each type takes (the first four every type takes). */
 const TOP_FIELDS = {
-  bar: ['version', 'title', 'summary', 'type', 'bars', 'x_label', 'y_label'],
+  bar: ['version', 'title', 'summary', 'type', 'bars', 'x_label', 'y_label', 'unit'],
   heatmap: ['version', 'title', 'summary', 'type', 'x_labels', 'y_labels', 'values'],
   treemap: ['version', 'title', 'summary', 'type', 'items'],
   mockup: ['version', 'title', 'summary', 'type', 'nodes'],
@@ -1169,6 +1169,7 @@ export function validate(viz) {
       dataset('bar', viz.bars.length);
       optionalText('x_label', viz.x_label);
       optionalText('y_label', viz.y_label);
+      shortOptional('unit', viz.unit);
       viz.bars.forEach((b, i) => {
         textField(`bars[${i}].label`, b.label, true);
         number(`bars[${i}].value`, b.value);

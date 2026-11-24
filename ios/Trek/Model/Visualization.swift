@@ -97,7 +97,7 @@ nonisolated struct MockNode: Equatable, Sendable {
 }
 
 nonisolated enum VizContent: Equatable, Sendable {
-    case bar(bars: [VizMark], xLabel: String?, yLabel: String?)
+    case bar(bars: [VizMark], xLabel: String?, yLabel: String?, unit: String?)
     case line(xLabels: [String], series: [VizSeries], area: Bool, yLabel: String?, unit: String?)
     case donut(parts: [VizMark], unit: String?)
     case stats(tiles: [VizTile])
@@ -196,7 +196,7 @@ nonisolated enum VizSchema {
 
     /// The top-level fields each type takes.
     static let fields: [String: [String]] = [
-        "bar": ["version", "title", "summary", "type", "bars", "x_label", "y_label"],
+        "bar": ["version", "title", "summary", "type", "bars", "x_label", "y_label", "unit"],
         "heatmap": ["version", "title", "summary", "type", "x_labels", "y_labels", "values"],
         "treemap": ["version", "title", "summary", "type", "items"],
         "mockup": ["version", "title", "summary", "type", "nodes"],
@@ -633,7 +633,8 @@ nonisolated enum VizParse {
             switch kind {
             case "bar":
                 content = .bar(bars: try list(required(f, "bars")).map { try mark($0, "BarMark", value: "value") },
-                               xLabel: try optional(f, "x_label", string), yLabel: try optional(f, "y_label", string))
+                               xLabel: try optional(f, "x_label", string), yLabel: try optional(f, "y_label", string),
+                               unit: try optional(f, "unit", string))
             case "heatmap":
                 content = .heatmap(xLabels: try strings(required(f, "x_labels")), yLabels: try strings(required(f, "y_labels")),
                                    values: try list(required(f, "values")).map(numbers))
@@ -737,10 +738,11 @@ nonisolated enum VizParse {
         try text("title", viz.title, required: true)
         try text("summary", viz.summary, required: true)
         switch viz.content {
-        case .bar(let bars, let x, let y):
+        case .bar(let bars, let x, let y, let unit):
             try dataset("bar", bars.count)
             try optionalText("x_label", x)
             try optionalText("y_label", y)
+            try shortOptional("unit", unit)
             for (i, bar) in bars.enumerated() {
                 try text("bars[\(i)].label", bar.label, required: true)
                 try number("bars[\(i)].value", bar.value)

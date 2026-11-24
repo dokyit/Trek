@@ -102,7 +102,7 @@ test('payload, text, count and depth are bounded', () => {
 test('a wrong version reads plainly', () => {
   const v2 = common('bar', '"bars":[{"label":"x","value":1}]').replace('"version":1', '"version":2');
   assert.equal(reason(v2), 'schema version 2 isn’t supported (expected 1)');
-  assert.equal(reason(common('bar', '"bars":[{"label":"x","value":1}],"html":"<b>"')), 'unknown field `html` (a bar takes `bars`, `x_label`, `y_label`)');
+  assert.equal(reason(common('bar', '"bars":[{"label":"x","value":1}],"html":"<b>"')), 'unknown field `html` (a bar takes `bars`, `x_label`, `y_label`, `unit`)');
 });
 
 test('the minutes timeline a user hit still parses', () => {

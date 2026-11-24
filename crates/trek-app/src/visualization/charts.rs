@@ -120,6 +120,7 @@ pub(super) fn bars(
     bars: &[BarMark],
     x_label: Option<&str>,
     y_label: Option<&str>,
+    unit: Option<&str>,
     frame: &Frame,
     cx: &App,
 ) -> AnyElement {
@@ -205,7 +206,7 @@ pub(super) fn bars(
                         .when(!negative, |el| el.left(relative(right)).pl(px(6.)))
                         .when(negative, |el| el.right(relative(1. - left)).pr(px(6.)))
                         .opacity(grown)
-                        .child(format_number(bar.value));
+                        .child(with_unit(format_number(bar.value), unit));
                     div()
                         .id(frame.id("bar", ix))
                         .test_support()

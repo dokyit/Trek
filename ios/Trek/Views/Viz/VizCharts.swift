@@ -28,6 +28,7 @@ struct VizBars: View {
     var bars: [VizMark]
     var xLabel: String?
     var yLabel: String?
+    var unit: String?
     var ctx: VizContext
 
     var body: some View {
@@ -65,7 +66,7 @@ struct VizBars: View {
                             .cornerRadius(4)
                             .foregroundStyle(VizLook.tone(bar.tone).opacity(on ? 1 : 0.86 * ctx.presence(i)))
                             .annotation(position: bar.value < 0 ? .leading : .trailing, alignment: .center, spacing: 6) {
-                                Text(VizFormat.number(bar.value))
+                                Text(VizFormat.withUnit(VizFormat.number(bar.value), unit))
                                     .font(.system(size: 11.5, design: .monospaced))
                                     .foregroundStyle(look.fg.opacity(on ? 1 : 0.78 * ctx.presence(i)))
                                     .opacity(ctx.enter)

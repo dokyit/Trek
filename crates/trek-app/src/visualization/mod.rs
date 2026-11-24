@@ -822,7 +822,15 @@ fn artifact(
                 bars,
                 x_label,
                 y_label,
-            } => charts::bars(bars, x_label.as_deref(), y_label.as_deref(), &frame, cx),
+                unit,
+            } => charts::bars(
+                bars,
+                x_label.as_deref(),
+                y_label.as_deref(),
+                unit.as_deref(),
+                &frame,
+                cx,
+            ),
             VisualizationContent::Line {
                 x_labels,
                 series,
@@ -1453,6 +1461,7 @@ pub(super) fn data_table(viz: &Visualization) -> Option<DataTable> {
             bars,
             x_label,
             y_label,
+            ..
         } => (
             vec![
                 y_label.clone().unwrap_or_else(|| "Label".into()),

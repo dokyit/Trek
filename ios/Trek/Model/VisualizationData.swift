@@ -103,7 +103,7 @@ nonisolated struct VizDataTable: Equatable, Sendable {
             }
         }
         switch viz.content {
-        case .bar(let bars, let x, let y):
+        case .bar(let bars, let x, let y, _):
             return VizDataTable(columns: [y ?? "Label", x ?? "Value"], rows: bars.map { [.text($0.label), .number($0.value)] })
         case .line(let xs, let series, _, _, _):
             return VizDataTable(columns: [""] + series.map(\.label),

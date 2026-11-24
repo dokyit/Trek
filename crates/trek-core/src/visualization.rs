@@ -43,7 +43,7 @@ pub const TYPES: &[&str] = &[
 /// visualizations, and that TeX math in an answer is typeset. Every session carries them, so they
 /// stay terse (`instructions_stay_compact`).
 pub const AGENT_INSTRUCTIONS: &str = "When a picture clarifies the answer, add a fenced `trek-viz` block of strict JSON, then its takeaway in prose. Each has version:1, title, summary, type, and its fields (? optional): \
-bar bars[{label,value}], x_label?, y_label?; \
+bar bars[{label,value}], x_label?, y_label?, unit?; \
 line x_labels, series[{label,values}] (≤6, a value per x label), area?:bool, y_label?, unit?; \
 donut parts[{label,value>0}], unit?; \
 stats tiles[{label,value:string,delta?:string,trend?:[numbers]}]; \
@@ -76,6 +76,8 @@ pub enum VisualizationContent {
         x_label: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         y_label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unit: Option<String>,
     },
     Heatmap {
         x_labels: Vec<String>,
@@ -741,10 +743,12 @@ pub fn validate(visualization: &Visualization) -> Result<(), VisualizationError>
             bars,
             x_label,
             y_label,
+            unit,
         } => {
             dataset("bar", bars.len())?;
             optional_text("x_label", x_label)?;
             optional_text("y_label", y_label)?;
+            short_opt("unit", unit)?;
             for (index, bar) in bars.iter().enumerate() {
                 text(&format!("bars[{index}].label"), &bar.label, true)?;
                 number(&format!("bars[{index}].value"), bar.value)?;
@@ -2127,7 +2131,7 @@ fn reject_unknown_top_level_fields(value: &Value) -> Result<(), VisualizationErr
         .ok_or_else(|| VisualizationError::InvalidJson("missing or non-string `type`".into()))?;
     let variant = match kind {
         "bar" => &[
-            "version", "title", "summary", "type", "bars", "x_label", "y_label",
+            "version", "title", "summary", "type", "bars", "x_label", "y_label", "unit",
         ][..],
         "heatmap" => &[
             "version", "title", "summary", "type", "x_labels", "y_labels", "values",
@@ -2434,10 +2438,13 @@ mod tests {
     fn parses_every_visualization_variant() {
         let bar = parse(&common(
             "bar",
-            r#""bars":[{"label":"Build","value":42,"tone":"positive"}],"y_label":"seconds""#,
+            r#""bars":[{"label":"Build","value":42,"tone":"positive"}],"y_label":"seconds","unit":"s""#,
         ))
         .unwrap();
-        assert!(matches!(bar.content, VisualizationContent::Bar { .. }));
+        let VisualizationContent::Bar { unit, .. } = &bar.content else {
+            panic!()
+        };
+        assert_eq!(unit.as_deref(), Some("s"));
 
         let heatmap = parse(&common(
             "heatmap",
@@ -3569,7 +3576,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             unknown.reason(),
-            "unknown field `html` (a bar takes `bars`, `x_label`, `y_label`)"
+            "unknown field `html` (a bar takes `bars`, `x_label`, `y_label`, `unit`)"
         );
         let big = VisualizationError::PayloadTooLarge {
             bytes: 40 * 1024,

@@ -83,7 +83,7 @@ export function bars(viz, ctx) {
               'span',
               { class: 'viz-bar-track' },
               el('span', { class: `viz-bar-fill${neg ? ' neg' : ''}`, style: { left: pct(Math.min(zero, f)), width: pct(Math.abs(f - zero)), '--c': toneColor(b.tone) } }),
-              el('span', { class: 'viz-bar-value', style: neg ? { right: `calc(${pct(1 - f)} + 6px)` } : { left: `calc(${pct(f)} + 6px)` }, text: formatNumber(b.value) }),
+              el('span', { class: 'viz-bar-value', style: neg ? { right: `calc(${pct(1 - f)} + 6px)` } : { left: `calc(${pct(f)} + 6px)` }, text: withUnit(formatNumber(b.value), viz.unit) }),
             ),
           );
         }),
