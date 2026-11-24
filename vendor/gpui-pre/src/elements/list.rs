@@ -1039,6 +1039,11 @@ impl StateInner {
         let mut rendered_height = padding.top;
         let mut max_item_width = px(0.);
         let mut scroll_top = self.logical_scroll_top();
+        // A text selection may span rows that are far outside the viewport.
+        // Keep every row mounted while it exists; otherwise virtualization
+        // drops the selection anchor and copied text at the overdraw edge.
+        // Normal virtualization resumes as soon as the selection is cleared.
+        let keep_selection_rows = window.text_selection_active();
 
         if self.follow_state.is_following() {
             scroll_top = ListOffset {
@@ -1063,7 +1068,7 @@ impl StateInner {
         cursor.seek(&Count(scroll_top.item_ix), Bias::Right);
         for (ix, item) in cursor.by_ref().enumerate() {
             let visible_height = rendered_height - scroll_top.offset_in_item;
-            if visible_height >= available_height + self.overdraw {
+            if !keep_selection_rows && visible_height >= available_height + self.overdraw {
                 break;
             }
 
@@ -1071,7 +1076,7 @@ impl StateInner {
             let mut size = item.size();
 
             // If we're within the visible area or the height wasn't cached, render and measure the item's element
-            if visible_height < available_height || size.is_none() {
+            if keep_selection_rows || visible_height < available_height || size.is_none() {
                 let item_index = scroll_top.item_ix + ix;
                 let mut element = render_item(item_index, window, cx);
                 let element_size = element.layout_as_root(available_item_space, window, cx);
@@ -1102,7 +1107,7 @@ impl StateInner {
                     }
                 }
 
-                if visible_height < available_height {
+                if keep_selection_rows || visible_height < available_height {
                     item_layouts.push_back(ItemLayout {
                         index: item_index,
                         element,
@@ -1177,14 +1182,21 @@ impl StateInner {
 
         // Measure items in the leading overdraw
         let mut leading_overdraw = scroll_top.offset_in_item;
-        while leading_overdraw < self.overdraw {
+        while keep_selection_rows || leading_overdraw < self.overdraw {
             cursor.prev();
             if let Some(item) = cursor.item() {
-                let size = if let ListItem::Measured { size, .. } = item {
-                    *size
+                let (size, element) = if keep_selection_rows {
+                    let mut element = render_item(cursor.start().0, window, cx);
+                    let size = element.layout_as_root(available_item_space, window, cx);
+                    (size, Some(element))
+                } else if let ListItem::Measured { size, .. } = item {
+                    (*size, None)
                 } else {
                     let mut element = render_item(cursor.start().0, window, cx);
-                    element.layout_as_root(available_item_space, window, cx)
+                    (
+                        element.layout_as_root(available_item_space, window, cx),
+                        None,
+                    )
                 };
 
                 leading_overdraw += size.height;
@@ -1192,6 +1204,16 @@ impl StateInner {
                     size,
                     focus_handle: item.focus_handle(),
                 });
+                if let Some(element) = element {
+                    if item.contains_focused(window, cx) {
+                        rendered_focused_item = true;
+                    }
+                    item_layouts.push_front(ItemLayout {
+                        index: cursor.start().0,
+                        element,
+                        size,
+                    });
+                }
             } else {
                 break;
             }
@@ -1280,7 +1302,13 @@ impl StateInner {
             // Only paint the visible items, if there is actually any space for them (taking padding into account)
             if bounds.size.height > padding.top + padding.bottom {
                 let mut item_origin = bounds.origin + Point::new(px(0.), padding.top);
-                item_origin.y -= layout_response.scroll_top.offset_in_item;
+                let leading_height: Pixels = layout_response
+                    .item_layouts
+                    .iter()
+                    .take_while(|item| item.index < layout_response.scroll_top.item_ix)
+                    .map(|item| item.size.height)
+                    .sum();
+                item_origin.y -= leading_height + layout_response.scroll_top.offset_in_item;
                 for item in &mut layout_response.item_layouts {
                     window.with_content_mask(Some(ContentMask { bounds }), |window| {
                         item.element.prepaint_at(item_origin, window, cx);
@@ -1720,14 +1748,65 @@ impl sum_tree::SeekTarget<'_, ListItemSummary, ListItemSummary> for Height {
 mod test {
 
     use gpui::{ScrollDelta, ScrollWheelEvent};
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
     use crate::{
         self as gpui, AppContext, Bounds, Context, Element, FollowMode, InteractiveElement,
-        IntoElement, ListState, Render, Styled, TestAppContext, Window, canvas, div, list, point,
-        px, size,
+        IntoElement, ListState, Pixels, Render, Styled, TestAppContext, Window, canvas, div, list,
+        point, px, size,
     };
+
+    #[gpui::test]
+    fn active_text_selection_keeps_every_virtual_row_mounted(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let state = ListState::new(100, crate::ListAlignment::Top, px(0.));
+        state.scroll_to(gpui::ListOffset {
+            item_ix: 50,
+            offset_in_item: px(0.),
+        });
+        let rendered = Rc::new(Cell::new(0));
+        let positions = Rc::new(RefCell::new(vec![None; 100]));
+
+        struct TestView {
+            state: ListState,
+            rendered: Rc<Cell<usize>>,
+            positions: Rc<RefCell<Vec<Option<Pixels>>>>,
+        }
+        impl Render for TestView {
+            fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                window.set_text_selection_active(true);
+                let rendered = self.rendered.clone();
+                let positions = self.positions.clone();
+                list(self.state.clone(), move |ix, _, _| {
+                    rendered.set(rendered.get() + 1);
+                    let positions = positions.clone();
+                    canvas(
+                        move |bounds, _, _| positions.borrow_mut()[ix] = Some(bounds.origin.y),
+                        |_, _, _, _| {},
+                    )
+                    .h(px(20.))
+                    .w_full()
+                    .into_any()
+                })
+                .w_full()
+                .h_full()
+            }
+        }
+
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(60.)), |_, cx| {
+            cx.new(|_| TestView {
+                state,
+                rendered: rendered.clone(),
+                positions: positions.clone(),
+            })
+            .into_any_element()
+        });
+
+        assert_eq!(rendered.get(), 100);
+        assert_eq!(positions.borrow()[50], Some(px(0.)));
+        assert_eq!(positions.borrow()[0], Some(px(-1000.)));
+    }
 
     #[gpui::test]
     fn test_autoscroll_above_item_top_renders_items_above(cx: &mut TestAppContext) {
