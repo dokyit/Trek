@@ -493,6 +493,16 @@ struct Media {
     stop: Arc<tokio::sync::Notify>,
 }
 
+impl Session {
+    /// A live screen share already runs the media stream (macOS only; there is none elsewhere).
+    fn media_held(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        return self.media.is_some();
+        #[cfg(not(target_os = "macos"))]
+        return false;
+    }
+}
+
 async fn answer(udid: &str, session: &mut Option<Session>, ask: Ask) {
     match ask {
         Ask::Mounted(reply) => {
@@ -767,7 +777,7 @@ async fn shoot(udid: &str, session: &mut Option<Session>) -> Result<Shot, String
 /// (touches, keys, buttons) only then. A live stream already runs it — touches ride that one.
 async fn touch(udid: &str, session: &mut Option<Session>, gesture: &Gesture) -> Result<(), String> {
     let s = open(udid, session).await?;
-    let ours = if s.media.is_some() {
+    let ours = if s.media_held() {
         None
     } else {
         let (client, audio, video) = start_media_stream(&mut s.adapter, &mut s.rsd).await?;
