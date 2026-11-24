@@ -53,6 +53,7 @@ use std::time::{Duration, Instant};
 use trek_agents::Decision;
 use trek_core::HandHolding;
 use trek_ipc::phone::{self as tools, Sensitive};
+use trek_phone::coredevice;
 use trek_phone::diagnose::{self, Blocker};
 use trek_phone::driver::{self, Driver};
 use trek_phone::helper::{self, Event, Link, MirrorCmd, Mirrored, Status};
@@ -101,6 +102,12 @@ const PASSCODE_ASK: Duration = Duration::from_secs(8);
 /// How long the picture waits after the driver failed to start before starting it again (each
 /// try runs xcodebuild for seconds; the strip says why meanwhile).
 const DRIVER_RETRY: Duration = Duration::from_secs(20);
+/// How long the live stream waits after a failed start before trying again (a mount can take
+/// minutes; the cable's screenshots stay the picture meanwhile).
+const LIVE_RETRY: Duration = Duration::from_secs(60);
+/// Xcode's developer disk images: where the display service's mount comes from when the phone
+/// doesn't have one yet (the image stays until the phone restarts).
+const XCODE_DDI: &str = "/Library/Developer/DeveloperDiskImages/iOS_DDI";
 /// From a driver without `/stream`: how often the picture is asked of it while it runs (a
 /// screenshot takes it ~0.3 s), and the JPEG quality it comes at. (One with `/stream` pushes
 /// its frames: `PhonePanel::start_driver_frames`.)
@@ -119,6 +126,52 @@ const ELEMENTS_MAX: u32 = 400;
 const ELEMENTS_LIMIT: Duration = Duration::from_secs(5);
 /// What a command to iPhone Mirroring that got no answer says.
 const MIRROR_LATE: &str = "iPhone Mirroring didn't answer in time.";
+
+/// The live stream's start, off the UI: the display service comes with the developer disk
+/// image, mounted from Xcode's folder when it isn't (as Xcode would; a mount can take minutes).
+/// When it can't be mounted the error is the cable capture's to fall back on.
+fn begin_live(udid: String) -> Result<coredevice::live::Live, String> {
+    if let Ok(false) = coredevice::mounted(&udid)
+        && Path::new(XCODE_DDI).is_dir()
+    {
+        coredevice::mount(&udid, Path::new(XCODE_DDI))?;
+    }
+    coredevice::live(&udid)
+}
+
+/// The live pump: each decoded frame becomes a `Frame` for the panel's channel (bounded: a full
+/// one drops the frame, so the newest wins). Runs until the flag clears or the stream ends; the
+/// `Live`'s drop then stops the stream on the phone's worker.
+async fn pump_live_frames(
+    stream: coredevice::live::Live,
+    tx: async_channel::Sender<Frame>,
+    shown: Arc<AtomicBool>,
+    run: Arc<AtomicBool>,
+) {
+    use coredevice::live::LiveEvent;
+    while run.load(Ordering::Relaxed) {
+        match stream.next(Duration::from_millis(100)) {
+            LiveEvent::Frame(frame) => {
+                let (width, height) = (frame.width, frame.height);
+                // A decoded frame's BGRA is what `RenderImage` holds.
+                if let Some(pixels) = image::RgbaImage::from_raw(width, height, frame.bgra)
+                    && shown.load(Ordering::Relaxed)
+                {
+                    let _ = tx.try_send(Frame {
+                        image: Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])),
+                        width: width as f32,
+                        height: height as f32,
+                        bar: None,
+                        real_clock: false,
+                        live: true,
+                    });
+                }
+            }
+            LiveEvent::Ended => break,
+            LiveEvent::Timeout => {}
+        }
+    }
+}
 /// Xcode in the Mac App Store, for a Mac without it.
 const XCODE_IN_APP_STORE: &str = "macappstore://apps.apple.com/app/xcode/id497799835";
 
@@ -162,6 +215,9 @@ struct Frame {
     bar: Option<StatusBar>,
     /// From Trek Driver: the clock in it is the real one.
     real_clock: bool,
+    /// From CoreDevice's live screen share (`coredevice::live`): already decoded, no status bar
+    /// to find.
+    live: bool,
 }
 
 /// A frame as it came, waiting for the decoder thread: only the newest waits.
@@ -223,6 +279,18 @@ pub struct PhonePanel {
     driver_frames_task: Option<Task<()>>,
     /// When the picture's last start of the driver failed.
     driver_frames_retry: Option<Instant>,
+    /// The CoreDevice live stream's pump (`coredevice::live`), while it's the picture's source.
+    live_task: Option<Task<()>>,
+    /// A `coredevice::live` start is in flight (the mount probe can take minutes).
+    live_starting: bool,
+    /// The pump's stop flag; the pump clears it when its loop ends.
+    live_live: Arc<AtomicBool>,
+    /// Live-stream frames are the picture (the cable's capture off), like `driver_frames`.
+    live_frames: bool,
+    /// When the last live start failed; it waits before trying again.
+    live_retry: Option<Instant>,
+    /// The channel `Frame`s go out on, for the live pump (the decoder thread has its own clone).
+    live_tx: async_channel::Sender<Frame>,
     area: Rc<Cell<Bounds<Pixels>>>,
     /// The user's own mouse, trackpad and keys on the picture.
     touch: touch::Touch,
@@ -304,6 +372,7 @@ impl PhonePanel {
         let decode_slot: Arc<Mutex<Option<Undecoded>>> = Arc::default();
         let (wake_tx, wake_rx) = async_channel::bounded::<()>(1);
         let (frames_tx, frames_rx) = async_channel::bounded::<Frame>(2);
+        let live_tx = frames_tx.clone();
         let (slot, renderer) = (decode_slot.clone(), cx.svg_renderer());
         let _ = std::thread::Builder::new()
             .name("trek-phone-decode".into())
@@ -348,6 +417,7 @@ impl PhonePanel {
                             height: h as f32,
                             bar,
                             real_clock,
+                            live: false,
                         };
                         if frames_tx.send_blocking(frame).is_err() {
                             break;
@@ -419,6 +489,12 @@ impl PhonePanel {
             busy_clock: Instant::now(),
             driver_frames_task: None,
             driver_frames_retry: None,
+            live_task: None,
+            live_starting: false,
+            live_live: Arc::new(AtomicBool::new(false)),
+            live_frames: false,
+            live_retry: None,
+            live_tx,
             mirroring_seen: std::fs::read_to_string(mirroring_marker())
                 .ok()
                 .map(|s| s.trim().to_string()),
@@ -463,6 +539,7 @@ impl PhonePanel {
             mirroring_known: self.mirroring_seen.is_some() && !other,
             mirror_frames: self.mirror_frames,
             driver_frames: self.driver_frames,
+            live_frames: self.live_frames,
             assistive: self.assistive,
             wants_taps: self.busy()
                 || self.lease.holder(Instant::now()).is_some()
@@ -597,9 +674,13 @@ impl PhonePanel {
         self.shown.store(visible, Ordering::Relaxed);
         if !visible && !self.held() {
             self.stop_driver_frames(cx);
+            self.stop_live_frames(cx);
         }
         if let Some(link) = &self.link {
-            link.frames(visible && !self.driver_frames, LIVE_FPS);
+            link.frames(
+                visible && !self.driver_frames && !self.live_frames,
+                LIVE_FPS,
+            );
         }
         if visible {
             self.refreshed = None;
@@ -624,6 +705,7 @@ impl PhonePanel {
         }
         self.restore_assistive(cx);
         self.stop_driver_frames(cx);
+        self.stop_live_frames(cx);
         self.stop_driver(cx);
         self.link = None;
         self._link_events = None;
@@ -662,6 +744,7 @@ impl PhonePanel {
         }
         if !self.demo {
             self.manage_driver_frames(cx);
+            self.manage_live_frames(window, cx);
             self.follow_setup(cx);
         }
         let stalled = self.stalled();
@@ -937,7 +1020,7 @@ impl PhonePanel {
                 width,
                 height,
             } => {
-                if self.driver_frames {
+                if self.driver_frames || self.live_frames {
                     return;
                 }
                 *self.decode_slot.lock().unwrap() = Some(Undecoded {
@@ -971,14 +1054,31 @@ impl PhonePanel {
     }
 
     fn show_frame(&mut self, frame: Frame, window: &mut Window, cx: &mut Context<Self>) {
-        if frame.real_clock && self.driver_frames_task.is_none() {
-            // A frame of a loop already stopped.
-            return;
-        }
-        if frame.real_clock && !self.driver_frames {
-            self.driver_frames = true;
-            if let Some(link) = &self.link {
-                link.frames(false, LIVE_FPS);
+        if frame.live {
+            // A frame of a pump already stopped, or the driver's picture is up: the driver's
+            // wins (it started later and its taps are proven).
+            if self.live_task.is_none() || self.driver_frames {
+                return;
+            }
+            if !self.live_frames {
+                self.live_frames = true;
+                if let Some(link) = &self.link {
+                    link.frames(false, LIVE_FPS);
+                }
+            }
+        } else {
+            if frame.real_clock && self.driver_frames_task.is_none() {
+                // A frame of a loop already stopped.
+                return;
+            }
+            if frame.real_clock && self.live_frames {
+                return;
+            }
+            if frame.real_clock && !self.driver_frames {
+                self.driver_frames = true;
+                if let Some(link) = &self.link {
+                    link.frames(false, LIVE_FPS);
+                }
             }
         }
         for old in self.stale.drain(..) {
@@ -1224,6 +1324,75 @@ impl PhonePanel {
                 && let Some(old) = self.frame.take()
             {
                 self.stale.push(old.image);
+            }
+            cx.notify();
+        }
+    }
+
+    /// The phone's screen live over its CoreDevice tunnel (`coredevice::live`, HEVC decoded by
+    /// VideoToolbox), while the cable's ~1 fps screenshots are the picture's only other source:
+    /// not iPhone Mirroring's window, not Trek Driver's stream (the driver wins when it runs —
+    /// its taps are proven, and this stream's ride the same media session anyway). The display
+    /// service comes with the developer disk image, mounted from Xcode's folder first when it
+    /// isn't; when it can't be, the cable's capture stays the picture. Wanted as long as the
+    /// driver's is (`manage_driver_frames`), and after a failed start it waits `LIVE_RETRY`.
+    fn manage_live_frames(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let wanted = (self.visible || self.held())
+            && !self.demo
+            && self.phone.is_some()
+            && !self.mirror_frames
+            && !self.driver_frames
+            && self.driver_frames_task.is_none();
+        let waiting = self.live_retry.is_some_and(|t| t.elapsed() < LIVE_RETRY);
+        if wanted && !waiting && !self.live_starting && self.live_task.is_none() {
+            self.start_live_frames(window, cx);
+        } else if (self.live_task.is_some() || self.live_starting)
+            && (!wanted || !self.live_live.load(Ordering::Relaxed))
+        {
+            self.stop_live_frames(cx);
+        }
+    }
+
+    /// The live stream's start (the mount probe and negotiation can take minutes, all off the
+    /// UI), then its pump of decoded frames into the panel's `Frame` channel.
+    fn start_live_frames(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(udid) = self.phone.as_ref().map(|p| p.udid.clone()) else {
+            return;
+        };
+        self.live_starting = true;
+        let run = Arc::new(AtomicBool::new(true));
+        self.live_live = run.clone();
+        let (tx, shown) = (self.live_tx.clone(), self.shown.clone());
+        self.live_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let begun = cx
+                .background_executor()
+                .spawn(async move { begin_live(udid) })
+                .await;
+            if let Ok(stream) = begun {
+                let _ = cx
+                    .background_executor()
+                    .spawn(pump_live_frames(stream, tx, shown, run))
+                    .await;
+            }
+            let _ = this.update_in(cx, |this, _window, cx| {
+                this.live_starting = false;
+                this.live_retry = Some(Instant::now());
+                this.stop_live_frames(cx);
+            });
+        }));
+    }
+
+    /// The live pump stops (the flag it checks with each frame); the stream is stopped on the
+    /// phone's worker when the `Live` drops at the loop's end. The cable's capture takes the
+    /// picture over again.
+    fn stop_live_frames(&mut self, cx: &mut Context<Self>) {
+        self.live_live.store(false, Ordering::Relaxed);
+        self.live_starting = false;
+        self.live_task = None;
+        if self.live_frames {
+            self.live_frames = false;
+            if let Some(link) = &self.link {
+                link.frames(self.visible && !self.driver_frames, LIVE_FPS);
             }
             cx.notify();
         }

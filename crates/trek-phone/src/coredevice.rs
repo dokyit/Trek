@@ -32,9 +32,14 @@ use idevice::tcp::handle::{AdapterHandle, UdpSocketHandle};
 use idevice::{IdeviceService, ReadWrite, RsdService};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc::{Sender, channel};
 use std::time::Duration;
+
+#[cfg(target_os = "macos")]
+pub mod live;
 
 /// A copy of the developer disk image with its one image renamed, as open-source tools keep it:
 /// these three files in one folder (Xcode's own names its files in its manifest).
@@ -360,6 +365,14 @@ pub fn tap(udid: &str, x: f32, y: f32) -> Result<(), String> {
     touch_now(udid, Gesture::Tap(x, y))
 }
 
+/// Phone `udid`'s screen, live: decoded frames of what its display service streams over the
+/// tunnel (needs the developer disk image mounted, which serves it). macOS only — the decode is
+/// VideoToolbox's. One at a time per phone; dropping the `Live` stops the stream.
+#[cfg(target_os = "macos")]
+pub fn live(udid: &str) -> Result<live::Live, String> {
+    ask(udid, |reply| Ask::Live(reply))
+}
+
 /// A touch on phone `udid`: a tap, a swipe, typing, or the Home Screen.
 pub fn touch_now(udid: &str, gesture: Gesture) -> Result<(), String> {
     if let Gesture::Type(text) = &gesture {
@@ -406,6 +419,10 @@ enum Ask {
     Touch(Gesture, Reply<()>),
     Open(String, Reply<String>),
     Apps(Reply<Vec<(String, String)>>),
+    #[cfg(target_os = "macos")]
+    Live(Reply<live::Live>),
+    #[cfg(target_os = "macos")]
+    LiveStop(Reply<()>),
 }
 
 /// Each phone's worker, by its udid.
@@ -458,11 +475,32 @@ fn worker(udid: String) -> Sender<Ask> {
     tx
 }
 
-/// The phone's tunnel, its services' list, and the screenshot service once used.
+/// The phone's tunnel, its services' list, the screenshot service once used, and a live screen
+/// share while one runs.
 struct Session {
     adapter: AdapterHandle,
     rsd: RsdHandshake,
     capture: Option<ScreenCaptureServiceClient<Box<dyn ReadWrite>>>,
+    #[cfg(target_os = "macos")]
+    media: Option<Media>,
+}
+
+/// A live stream's hold on the media session: the display-service client (the stream's authority,
+/// which touches ride too) and the signal that ends its receive loop.
+#[cfg(target_os = "macos")]
+struct Media {
+    client: DisplayServiceClient<Box<dyn ReadWrite>>,
+    stop: Arc<tokio::sync::Notify>,
+}
+
+impl Session {
+    /// A live screen share already runs the media stream (macOS only; there is none elsewhere).
+    fn media_held(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        return self.media.is_some();
+        #[cfg(not(target_os = "macos"))]
+        return false;
+    }
 }
 
 async fn answer(udid: &str, session: &mut Option<Session>, ask: Ask) {
@@ -530,6 +568,21 @@ async fn answer(udid: &str, session: &mut Option<Session>, ask: Ask) {
                 *session = None;
             }
             let _ = reply.send(opened);
+        }
+        #[cfg(target_os = "macos")]
+        Ask::Live(reply) => {
+            let live = live::start(udid, session).await;
+            if live.is_err() {
+                // A stream that couldn't start may have left the session's services askew; the
+                // next call opens the tunnel again.
+                *session = None;
+            }
+            let _ = reply.send(live);
+        }
+        #[cfg(target_os = "macos")]
+        Ask::LiveStop(reply) => {
+            live::stop(session).await;
+            let _ = reply.send(Ok(()));
         }
     }
 }
@@ -687,6 +740,8 @@ async fn open<'a>(udid: &str, session: &'a mut Option<Session>) -> Result<&'a mu
             adapter,
             rsd,
             capture: None,
+            #[cfg(target_os = "macos")]
+            media: None,
         });
     }
     session.as_mut().ok_or_else(|| "No tunnel.".to_string())
@@ -719,17 +774,26 @@ async fn shoot(udid: &str, session: &mut Option<Session>) -> Result<Shot, String
 }
 
 /// A touch, sent while the display service's media stream runs: the phone takes synthetic input
-/// (touches, keys, buttons) only then (its video is dropped unread).
+/// (touches, keys, buttons) only then. A live stream already runs it — touches ride that one.
 async fn touch(udid: &str, session: &mut Option<Session>, gesture: &Gesture) -> Result<(), String> {
     let s = open(udid, session).await?;
-    let (mut display, _audio, _video) = start_media_stream(&mut s.adapter, &mut s.rsd).await?;
+    let ours = if s.media_held() {
+        None
+    } else {
+        let (client, audio, video) = start_media_stream(&mut s.adapter, &mut s.rsd).await?;
+        drop(audio);
+        drop(video);
+        Some(client)
+    };
     // The input surfaces need a moment to take the stream as their authority.
     tokio::time::sleep(Duration::from_millis(300)).await;
     let (done, held) = send_touch(s, gesture).await;
     // The events go without an answer: the stream, which lets them in, and the connection they
     // came on stay until the phone has taken them (stopped at once, a tap's lift was lost).
     tokio::time::sleep(TOUCH_LANDS).await;
-    let _ = display.stop_media_stream().await;
+    if let Some(mut display) = ours {
+        let _ = display.stop_media_stream().await;
+    }
     drop(held);
     done
 }
