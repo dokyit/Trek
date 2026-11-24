@@ -1371,7 +1371,7 @@ impl PhonePanel {
             if let Ok(stream) = begun {
                 let _ = cx
                     .background_executor()
-                    .spawn(async move { pump_live_frames(stream, tx, shown, run) })
+                    .spawn(pump_live_frames(stream, tx, shown, run))
                     .await;
             }
             let _ = this.update_in(cx, |this, _window, cx| {
