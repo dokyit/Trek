@@ -2644,6 +2644,12 @@ impl App {
         self.active_drag.is_some()
     }
 
+    /// Trek: what is being dragged, when it is a `T` (`ExternalPaths` for files from another
+    /// app), so a view can say what a drop will do before it happens.
+    pub fn dragged<T: 'static>(&self) -> Option<&T> {
+        self.active_drag.as_ref()?.value.downcast_ref()
+    }
+
     /// Gets the cursor style of the currently active drag operation.
     pub fn active_drag_cursor_style(&self) -> Option<CursorStyle> {
         self.active_drag.as_ref().and_then(|drag| drag.cursor_style)
