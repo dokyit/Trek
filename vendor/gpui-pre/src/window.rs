@@ -5683,6 +5683,15 @@ impl Window {
         self.last_input_modality = match &event {
             PlatformInput::KeyDown(_) => InputModality::Keyboard,
             PlatformInput::MouseMove(_) | PlatformInput::MouseDown(_) => InputModality::Mouse,
+            // Trek: files dragged in from another app are the pointer's doing. They become the
+            // mouse moves and the release below, after this, so with a key the last thing pressed
+            // (a message typed, then a file fetched from Finder) nothing in the window counted as
+            // under the pointer: no drop target lit up and none took the drop.
+            PlatformInput::FileDrop(
+                FileDropEvent::Entered { .. }
+                | FileDropEvent::Pending { .. }
+                | FileDropEvent::Submit { .. },
+            ) => InputModality::Mouse,
             PlatformInput::Touch(_) => InputModality::Touch,
             _ => self.last_input_modality,
         };

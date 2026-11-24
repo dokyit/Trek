@@ -4984,6 +4984,8 @@ impl Render for Composer {
         let picker = pickers::picker(self, cx);
         let drop_tint = palette::ember(cx);
         let card = div()
+            .id("composer-card")
+            .test_support()
             .relative()
             .w_full()
             // In here, so the chips and the picker float above them rather than over them.
