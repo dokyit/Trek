@@ -71,6 +71,8 @@ struct StateInner {
     scroll_handler: Option<Box<dyn FnMut(&ListScrollEvent, &mut Window, &mut App)>>,
     scrollbar_drag_start_height: Option<Pixels>,
     measuring_behavior: ListMeasuringBehavior,
+    selection_retained_range: Option<Range<usize>>,
+    last_mounted_range: Option<Range<usize>>,
     pending_scroll: Option<PendingScroll>,
     follow_state: FollowState,
 }
@@ -323,6 +325,8 @@ impl ListState {
             reset: false,
             scrollbar_drag_start_height: None,
             measuring_behavior: ListMeasuringBehavior::default(),
+            selection_retained_range: None,
+            last_mounted_range: None,
             pending_scroll: None,
             follow_state: FollowState::default(),
         })));
@@ -360,6 +364,8 @@ impl ListState {
             state.logical_scroll_top = None;
             state.pending_scroll = None;
             state.scrollbar_drag_start_height = None;
+            state.selection_retained_range = None;
+            state.last_mounted_range = None;
             state.items.summary().count
         };
 
@@ -471,6 +477,7 @@ impl ListState {
             new_items
         };
         state.items = new_items;
+
         state.measuring_behavior.reset();
     }
 
@@ -533,6 +540,38 @@ impl ListState {
         new_items.append(old_items.suffix(), ());
         drop(old_items);
         state.items = new_items;
+
+        fn remap_range(
+            range: Option<Range<usize>>,
+            old: &Range<usize>,
+            new_count: usize,
+        ) -> Option<Range<usize>> {
+            let mut range = range?;
+            if old.end <= range.start {
+                let removed = old.end - old.start;
+                range.start = range.start - removed + new_count;
+                range.end = range.end - removed + new_count;
+            } else if old.start < range.end {
+                let removed = old.end - old.start;
+                range.start = range.start.min(old.start);
+                range.end = if range.end <= old.end {
+                    old.start + new_count
+                } else {
+                    range.end - removed + new_count
+                };
+            }
+            (range.start < range.end).then_some(range)
+        }
+        state.selection_retained_range = remap_range(
+            state.selection_retained_range.take(),
+            &old_range,
+            spliced_count,
+        );
+        state.last_mounted_range = remap_range(
+            state.last_mounted_range.take(),
+            &old_range,
+            spliced_count,
+        );
 
         if let Some(ListOffset {
             item_ix,
@@ -1040,10 +1079,16 @@ impl StateInner {
         let mut max_item_width = px(0.);
         let mut scroll_top = self.logical_scroll_top();
         // A text selection may span rows that are far outside the viewport.
-        // Keep every row mounted while it exists; otherwise virtualization
-        // drops the selection anchor and copied text at the overdraw edge.
-        // Normal virtualization resumes as soon as the selection is cleared.
-        let keep_selection_rows = window.text_selection_active();
+        // Retain the contiguous envelope of rows visited while the selection
+        // is live, rather than mounting every row in every list in the window.
+        let selection_active = window.text_selection_active();
+        if selection_active {
+            if self.selection_retained_range.is_none() {
+                self.selection_retained_range = self.last_mounted_range.clone();
+            }
+        } else {
+            self.selection_retained_range = None;
+        }
 
         if self.follow_state.is_following() {
             scroll_top = ListOffset {
@@ -1052,6 +1097,10 @@ impl StateInner {
             };
             self.logical_scroll_top = Some(scroll_top);
         }
+
+        let retained_range = self.selection_retained_range.as_ref().map(|range| {
+            range.start.min(scroll_top.item_ix)..range.end.max(scroll_top.item_ix + 1)
+        });
 
         let mut rendered_focused_item = false;
 
@@ -1068,7 +1117,11 @@ impl StateInner {
         cursor.seek(&Count(scroll_top.item_ix), Bias::Right);
         for (ix, item) in cursor.by_ref().enumerate() {
             let visible_height = rendered_height - scroll_top.offset_in_item;
-            if !keep_selection_rows && visible_height >= available_height + self.overdraw {
+            let item_index = scroll_top.item_ix + ix;
+            let retained = retained_range
+                .as_ref()
+                .is_some_and(|range| range.contains(&item_index));
+            if !retained && visible_height >= available_height + self.overdraw {
                 break;
             }
 
@@ -1076,8 +1129,7 @@ impl StateInner {
             let mut size = item.size();
 
             // If we're within the visible area or the height wasn't cached, render and measure the item's element
-            if keep_selection_rows || visible_height < available_height || size.is_none() {
-                let item_index = scroll_top.item_ix + ix;
+            if retained || visible_height < available_height || size.is_none() {
                 let mut element = render_item(item_index, window, cx);
                 let element_size = element.layout_as_root(available_item_space, window, cx);
                 size = Some(element_size);
@@ -1107,7 +1159,7 @@ impl StateInner {
                     }
                 }
 
-                if keep_selection_rows || visible_height < available_height {
+                if retained || visible_height < available_height {
                     item_layouts.push_back(ItemLayout {
                         index: item_index,
                         element,
@@ -1182,10 +1234,17 @@ impl StateInner {
 
         // Measure items in the leading overdraw
         let mut leading_overdraw = scroll_top.offset_in_item;
-        while keep_selection_rows || leading_overdraw < self.overdraw {
+        while retained_range
+            .as_ref()
+            .is_some_and(|range| cursor.start().0 > range.start)
+            || leading_overdraw < self.overdraw
+        {
             cursor.prev();
             if let Some(item) = cursor.item() {
-                let (size, element) = if keep_selection_rows {
+                let retained = retained_range
+                    .as_ref()
+                    .is_some_and(|range| range.contains(&cursor.start().0));
+                let (size, element) = if retained {
                     let mut element = render_item(cursor.start().0, window, cx);
                     let size = element.layout_as_root(available_item_space, window, cx);
                     (size, Some(element))
@@ -1261,6 +1320,23 @@ impl StateInner {
                 }
                 cursor.next();
             }
+        }
+
+        let mounted_range = item_layouts
+            .iter()
+            .map(|item| item.index)
+            .min()
+            .zip(item_layouts.iter().map(|item| item.index).max())
+            .map(|(first, last)| first..last + 1);
+        self.last_mounted_range = mounted_range.clone();
+        if selection_active {
+            self.selection_retained_range = match (
+                self.selection_retained_range.take(),
+                mounted_range,
+            ) {
+                (Some(old), Some(new)) => Some(old.start.min(new.start)..old.end.max(new.end)),
+                (old, new) => old.or(new),
+            };
         }
 
         LayoutItemsResponse {
@@ -1758,11 +1834,11 @@ mod test {
     };
 
     #[gpui::test]
-    fn active_text_selection_keeps_every_virtual_row_mounted(cx: &mut TestAppContext) {
+    fn active_text_selection_retains_only_the_visited_row_envelope(cx: &mut TestAppContext) {
         let cx = cx.add_empty_window();
         let state = ListState::new(100, crate::ListAlignment::Top, px(0.));
         state.scroll_to(gpui::ListOffset {
-            item_ix: 50,
+            item_ix: 10,
             offset_in_item: px(0.),
         });
         let rendered = Rc::new(Cell::new(0));
@@ -1796,16 +1872,88 @@ mod test {
 
         cx.draw(point(px(0.), px(0.)), size(px(100.), px(60.)), |_, cx| {
             cx.new(|_| TestView {
-                state,
+                state: state.clone(),
                 rendered: rendered.clone(),
                 positions: positions.clone(),
             })
             .into_any_element()
         });
 
-        assert_eq!(rendered.get(), 100);
+        rendered.set(0);
+        positions.borrow_mut().fill(None);
+        state.scroll_to(gpui::ListOffset {
+            item_ix: 50,
+            offset_in_item: px(0.),
+        });
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(60.)), |_, cx| {
+            cx.new(|_| TestView {
+                state: state.clone(),
+                rendered: rendered.clone(),
+                positions: positions.clone(),
+            })
+            .into_any_element()
+        });
+
+        assert!(rendered.get() < 100);
+        assert_eq!(positions.borrow()[10], Some(px(-800.)));
         assert_eq!(positions.borrow()[50], Some(px(0.)));
-        assert_eq!(positions.borrow()[0], Some(px(-1000.)));
+
+        rendered.set(0);
+        positions.borrow_mut().fill(None);
+        state.scroll_to(gpui::ListOffset {
+            item_ix: 10,
+            offset_in_item: px(0.),
+        });
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(60.)), |_, cx| {
+            cx.new(|_| TestView {
+                state: state.clone(),
+                rendered: rendered.clone(),
+                positions: positions.clone(),
+            })
+            .into_any_element()
+        });
+
+        assert!(rendered.get() < 100);
+        assert_eq!(positions.borrow()[10], Some(px(0.)));
+        assert_eq!(positions.borrow()[50], Some(px(800.)));
+    }
+
+    #[gpui::test]
+    fn active_text_selection_keeps_unvisited_rows_virtualized(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let state = ListState::new(100, crate::ListAlignment::Top, px(0.));
+        state.scroll_to(gpui::ListOffset {
+            item_ix: 50,
+            offset_in_item: px(0.),
+        });
+        let rendered = Rc::new(Cell::new(0));
+
+        struct TestView {
+            state: ListState,
+            rendered: Rc<Cell<usize>>,
+        }
+        impl Render for TestView {
+            fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                window.set_text_selection_active(true);
+                let rendered = self.rendered.clone();
+                list(self.state.clone(), move |_, _, _| {
+                    rendered.set(rendered.get() + 1);
+                    div().h(px(20.)).w_full().into_any()
+                })
+                .w_full()
+                .h_full()
+            }
+        }
+
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(60.)), |_, cx| {
+            cx.new(|_| TestView {
+                state,
+                rendered: rendered.clone(),
+            })
+            .into_any_element()
+        });
+
+        assert!(rendered.get() < 100);
     }
 
     #[gpui::test]
