@@ -48,6 +48,9 @@ pub struct Facts {
     /// The picture comes from Trek Driver: the cable's capture is off, so the iPhone shows its
     /// real clock (captured, it shows 9:41, on the phone too).
     pub driver_frames: bool,
+    /// The picture comes from CoreDevice's live screen share (`coredevice::live`): the cable's
+    /// capture is off for it too.
+    pub live_frames: bool,
     pub assistive: Option<bool>,
     /// Someone wants taps now (an agent holds the phone, or the user just tapped it): the lock
     /// step is then a thing to do, not just a state.
@@ -226,6 +229,7 @@ impl Facts {
     pub fn usb_live(&self) -> bool {
         let s = &self.status;
         self.driver_frames
+            || self.live_frames
             || (!s.screen.is_empty()
                 && s.frames > 0
                 && !s.dark
@@ -240,7 +244,10 @@ impl Facts {
             return self.passcode == Some(true);
         }
         let s = &self.status;
-        !self.driver_frames && !s.screen.is_empty() && (s.frames == 0 || s.dark)
+        !self.driver_frames
+            && !self.live_frames
+            && !s.screen.is_empty()
+            && (s.frames == 0 || s.dark)
     }
 
     /// Whether Bluetooth can't carry taps at all here.
@@ -300,6 +307,8 @@ impl Facts {
             chip("Screen", Tone::Good, "Live · Wi-Fi")
         } else if self.driver_frames {
             // The header says it's the cable; the picture is the driver's, with the real clock.
+            chip("Screen", Tone::Good, "Live")
+        } else if self.live_frames {
             chip("Screen", Tone::Good, "Live")
         } else if self.wifi {
             // No cable: the driver's picture is the one there is (and iPhone Mirroring's, above).
