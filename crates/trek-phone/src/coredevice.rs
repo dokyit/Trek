@@ -1050,6 +1050,7 @@ async fn launch(udid: &str, session: &mut Option<Session>, name: &str) -> Result
 
 /// The display service's screen-sharing session as Device Hub starts it: audio first, then video
 /// on the same session, each to a UDP port on the tunnel (kept bound while it runs).
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct AudioConfig {
     mode: Option<u32>,
@@ -1065,9 +1066,11 @@ struct StartedMedia {
     client: DisplayServiceClient<Box<dyn ReadWrite>>,
     audio: UdpSocketHandle,
     video: UdpSocketHandle,
+    #[cfg(target_os = "macos")]
     audio_config: Option<AudioConfig>,
 }
 
+#[cfg(target_os = "macos")]
 fn plist_u64(value: &plist::Value) -> Option<u64> {
     value.as_unsigned_integer().or_else(|| {
         value
@@ -1076,6 +1079,7 @@ fn plist_u64(value: &plist::Value) -> Option<u64> {
     })
 }
 
+#[cfg(target_os = "macos")]
 fn stream_config(value: &plist::Value) -> Option<&plist::Dictionary> {
     let dictionary = value.as_dictionary()?;
     if let Some(config) = dictionary
@@ -1087,6 +1091,7 @@ fn stream_config(value: &plist::Value) -> Option<&plist::Dictionary> {
     dictionary.values().find_map(stream_config)
 }
 
+#[cfg(target_os = "macos")]
 fn parse_audio_config(response: &plist::Value) -> Option<AudioConfig> {
     let config = stream_config(response)?;
     let number = |key: &str| config.get(key).and_then(plist_u64);
@@ -1142,7 +1147,10 @@ async fn start_media_stream(
         .start_media_stream(params)
         .await
         .map_err(|e| format!("The stream's audio: {e:?}"))?;
+    #[cfg(target_os = "macos")]
     let audio_config = parse_audio_config(&audio_response);
+    #[cfg(not(target_os = "macos"))]
+    drop(audio_response);
     let call = uuid::Uuid::new_v4().to_string().to_uppercase();
     let ssrc = uuid::Uuid::new_v4().as_u128() as u32;
     let offer = build_screen_video_offer(&call, &call_info, ssrc)
@@ -1167,6 +1175,7 @@ async fn start_media_stream(
         client,
         audio,
         video,
+        #[cfg(target_os = "macos")]
         audio_config,
     })
 }
@@ -1175,6 +1184,7 @@ async fn start_media_stream(
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn audio_response_stream_config_is_parsed_without_assuming_a_codec() {
         let mut config = plist::Dictionary::new();
@@ -1201,6 +1211,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn missing_or_unknown_audio_negotiation_remains_graceful() {
         assert_eq!(
