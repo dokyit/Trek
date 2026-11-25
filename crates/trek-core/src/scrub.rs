@@ -80,7 +80,12 @@ impl Scrubber {
                     let boundary = c.name("boundary").map_or("", |m| m.as_str());
                     let path = &c[0][..c[0].len() - boundary.len()];
                     let (_, tail) = separate_path_tail(path);
-                    format!("[path]{}{}", self.scrub(tail), boundary)
+                    // The permissive path matcher includes a separator after a path with spaces.
+                    // Keep that separator visible instead of running `[path]` into the next
+                    // already-scrubbed value (such as `[url]`).
+                    let path = path.trim_end_matches(char::is_whitespace);
+                    let gap = &c[0][path.len()..c[0].len() - boundary.len()];
+                    format!("[path]{}{}{}", self.scrub(tail), gap, boundary)
                 })
                 .into_owned();
         }
@@ -101,7 +106,15 @@ impl Scrubber {
                     }
                 }
                 let (path, tail) = separate_path_tail(path);
-                format!("{}{}{}", &c[1], unix_path(path, home), self.scrub(tail))
+                let trimmed = path.trim_end_matches(char::is_whitespace);
+                let gap = &path[trimmed.len()..];
+                format!(
+                    "{}{}{}{}",
+                    &c[1],
+                    unix_path(trimmed, home),
+                    self.scrub(tail),
+                    gap
+                )
             })
             .into_owned();
         text = WINDOWS_PATH
@@ -113,7 +126,15 @@ impl Scrubber {
                     }
                 }
                 let (path, tail) = separate_path_tail(path);
-                format!("{}{}{}", &c[1], windows_path(path, home), self.scrub(tail))
+                let trimmed = path.trim_end_matches(char::is_whitespace);
+                let gap = &path[trimmed.len()..];
+                format!(
+                    "{}{}{}{}",
+                    &c[1],
+                    windows_path(trimmed, home),
+                    self.scrub(tail),
+                    gap
+                )
             })
             .into_owned();
         text = HOME_PATH
@@ -141,7 +162,7 @@ impl Scrubber {
 
 static PRIVATE_KEY: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(
-        r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)|\A.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+        r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)|\A(?:[A-Za-z0-9+/=]{16,}\r?\n)+-----END [A-Z0-9 ]*PRIVATE KEY-----",
     )
     .unwrap()
 });
@@ -484,6 +505,10 @@ mod tests {
         assert_eq!(
             s.scrub("went to http://192.168.1.20:8080/admin, then"),
             "went to [url], then"
+        );
+        assert_eq!(
+            s.scrub("at /Users/me/private/file.rs https://private.example/path"),
+            "at ~/[path] [url]"
         );
         // A file address holds a path, and goes whole.
         assert_eq!(s.scrub("open file:///Users/me/taxes.pdf"), "open [url]");

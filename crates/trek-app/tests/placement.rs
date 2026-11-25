@@ -167,6 +167,9 @@ fn a_folder_argument_opens_as_a_project() {
         .unwrap();
         cx.run_until_parked();
         assert_eq!(answer.try_recv(), Ok(Ok(())));
+        assert!(cx.has_pending_prompt(), "a forwarded folder asks first");
+        cx.simulate_prompt_answer("Open");
+        trek.render(cx);
         assert!(is_project(&trek, cx, &second), "a forwarded one");
         assert!(
             matches!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: Some(p) } if p == second)

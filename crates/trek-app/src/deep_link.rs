@@ -52,6 +52,16 @@ pub fn open_folder(path: PathBuf, cx: &mut App) {
     open_link(Link::Folder(path), cx);
 }
 
+/// A folder named on Trek's own command line is the user's explicit request, unlike a folder
+/// handed over by another process through the single-instance socket.
+pub fn open_launch_folder(path: PathBuf, cx: &mut App) {
+    if !cx.has_global::<workspace::GlobalWorkspace>() || !path.is_dir() {
+        return;
+    }
+    let ws = workspace::workspace_global(cx);
+    ws.update(cx, |ws, cx| ws.add_project(path, cx));
+}
+
 fn open_link(link: Link, cx: &mut App) {
     // A thread link opens what's already Trek's own: the file checks below don't apply.
     if let Link::Thread(id) = &link {

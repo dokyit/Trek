@@ -375,7 +375,7 @@ pub fn hear(
     cx: &mut App,
 ) {
     for arg in own {
-        dispatch(arg, &ws, &links, cx);
+        dispatch_own(arg, &ws, &links, cx);
     }
     let Some(rx) = primary_forwarded else { return };
     // Weak: this loop waits on the pipe for as long as the app lives, and a handle it held would
@@ -509,6 +509,20 @@ fn dispatch(
             "single instance: ignored {what} ({} characters)",
             arg.chars().count()
         ),
+    }
+}
+
+/// This process's command-line folder is an explicit request by the person who launched Trek;
+/// only a handoff from the single-instance socket must obtain consent before adding a project.
+fn dispatch_own(
+    arg: String,
+    ws: &Entity<Workspace>,
+    links: &async_channel::Sender<String>,
+    cx: &mut App,
+) {
+    match classify(&arg) {
+        Arg::Folder(path) => crate::deep_link::open_launch_folder(path, cx),
+        _ => dispatch(arg, ws, links, cx),
     }
 }
 
