@@ -286,7 +286,7 @@ fn lines_of(path: &Path) -> Vec<String> {
     let _ = file.seek(std::io::SeekFrom::Start(from));
     let mut bytes = Vec::new();
     let _ = file.read_to_end(&mut bytes);
-    let text = String::from_utf8_lossy(&bytes);
+    let text = crate::scrub::redact_private_keys(&String::from_utf8_lossy(&bytes));
     let mut lines: Vec<String> = text.lines().map(clip).collect();
     // A cut-off first line is half a line.
     if from > 0 && !lines.is_empty() {

@@ -9774,6 +9774,7 @@ version = "0.4.66"
 dependencies = [
  "async-channel",
  "futures",
+ "getrandom 0.3.4",
  "idevice",
  "plist",
  "serde_json",

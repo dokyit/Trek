@@ -104,47 +104,6 @@ fn redact_item(item: Item, r: &Redact) -> Item {
 
 // ───────────────────────────── redaction ─────────────────────────────
 
-static PRIVATE_KEY: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(
-        r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(-----END [A-Z0-9 ]*PRIVATE KEY-----|$)",
-    )
-    .unwrap()
-});
-
-/// Tokens recognisable by their shape: Anthropic, OpenAI, GitHub, Slack, AWS, Google, GitLab,
-/// npm keys, and JSON web tokens.
-static TOKEN: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(concat!(
-        r"\b(?:sk-ant-[A-Za-z0-9_\-]{10,}",
-        r"|sk-(?:proj-|live-|test-)?[A-Za-z0-9_\-]{20,}",
-        r"|gh[pousr]_[A-Za-z0-9]{20,}",
-        r"|github_pat_[A-Za-z0-9_]{20,}",
-        r"|xox[abposr]-[A-Za-z0-9\-]{10,}",
-        r"|AKIA[0-9A-Z]{16}",
-        r"|AIza[0-9A-Za-z_\-]{35}",
-        r"|glpat-[A-Za-z0-9_\-]{20,}",
-        r"|npm_[A-Za-z0-9]{36}",
-        r"|eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,})",
-    ))
-    .unwrap()
-});
-
-static BEARER: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"(?i)\b(bearer|token|basic)(\s+)[A-Za-z0-9._~+/\-]{16,}=*").unwrap()
-});
-
-/// `API_KEY=…`, `"password": "…"`, `client_secret: …`: the name stays, the value goes.
-static ASSIGNED: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(
-        r#"(?i)\b([A-Za-z0-9_\-]*(?:api[_\-]?key|secret|token|passw(?:or)?d|access[_\-]?key|private[_\-]?key)[A-Za-z0-9_\-]*)("?\s*[:=]\s*)(["']?)([^\s"'`,;]{8,})"#,
-    )
-    .unwrap()
-});
-
-/// `https://user:password@host`.
-static URL_CREDENTIALS: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"\b([a-z][a-z0-9+.\-]*://)[^\s/:@]+:[^\s/@]+@").unwrap());
-
 /// An absolute path of two or more parts, where a path can start: `/Users/me/x.rs`, and on
 /// Windows `C:\Users\me\x.rs`. URLs (`https://a/b`) aren't, as their `//` starts no part.
 static UNIX_PATH: LazyLock<regex::Regex> = LazyLock::new(|| {
@@ -161,33 +120,13 @@ static WINDOWS_PATH: LazyLock<regex::Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
-const REDACTED: &str = "[redacted]";
-
 /// `text` with keys and tokens taken out and paths shortened (see `Redact`).
 pub fn redact_text(text: &str, r: &Redact) -> String {
     let text = redact_secrets(text);
     redact_paths(&text, r)
 }
 
-/// `text` without what looks like a private key, an API key or token, or a password.
-pub fn redact_secrets(text: &str) -> String {
-    let text = PRIVATE_KEY.replace_all(text, "[redacted private key]");
-    let text = URL_CREDENTIALS.replace_all(&text, "${1}[redacted]@");
-    let text = TOKEN.replace_all(&text, REDACTED);
-    let text = BEARER.replace_all(&text, "${1}${2}[redacted]");
-    let text = ASSIGNED.replace_all(&text, |c: &regex::Captures| {
-        let value = &c[4];
-        // A word ("token: the next one") isn't a secret: a value with a digit, or a long one, is.
-        let secret = value != REDACTED
-            && (value.chars().any(|ch| ch.is_ascii_digit()) || value.chars().count() >= 16);
-        if secret {
-            format!("{}{}{}{REDACTED}", &c[1], &c[2], &c[3])
-        } else {
-            c[0].to_string()
-        }
-    });
-    text.into_owned()
-}
+pub use trek_core::scrub::redact_secrets;
 
 /// `text` with the home folder as `~` and absolute paths outside the project as `…/name`.
 pub fn redact_paths(text: &str, r: &Redact) -> String {

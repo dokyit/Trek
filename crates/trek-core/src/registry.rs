@@ -611,6 +611,12 @@ impl AddedAgent {
                 } else {
                     v.value.clone()
                 };
+                if v.secret {
+                    crate::session_secrets::remember(
+                        &format!("{} env {}", self.id, v.name),
+                        &value,
+                    );
+                }
                 Some((v.name.clone(), value))
             })
             .collect()

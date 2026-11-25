@@ -27,6 +27,132 @@ fn editing(path: &PathBuf) -> impl Fn(&Route) -> bool + '_ {
     move |r| matches!(r, Route::Editor { path: p } if p == path)
 }
 
+/// Exercise the same parsed frame the tokenless single-instance socket dispatches.
+fn handoff(trek: &common::Trek, cx: &mut gpui_kit::TestAppContext, path: &std::path::Path) {
+    let frame = trek_ipc::instance::Open {
+        args: vec![path.display().to_string()],
+        background: true,
+    }
+    .to_frame();
+    let request = trek_ipc::instance::Open::parse(&frame).unwrap();
+    let (links, _) = async_channel::unbounded();
+    cx.update(|cx| trek_app::single_instance::take(request, &trek.ws, &links, cx));
+    trek.render(cx);
+}
+
+#[test]
+fn a_handed_over_folder_cannot_make_links_trusted_without_approval() {
+    run(async |cx| {
+        let trek = open(cx);
+        let elsewhere = new_project("untrusted-handoff");
+        let file = elsewhere.join("a.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let projects = trek.read(cx, |ws, _| ws.settings.user_projects.clone());
+
+        handoff(&trek, cx, &elsewhere);
+        assert!(cx.has_pending_prompt(), "even background requests ask");
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.settings.user_projects.clone()),
+            projects
+        );
+        cx.simulate_prompt_answer("Cancel");
+        trek.render(cx);
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.settings.user_projects.clone()),
+            projects
+        );
+        assert!(!trek.read(cx, |ws, _| ws.projects.iter().any(|p| p.path == elsewhere)));
+
+        // The exploit's second step still needs permission after the folder was refused.
+        for action in ["edit", "ask"] {
+            let url = format!("trek://{action}?path={}&selection=x", file.display());
+            cx.update(|cx| trek_app::deep_link::open(&url, cx));
+            trek.render(cx);
+            assert!(cx.has_pending_prompt());
+            cx.simulate_prompt_answer("Cancel");
+            trek.render(cx);
+        }
+
+        handoff(&trek, cx, &elsewhere);
+        cx.simulate_prompt_answer("Open");
+        trek.render(cx);
+        assert!(trek.read(cx, |ws, _| {
+            ws.settings
+                .user_projects
+                .contains(&elsewhere.display().to_string())
+        }));
+        cx.update(|cx| {
+            trek_app::deep_link::open(&format!("trek://edit?path={}", file.display()), cx)
+        });
+        trek.render(cx);
+        assert!(!cx.has_pending_prompt());
+        assert!(trek.read(cx, |ws, _| editing(&file)(&ws.route)));
+    });
+}
+
+#[test]
+fn handed_over_trusted_folders_and_files_still_open_without_a_token() {
+    run(async |cx| {
+        let trek = open(cx);
+        handoff(&trek, cx, &trek.project);
+        assert!(!cx.has_pending_prompt());
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.route.clone()),
+            Route::Draft {
+                project: Some(trek.project.clone())
+            }
+        );
+        let file = trek.project.join("opened.rs");
+        std::fs::write(&file, "\n").unwrap();
+        handoff(&trek, cx, &file);
+        assert!(!cx.has_pending_prompt());
+        assert!(trek.read(cx, |ws, _| editing(&file)(&ws.route)));
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn handed_over_folders_cannot_escape_trust_through_a_symlink_or_parent() {
+    run(async |cx| {
+        let trek = open(cx);
+        let elsewhere = new_project("handoff-elsewhere");
+        let link = trek.project.join("out");
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+        let climbing = trek.project.join("..").join(elsewhere.file_name().unwrap());
+        for path in [link, climbing] {
+            handoff(&trek, cx, &path);
+            assert!(cx.has_pending_prompt());
+            cx.simulate_prompt_answer("Cancel");
+            trek.render(cx);
+            assert!(!trek.read(cx, |ws, _| {
+                ws.settings
+                    .user_projects
+                    .contains(&path.display().to_string())
+            }));
+        }
+    });
+}
+
+#[test]
+fn a_handed_over_folder_must_still_be_a_folder_after_approval() {
+    run(async |cx| {
+        let trek = open(cx);
+        let elsewhere = new_project("handoff-gone");
+        let projects = trek.read(cx, |ws, _| ws.settings.user_projects.clone());
+        handoff(&trek, cx, &elsewhere);
+        assert!(cx.has_pending_prompt());
+        std::fs::remove_dir_all(&elsewhere).unwrap();
+        std::fs::write(&elsewhere, "now a file").unwrap();
+        cx.simulate_prompt_answer("Open");
+        trek.render(cx);
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.settings.user_projects.clone()),
+            projects
+        );
+        std::fs::remove_file(&elsewhere).unwrap();
+    });
+}
+
 #[test]
 fn a_link_to_a_file_outside_the_projects_asks_first() {
     run(async |cx| {

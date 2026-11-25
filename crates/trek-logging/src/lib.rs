@@ -291,8 +291,8 @@ fn executable_image() -> Option<(String, String, usize)> {
 }
 
 /// What a panic leaves for the next launch to report, if the user said yes to crash reports
-/// (`trek-telemetry`). Secrets agents were given this run are already out of it; paths and the
-/// rest are taken out before it's sent.
+/// (`trek-telemetry`). Paths, URLs, emails and secrets are scrubbed before it is written,
+/// then scrubbed again before it is sent.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CrashReport {
     /// When, in seconds since 1970 (UTC).
@@ -313,15 +313,30 @@ fn crash_reports_dir(data_dir: &Path) -> PathBuf {
 }
 
 fn write_crash_report(data_dir: &Path, mut report: CrashReport) {
-    // Not `known()`: this may be the thread that's changing the list, and would wait forever.
-    if let Some(secrets) = trek_core::session_secrets::try_known() {
-        for text in [
-            &mut report.message,
-            &mut report.backtrace,
-            &mut report.location,
-        ] {
-            trek_core::session_secrets::scrub_string(text, &secrets);
-        }
+    // Not `known()`: this may be the thread changing the list. If it is locked, don't
+    // persist a report whose session secrets we couldn't remove.
+    let Some(secrets) = trek_core::session_secrets::try_known() else {
+        return;
+    };
+    let scrubber = trek_core::scrub::Scrubber::new(
+        Some(trek_core::paths::home().display().to_string()),
+        vec![
+            (data_dir.display().to_string(), "[Trek data]"),
+            (log_dir().display().to_string(), "[Trek logs]"),
+        ],
+        &[],
+        secrets.as_ref().clone(),
+        trek_core::scrub::redact_secrets,
+    );
+    report.message = trek_core::scrub::without_quoted_text(&report.message);
+    for text in [
+        &mut report.message,
+        &mut report.backtrace,
+        &mut report.location,
+        &mut report.thread,
+        &mut report.version,
+    ] {
+        *text = scrubber.scrub(text);
     }
     let dir = crash_reports_dir(data_dir);
     let Ok(json) = serde_json::to_string_pretty(&report) else {
@@ -455,6 +470,9 @@ impl DailyFile {
         if STOPPED.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(());
         }
+        let text = String::from_utf8_lossy(buf);
+        let cleaned = scrub_log_line(&text);
+        let buf = cleaned.as_bytes();
         let today = chrono::Local::now().date_naive();
         let day = today.format("%Y-%m-%d").to_string();
         let mut current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
@@ -471,6 +489,24 @@ impl DailyFile {
             None => Ok(()),
         }
     }
+}
+
+/// A log line with the secrets agents were given this run taken out, and any private key
+/// removed. Paths, emails and web addresses stay: the file is local, and they make it useful.
+fn scrub_log_line(text: &str) -> std::borrow::Cow<'_, str> {
+    let secrets = trek_core::session_secrets::try_known();
+    let has_secret = secrets.as_ref().is_some_and(|s| !s.is_empty());
+    if !has_secret && !text.contains("PRIVATE KEY") {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = text.to_string();
+    if let Some(secrets) = secrets {
+        out = trek_core::session_secrets::scrub(&out, &secrets).into_owned();
+    }
+    if out.contains("PRIVATE KEY") {
+        out = trek_core::scrub::redact_private_keys(&out);
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 struct LogWriter(&'static DailyFile);
@@ -689,6 +725,31 @@ pub mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn log_files_hold_no_known_secret_or_private_key() {
+        let dir = scratch();
+        let secret = "log-file-secret-value";
+        trek_core::session_secrets::remember("TOKEN", secret);
+        let f: &'static DailyFile = Box::leak(Box::new(DailyFile::open(dir.clone()).unwrap()));
+        f.writer()
+            .write_all(
+                format!(
+                    "agent printed {secret} and\n-----BEGIN RSA PRIVATE KEY-----\nbody\n-----END RSA PRIVATE KEY-----\nafter\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let day = chrono::Local::now().format("%Y-%m-%d");
+        let text = std::fs::read_to_string(dir.join(format!("trek-{day}.log"))).unwrap();
+        assert!(!text.contains(secret), "{text}");
+        assert!(!text.contains("body"), "{text}");
+        assert!(
+            text.contains("[TOKEN hidden]") && text.contains("after"),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[cfg(test)]
     fn report(at: i64, message: &str) -> CrashReport {
         CrashReport {
@@ -717,6 +778,60 @@ pub mod tests {
         );
         assert_eq!(take_crash_reports(&dir).len(), 2);
         assert_eq!(crash_reports(&dir), vec![]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn crash_report_files_are_scrubbed_before_the_next_launch() {
+        let dir = scratch();
+        let sensitive = "me@example.com /Users/alice/private/file.rs https://private.example/secret https://api.openai.com/v1/messages?key=private sk-proj-1234567890abcdefghijklmnop";
+        let mut crash = report(100, sensitive);
+        crash.thread = sensitive.into();
+        crash.location = sensitive.into();
+        crash.backtrace = sensitive.into();
+        write_crash_report(&dir, crash);
+        let raw = std::fs::read_to_string(&crash_report_files(&dir)[0]).unwrap();
+        for secret in [
+            "me@example.com",
+            "alice",
+            "file.rs",
+            "private.example",
+            "messages",
+            "1234567890",
+        ] {
+            assert!(!raw.contains(secret), "{secret} survived in {raw}");
+        }
+        let saved = crash_reports(&dir).pop().unwrap();
+        for text in [saved.message, saved.thread, saved.location, saved.backtrace] {
+            assert_eq!(
+                text,
+                "[email] [path] [url] https://api.openai.com [redacted]"
+            );
+        }
+        write_crash_report(
+            &dir,
+            report(101, "panic in `private words from a document`"),
+        );
+        assert_eq!(crash_reports(&dir)[1].message, "panic in `[text]`");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_crash_report_scrubs_a_secret_while_the_registry_is_contended() {
+        let dir = scratch();
+        let secret = "crash-contention-secret";
+        trek_core::session_secrets::remember("TOKEN", secret);
+        let writer = std::thread::spawn(|| {
+            for n in 0..1000 {
+                trek_core::session_secrets::remember("TOKEN", &format!("other-secret-{n}"));
+            }
+        });
+        write_crash_report(&dir, report(101, &format!("panic contains {secret}")));
+        writer.join().unwrap();
+        let saved = crash_reports(&dir);
+        assert_eq!(saved.len(), 1);
+        assert!(!saved[0].message.contains(secret), "{:?}", saved[0].message);
+        assert!(saved[0].message.contains("hidden"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

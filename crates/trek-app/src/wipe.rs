@@ -69,10 +69,11 @@ pub fn request(ws: &Workspace) -> Request {
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut files = vec![];
     // WebKit keeps the Browser's data by the app's bundle id, in folders of the system's naming.
+    // Any Trek bundle id counts (a dev or nightly build), not only the release one.
     #[cfg(target_os = "macos")]
     if let (false, Some(id)) = (
         paths::moved(),
-        bundle_id().filter(|id| id == "dev.trek.Trek"),
+        bundle_id().filter(|id| id.to_ascii_lowercase().contains("trek")),
     ) {
         let library = paths::home().join("Library");
         roots.push(root(
@@ -98,6 +99,24 @@ pub fn request(ws: &Workspace) -> Request {
         files.push(root(
             library.join("Preferences").join(format!("{id}.plist")),
             "The system's preferences file for Trek",
+        ));
+    }
+    // The iPhone updater runs from a LaunchAgent of its own, outside the data folder: its
+    // folder (a copy of the script, and the iPhone's name and version), the agent, and its log.
+    #[cfg(target_os = "macos")]
+    if !paths::isolated() {
+        let home = paths::home();
+        roots.push(root(
+            home.join("Library/Application Support/dev.trek.phone-update"),
+            "The iPhone updater's folder: its copy of the script, and what it last installed",
+        ));
+        files.push(root(
+            home.join("Library/LaunchAgents/dev.trek.phone-update.plist"),
+            "The iPhone updater's schedule",
+        ));
+        files.push(root(
+            home.join("Library/Logs/trek-phone-update.log"),
+            "The iPhone updater's log",
         ));
     }
     let mut kept = vec![

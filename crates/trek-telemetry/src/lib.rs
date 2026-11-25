@@ -44,6 +44,8 @@ pub struct Batch {
     pub body: Value,
     /// The queued events it carries (none for feedback, which isn't queued).
     pub items: Vec<Queued>,
+    /// Revoked when the consent/identity under which this batch was taken changes.
+    permission: Option<tokio::sync::watch::Receiver<u64>>,
 }
 
 /// What Settings › Privacy shows.
@@ -78,6 +80,7 @@ pub struct Telemetry {
     dirty: bool,
     /// The setup as the app last described it, for the day's `setup`.
     setup: Option<event::Setup>,
+    permission: tokio::sync::watch::Sender<u64>,
 }
 
 impl Telemetry {
@@ -97,6 +100,7 @@ impl Telemetry {
             last_error: None,
             dirty: false,
             setup: None,
+            permission: tokio::sync::watch::channel(0).0,
         }
     }
 
@@ -141,6 +145,7 @@ impl Telemetry {
         if yes {
             self.install_id();
         } else {
+            self.cancel_pending();
             // A no stops what was waiting too.
             self.queue.clear();
             self.state.counts.clear();
@@ -155,6 +160,7 @@ impl Telemetry {
     pub fn set_totals(&mut self, yes: bool) {
         self.state.totals = if yes { Consent::Yes } else { Consent::No };
         if !yes {
+            self.cancel_pending();
             self.state.tokens.clear();
             for day in self.state.counts.values_mut() {
                 day.retain(|key, _| !key.starts_with("action:"));
@@ -222,6 +228,7 @@ impl Telemetry {
     /// A new install id: nothing sent from now on can be tied to what was sent before. What was
     /// waiting under the old one goes unsent.
     pub fn reset_install_id(&mut self) {
+        self.cancel_pending();
         self.state.install_id = Some(uuid::Uuid::new_v4().to_string());
         self.queue.clear();
         self.files.save_queue(&self.queue);
@@ -265,8 +272,8 @@ impl Telemetry {
         if !self.state.install_sent && self.enqueue(&Event::Install { set_up_before }, at) {
             self.state.install_sent = true;
         }
-        // Unanswered, they wait for the answer; answered, they're sent or not wanted.
-        if self.state.consent != Consent::Unasked {
+        // Keep crashes until they can be queued. A no explicitly discards them, even keyless.
+        if self.state.consent == Consent::No || self.sending() {
             for mut crash in trek_logging::take_crash_reports(&self.data_dir) {
                 crash.message = scrubber.scrub(&scrub::without_quoted_text(&crash.message));
                 crash.location = scrubber.scrub(&crash.location);
@@ -407,6 +414,7 @@ impl Telemetry {
             url: format!("{}/batch/", key.host),
             body: event::batch_body(&key.key, events),
             items,
+            permission: Some(self.permission.subscribe()),
         })
     }
 
@@ -415,8 +423,21 @@ impl Telemetry {
         self.sending().then(|| self.queue.next_due()).flatten()
     }
 
+    /// Cancel requests already taken from the queue, including across a quick no/yes toggle.
+    fn cancel_pending(&mut self) {
+        self.permission
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
     /// What became of `batch`.
     pub fn settle(&mut self, batch: Batch, outcome: &Outcome, now: i64) {
+        if batch
+            .permission
+            .as_ref()
+            .is_some_and(|p| p.has_changed().unwrap_or(true))
+        {
+            return;
+        }
         match outcome {
             Outcome::Sent => {
                 self.record_sent(&batch, now);
@@ -473,6 +494,7 @@ impl Telemetry {
             url: format!("{}/batch/", key.host),
             body: event::batch_body(&key.key, vec![envelope]),
             items: vec![],
+            permission: None,
         })
     }
 

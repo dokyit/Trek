@@ -46,6 +46,13 @@ static STOPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::n
 /// again on the way out.
 pub fn stop() {
     STOPPED.store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Some(global) = GLOBAL.get() {
+        global
+            .telemetry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .cancel_pending();
+    }
 }
 
 fn with<R>(f: impl FnOnce(&mut Telemetry) -> R) -> Option<R> {
@@ -133,7 +140,9 @@ async fn run() {
             t.save_if_changed();
         });
         while let Some(batch) = with(|t| t.take_batch(now())).flatten() {
-            let outcome = post(&client, &batch).await;
+            let Some(outcome) = post_usage(&batch, post(&client, &batch)).await else {
+                break;
+            };
             with(|t| t.settle(batch, &outcome, now()));
             changed();
             if outcome != Outcome::Sent {
@@ -147,6 +156,18 @@ async fn run() {
             _ = tokio::time::sleep(Duration::from_secs(wait as u64)) => {}
             _ = global.wake.notified() => {}
         }
+    }
+}
+
+/// Dropping the HTTP future cancels an in-flight request. Check revocation first even when
+/// both branches are ready, and subscribe when taking the batch so no change can be missed.
+/// Bytes already transmitted cannot be recalled from the server.
+async fn post_usage<T>(batch: &Batch, send: impl std::future::Future<Output = T>) -> Option<T> {
+    let mut permission = batch.permission.clone()?;
+    tokio::select! {
+        biased;
+        _ = permission.changed() => None,
+        outcome = send => Some(outcome),
     }
 }
 

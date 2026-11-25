@@ -201,6 +201,18 @@ pub(crate) fn not_installed(name: &str, key: &str) -> String {
     }
 }
 
+/// Keep Trek's own channel variables out of an agent process's environment. They belong to the
+/// MCP servers Trek starts for the session, never to the agent (or anything it spawns).
+pub(crate) fn strip_channel_env(cmd: &mut tokio::process::Command) {
+    for name in [
+        trek_ipc::ENV_SOCKET,
+        trek_ipc::ENV_TOKEN,
+        trek_ipc::ENV_SESSION,
+    ] {
+        cmd.env_remove(name);
+    }
+}
+
 /// `{name: {…}, ...}` for a set of servers, as `agent` can start them, and the notices for the
 /// ones it can't (left out). The user's own settings are never changed, only what's handed over.
 pub(crate) fn mcp_servers_json(

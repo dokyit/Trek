@@ -46,6 +46,12 @@ pub fn open_file(path: PathBuf, cx: &mut App) {
     open_link(Link::Edit { path, line: None }, cx);
 }
 
+/// A folder from another launch is untrusted input too: adding it makes subsequent file
+/// links trusted. Keep the tokenless OS handoff, but ask before granting that trust.
+pub fn open_folder(path: PathBuf, cx: &mut App) {
+    open_link(Link::Folder(path), cx);
+}
+
 fn open_link(link: Link, cx: &mut App) {
     // A thread link opens what's already Trek's own: the file checks below don't apply.
     if let Link::Thread(id) = &link {
@@ -75,14 +81,27 @@ fn open_link(link: Link, cx: &mut App) {
     let Some(main) = ws.read(cx).main_window else {
         return;
     };
-    let detail = format!(
-        "{}\n\nThis isn't in one of your projects. Opening it reads the folder with git and may start a language server there. Only open files from folders you trust.",
-        link.path().display()
-    );
+    let (title, detail) = if matches!(link, Link::Folder(_)) {
+        (
+            "Open a folder from another application?",
+            format!(
+                "{}\n\nThis isn't in one of your projects. Adding it lets Trek read the folder with git and open files and links there without asking again. It may start a language server. Only add folders you trust.",
+                link.path().display()
+            ),
+        )
+    } else {
+        (
+            "Open a file from a link?",
+            format!(
+                "{}\n\nThis isn't in one of your projects. Opening it reads the folder with git and may start a language server there. Only open files from folders you trust.",
+                link.path().display()
+            ),
+        )
+    };
     let answer = main.update(cx, |_, window, cx| {
         window.prompt(
             PromptLevel::Warning,
-            "Open a file from a link?",
+            title,
             Some(&detail),
             &["Open", "Cancel"],
             cx,
@@ -101,6 +120,12 @@ fn open_link(link: Link, cx: &mut App) {
 /// said, not opened as an empty editor. Asked only of a path the user's projects hold or the user
 /// agreed to open.
 fn follow_if_there(link: Link, cx: &mut App) {
+    if matches!(link, Link::Folder(_)) && !link.path().is_dir() {
+        return refuse(
+            format!("There's no folder at {} any more.", link.path().display()),
+            cx,
+        );
+    }
     if !link.path().exists() {
         return refuse(
             format!("There's no file at {} any more.", link.path().display()),
@@ -126,6 +151,7 @@ fn follow(link: Link, cx: &mut App) {
     match link {
         // Answered before `follow` runs (`open_link`); it needs no file checks.
         Link::Thread(id) => open_thread(&id, cx),
+        Link::Folder(path) => ws.update(cx, |ws, cx| ws.add_project(path, cx)),
         Link::Edit { path, line } => {
             // The window has to exist before the event it hears goes out.
             crate::root::show_main(ws.clone(), cx);
@@ -205,6 +231,7 @@ fn within(roots: &[PathBuf], path: &Path, real: impl Fn(&Path) -> Option<PathBuf
 }
 
 enum Link {
+    Folder(PathBuf),
     Edit {
         path: PathBuf,
         line: Option<u32>,
@@ -222,7 +249,7 @@ enum Link {
 impl Link {
     fn path(&self) -> &Path {
         match self {
-            Link::Edit { path, .. } | Link::Ask { path, .. } => path,
+            Link::Folder(path) | Link::Edit { path, .. } | Link::Ask { path, .. } => path,
             // Checked before it's asked: it carries no path.
             Link::Thread(_) => unreachable!(),
         }

@@ -17,6 +17,16 @@ pub enum McpCheck {
     Failed(String),
 }
 
+/// Whether `name` is one of Trek's own channel variables. A server the user configured must
+/// never be handed them: the token lets a process act as that session (`request_secret`, sub-
+/// agents), so a pasted or agent-written config could otherwise read it from its own env.
+fn is_trek_channel(name: &str) -> bool {
+    matches!(
+        name,
+        trek_ipc::ENV_SOCKET | trek_ipc::ENV_TOKEN | trek_ipc::ENV_SESSION
+    )
+}
+
 /// `s` as a session is given it, its tokens read back from the Keychain (one that's gone isn't
 /// sent).
 pub fn mcp_server_of(s: &McpServerConfig) -> McpServer {
@@ -26,7 +36,10 @@ pub fn mcp_server_of(s: &McpServerConfig) -> McpServer {
             s.name.clone(),
             s.command.clone(),
             s.args.clone(),
-            s.resolved_env(),
+            s.resolved_env()
+                .into_iter()
+                .filter(|(name, _)| !is_trek_channel(name))
+                .collect(),
         ),
     }
 }
@@ -82,5 +95,34 @@ impl Workspace {
             });
         });
         self.keep(task);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trek_core::settings::McpEnvVar;
+
+    fn env(name: &str, value: &str) -> McpEnvVar {
+        McpEnvVar {
+            name: name.into(),
+            value: value.into(),
+            secret: false,
+        }
+    }
+
+    #[test]
+    fn a_users_mcp_server_is_never_handed_treks_channel_token() {
+        let mut server = McpServerConfig::stdio("pasted", "/bin/true", vec![]);
+        server.env = vec![
+            env(trek_ipc::ENV_TOKEN, "stolen-token"),
+            env(trek_ipc::ENV_SOCKET, "/tmp/stolen"),
+            env(trek_ipc::ENV_SESSION, "stolen-session"),
+            env("KEEP", "yes"),
+        ];
+        assert_eq!(
+            mcp_server_of(&server).env(),
+            [("KEEP".to_string(), "yes".to_string())]
+        );
     }
 }
