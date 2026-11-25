@@ -30,6 +30,10 @@ video-toolbox = { version = "0.3.1", optional = true }
 core-media = { version = "0.8", optional = true }
 core-video = { version = "0.6", optional = true }
 core-foundation = { version = "0.10", optional = true }
+# Apple's AAC-ELD decoder and bounded PCM playback for the CoreDevice live stream.
+# MIT/Zlib/Apache-2.0 licensed generated bindings; only the two AudioToolbox APIs used here.
+objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = ["AudioConverter", "AudioQueue", "objc2-core-audio-types", "objc2-core-foundation"], optional = true }
+objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["CoreAudioBaseTypes"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
 # Whether Apple Mobile Device Service is installed and running, when usbmuxd doesn't answer.
@@ -60,6 +64,8 @@ coredevice = [
     "dep:core-media",
     "dep:core-video",
     "dep:core-foundation",
+    "dep:objc2-audio-toolbox",
+    "dep:objc2-core-audio-types",
 ]
 
 [[example]]

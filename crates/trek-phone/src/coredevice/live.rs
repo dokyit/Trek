@@ -4,14 +4,15 @@
 //! `VTDecompressionSession` to BGRA frames. The media session is the one touches already start;
 //! while it runs taps ride it too, and dropping `Live` asks the worker to stop it.
 
-use super::{Ask, Media, Session, WORKERS};
+mod audio;
+
+use super::{Ask, Media, Session, StartedMedia, WORKERS};
 use core_foundation::base::TCFType as _;
 use core_media::format_description::TCMFormatDescription as _;
 use idevice::core_device::{
     HevcDepacketizer, ReportBlock, RtpPacket, build_frame_ack, build_keyframe_request,
     build_liveness, build_rctl, is_rtcp,
 };
-use idevice::tcp::handle::UdpSocketHandle;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,6 +42,13 @@ pub enum LiveEvent {
 pub struct Live {
     frames: Receiver<LiveFrame>,
     udid: String,
+    generation: u64,
+}
+
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn is_current_generation(current: Option<u64>, requested: u64) -> bool {
+    current == Some(requested)
 }
 
 impl Live {
@@ -63,7 +71,7 @@ impl Drop for Live {
             .as_ref()
             .and_then(|workers| workers.get(&self.udid).cloned());
         if let Some(worker) = worker {
-            let _ = worker.send(Ask::LiveStop(reply));
+            let _ = worker.send(Ask::LiveStop(self.generation, reply));
         }
     }
 }
@@ -76,54 +84,107 @@ pub(super) async fn start(udid: &str, session: &mut Option<Session>) -> Result<L
     if s.media.is_some() {
         return Err("The iPhone's screen is already live.".into());
     }
-    let (client, audio, video) = super::start_media_stream(&mut s.adapter, &mut s.rsd).await?;
-    // The audio stream exists to open the screen-sharing session; its RTP is dropped unread
-    // (the port unbinds with the socket).
-    drop(audio);
+    let started = super::start_media_stream(&mut s.adapter, &mut s.rsd).await?;
     let (frames, rx) = channel();
-    let stop = Arc::new(tokio::sync::Notify::new());
+    let (cancel, stopped) = tokio::sync::oneshot::channel();
     let our_ssrc = uuid::Uuid::new_v4().as_u128() as u32;
-    tokio::spawn(receive_loop(video, frames, stop.clone(), our_ssrc));
-    s.media = Some(Media { client, stop });
+    let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    let receiver = tokio::spawn(receive_loop(started, frames, stopped, our_ssrc));
+    s.media = Some(Media {
+        cancel: Some(cancel),
+        receiver,
+        generation,
+    });
     Ok(Live {
         frames: rx,
         udid: udid.to_string(),
+        generation,
     })
 }
 
 /// Stop the session's media stream, if one runs: end the receive loop, then stop the stream on
 /// the display service.
-pub(super) async fn stop(session: &mut Option<Session>) {
-    let Some(media) = session.as_mut().and_then(|s| s.media.take()) else {
+pub(super) async fn stop(session: &mut Option<Session>, generation: u64) {
+    let Some(s) = session.as_mut() else {
         return;
     };
-    media.stop.notify_one();
-    let mut client = media.client;
-    let _ = client.stop_media_stream().await;
+    if !is_current_generation(s.media.as_ref().map(|media| media.generation), generation) {
+        return;
+    }
+    let Some(mut media) = s.media.take() else {
+        return;
+    };
+    if let Some(cancel) = media.cancel.take() {
+        let _ = cancel.send(());
+    }
+    // The receiver bounds its own display-service stop at two seconds; leave a little room for
+    // the task to observe cancellation and finish that cleanup before forcing it down.
+    if tokio::time::timeout(Duration::from_secs(3), &mut media.receiver)
+        .await
+        .is_err()
+    {
+        media.receiver.abort();
+        let _ = (&mut media.receiver).await;
+    }
 }
 
 /// The receive loop, on the phone worker's runtime: RTP in, decoded frames out, the RTCP Apple's
 /// encoder expects back (RCTL about every 50ms, a liveness report every few seconds, a keyframe
 /// request until the first frame, a frame ACK per decoded frame).
 async fn receive_loop(
-    video: UdpSocketHandle,
+    started_media: StartedMedia,
     frames: Sender<LiveFrame>,
-    stop: Arc<tokio::sync::Notify>,
+    mut stop: tokio::sync::oneshot::Receiver<()>,
     our_ssrc: u32,
 ) {
+    let StartedMedia {
+        mut client,
+        audio: audio_socket,
+        video,
+        audio_config,
+    } = started_media;
     let mut stream = Stream::new(frames, our_ssrc);
+    let mut audio = audio_config.and_then(audio::AudioStream::new);
     let mut peer_port = None;
     let mut fir_seq = 0u8;
     let started = Instant::now();
     let mut rctl_at = Instant::now();
     let mut liveness_at = Instant::now();
     let mut keyframe_at = Instant::now();
+    let mut audio_rr = tokio::time::interval(Duration::from_secs(1));
+    audio_rr.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        let datagram = tokio::select! {
-            _ = stop.notified() => break,
-            dg = video.recv() => dg,
+        enum Input {
+            Video(idevice::tcp::adapter::UdpDatagram),
+            Audio(idevice::tcp::adapter::UdpDatagram),
+            Rr,
+        }
+        let input = tokio::select! {
+            _ = &mut stop => break,
+            dg = video.recv() => match dg { Ok(dg) => Input::Video(dg), Err(_) => break },
+            dg = audio_socket.recv(), if audio.is_some() => match dg { Ok(dg) => Input::Audio(dg), Err(_) => { audio = None; continue } },
+            _ = audio_rr.tick(), if audio.is_some() => Input::Rr,
         };
-        let Ok(dg) = datagram else { break };
+        let dg = match input {
+            Input::Audio(dg) => {
+                if audio
+                    .as_mut()
+                    .is_some_and(|playback| playback.push(&dg.data).is_err())
+                {
+                    audio = None;
+                }
+                continue;
+            }
+            Input::Rr => {
+                if let Some(playback) = audio.as_ref() {
+                    let _ = audio_socket
+                        .send_to(playback.source_port(), playback.receiver_report())
+                        .await;
+                }
+                continue;
+            }
+            Input::Video(dg) => dg,
+        };
         peer_port.get_or_insert(dg.source_port);
         if is_rtcp(&dg.data) {
             continue;
@@ -160,6 +221,10 @@ async fn receive_loop(
             }
         }
     }
+    // This task owns the entire native/media lifetime, including an orderly stop. When the
+    // surrounding Session itself is discarded, Media::drop aborts this task instead so an old
+    // session can never race a replacement with a late stopAll.
+    let _ = tokio::time::timeout(Duration::from_secs(2), client.stop_media_stream()).await;
 }
 
 /// The stream's state between datagrams: depacketizer, access-unit splitter, decoder, RTCP.
@@ -670,5 +735,12 @@ mod tests {
         for (header, want) in [(0x40u8, 32), (0x42, 33), (0x44, 34), (0x02, 1)] {
             assert_eq!(nal_type(header), want, "{header:#x}");
         }
+    }
+
+    #[test]
+    fn only_the_current_generation_can_stop_a_live_session() {
+        assert!(is_current_generation(Some(7), 7));
+        assert!(!is_current_generation(Some(8), 7));
+        assert!(!is_current_generation(None, 7));
     }
 }

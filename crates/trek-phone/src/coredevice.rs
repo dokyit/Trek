@@ -32,8 +32,6 @@ use idevice::tcp::handle::{AdapterHandle, UdpSocketHandle};
 use idevice::{IdeviceService, ReadWrite, RsdService};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "macos")]
-use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc::{Sender, channel};
 use std::time::Duration;
@@ -422,7 +420,7 @@ enum Ask {
     #[cfg(target_os = "macos")]
     Live(Reply<live::Live>),
     #[cfg(target_os = "macos")]
-    LiveStop(Reply<()>),
+    LiveStop(u64, Reply<()>),
 }
 
 /// Each phone's worker, by its udid.
@@ -485,12 +483,27 @@ struct Session {
     media: Option<Media>,
 }
 
-/// A live stream's hold on the media session: the display-service client (the stream's authority,
-/// which touches ride too) and the signal that ends its receive loop.
+/// A live stream's hold on the media task: its cancellation signal, join handle, and identity.
+/// The task itself owns the display-service client, sockets, decoders, playback, and shutdown.
 #[cfg(target_os = "macos")]
 struct Media {
-    client: DisplayServiceClient<Box<dyn ReadWrite>>,
-    stop: Arc<tokio::sync::Notify>,
+    cancel: Option<tokio::sync::oneshot::Sender<()>>,
+    receiver: tokio::task::JoinHandle<()>,
+    generation: u64,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for Media {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+        // `Session` is cleared on transport/service errors too, outside the explicit async stop
+        // path. Abort instead of letting a detached old task send stopAll after a replacement has
+        // started; aborting drops the one receiver future that owns the display client, both
+        // sockets, and the native outputs.
+        self.receiver.abort();
+    }
 }
 
 impl Session {
@@ -572,7 +585,7 @@ async fn answer(udid: &str, session: &mut Option<Session>, ask: Ask) {
         #[cfg(target_os = "macos")]
         Ask::Live(reply) => {
             let live = live::start(udid, session).await;
-            if live.is_err() {
+            if live.is_err() && !session.as_ref().is_some_and(Session::media_held) {
                 // A stream that couldn't start may have left the session's services askew; the
                 // next call opens the tunnel again.
                 *session = None;
@@ -580,8 +593,8 @@ async fn answer(udid: &str, session: &mut Option<Session>, ask: Ask) {
             let _ = reply.send(live);
         }
         #[cfg(target_os = "macos")]
-        Ask::LiveStop(reply) => {
-            live::stop(session).await;
+        Ask::LiveStop(generation, reply) => {
+            live::stop(session, generation).await;
             let _ = reply.send(Ok(()));
         }
     }
@@ -780,10 +793,10 @@ async fn touch(udid: &str, session: &mut Option<Session>, gesture: &Gesture) -> 
     let ours = if s.media_held() {
         None
     } else {
-        let (client, audio, video) = start_media_stream(&mut s.adapter, &mut s.rsd).await?;
-        drop(audio);
-        drop(video);
-        Some(client)
+        let started = start_media_stream(&mut s.adapter, &mut s.rsd).await?;
+        drop(started.audio);
+        drop(started.video);
+        Some(started.client)
     };
     // The input surfaces need a moment to take the stream as their authority.
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1037,17 +1050,60 @@ async fn launch(udid: &str, session: &mut Option<Session>, name: &str) -> Result
 
 /// The display service's screen-sharing session as Device Hub starts it: audio first, then video
 /// on the same session, each to a UDP port on the tunnel (kept bound while it runs).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AudioConfig {
+    mode: Option<u32>,
+    payload_type: Option<u8>,
+    source_port: Option<u16>,
+    local_ssrc: Option<u32>,
+    remote_ssrc: Option<u32>,
+    cipher_suite: Option<u32>,
+}
+
+/// Both negotiated RTP sockets and the display-service authority that owns them.
+struct StartedMedia {
+    client: DisplayServiceClient<Box<dyn ReadWrite>>,
+    audio: UdpSocketHandle,
+    video: UdpSocketHandle,
+    audio_config: Option<AudioConfig>,
+}
+
+fn plist_u64(value: &plist::Value) -> Option<u64> {
+    value.as_unsigned_integer().or_else(|| {
+        value
+            .as_signed_integer()
+            .and_then(|n| u64::try_from(n).ok())
+    })
+}
+
+fn stream_config(value: &plist::Value) -> Option<&plist::Dictionary> {
+    let dictionary = value.as_dictionary()?;
+    if let Some(config) = dictionary
+        .get("streamConfig")
+        .and_then(plist::Value::as_dictionary)
+    {
+        return Some(config);
+    }
+    dictionary.values().find_map(stream_config)
+}
+
+fn parse_audio_config(response: &plist::Value) -> Option<AudioConfig> {
+    let config = stream_config(response)?;
+    let number = |key: &str| config.get(key).and_then(plist_u64);
+    Some(AudioConfig {
+        mode: number("AudioStreamMode").and_then(|n| u32::try_from(n).ok()),
+        payload_type: number("RxPayloadType").and_then(|n| u8::try_from(n).ok()),
+        source_port: number("SourcePort").and_then(|n| u16::try_from(n).ok()),
+        local_ssrc: number("LocalSSRC").and_then(|n| u32::try_from(n).ok()),
+        remote_ssrc: number("RemoteSSRC").and_then(|n| u32::try_from(n).ok()),
+        cipher_suite: number("SRTPCipherSuite").and_then(|n| u32::try_from(n).ok()),
+    })
+}
+
 async fn start_media_stream(
     adapter: &mut AdapterHandle,
     rsd: &mut RsdHandshake,
-) -> Result<
-    (
-        DisplayServiceClient<Box<dyn ReadWrite>>,
-        UdpSocketHandle,
-        UdpSocketHandle,
-    ),
-    String,
-> {
+) -> Result<StartedMedia, String> {
     let mut client = DisplayServiceClient::connect_rsd(adapter, rsd)
         .await
         .map_err(|e| service_missing("display service", e))?;
@@ -1082,10 +1138,11 @@ async fn start_media_stream(
         CLIENT_SUPPORTED_FEATURES,
         session,
     );
-    client
+    let audio_response = client
         .start_media_stream(params)
         .await
         .map_err(|e| format!("The stream's audio: {e:?}"))?;
+    let audio_config = parse_audio_config(&audio_response);
     let call = uuid::Uuid::new_v4().to_string().to_uppercase();
     let ssrc = uuid::Uuid::new_v4().as_u128() as u32;
     let offer = build_screen_video_offer(&call, &call_info, ssrc)
@@ -1100,16 +1157,68 @@ async fn start_media_stream(
         1,
         session,
     );
-    client
-        .start_media_stream(params)
-        .await
-        .map_err(|e| format!("The stream's video: {e:?}"))?;
-    Ok((client, audio, video))
+    if let Err(error) = client.start_media_stream(params).await {
+        // Audio has already started. End that partial media session before returning so a retry
+        // does not inherit the phone's previous display-service authority.
+        let _ = tokio::time::timeout(Duration::from_secs(2), client.stop_media_stream()).await;
+        return Err(format!("The stream's video: {error:?}"));
+    }
+    Ok(StartedMedia {
+        client,
+        audio,
+        video,
+        audio_config,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_response_stream_config_is_parsed_without_assuming_a_codec() {
+        let mut config = plist::Dictionary::new();
+        config.insert("AudioStreamMode".into(), 8u64.into());
+        config.insert("RxPayloadType".into(), 101u64.into());
+        config.insert("SourcePort".into(), 50_002u64.into());
+        config.insert("LocalSSRC".into(), 0x1122_3344u64.into());
+        config.insert("RemoteSSRC".into(), 0x5566_7788u64.into());
+        config.insert("SRTPCipherSuite".into(), 0u64.into());
+        let mut connection = plist::Dictionary::new();
+        connection.insert("streamConfig".into(), plist::Value::Dictionary(config));
+        let mut response = plist::Dictionary::new();
+        response.insert("connection".into(), plist::Value::Dictionary(connection));
+        assert_eq!(
+            parse_audio_config(&plist::Value::Dictionary(response)),
+            Some(AudioConfig {
+                mode: Some(8),
+                payload_type: Some(101),
+                source_port: Some(50_002),
+                local_ssrc: Some(0x1122_3344),
+                remote_ssrc: Some(0x5566_7788),
+                cipher_suite: Some(0),
+            })
+        );
+    }
+
+    #[test]
+    fn missing_or_unknown_audio_negotiation_remains_graceful() {
+        assert_eq!(
+            parse_audio_config(&plist::Value::Dictionary(Default::default())),
+            None
+        );
+        let mut config = plist::Dictionary::new();
+        config.insert("AudioStreamMode".into(), 99u64.into());
+        let mut response = plist::Dictionary::new();
+        response.insert("streamConfig".into(), plist::Value::Dictionary(config));
+        assert_eq!(
+            parse_audio_config(&plist::Value::Dictionary(response)),
+            Some(AudioConfig {
+                mode: Some(99),
+                ..AudioConfig::default()
+            })
+        );
+    }
 
     #[test]
     fn text_is_typed_with_a_us_keyboard_s_keys() {
