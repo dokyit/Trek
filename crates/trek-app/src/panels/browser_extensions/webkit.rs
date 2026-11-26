@@ -123,14 +123,13 @@ pub fn ensure() -> bool {
         // SAFETY: main thread; plain object creation and a delegate WebKit holds weakly (kept in
         // the state for as long as the controller).
         unsafe {
-            // Chrome's `<all_urls>` and match patterns take WebSocket addresses too (Privacy
-            // Badger watches `ws://*/*`); WebKit's take only the schemes registered with it.
-            for scheme in ["ws", "wss"] {
-                WKWebExtensionMatchPattern::registerCustomURLScheme(
-                    &NSString::from_str(scheme),
-                    mtm,
-                );
-            }
+            // `ws` and `wss` are not registered with WebKit as schemes for match patterns
+            // (`registerCustomURLScheme`), although Chrome's patterns take them (`ws://*/*`):
+            // WebKit treats a registered scheme as an extension's own, which no page's
+            // Content-Security-Policy applies to. Registered, every page in every web view of
+            // the app (a site in the Browser, a plugin's page, an agent's artifact) could open a
+            // WebSocket to any host whatever its `connect-src` said. A pattern with those
+            // schemes is one WebKit doesn't take.
             let config = if trek_core::paths::isolated() {
                 // A test profile keeps its extensions' storage apart from the user's.
                 let id = NSUUID::from_bytes(uuid_bytes(&trek_core::paths::data_dir()));
@@ -1528,5 +1527,22 @@ fn open_url(controller: &WKWebExtensionController, url: Option<&NSURL>) {
     };
     if let Some(open) = with(|s| s.open_tab.clone()).flatten() {
         open(address);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// `ws` and `wss` were once registered with WebKit as schemes for extensions' match patterns.
+    /// WebKit takes a scheme registered that way for an extension's own and holds no page's
+    /// Content-Security-Policy to it, anywhere in the app: a page an agent wrote, served with
+    /// `connect-src` naming a handful of hosts, opened a WebSocket to any host as soon as the
+    /// Browser tool had been used once. Nothing here may register a scheme again.
+    #[test]
+    fn no_scheme_is_registered_as_an_extensions_own() {
+        let call = ["::registerCustomURL", "Scheme("].concat();
+        assert!(
+            !include_str!("webkit.rs").contains(&call),
+            "a scheme registered for match patterns escapes every page's policy"
+        );
     }
 }
