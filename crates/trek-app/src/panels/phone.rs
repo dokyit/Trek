@@ -328,9 +328,11 @@ pub struct PhonePanel {
     driver_shown: driver::State,
     /// A made-up driver for design review.
     demo_driver: Option<(driver::Avail, driver::State)>,
-    /// Over Wi-Fi (no cable), whether the phone needs its passcode now, as CoreDevice last said
-    /// (`driver::passcode_required`): over the cable its black picture says it.
+    /// Whether the phone needs its passcode now, as CoreDevice last said
+    /// (`driver::passcode_required`, asked over the link `passcode_usb` names).
     passcode: Option<bool>,
+    /// The link (`true`: the cable) `passcode` was asked over.
+    passcode_usb: Option<bool>,
     passcode_asked: Option<Instant>,
     passcode_asking: bool,
     /// The phone's clock settings, for the status bar drawn over iOS's 9:41.
@@ -506,6 +508,7 @@ impl PhonePanel {
             driver_shown: driver::State::Off,
             demo_driver: None,
             passcode: None,
+            passcode_usb: None,
             passcode_asked: None,
             passcode_asking: false,
             clock: None,
@@ -551,7 +554,8 @@ impl PhonePanel {
             },
             blocker: self.blocker.clone(),
             wifi: self.on_wifi(),
-            passcode: self.passcode.filter(|_| self.on_wifi()),
+            // A made-up phone's is its Wi-Fi states' alone (`demo`).
+            passcode: self.passcode.filter(|_| !self.demo || self.on_wifi()),
             setup: self.setup.clone(),
             driver_left: self.driver_left(),
             untrusted: self.untrusted,
@@ -609,16 +613,29 @@ impl PhonePanel {
         )
     }
 
-    /// Over Wi-Fi with the driver on offer, ask CoreDevice now and then whether the phone is
-    /// locked (the route goes to iPhone Mirroring while it is); on the cable, forget it.
+    /// With the driver on offer, ask CoreDevice now and then whether the phone is locked (the
+    /// route goes to iPhone Mirroring while it is), over Wi-Fi and on the cable alike: the
+    /// cable's picture can't tell an app with a black screen from a locked phone, nor a lit Lock
+    /// Screen from an unlocked one (`Facts::locked`). What it said over one link is forgotten
+    /// when the link changes.
     fn ask_passcode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let udid = match &self.phone {
-            Some(p) if !p.usb => p.udid.clone(),
-            _ => {
+        // A made-up phone says it itself (`demo`): CoreDevice knows nothing of it.
+        if self.demo {
+            return;
+        }
+        let (udid, usb) = match &self.phone {
+            Some(p) => (p.udid.clone(), p.usb),
+            None => {
                 self.passcode = None;
+                self.passcode_usb = None;
                 return;
             }
         };
+        if self.passcode_usb != Some(usb) {
+            self.passcode_usb = Some(usb);
+            self.passcode = None;
+            self.passcode_asked = None;
+        }
         if self.passcode_asking
             || self.driver_avail() == driver::Avail::None
             || self
