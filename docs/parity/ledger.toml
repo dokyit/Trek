@@ -1374,15 +1374,16 @@ how = { macos = "The same on both.", windows = "The same on both: made for Windo
 code = ["crates/trek-app/src/thread_view.rs", "crates/trek-app/src/context_popover.rs"]
 
 [[feature]]
-id = "timeline-thoughts"
+id = "tool-activity"
 area = "Threads"
-what = "The thought streaming in after a group of tool calls, in the timeline and the working bar"
-macos = "partial"
+what = "A working turn's thinking and tool calls: above the composer the hiker on its trail with a trail word and the turn's clock, and the live group over it (a summary line with what it's about, shimmering, and a row per call sliding in under a hairline); in the transcript a group's summary line, which opens to a row per call and thought, each opening to its output"
+macos = "yes"
 windows = "yes"
-linux = "partial"
-live = ["route project:{project}", "pace 1", "send mock:long 6s", "wait 2500", "count working-bar 1", "click stop", "pace 0"]
-note = "Shown by Windows' timeline design only (fluent::WINDOWS). Whether the Mac's timeline shows it too is a design decision, not a bug: kept apart until it's made. Linux: as on the Mac (Windows' timeline design only)."
-code = ["crates/trek-app/src/thread_view.rs", "crates/trek-app/src/working_bar.rs"]
+linux = "yes"
+live = ["route project:{project}", "pace 1", "send mock:explore 40s", "wait shown live-row-* 20000", "wait 3000", "count working-bar 1", "count live-group 1", "count live-row-* 2+", "shot live-tool-activity-working", "click stop", "wait idle 30000", "pace 0", "wait shown tool-group#* 10000", "click tool-group#*", "wait shown tool#* 5000", "count tool#* 2+", "count reasoning#* 1"]
+how = { macos = "One design, drawn by shared code with no platform branch (working_bar.rs's live group, thread_view.rs's closed_group and tool_row): the same structure, sizes, corners, words and motion everywhere.", windows = "The Mac's. Until 2026-11-26 Windows drew a design of its own behind its styling switch (a rail with a node per step, \"Thinking\" and \"Finished thinking\" in place of the summary line, a spinner on the step under way, the streaming thought as a step, files as chips under a step): the owner asked for the Mac's, and that design and its code are gone. Three greys stay a step stronger (the summary line's and rows' chevrons, the header's clock, a running file's name), as they were tuned on the Mac against glass that Windows' window doesn't have by default: at the Mac's strength they fall under 4.5:1 on Paper.", linux = "The Mac's, as it always was (the styling switch is Windows' alone)." }
+code = ["crates/trek-app/src/thread_view.rs", "crates/trek-app/src/working_bar.rs", "crates/trek-app/src/activity.rs"]
+tests = ["crates/trek-app/tests/activity.rs"]
 
 [[feature]]
 id = "cloud-file-preview"

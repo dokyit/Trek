@@ -5442,7 +5442,17 @@ fn pointer(window: &mut Window, verb: &str, id: &str, cx: &mut App) -> anyhow::R
     );
     POINTER_SCRIPTED.store(true, Ordering::Relaxed);
     window.render_frame(cx);
-    let id = element_id(id);
+    // `tool-group#*`: the first element on screen whose id starts so, for a row whose index
+    // depends on what came before it in the thread.
+    let id = match id.strip_suffix('*') {
+        Some(prefix) => gpui_kit::base::test_support::snapshots(window)
+            .into_iter()
+            .filter(|s| s.visible())
+            .filter_map(|s| s.path().last().cloned())
+            .find(|last| id_text(last).starts_with(prefix))
+            .ok_or_else(|| anyhow::anyhow!("{verb}: nothing on screen starts with {prefix}"))?,
+        None => element_id(id),
+    };
     let found: Vec<_> = gpui_kit::base::test_support::snapshots(window)
         .into_iter()
         .filter(|s| s.path().last() == Some(&id))
