@@ -6,13 +6,16 @@
 //! `FRAME_BUDGET` bytes), and its audio is transcribed: by `whisper` when that's installed, else on
 //! a Mac by the Speech framework (in a child process, `trek-mcp transcribe`, in pieces under a
 //! minute), and on a Windows PC by Whisper in Trek itself (trek-dictate), with the speech model
-//! dictation downloaded. The answer is one text block (what the video is, the frames' times, the
+//! dictation downloaded. Linux has neither: without `whisper` the answer says a transcript needs
+//! it (`own_transcriber`). The answer is one text block (what the video is, the frames' times, the
 //! transcript with times) and then the frames as images, in order. The scratch folder keeps a
 //! manifest (`watch.json`) that Trek reads to show the user the same frames under a player.
 //!
-//! ffmpeg and ffprobe aren't bundled: without them the tool says how to install them.
-// Speech and its pieces are the Mac's: Windows transcribes with whisper, or Trek's own Whisper.
-#![cfg_attr(windows, allow(dead_code))]
+//! ffmpeg and ffprobe aren't bundled: Trek downloads its own the first time (`media_tools`), and
+//! where that can't be the tool says how to install them.
+// Speech and its pieces are the Mac's: Windows transcribes with whisper, or Trek's own Whisper,
+// and Linux with whisper alone.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -47,14 +50,52 @@ pub const ENV_VIDEO_DIR: &str = "TREK_VIDEO_DIR";
 /// Where Trek keeps dictation's speech model (Windows): a transcript without whisper uses it.
 pub const ENV_DICTATION_DIR: &str = "TREK_DICTATION_DIR";
 
-// No restart: the user's and the machine's Path are read again as they are now (util.rs), and the
-// folder Trek downloads ffmpeg into is looked in too.
-#[cfg(windows)]
-pub const FFMPEG_MISSING: &str = "watch_video needs ffmpeg and ffprobe, and they aren't installed. Ask the user to \
-install them with `winget install ffmpeg`, and try again.";
-#[cfg(not(windows))]
-pub const FFMPEG_MISSING: &str = "watch_video needs ffmpeg and ffprobe, and they aren't installed. Ask the user to \
-install them with `brew install ffmpeg`, and try again.";
+/// What an agent is told when ffmpeg and ffprobe aren't here and Trek's own download isn't either:
+/// how the user installs them on `os` (`std::env::consts::OS`), with the package manager the
+/// computer has (`found`). No restart after it: the user's and the machine's Path are read again
+/// as they are now (util.rs), and the folder Trek downloads ffmpeg into is looked in too.
+pub fn ffmpeg_missing_on(
+    os: &str,
+    found: Option<trek_core::media_tools::PackageManager>,
+) -> String {
+    format!(
+        "watch_video needs ffmpeg and ffprobe, and they aren't installed. Ask the user to install them with {}, and try again.",
+        trek_core::media_tools::install_hint(trek_core::media_tools::Tool::Ffmpeg, os, found)
+    )
+}
+
+/// The package manager this computer has that installs ffmpeg and yt-dlp, if it has one.
+fn package_manager() -> Option<trek_core::media_tools::PackageManager> {
+    trek_core::media_tools::package_manager_on(std::env::consts::OS, |program| {
+        find(program).is_some()
+    })
+}
+
+/// What writes a transcript when `whisper` isn't installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnTranscriber {
+    /// The Mac's Speech framework.
+    Speech,
+    /// Whisper in Trek itself, with the speech model dictation downloaded (a Windows PC).
+    DictationModel,
+    /// Nothing: Trek has no speech recognizer of its own there (Linux), so a transcript takes
+    /// `whisper`.
+    None,
+}
+
+/// Who transcribes on `os` (`std::env::consts::OS`) without `whisper`.
+pub fn own_transcriber(os: &str) -> OwnTranscriber {
+    match os {
+        "macos" => OwnTranscriber::Speech,
+        "windows" => OwnTranscriber::DictationModel,
+        _ => OwnTranscriber::None,
+    }
+}
+
+/// What an agent is told where a transcript takes `whisper` and it isn't installed: the frames
+/// are all it gets until the user installs it.
+pub const WHISPER_NEEDED: &str = "on Linux a transcript needs the `whisper` command, which isn't installed (Trek has no speech recognizer \
+of its own there yet). The frames are all there is of this video until the user installs it: `pipx install openai-whisper`.";
 
 /// The tool family: `scratch` is where the scratch folders go (`TREK_VIDEO_DIR`, else a folder in
 /// the system's temp); `speech` the folder of dictation's speech model, where Trek has one
@@ -602,14 +643,16 @@ impl Video {
                 use trek_core::media_tools::Tool;
                 let both = find_or_download(Tool::Ffmpeg, "ffmpeg", self.fetch)
                     .and_then(|a| Ok((a, find_or_download(Tool::Ffmpeg, "ffprobe", self.fetch)?)));
+                let missing = || ffmpeg_missing_on(std::env::consts::OS, package_manager());
                 match both {
                     Ok(both) => both,
                     Err(why) if self.fetch => {
                         return Err(format!(
-                            "{FFMPEG_MISSING} (Trek tried to download them and couldn't: {why})"
+                            "{} (Trek tried to download them and couldn't: {why})",
+                            missing()
                         ));
                     }
-                    Err(_) => return Err(FFMPEG_MISSING.into()),
+                    Err(_) => return Err(missing()),
                 }
             }
         };
@@ -932,7 +975,8 @@ fn extract_audio(
 
 /// The audio between `start` and `end`, transcribed: by whisper when it's installed, else by the
 /// Speech framework on a Mac, or on a Windows PC by Whisper in Trek itself, with the speech model
-/// dictation downloaded (in `speech`). Says which, with what it heard and the parts that failed.
+/// dictation downloaded (in `speech`); on Linux by whisper alone (`own_transcriber`). Says which,
+/// with what it heard and the parts that failed.
 fn transcribe(
     ffmpeg: &str,
     input: &str,
@@ -956,6 +1000,21 @@ fn transcribe(
             .collect();
         return Ok(("whisper".into(), shifted, vec![]));
     }
+    if own_transcriber(std::env::consts::OS) == OwnTranscriber::None {
+        return Err(WHISPER_NEEDED.into());
+    }
+    own_transcript(ffmpeg, input, start, end, dir, speech)
+}
+
+/// `transcribe` without whisper: by what Trek has of its own on this platform (`own_transcriber`).
+fn own_transcript(
+    ffmpeg: &str,
+    input: &str,
+    start: f64,
+    end: f64,
+    dir: &Path,
+    speech: Option<&Path>,
+) -> Result<(String, Vec<Segment>, Vec<String>), String> {
     #[cfg(windows)]
     {
         let models = own_speech_model(speech)?;
@@ -987,13 +1046,12 @@ fn transcribe(
         })?;
         return Ok(("macOS Speech".into(), segments, failed));
     }
+    // Never reached: `transcribe` has said a transcript needs whisper where Trek has nothing of
+    // its own (`own_transcriber`).
     #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = (ffmpeg, input, start, end, dir, speech);
-        return Err(
-            "a transcript needs whisper (`pip install openai-whisper`), which isn't installed"
-                .into(),
-        );
+        return Err(WHISPER_NEEDED.into());
     }
 }
 
@@ -1168,23 +1226,35 @@ fn download(url: &str, dir: &Path) -> Result<PathBuf, String> {
     Ok(out)
 }
 
+/// What an agent is told when a `site` link needs yt-dlp and it isn't here (`tried`: what became
+/// of Trek's own download, if it tried): how the user installs it on `os`, or the other way.
+fn ytdlp_missing_on(
+    site: &str,
+    tried: &str,
+    os: &str,
+    found: Option<trek_core::media_tools::PackageManager>,
+) -> String {
+    format!(
+        "{site} links need yt-dlp to get the video out of the page, and it isn't installed.{tried} Ask the user to install it with {}, or pass a direct link to the media file.",
+        trek_core::media_tools::install_hint(trek_core::media_tools::Tool::YtDlp, os, found)
+    )
+}
+
 fn fetch_with_ytdlp(url: &str, site: &str, dir: &Path, fetch: bool) -> Result<PathBuf, String> {
     let downloaded = find_or_download(trek_core::media_tools::Tool::YtDlp, "yt-dlp", fetch);
     let ytdlp = match downloaded {
         Ok(ytdlp) => ytdlp,
         Err(why) => {
-            let install = if cfg!(windows) {
-                "winget install yt-dlp"
-            } else {
-                "brew install yt-dlp"
-            };
             let tried = if fetch {
                 format!(" Trek tried to download it and couldn't: {why}.")
             } else {
                 String::new()
             };
-            return Err(format!(
-                "{site} links need yt-dlp to get the video out of the page, and it isn't installed.{tried} Ask the user to install it (`{install}`), or pass a direct link to the media file."
+            return Err(ytdlp_missing_on(
+                site,
+                &tried,
+                std::env::consts::OS,
+                package_manager(),
             ));
         }
     };
@@ -1780,6 +1850,27 @@ mod tests {
             "{summary}"
         );
         assert_eq!(out.len(), 1 + 10);
+
+        // With its transcript asked for, where Trek has no recognizer of its own (Linux) and
+        // whisper isn't installed: the frames still come, and the answer says what a transcript
+        // takes. (A Mac would ask Speech, and a PC dictation's model: their own tests.)
+        if own_transcriber(std::env::consts::OS) == OwnTranscriber::None
+            && find("whisper").is_none()
+        {
+            let out = video
+                .call(
+                    "watch_video",
+                    &json!({ "source": clip.to_str().unwrap(), "fps": 1 }),
+                )
+                .unwrap();
+            let summary = out[0]["text"].as_str().unwrap();
+            assert!(
+                summary.contains(&format!("Note: No transcript: {WHISPER_NEEDED}")),
+                "{summary}"
+            );
+            assert!(!summary.contains("Transcript ("), "{summary}");
+            assert_eq!(out.len(), 1 + 3, "the frames all the same");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1804,14 +1895,76 @@ mod tests {
         assert_eq!(missing, Err("it isn't installed".to_string()));
     }
 
+    /// Each platform's own way, on every platform's CI: Homebrew's line on a Mac, winget's on
+    /// Windows, and on Linux the line of the package manager the computer has, or words where
+    /// Trek knows none (never another system's line).
     #[test]
     fn missing_ffmpeg_says_how_to_install_it() {
-        let how = if cfg!(windows) {
+        use trek_core::media_tools::package_manager_on;
+        assert!(ffmpeg_missing_on("macos", None).contains("with `brew install ffmpeg`, and"));
+        assert!(ffmpeg_missing_on("windows", None).contains("with `winget install ffmpeg`, and"));
+        let apt = package_manager_on("linux", |p| p == "apt-get");
+        assert_eq!(
+            ffmpeg_missing_on("linux", apt),
+            "watch_video needs ffmpeg and ffprobe, and they aren't installed. Ask the user to install them with `sudo apt install ffmpeg`, and try again."
+        );
+        let dnf = package_manager_on("linux", |p| p == "dnf");
+        assert!(ffmpeg_missing_on("linux", dnf).contains("`sudo dnf install ffmpeg-free`"));
+        let unknown = ffmpeg_missing_on("linux", None);
+        assert!(
+            unknown.contains("install them with their distribution's package manager, and"),
+            "{unknown}"
+        );
+        assert!(!unknown.contains("brew") && !unknown.contains("winget"));
+        // This computer's, as a call says it.
+        let here = ffmpeg_missing_on(std::env::consts::OS, package_manager());
+        let line = if cfg!(windows) {
             "winget install ffmpeg"
-        } else {
+        } else if cfg!(target_os = "macos") {
             "brew install ffmpeg"
+        } else {
+            "install them with "
         };
-        assert!(FFMPEG_MISSING.contains(how));
+        assert!(here.contains(line), "{here}");
+
+        let ytdlp = ytdlp_missing_on("YouTube", "", "linux", apt);
+        assert_eq!(
+            ytdlp,
+            "YouTube links need yt-dlp to get the video out of the page, and it isn't installed. Ask the user to install it with `sudo apt install yt-dlp`, or pass a direct link to the media file."
+        );
+        let tried = " Trek tried to download it and couldn't: no network.";
+        let ytdlp = ytdlp_missing_on("X", tried, "macos", None);
+        assert!(
+            ytdlp.contains("it isn't installed. Trek tried to download it and couldn't: no network. Ask the user to install it with `brew install yt-dlp`, or"),
+            "{ytdlp}"
+        );
+    }
+
+    /// Without whisper, a Mac has Speech and a Windows PC dictation's model; Linux has nothing of
+    /// Trek's own, and the agent is told a transcript takes whisper and how the user gets it.
+    #[test]
+    fn who_transcribes_without_whisper_is_decided_per_platform() {
+        assert_eq!(own_transcriber("macos"), OwnTranscriber::Speech);
+        assert_eq!(own_transcriber("windows"), OwnTranscriber::DictationModel);
+        assert_eq!(own_transcriber("linux"), OwnTranscriber::None);
+        assert!(
+            WHISPER_NEEDED.contains("needs the `whisper` command")
+                && WHISPER_NEEDED.contains("pipx install openai-whisper")
+                && WHISPER_NEEDED.contains("The frames are all there is"),
+            "{WHISPER_NEEDED}"
+        );
+        // This computer's: a Mac and a PC go on to their own; elsewhere the call says so before
+        // any audio is taken (the ffmpeg here is one that doesn't exist).
+        if find("whisper").is_some() {
+            eprintln!("skipped the call: whisper is installed, and transcripts go to it first");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("trek-video-who-{}", std::process::id()));
+        let said = transcribe("trek-no-such-ffmpeg", "file:none.mp4", 0., 1., &dir, None);
+        match own_transcriber(std::env::consts::OS) {
+            OwnTranscriber::None => assert_eq!(said, Err(WHISPER_NEEDED.to_string())),
+            _ => assert_ne!(said, Err(WHISPER_NEEDED.to_string())),
+        }
     }
 
     /// Without whisper, a Windows transcript is Trek's own Whisper's, with dictation's model: an

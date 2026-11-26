@@ -10820,7 +10820,7 @@ impl Workspace {
             // The simulator's tools only where there's a simulator to drive (Xcode, not just its
             // command line tools): elsewhere they're tool names and words in every request.
             let sim_tools = tools.simulator && trek_core::detect::has_simulator();
-            // Linux has no computer use or video watcher (`trek-mcp` has neither there).
+            // Linux has no computer use (`trek-mcp` has none there).
             let linux = crate::words::is_linux();
             let computer_use = tools.computer_use && !linux;
             for family in trek_mcp_families(computer_use, sim_tools, windows) {
@@ -10844,7 +10844,7 @@ impl Workspace {
                     )
                 });
             }
-            if tools.video && !linux {
+            if tools.video {
                 out.push(video_server(&bin));
             }
         }
@@ -12237,7 +12237,7 @@ pub(crate) fn agent_notes(
             ),
             None => trek_core::artifact::AGENT_INSTRUCTIONS.to_string(),
         });
-    let video = (settings.tools.video && tool_server && !crate::words::is_linux())
+    let video = (settings.tools.video && tool_server)
         .then(|| trek_core::media::AGENT_INSTRUCTIONS.to_string());
     // Every session has its thread's transcript to search (`transcript_log`), and is told where
     // to look when asked to restyle Trek (`themes`).

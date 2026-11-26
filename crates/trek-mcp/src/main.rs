@@ -24,9 +24,8 @@ mod phone;
 mod rpc;
 #[cfg(target_os = "macos")]
 mod simulator;
-#[cfg(any(target_os = "macos", windows))]
 mod util;
-#[cfg(any(target_os = "macos", windows))]
+// The video watcher runs wherever ffmpeg does: macOS, Windows and Linux.
 mod video;
 
 const USAGE: &str = "\
@@ -64,13 +63,7 @@ fn main() {
         }
         #[cfg(target_os = "macos")]
         "simulator" | "sim" => serve(Box::new(simulator::Simulator::default())),
-        #[cfg(any(target_os = "macos", windows))]
         "video" => serve(Box::new(video::Video::default())),
-        #[cfg(not(any(target_os = "macos", windows)))]
-        "video" => {
-            eprintln!("trek-mcp: the video tools run only on macOS and Windows");
-            std::process::exit(2);
-        }
         // `watch_video`'s Speech pass, in a process of its own (see `video::speech_child`).
         #[cfg(target_os = "macos")]
         "transcribe" => match std::env::args().nth(2) {
