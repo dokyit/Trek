@@ -71,6 +71,7 @@ impl IpcServer {
         static N: AtomicUsize = AtomicUsize::new(0);
         let path = address(dir, N.fetch_add(1, Ordering::Relaxed))?;
         let token = trek_ipc::token()?;
+        trek_core::session_secrets::remember(trek_ipc::ENV_TOKEN, &token);
         let sessions: Sessions = Default::default();
         let (calls_tx, calls) = async_channel::unbounded();
         let rt = trek_core::runtime();
@@ -442,6 +443,18 @@ mod tests {
     #[test]
     fn only_trek_s_own_sessions_get_in() {
         let (server, calls) = IpcServer::start(&dir()).unwrap();
+        let key = server.open_session(Some("thread-1"));
+        let token = server
+            .env(&key)
+            .into_iter()
+            .find(|(name, _)| name == trek_ipc::ENV_TOKEN)
+            .unwrap()
+            .1;
+        assert_eq!(
+            trek_core::session_secrets::scrub(&token, &trek_core::session_secrets::known())
+                .to_string(),
+            format!("[{} hidden]", trek_ipc::ENV_TOKEN)
+        );
         // (A pipe's DACL is checked in trek-ipc's tests.)
         #[cfg(unix)]
         {
@@ -456,7 +469,6 @@ mod tests {
                 "only the user can connect"
             );
         }
-        let key = server.open_session(Some("thread-1"));
         let answers = answer_with(calls, |c| {
             vec![Reply::Done(Ok(json!({ "echo": c.params.clone() })))]
         });

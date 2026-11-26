@@ -8,9 +8,15 @@
 
 use std::borrow::Cow;
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{
+    Arc, LazyLock, RwLock,
+    atomic::{AtomicPtr, Ordering},
+};
 
-/// Values shorter than this aren't taken out of text: "abc" is in too many words.
+/// Byte-length floor for literal substring replacement (not word matching). Keep four:
+/// three-byte values such as "the" or "123" would erase ordinary prose and numbers everywhere.
+/// Shorter values are still stored privately, but aren't protected by value scrubbing;
+/// diagnostic scrubbing can only catch them when a separate shape rule matches.
 const MIN_SCRUBBED: usize = 4;
 
 /// Whether `name` can name a secret (and so a file): what an environment variable may be called.
@@ -24,28 +30,39 @@ pub fn valid_name(name: &str) -> bool {
 /// Every value given this run, `(name, value)`, to take back out of what any thread says: an agent
 /// can hand a path to a sub-agent, or tell another thread what it read. Only for `scrub`.
 static KNOWN: LazyLock<RwLock<Arc<Vec<(String, String)>>>> = LazyLock::new(Default::default);
+// A panic hook must never wait for the writer. Keep old snapshots alive forever (the list is
+// tiny and only changes when a secret is resolved), so taking a snapshot is lock-free and cannot
+// deadlock even when the panic happened while `KNOWN` is being written.
+static KNOWN_FAST: LazyLock<AtomicPtr<Vec<(String, String)>>> = LazyLock::new(|| {
+    AtomicPtr::new(Arc::into_raw(Arc::new(Vec::<(String, String)>::new())) as *mut _)
+});
 
 pub fn known() -> Arc<Vec<(String, String)>> {
     KNOWN.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-/// `known`, without waiting: `None` while the list is being changed. For a panic hook, which may
-/// run on the very thread that's changing it, where waiting would never end.
-pub fn try_known() -> Option<Arc<Vec<(String, String)>>> {
-    match KNOWN.try_read() {
-        Ok(known) => Some(known.clone()),
-        Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner().clone()),
-        Err(std::sync::TryLockError::WouldBlock) => None,
+/// `known`, without waiting: a lock-free snapshot for a panic hook, which may run on the very
+/// thread that's changing the list, where waiting would never end.
+pub fn try_known() -> Arc<Vec<(String, String)>> {
+    let ptr = KNOWN_FAST.load(Ordering::Acquire);
+    // Every pointer published above is intentionally kept alive.
+    unsafe {
+        Arc::increment_strong_count(ptr);
+        Arc::from_raw(ptr)
     }
 }
 
-fn remember(name: &str, value: &str) {
+/// Register a value that has entered Trek's process memory so logs, transcripts, and crash
+/// reports can remove it before they leave Trek.
+pub fn remember(name: &str, value: &str) {
     let mut known = KNOWN.write().unwrap_or_else(|e| e.into_inner());
     let mut list = known.as_ref().clone();
     if !list.iter().any(|(_, v)| v == value) {
         list.push((name.to_string(), value.to_string()));
     }
-    *known = Arc::new(list);
+    let snapshot = Arc::new(list);
+    *known = snapshot.clone();
+    KNOWN_FAST.store(Arc::into_raw(snapshot) as *mut _, Ordering::Release);
 }
 
 fn root() -> PathBuf {
@@ -107,7 +124,9 @@ pub fn forget(thread: &str) {
 /// All of them go: Trek is quitting, or a new launch finds what a crash left.
 pub fn forget_all() {
     let _ = std::fs::remove_dir_all(root());
-    *KNOWN.write().unwrap_or_else(|e| e.into_inner()) = Arc::default();
+    let snapshot = Arc::new(Vec::new());
+    *KNOWN.write().unwrap_or_else(|e| e.into_inner()) = snapshot.clone();
+    KNOWN_FAST.store(Arc::into_raw(snapshot) as *mut _, Ordering::Release);
 }
 
 /// `text` with every known value taken out, its name in its place. `secrets`: `(name, value)`.
@@ -261,6 +280,19 @@ mod tests {
     }
 
     #[test]
+    fn short_values_do_not_corrupt_ordinary_text() {
+        let secrets = vec![
+            ("WORD".into(), "the".into()),
+            ("PIN".into(), "123".into()),
+            ("TOKEN".into(), "abcd".into()),
+        ];
+        assert_eq!(
+            scrub("the theme, other words, 123 and 12345; abcd", &secrets),
+            "the theme, other words, 123 and 12345; [TOKEN hidden]"
+        );
+    }
+
+    #[test]
     fn scrubbing_takes_every_value_out_and_names_it() {
         let secrets = vec![
             ("TOKEN".to_string(), "ghp_abc123".to_string()),
@@ -277,5 +309,33 @@ mod tests {
         let mut text = "x ghp_abc123".to_string();
         scrub_string(&mut text, &secrets);
         assert_eq!(text, "x [TOKEN hidden]");
+    }
+
+    #[test]
+    fn panic_snapshot_does_not_wait_for_the_secret_writer() {
+        let value = "contention-secret-value";
+        remember("TOKEN", value);
+        let _writer = KNOWN.write().unwrap();
+        let snapshot = try_known();
+        assert_eq!(scrub(value, &snapshot), "[TOKEN hidden]");
+    }
+
+    /// A scrubber made before a value was given (telemetry's is made once, at launch) takes it
+    /// out all the same, when it reads the values at the time it scrubs.
+    #[test]
+    fn a_scrubber_made_earlier_takes_out_a_secret_given_later() {
+        with_data_dir(|_| {
+            let made = |live: bool| {
+                let s = crate::scrub::Scrubber::new(None, vec![], &[], vec![], str::to_owned);
+                if live { s.with_live_secrets() } else { s }
+            };
+            let (fixed, live) = (made(false), made(true));
+            let value = "given-later-7f3a9c1e";
+            let line = format!("got {value}");
+            assert_eq!(live.scrub(&line), line);
+            remember("LATER", value);
+            assert_eq!(live.scrub(&line), "got [LATER hidden]");
+            assert_eq!(fixed.scrub(&line), line, "only what it was made with");
+        });
     }
 }

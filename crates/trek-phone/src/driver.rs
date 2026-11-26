@@ -500,9 +500,18 @@ pub fn find_app(apps: &[device::App], name: &str) -> Option<String> {
         .map(|a| a.bundle.clone())
 }
 
-/// A fresh, unguessable-enough token for one start (std only: the hasher's random keys, the time
-/// and the process).
+/// A fresh, unguessable token for one start, from the OS random source (32 bytes, hex).
 fn token() -> String {
+    let mut bytes = [0u8; 32];
+    if getrandom::fill(&mut bytes).is_ok() {
+        return bytes.iter().map(|b| format!("{b:02x}")).collect();
+    }
+    fallback_token()
+}
+
+/// If the OS random source is somehow unavailable, still start with something unpredictable:
+/// the hasher's random keys, the time and the process (std only).
+fn fallback_token() -> String {
     use std::hash::{BuildHasher, Hasher};
     let mut out = String::new();
     for i in 0..2u64 {

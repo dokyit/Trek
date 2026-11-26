@@ -10780,6 +10780,36 @@ impl Workspace {
 
     /// MCP servers handed to every new agent session: Trek's own tools plus the user's.
     pub fn mcp_servers(&self) -> Vec<McpServer> {
+        let mut out = self.own_mcp_servers();
+        out.extend(self.user_mcp_servers());
+        out
+    }
+
+    /// The user's own servers that are on, as a session is given them. One named as one of
+    /// Trek's own is left out (`mcp::is_reserved_server`).
+    pub(crate) fn user_mcp_servers(&self) -> Vec<McpServer> {
+        self.settings
+            .tools
+            .mcp_servers
+            .iter()
+            .filter(|s| s.enabled)
+            .filter(|s| {
+                let reserved = mcp::is_reserved_server(&s.name);
+                if reserved {
+                    tracing::debug!(
+                        "MCP server {:?} has the name of one of Trek's own: left out",
+                        s.name
+                    );
+                }
+                !reserved
+            })
+            .map(mcp_server_of)
+            .collect()
+    }
+
+    /// The servers Trek itself builds for every session (its tools, Figma's desktop server):
+    /// nothing in here comes from the user's settings but which of them are on.
+    pub(crate) fn own_mcp_servers(&self) -> Vec<McpServer> {
         let tools = &self.settings.tools;
         let mut out = vec![];
         if let Some(bin) = trek_mcp_binary() {
@@ -10830,13 +10860,6 @@ impl Workspace {
                 vec![],
             ));
         }
-        out.extend(
-            tools
-                .mcp_servers
-                .iter()
-                .filter(|s| s.enabled)
-                .map(mcp_server_of),
-        );
         out
     }
 

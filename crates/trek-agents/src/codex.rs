@@ -150,6 +150,7 @@ pub(crate) async fn start_app_server(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::strip_channel_env(&mut command);
     crate::sign_in_as_account(&mut command);
     let mut child = crate::spawn_group(&mut command).context("failed to start codex app-server")?;
     let stderr = StderrTail::capture(child.stderr.take().unwrap(), "codex");

@@ -375,7 +375,7 @@ pub fn hear(
     cx: &mut App,
 ) {
     for arg in own {
-        dispatch(arg, &ws, &links, cx);
+        dispatch_own(arg, &ws, &links, cx);
     }
     let Some(rx) = primary_forwarded else { return };
     // Weak: this loop waits on the pipe for as long as the app lives, and a handle it held would
@@ -451,7 +451,7 @@ pub enum Arg {
     Link(String),
     /// A file: opens in the editor, as a `trek://edit` link to it would.
     File(PathBuf),
-    /// A folder: becomes a project, as "Open Folder…" makes one.
+    /// A folder: becomes a project after the same trust check as a file link.
     Folder(PathBuf),
     /// Nothing Trek acts on, and why.
     Ignored(&'static str),
@@ -490,10 +490,11 @@ pub fn classify(arg: &str) -> Arg {
 
 /// A link goes where macOS's `on_open_urls` sends links; a file opens in the editor as a
 /// `trek://edit` link to it would (asking first when it's outside the user's projects); a folder
-/// opens as a project, as "Open Folder…" opens one. Anything else is ignored, and logged.
+/// asks before becoming a project when it isn't already trusted. Anything else is ignored,
+/// and logged.
 fn dispatch(
     arg: String,
-    ws: &Entity<Workspace>,
+    _ws: &Entity<Workspace>,
     links: &async_channel::Sender<String>,
     cx: &mut App,
 ) {
@@ -502,12 +503,26 @@ fn dispatch(
             let _ = links.try_send(link);
         }
         Arg::File(path) => crate::deep_link::open_file(path, cx),
-        Arg::Folder(path) => ws.update(cx, |ws, cx| ws.add_project(path, cx)),
+        Arg::Folder(path) => crate::deep_link::open_folder(path, cx),
         // Not the argument itself: a link may carry code.
         Arg::Ignored(what) => tracing::warn!(
             "single instance: ignored {what} ({} characters)",
             arg.chars().count()
         ),
+    }
+}
+
+/// This process's command-line folder is an explicit request by the person who launched Trek;
+/// only a handoff from the single-instance socket must obtain consent before adding a project.
+fn dispatch_own(
+    arg: String,
+    ws: &Entity<Workspace>,
+    links: &async_channel::Sender<String>,
+    cx: &mut App,
+) {
+    match classify(&arg) {
+        Arg::Folder(path) => crate::deep_link::open_launch_folder(path, cx),
+        _ => dispatch(arg, ws, links, cx),
     }
 }
 

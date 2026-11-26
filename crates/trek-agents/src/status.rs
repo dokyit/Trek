@@ -130,6 +130,7 @@ async fn claude_read(cwd: &Path, with_usage: bool) -> Result<AgentStatus> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::strip_channel_env(&mut command);
     crate::sign_in_as_account(&mut command);
     let mut child = crate::spawn_group(&mut command).context("failed to start claude")?;
     let mut stdin = child.stdin.take().unwrap();

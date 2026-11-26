@@ -14,6 +14,10 @@
 //! the phone server stops; after, the process `leave`s its profile, so what is saved on the way
 //! out goes to a throwaway folder, and the same plan runs once more as Trek quits.
 //!
+//! What the system runs for Trek on a schedule is taken off the schedule first (`jobs`): the Mac's
+//! iPhone updater (a LaunchAgent, which stays loaded until the next login when only its file
+//! goes) and Windows' "Update while closed" task. Linux has neither.
+//!
 //! Only this page starts it: no MCP tool, remote request or `trek://` link reaches `confirm` or
 //! `run` (`tests/wipe.rs` checks every caller).
 
@@ -28,6 +32,106 @@ use trek_core::wipe::{Keep, Plan, Request, Root, Secrets};
 
 /// What the user types to confirm.
 pub const CONFIRM_WORD: &str = "delete";
+
+/// The iPhone updater's LaunchAgent, by its label (`ios/scripts/install-phone-update.sh`); its
+/// file is `~/Library/LaunchAgents/<label>.plist`.
+pub const PHONE_UPDATE_AGENT: &str = "dev.trek.phone-update";
+
+/// Something of Trek's the system runs on a schedule, outside Trek: deleting its files alone
+/// leaves it on the schedule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Job {
+    /// macOS: a LaunchAgent loaded for this user, by its label.
+    LaunchAgent(String),
+    /// Windows: the user's task in Task Scheduler, by its name.
+    ScheduledTask(String),
+}
+
+impl Job {
+    /// What it is, for the confirmation and for what couldn't go.
+    pub fn what(&self) -> String {
+        match self {
+            Job::LaunchAgent(label) => format!("The iPhone updater's schedule ({label})"),
+            Job::ScheduledTask(name) => {
+                format!("The task that updates Trek while it's closed (Task Scheduler › {name})")
+            }
+        }
+    }
+}
+
+/// The scheduled jobs this profile's Trek has, to take off the schedule before its files go.
+/// None for a test's or the verify app's profile: the jobs are the user's own Trek's.
+pub fn jobs() -> Vec<Job> {
+    jobs_of(paths::isolated() || paths::moved())
+}
+
+/// `jobs`, for a profile that is the user's own or `elsewhere`.
+fn jobs_of(elsewhere: bool) -> Vec<Job> {
+    if elsewhere {
+        return vec![];
+    }
+    #[cfg(target_os = "macos")]
+    {
+        vec![Job::LaunchAgent(PHONE_UPDATE_AGENT.to_string())]
+    }
+    #[cfg(windows)]
+    {
+        vec![Job::ScheduledTask(
+            crate::workspace::update_task_name().to_string(),
+        )]
+    }
+    // Linux: Trek sets up nothing that runs by itself (no systemd unit, no autostart entry).
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        vec![]
+    }
+}
+
+/// Take `job` off the system's schedule, ending a run of it under way. One that isn't there is
+/// fine; an error is why it's still there.
+fn stop(job: &Job) -> Result<(), String> {
+    match job {
+        #[cfg(target_os = "macos")]
+        Job::LaunchAgent(label) => {
+            // SAFETY: getuid has no failure and touches nothing.
+            let uid = unsafe { libc::getuid() };
+            let target = format!("gui/{uid}/{label}");
+            let launchctl = |verb: &str| {
+                trek_core::procs::command("/bin/launchctl")
+                    .args([verb, &target])
+                    .output()
+            };
+            let out = launchctl("bootout").map_err(|e| format!("launchctl didn't run: {e}"))?;
+            // It fails for one that isn't loaded, which is all that's wanted: what counts is
+            // whether launchd still has it.
+            match launchctl("print") {
+                Ok(still) if still.status.success() => Err(format!(
+                    "launchd still has it: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )),
+                _ => Ok(()),
+            }
+        }
+        #[cfg(windows)]
+        Job::ScheduledTask(name) => {
+            trek_core::update::closed::task::unregister(name).map_err(|e| format!("{e:#}"))
+        }
+        // The other platforms' jobs: nothing of this one's to stop.
+        #[allow(unreachable_patterns)]
+        _ => Ok(()),
+    }
+}
+
+/// `stop` each of `jobs`; those still there, as `Outcome::left` lists what couldn't go.
+fn stop_jobs(jobs: &[Job]) -> Vec<(std::path::PathBuf, String)> {
+    jobs.iter()
+        .filter_map(|job| {
+            let why = stop(job).err()?;
+            tracing::warn!("delete all data: {}: {why}", job.what());
+            Some((std::path::PathBuf::from(job.what()), why))
+        })
+        .collect()
+}
 
 /// The folders this profile has, what stays in them, and its secrets, as Trek resolves them.
 pub fn request(ws: &Workspace) -> Request {
@@ -69,10 +173,11 @@ pub fn request(ws: &Workspace) -> Request {
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut files = vec![];
     // WebKit keeps the Browser's data by the app's bundle id, in folders of the system's naming.
+    // Any Trek bundle id counts (a dev or nightly build), not only the release one.
     #[cfg(target_os = "macos")]
     if let (false, Some(id)) = (
         paths::moved(),
-        bundle_id().filter(|id| id == "dev.trek.Trek"),
+        bundle_id().filter(|id| id.to_ascii_lowercase().contains("trek")),
     ) {
         let library = paths::home().join("Library");
         roots.push(root(
@@ -98,6 +203,25 @@ pub fn request(ws: &Workspace) -> Request {
         files.push(root(
             library.join("Preferences").join(format!("{id}.plist")),
             "The system's preferences file for Trek",
+        ));
+    }
+    // The iPhone updater runs from a LaunchAgent of its own, outside the data folder: its
+    // folder (a copy of the script, and the iPhone's name and version), the agent, and its log.
+    // The agent is unloaded before its file goes (`jobs`).
+    #[cfg(target_os = "macos")]
+    if !paths::isolated() {
+        let home = paths::home();
+        roots.push(root(
+            home.join("Library/Application Support/dev.trek.phone-update"),
+            "The iPhone updater's folder: its copy of the script, and what it last installed",
+        ));
+        files.push(root(
+            home.join(format!("Library/LaunchAgents/{PHONE_UPDATE_AGENT}.plist")),
+            "The iPhone updater's schedule",
+        ));
+        files.push(root(
+            home.join("Library/Logs/trek-phone-update.log"),
+            "The iPhone updater's log",
         ));
     }
     let mut kept = vec![
@@ -210,7 +334,14 @@ pub fn confirm(ws: Entity<Workspace>, window: &mut Window, cx: &mut App) {
     window.defer(cx, move |window, cx| {
         focus.update(cx, |s, cx| s.focus(window, cx))
     });
-    let lines = Lines::of(&plan, running);
+    // The Mac's updater is listed by its file; Windows' task has none.
+    let tasks: Vec<String> = jobs()
+        .iter()
+        .filter(|job| matches!(job, Job::ScheduledTask(_)))
+        .filter(|_| ws.read(cx).settings.updates.while_closed)
+        .map(Job::what)
+        .collect();
+    let lines = Lines::of(&plan, running, &tasks);
     window.open_dialog(cx, move |dialog, _, cx| {
         let typed = input
             .read(cx)
@@ -292,7 +423,8 @@ struct Lines {
 }
 
 impl Lines {
-    fn of(plan: &Plan, running: usize) -> Lines {
+    /// `tasks`: the scheduled jobs that go and have no file in the plan to stand for them.
+    fn of(plan: &Plan, running: usize, tasks: &[String]) -> Lines {
         let this = crate::words::words().this_computer;
         let mut intro = format!(
             "Trek deletes everything it keeps for you on {this}, then quits. The next time you open it, it starts as new. This can't be undone."
@@ -309,6 +441,7 @@ impl Lines {
             .iter()
             .map(|r| format!("{} ({})", r.what, paths::tildify(&r.path)))
             .collect();
+        goes.extend(tasks.iter().cloned());
         match &plan.secrets_kept {
             None => goes.push(format!(
                 "API keys and tokens Trek saved in {}",
@@ -352,15 +485,24 @@ pub fn run(ws: Entity<Workspace>, window: &mut Window, cx: &mut App) {
         cx.background_executor()
             .timer(std::time::Duration::from_millis(1500))
             .await;
-        let plan = ws2.update(cx, |ws, cx| {
+        let (plan, jobs) = ws2.update(cx, |ws, cx| {
             let plan = trek_core::wipe::plan(&request(ws));
+            // Worked out while the profile is still this one.
+            let jobs = jobs();
             ws.leave_profile_for_wipe(cx);
-            plan
+            (plan, jobs)
         });
         let kept = plan.clone();
         let outcome = cx
             .background_executor()
-            .spawn(async move { trek_core::wipe::execute(&kept, forget_secret) })
+            .spawn(async move {
+                // Off the schedule before their files go: a LaunchAgent whose file is gone can
+                // no longer be found by it, and stays loaded until the next login.
+                let still = stop_jobs(&jobs);
+                let mut outcome = trek_core::wipe::execute(&kept, forget_secret);
+                outcome.left.extend(still);
+                outcome
+            })
             .await;
         ws2.update(cx, |ws, cx| {
             ws.wiped = Some((plan, outcome.clone()));
@@ -478,5 +620,41 @@ impl Workspace {
             }
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: GPUI's `test` attribute would come with it.
+    use super::{Job, Lines, PHONE_UPDATE_AGENT, jobs_of};
+
+    /// Deleting everything takes Trek's scheduled jobs off the system's schedule, not only
+    /// their files: the Mac's iPhone updater, Windows' update task. Never another profile's.
+    #[test]
+    fn scheduled_jobs_are_stopped_for_the_users_own_profile_only() {
+        assert_eq!(jobs_of(true), []);
+        let jobs = jobs_of(false);
+        #[cfg(target_os = "macos")]
+        assert_eq!(jobs, [Job::LaunchAgent("dev.trek.phone-update".into())]);
+        #[cfg(windows)]
+        assert_eq!(
+            jobs,
+            [Job::ScheduledTask(
+                crate::workspace::update_task_name().to_string()
+            )]
+        );
+        #[cfg(not(any(target_os = "macos", windows)))]
+        assert_eq!(jobs, []);
+        // The label the installer loads it under, which is also its file's name.
+        assert_eq!(PHONE_UPDATE_AGENT, "dev.trek.phone-update");
+    }
+
+    /// The confirmation names a scheduled task that goes: it has no file to be listed by.
+    #[test]
+    fn the_confirmation_lists_a_task_that_goes() {
+        let task = Job::ScheduledTask(r"Trek\Update while closed".into()).what();
+        let lines = Lines::of(&Default::default(), 0, std::slice::from_ref(&task));
+        assert!(lines.goes.contains(&task), "{:?}", lines.goes);
+        assert!(task.contains("Update while closed"));
     }
 }

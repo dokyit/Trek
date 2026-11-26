@@ -710,6 +710,7 @@ impl Cli {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        crate::strip_channel_env(&mut cmd);
         let settings: Vec<String> = settings_files(&config.cwd)
             .iter()
             .filter_map(|f| std::fs::read_to_string(f).ok())

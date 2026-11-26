@@ -102,8 +102,25 @@ pub fn parent_console() -> Option<std::fs::File> {
     None
 }
 
+/// Trek's own channel variables (`trek_ipc::ENV_SOCKET`, `ENV_TOKEN`, `ENV_SESSION`): where Trek
+/// listens, its token, and which session is asking. They belong to the tool servers Trek starts
+/// for a session and to nothing else: the token lets a process act as that session.
+pub const CHANNEL_ENV: [&str; 3] = ["TREK_IPC_SOCKET", "TREK_IPC_TOKEN", "TREK_IPC_SESSION"];
+
+/// Whether `name` is one of Trek's channel variables, in any case: Windows' names have none, so
+/// `trek_ipc_token` is the same variable there (and nothing else is called that anywhere).
+pub fn is_channel_env(name: &str) -> bool {
+    CHANNEL_ENV.iter().any(|c| c.eq_ignore_ascii_case(name))
+}
+
+/// A program Trek starts. It never inherits Trek's channel variables (a Trek started from inside
+/// a Trek session has them in its own environment): only a caller that sets them on the command
+/// itself, for one of Trek's own tool servers, hands them on.
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     let mut command = std::process::Command::new(program); // spawn: the helper
+    for name in CHANNEL_ENV {
+        command.env_remove(name);
+    }
     quiet(&mut command);
     command
 }
@@ -111,14 +128,13 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
 /// [`command`] for tokio. Its `Child` is tokio's, and the group and job object a caller wants
 /// (`trek_agents::spawn_group`) are its own.
 pub fn async_command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
-    #[cfg(windows)]
-    {
-        let mut command = tokio::process::Command::new(program); // spawn: the helper
-        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-        command
+    let mut command = tokio::process::Command::new(program); // spawn: the helper
+    for name in CHANNEL_ENV {
+        command.env_remove(name);
     }
-    #[cfg(not(windows))]
-    tokio::process::Command::new(program) // spawn: the helper
+    #[cfg(windows)]
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    command
 }
 
 /// Make an existing `command` windowless, as [`command`] does: for one built elsewhere (a
@@ -929,6 +945,34 @@ mod win {
 #[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
+
+    /// A Trek started from inside a Trek session has that session's channel in its own
+    /// environment: nothing it starts inherits it, unless the caller sets it on purpose.
+    #[test]
+    fn nothing_trek_starts_inherits_its_channel() {
+        let removed = |envs: std::process::CommandEnvs| -> Vec<String> {
+            envs.filter(|(_, value)| value.is_none())
+                .map(|(name, _)| name.to_string_lossy().into_owned())
+                .collect()
+        };
+        let mut want = CHANNEL_ENV.map(String::from).to_vec();
+        want.sort();
+        assert_eq!(removed(command("x").get_envs()), want);
+        assert_eq!(removed(async_command("x").as_std().get_envs()), want);
+        // One of Trek's own tool servers is handed it by name.
+        let mut own = command("x");
+        own.env(CHANNEL_ENV[1], "t");
+        assert!(
+            own.get_envs()
+                .any(|(name, value)| name == CHANNEL_ENV[1] && value.is_some())
+        );
+        for name in ["TREK_IPC_TOKEN", "trek_ipc_token", "Trek_Ipc_Socket"] {
+            assert!(is_channel_env(name), "{name}");
+        }
+        for name in ["TREK_IPC_TOOLS", "TREK_COMPUTER_MODE", "TOKEN", ""] {
+            assert!(!is_channel_env(name), "{name}");
+        }
+    }
 
     #[cfg(unix)]
     fn sleeper() -> std::process::Child {

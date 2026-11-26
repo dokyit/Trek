@@ -673,14 +673,15 @@ impl McpServerConfig {
         self.env
             .iter()
             .filter_map(|e| {
-                Some((
-                    e.name.clone(),
-                    if e.secret {
-                        secrets::mcp_env(&self.name, &e.name)?
-                    } else {
-                        e.value.clone()
-                    },
-                ))
+                let value = if e.secret {
+                    secrets::mcp_env(&self.name, &e.name)?
+                } else {
+                    e.value.clone()
+                };
+                if e.secret {
+                    crate::session_secrets::remember(&format!("MCP env {}", e.name), &value);
+                }
+                Some((e.name.clone(), value))
             })
             .collect()
     }
@@ -690,14 +691,15 @@ impl McpServerConfig {
         self.headers
             .iter()
             .filter_map(|h| {
-                Some((
-                    h.name.clone(),
-                    if h.secret {
-                        secrets::mcp_header(&self.name, &h.name)?
-                    } else {
-                        h.value.clone()
-                    },
-                ))
+                let value = if h.secret {
+                    secrets::mcp_header(&self.name, &h.name)?
+                } else {
+                    h.value.clone()
+                };
+                if h.secret {
+                    crate::session_secrets::remember(&format!("MCP header {}", h.name), &value);
+                }
+                Some((h.name.clone(), value))
             })
             .collect()
     }
@@ -1726,7 +1728,9 @@ pub mod secrets {
     use crate::keychain::{self, Lookup};
 
     pub fn set_api_key(provider: &str, key: &str) -> anyhow::Result<()> {
-        keychain::write(provider, key)
+        keychain::write(provider, key)?;
+        crate::session_secrets::remember(&format!("{provider} API key"), key);
+        Ok(())
     }
 
     /// The Keychain account for header `header` of MCP server `server` (its own namespace, so
@@ -1777,6 +1781,7 @@ pub mod secrets {
             && let Ok(v) = std::env::var(env)
             && !v.is_empty()
         {
+            crate::session_secrets::remember(&format!("{provider} API key"), &v);
             return Lookup::Found(v);
         }
         stored_api_key_lookup(provider)
@@ -1789,13 +1794,21 @@ pub mod secrets {
     }
 
     pub fn stored_api_key_lookup(provider: &str) -> Lookup {
-        keychain::read(provider)
+        let found = keychain::read(provider);
+        if let Lookup::Found(ref value) = found {
+            crate::session_secrets::remember(&format!("{provider} API key"), value);
+        }
+        found
     }
 
     /// Read `provider`'s locked key, letting macOS ask the user's login password: only for
     /// their Allow access, off the main thread (it waits for their answer).
     pub fn unlock_api_key(provider: &str) -> Lookup {
-        keychain::unlock(provider)
+        let found = keychain::unlock(provider);
+        if let Lookup::Found(ref value) = found {
+            crate::session_secrets::remember(&format!("{provider} API key"), value);
+        }
+        found
     }
 
     pub fn delete_api_key(provider: &str) -> anyhow::Result<()> {
@@ -2117,7 +2130,7 @@ keep_in_tray = false
         .unwrap();
         gh.headers.push(McpHeader {
             name: "X-Key".into(),
-            value: "k".into(),
+            value: "header-key".into(),
             secret: false,
         });
         gh.stash_secrets(None).unwrap();
@@ -2134,6 +2147,20 @@ keep_in_tray = false
                 ("GITHUB_TOKEN".to_string(), "ghp_1".to_string()),
                 ("LOG".into(), "debug".into())
             ]
+        );
+        assert_eq!(
+            gh.resolved_headers(),
+            [("X-Key".to_string(), "header-key".to_string())]
+        );
+        assert!(
+            crate::session_secrets::scrub("token ghp_1", &crate::session_secrets::known())
+                .to_string()
+                .contains("hidden")
+        );
+        assert!(
+            crate::session_secrets::scrub("header header-key", &crate::session_secrets::known())
+                .to_string()
+                .contains("hidden")
         );
 
         // Edited and renamed: a value left as it was moves with it, a new one replaces it, and
@@ -2153,7 +2180,7 @@ keep_in_tray = false
         );
         assert_eq!(
             edited.resolved_headers(),
-            [("X-Key".to_string(), "k".to_string())]
+            [("X-Key".to_string(), "header-key".to_string())]
         );
         assert!(gh.resolved_env().is_empty() && gh.resolved_headers().is_empty());
         // A kept value with nothing saved behind it is an error, not an empty token.

@@ -9,6 +9,10 @@ description = "A real iPhone from the Mac without Xcode: its screen over USB, ta
 # lockdown, AFC, house_arrest, installation_proxy) and Trek Driver's client build on macOS and
 # Windows, where usbmuxd is Apple Mobile Device Service (Apple Devices installs it). The helper
 # that captures the screen and speaks Bluetooth, and iPhone Mirroring, are macOS-only.
+[dependencies]
+# The driver token comes from the OS random source, not a hasher's keys.
+getrandom = "0.3"
+
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
 serde_json.workspace = true
 # MIT; pure Rust over the usbmuxd socket, no libimobiledevice (LGPL) or pymobiledevice3 (GPL).

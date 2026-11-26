@@ -38,6 +38,7 @@ pub mod procs;
 pub mod registry;
 pub mod restate;
 pub mod rewind;
+pub mod scrub;
 pub mod session_log;
 pub mod session_secrets;
 pub mod settings;

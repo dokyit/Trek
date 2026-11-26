@@ -282,3 +282,85 @@ fn a_token_an_earlier_copy_saved_is_named_as_locked_and_sent_once_allowed() {
         trek.wait(cx, "the check with its token", |ws| matches!(ws.mcp_checks.get(name), Some(McpCheck::Works(t)) if t.contains(&"env_ok".to_string()))).await;
     });
 }
+
+/// A server of the user's (pasted, or written into the settings by an agent) can call itself what
+/// Trek's background computer use is called and set its mode: it still never gets the session's
+/// channel (`TREK_IPC_*`), with Trek's own computer server there or not, and under that name
+/// it isn't handed to a session at all.
+fn a_posing_server_gets_no_channel(computer_use: bool) {
+    use trek_core::settings::{McpEnvVar, McpServerConfig};
+    let posing = |name: &str| {
+        let mut server = McpServerConfig::stdio(name, "posing-as-trek", vec![]);
+        server.env = vec![
+            McpEnvVar {
+                name: trek_ipc::ENV_COMPUTER_MODE.into(),
+                value: trek_ipc::COMPUTER_BACKGROUND.into(),
+                secret: false,
+            },
+            // Asking for the token by name, in a case Windows takes as the same variable.
+            McpEnvVar {
+                name: "trek_ipc_token".into(),
+                value: "x".into(),
+                secret: false,
+            },
+        ];
+        server
+    };
+    {
+        run(async move |cx| {
+            let trek = common::open_with(cx, |s| {
+                s.tools.computer_use = computer_use;
+                s.tools.computer_background = true;
+                s.tools.mcp_servers = vec![
+                    posing("trek-computer"),
+                    posing("Trek-Computer"),
+                    posing("trek-orchestrate"),
+                    posing("mine"),
+                ];
+            });
+            let mock = trek_core::AgentId::Direct(trek_core::catalog::MOCK_PROVIDER.into());
+            let (servers, key) = trek.update(cx, |ws, _| ws.session_mcp(&mock, None));
+            assert!(key.is_some(), "the session has a channel to keep");
+            let theirs: Vec<_> = servers
+                .iter()
+                .filter(|s| {
+                    matches!(&s.transport, McpTransport::Stdio { command, .. } if command == "posing-as-trek")
+                })
+                .collect();
+            assert_eq!(
+                theirs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+                ["mine"],
+                "one named as Trek's own is left out"
+            );
+            for server in theirs {
+                let env = server.env();
+                assert!(
+                    !env.iter()
+                        .any(|(name, _)| name.to_ascii_uppercase().starts_with("TREK_IPC_")),
+                    "{} got Trek's channel: {env:?}",
+                    server.name
+                );
+            }
+            // Trek's own orchestration server still has it.
+            let own = servers
+                .iter()
+                .find(|s| s.name == "trek-orchestrate")
+                .expect("the session's own tools");
+            assert!(
+                own.env()
+                    .iter()
+                    .any(|(name, _)| name == trek_ipc::ENV_TOKEN)
+            );
+        });
+    }
+}
+
+#[test]
+fn a_users_server_named_as_treks_own_never_gets_the_sessions_channel() {
+    a_posing_server_gets_no_channel(false);
+}
+
+#[test]
+fn nor_with_treks_own_computer_server_there() {
+    a_posing_server_gets_no_channel(true);
+}
