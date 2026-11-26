@@ -17,8 +17,10 @@ pub struct Scrubber {
     /// The user's projects' folders, each with whatever path follows it: never shown, not even
     /// a file's name.
     projects: Vec<regex::Regex>,
-    /// Values agents were given this run, `(name, value)`.
+    /// Values agents were given, `(name, value)`, as known when this was made.
     secrets: Vec<(String, String)>,
+    /// Take out, too, the values known when a text is scrubbed (`with_live_secrets`).
+    live_secrets: bool,
     /// What takes out keys and tokens by their shape (`redact_secrets`).
     shapes: fn(&str) -> String,
 }
@@ -45,7 +47,7 @@ impl Scrubber {
                 // Require a root boundary, preserving it when it isn't a path separator.
                 // Spaces can be part of any filename; ambiguous trailing prose is removed too.
                 regex::Regex::new(&format!(
-                    r#"{p}(?:[/\\][^\r\n\t"'`,;:()\[\]<>|]*|(?P<boundary>[\s"'`]|$))"#,
+                    r#"{p}(?:[/\\][^\r\n\t"'`,;:()\[\]<>|]*(?:{NAME_GOES_ON}[^\r\n\t"'`,;:()\[\]<>|]*)*|(?P<boundary>[\s"'`]|$))"#,
                 ))
                 .ok()
             })
@@ -60,13 +62,29 @@ impl Scrubber {
             trek_folders,
             projects,
             secrets,
+            live_secrets: false,
             shapes,
         }
     }
 
+    /// Also take out every value `session_secrets` knows at the time a text is scrubbed: one
+    /// given after this scrubber was made (telemetry's is made once, at launch) goes too.
+    pub fn with_live_secrets(mut self) -> Scrubber {
+        self.live_secrets = true;
+        self
+    }
+
     pub fn scrub(&self, text: &str) -> String {
         let mut text = crate::session_secrets::scrub(text, &self.secrets).into_owned();
+        if self.live_secrets {
+            // The lock-free snapshot: a panic hook scrubs too.
+            let known = crate::session_secrets::try_known();
+            text = crate::session_secrets::scrub(&text, &known).into_owned();
+        }
         text = redact_private_keys(&text);
+        // The Mac's data volume by its other name: `/System/Volumes/Data/Users/me` is
+        // `/Users/me`, not one of the system's own folders.
+        text = text.replace(DATA_VOLUME, "/");
         text = (self.shapes)(&text);
         // Web addresses before emails, so a login in one (`https://me:pw@host`) goes with it.
         text = FILE_URL.replace_all(&text, "[url]").into_owned();
@@ -160,9 +178,12 @@ impl Scrubber {
     }
 }
 
+/// A private key from its BEGIN line to its END line (or the text's end), PGP's `PRIVATE KEY
+/// BLOCK` included; or an END line with the base64 lines right above it, of any length (a key's
+/// last line is as short as what's left), when its BEGIN isn't there.
 static PRIVATE_KEY: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(
-        r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)|\A(?:[A-Za-z0-9+/=]{16,}\r?\n)+-----END [A-Z0-9 ]*PRIVATE KEY-----",
+        r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\z)|(?m:^[A-Za-z0-9+/=]+\r?\n)*-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----",
     )
     .unwrap()
 });
@@ -170,13 +191,17 @@ static PRIVATE_KEY: LazyLock<regex::Regex> = LazyLock::new(|| {
 /// Run before selecting/clipping diagnostics so PEM bodies cannot lose their header.
 /// A partial block (including one whose BEGIN fell outside a log read) is removed too.
 pub fn redact_private_keys(text: &str) -> String {
+    // Every form names it, and most text has none.
+    if !text.contains("PRIVATE KEY") {
+        return text.to_string();
+    }
     PRIVATE_KEY
         .replace_all(text, "[redacted private key]")
         .into_owned()
 }
 
 /// Tokens recognisable by their shape: Anthropic, OpenAI, GitHub, Slack, AWS, Google, GitLab,
-/// npm keys, and JSON web tokens.
+/// npm, Stripe, Hugging Face, age, DigitalOcean, Shopify and Square keys, and JSON web tokens.
 static TOKEN: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(concat!(
         r"\b(?:sk-ant-[A-Za-z0-9_\-]{10,}",
@@ -184,6 +209,14 @@ static TOKEN: LazyLock<regex::Regex> = LazyLock::new(|| {
         r"|gh[pousr]_[A-Za-z0-9]{20,}",
         r"|github_pat_[A-Za-z0-9_]{20,}",
         r"|xox[abposr]-[A-Za-z0-9\-]{10,}",
+        r"|xapp-[A-Za-z0-9\-]{10,}",
+        r"|[sr]k_(?:live|test)_[A-Za-z0-9]{16,}",
+        r"|whsec_[A-Za-z0-9+/=]{20,}",
+        r"|hf_[A-Za-z0-9]{30,}",
+        r"|AGE-SECRET-KEY-1[A-Za-z0-9]{40,}",
+        r"|dop_v1_[A-Fa-f0-9]{40,}",
+        r"|shp(?:at|ca|pa|ss)_[A-Fa-f0-9]{32,}",
+        r"|sq0csp-[A-Za-z0-9_\-]{20,}",
         r"|AKIA[0-9A-Z]{16}",
         r"|AIza[0-9A-Za-z_\-]{35}",
         r"|glpat-[A-Za-z0-9_\-]{20,}",
@@ -197,10 +230,11 @@ static BEARER: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"(?i)\b(bearer|token|basic)(\s+)[A-Za-z0-9._~+/\-]{16,}=*").unwrap()
 });
 
-/// `API_KEY=…`, `"password": "…"`, `client_secret: …`: the name stays, the value goes.
+/// `API_KEY=…`, `"password": "…"`, `client_secret: …`: the name stays, the value goes. A value
+/// in quotes is all of what's between them, spaces included (`password="my secret phrase"`).
 static ASSIGNED: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(
-        r#"(?i)\b([A-Za-z0-9_\-]*(?:api[_\-]?key|secret|token|passw(?:or)?d|access[_\-]?key|private[_\-]?key)[A-Za-z0-9_\-]*)("?\s*[:=]\s*)(["']?)([^\s"'`,;]{8,})"#,
+        r#"(?i)\b([A-Za-z0-9_\-]*(?:api[_\-]?key|secret|token|passw(?:or)?d|access[_\-]?key|private[_\-]?key)[A-Za-z0-9_\-]*)("?\s*[:=]\s*)(?:"(?P<dq>[^"\r\n]{8,})"|'(?P<sq>[^'\r\n]{8,})'|(?P<open>["']?)(?P<bare>[^\s"'`,;]{8,}))"#,
     )
     .unwrap()
 });
@@ -218,18 +252,38 @@ pub fn redact_secrets(text: &str) -> String {
     let text = TOKEN.replace_all(&text, REDACTED);
     let text = BEARER.replace_all(&text, "${1}${2}[redacted]");
     let text = ASSIGNED.replace_all(&text, |c: &regex::Captures| {
-        let value = &c[4];
-        // A word ("token: the next one") isn't a secret: a value with a digit, or a long one, is.
+        let (quote, value) = match (c.name("dq"), c.name("sq")) {
+            (Some(v), _) => ("\"", v.as_str()),
+            (_, Some(v)) => ("'", v.as_str()),
+            _ => ("", &c["bare"]),
+        };
+        // A word ("token: the next one") isn't a secret: a value with a digit, or a long one, is,
+        // and so is a phrase someone put in quotes as one.
         let secret = value != REDACTED
-            && (value.chars().any(|ch| ch.is_ascii_digit()) || value.chars().count() >= 16);
-        if secret {
-            format!("{}{}{}{REDACTED}", &c[1], &c[2], &c[3])
-        } else {
-            c[0].to_string()
+            && (value.chars().any(|ch| ch.is_ascii_digit())
+                || value.chars().count() >= 16
+                || (!quote.is_empty() && value.contains(char::is_whitespace)));
+        if !secret {
+            return c[0].to_string();
+        }
+        match quote {
+            "" => format!("{}{}{}{REDACTED}", &c[1], &c[2], &c["open"]),
+            _ => format!("{}{}{quote}{REDACTED}{quote}", &c[1], &c[2]),
         }
     });
     text.into_owned()
 }
+
+/// The Mac's data volume as the system itself sees it: everything under it is under `/` too.
+const DATA_VOLUME: &str = "/System/Volumes/Data/";
+
+/// Where a file's name goes on past a character a path usually ends at (`,;:()[]`), so the rest
+/// of the name goes with the path instead of being left behind it: brackets closed and followed
+/// by more of a name (`taxes (2024).pdf`, `Photos [old]/a.jpg`), or one of `,;:` with the name
+/// going straight on (`a,b.txt`). Prose after a path is none of these: `x (os error 2)`,
+/// `x: not found`, `x, y`, and neither are a line and column (`x.rs:12:5`) or a second path
+/// (`/usr/bin:/bin`).
+const NAME_GOES_ON: &str = r#"(?:[(\[][^()\[\]\r\n\t/\\<>"'`|*]*[)\]](?:[/\\\w]|\.[A-Za-z0-9])|[,;][^\s/\\~()\[\]<>"'`,;:*|]|:[^\s/\\~\d()\[\]<>"'`,;:*|])"#;
 
 /// Where the system's own files are: they name nothing of the user's.
 const SYSTEM: &[&str] = &[
@@ -393,22 +447,25 @@ static REGISTRY: LazyLock<regex::Regex> = LazyLock::new(|| {
 
 /// An absolute path of two or more parts, where a path can start (as `share::render` has it).
 static UNIX_PATH: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(
-        r#"(^|[\s(\[<"'`=:,*])(/[^\r\n\t/()\[\]<>"'`,;:*|]+(?:/[^\r\n\t/()\[\]<>"'`,;:*|]*)+)"#,
-    )
+    regex::Regex::new(&format!(
+        r#"(^|[\s(\[<"'`=:,*])(/[^\r\n\t/()\[\]<>"'`,;:*|]+(?:/[^\r\n\t/()\[\]<>"'`,;:*|]*)+(?:{NAME_GOES_ON}[^\r\n\t()\[\]<>"'`,;:*|]*)*)"#,
+    ))
     .unwrap()
 });
 
 static WINDOWS_PATH: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(
-        r#"(^|[\s(\[<"'`=,*])([A-Za-z]:\\[^\r\n\t\\()\[\]<>"'`,;*|]+(?:\\[^\r\n\t\\()\[\]<>"'`,;*|]*)+)"#,
-    )
+    regex::Regex::new(&format!(
+        r#"(^|[\s(\[<"'`=,*])([A-Za-z]:\\[^\r\n\t\\()\[\]<>"'`,;*|]+(?:\\[^\r\n\t\\()\[\]<>"'`,;*|]*)+(?:{NAME_GOES_ON}[^\r\n\t()\[\]<>"'`,;*|]*)*)"#,
+    ))
     .unwrap()
 });
 
 /// A path already written from the home folder (`~/code/app`).
 static HOME_PATH: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r#"(^|[\s(\[<"'`=:,*])~([/\\])[^\r\n\t()\[\]<>"'`,;*|]+"#).unwrap()
+    regex::Regex::new(&format!(
+        r#"(^|[\s(\[<"'`=:,*])~([/\\])[^\r\n\t()\[\]<>"'`,;*|]+(?:{NAME_GOES_ON}[^\r\n\t()\[\]<>"'`,;*|]*)*"#,
+    ))
+    .unwrap()
 });
 
 #[cfg(test)]
@@ -668,6 +725,184 @@ mod tests {
             let output = s.lines(&lines).join("\n");
             assert!(!output.contains("sensitiveBase64"));
             assert!(output.contains("[redacted private key]") && output.ends_with("after"));
+        }
+    }
+
+    /// The Mac's data volume by its other name is the same folders, not the system's.
+    #[test]
+    fn the_data_volumes_other_name_hides_nothing() {
+        let s = scrubber();
+        assert_eq!(
+            s.scrub("open /System/Volumes/Data/Users/me/Desktop/taxes.pdf failed"),
+            "open ~/[path] failed"
+        );
+        assert_eq!(
+            s.scrub("open /System/Volumes/Data/Users/me/code/acme-secret/plan.rs failed"),
+            "open [path] failed"
+        );
+        assert_eq!(
+            s.scrub("open /System/Volumes/Data/Users/ann/notes.md"),
+            "open [path]"
+        );
+        // The system's own stay.
+        assert_eq!(
+            s.scrub("load /System/Library/Frameworks/AppKit.framework/AppKit"),
+            "load /System/Library/Frameworks/AppKit.framework/AppKit"
+        );
+    }
+
+    #[test]
+    fn a_keys_short_last_line_and_pgp_blocks_go_too() {
+        // The BEGIN line fell outside what was read: the body's last line is short.
+        let tail = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nc2hvcnQ=\n-----END PRIVATE KEY-----\nafter";
+        assert_eq!(redact_private_keys(tail), "[redacted private key]\nafter");
+        let inside = "INFO read the file\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nAb==\n-----END RSA PRIVATE KEY-----";
+        assert_eq!(
+            redact_private_keys(inside),
+            "INFO read the file\n[redacted private key]"
+        );
+        let pgp = "x\n-----BEGIN PGP PRIVATE KEY BLOCK-----\nVersion: 1\n\nlQOYBGabcdefSecretBody\n=AbCd\n-----END PGP PRIVATE KEY BLOCK-----\ny";
+        assert_eq!(redact_private_keys(pgp), "x\n[redacted private key]\ny");
+        let pgp_tail = "lQOYBGabcdefSecretBody\n=AbCd\n-----END PGP PRIVATE KEY BLOCK-----";
+        assert_eq!(redact_private_keys(pgp_tail), "[redacted private key]");
+        // A public key isn't one, nor is talk of them.
+        for plain in [
+            "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A\n-----END PUBLIC KEY-----",
+            "the PRIVATE KEY was not found\nnext line",
+        ] {
+            assert_eq!(redact_private_keys(plain), plain);
+        }
+    }
+
+    #[test]
+    fn more_providers_tokens_go_by_their_shape() {
+        // Made-up tokens, each written in two pieces: whole, they look real enough that GitHub's
+        // push protection refuses the commit.
+        for token in [
+            concat!("sk_", "live_4eC39HqLyjWDarjtT1zdp7dc"),
+            concat!("rk_", "live_4eC39HqLyjWDarjtT1zdp7dc"),
+            concat!("sk_", "test_4eC39HqLyjWDarjtT1zdp7dc"),
+            concat!("whsec_", "MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"),
+            concat!("hf_", "abcdefghijklmnopqrstuvwxyzABCDEFGH"),
+            concat!("xapp-", "1-A0123456789-0123456789012-abcdef0123456789"),
+            concat!(
+                "AGE-SECRET-KEY-",
+                "1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ"
+            ),
+            concat!(
+                "dop_",
+                "v1_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            ),
+            concat!("shpat_", "0123456789abcdef0123456789abcdef"),
+            concat!("sq0csp-", "0123456789abcdefghijABCDEFGHIJ_-0123456789a"),
+        ] {
+            assert_eq!(
+                redact_secrets(&format!("sent {token} to the server")),
+                "sent [redacted] to the server",
+                "{token}"
+            );
+        }
+        // Words that only start alike stay.
+        for prose in [
+            "the hf_hub download and sk_live_mode flag",
+            "risk_test_cases and whsec_ are names",
+            "an xapp-like prefix, dop_v1_ and shpat_ alone",
+        ] {
+            assert_eq!(redact_secrets(prose), prose);
+        }
+    }
+
+    #[test]
+    fn a_quoted_secret_goes_whole_spaces_and_all() {
+        for (input, expected) in [
+            (
+                r#"password="my secret phrase" next"#,
+                r#"password="[redacted]" next"#,
+            ),
+            (
+                "login with password = 'correct horse' failed",
+                "login with password = '[redacted]' failed",
+            ),
+            (
+                r#"{"client_secret": "two words", "id": 4}"#,
+                r#"{"client_secret": "[redacted]", "id": 4}"#,
+            ),
+            (r#"API_KEY="abc12345""#, r#"API_KEY="[redacted]""#),
+            ("API_KEY=abc12345 rest", "API_KEY=[redacted] rest"),
+        ] {
+            assert_eq!(redact_secrets(input), expected, "{input}");
+        }
+        // Ordinary prose and short words in quotes stay as they are.
+        for prose in [
+            "the token: provided by you",
+            "password: \"none\"",
+            "the secret is that it rains, and the password is long gone",
+            r#"token = "missing""#,
+            "No password was given; the token expired",
+        ] {
+            assert_eq!(redact_secrets(prose), prose);
+        }
+    }
+
+    /// A file's name with brackets, a comma or a colon in it goes with its path, whole.
+    #[test]
+    fn a_name_with_punctuation_in_it_leaves_no_piece_behind() {
+        let s = Scrubber::new(
+            Some("/Users/me".into()),
+            vec![],
+            &["/Users/me/code/app".into()],
+            vec![],
+            str::to_owned,
+        );
+        for (input, expected) in [
+            ("open /Users/me/taxes (2024).pdf", "open ~/[path]"),
+            (
+                "open /Users/me/taxes (2024).pdf failed",
+                "open ~/[path] failed",
+            ),
+            ("open /Users/me/Photos (old)/cat.jpg", "open ~/[path]"),
+            ("open /Users/me/docs/report[final].docx", "open ~/[path]"),
+            ("open /Users/me/docs/a,b.txt", "open ~/[path]"),
+            ("open /Users/me/docs/notes;draft.md", "open ~/[path]"),
+            ("open /Users/me/docs/talk:slides.key", "open ~/[path]"),
+            ("open /tmp/x/budget (final).xlsx", "open [path]"),
+            ("open /Users/me/code/app/plan (v2).md", "open [path]"),
+            (
+                "open /Users/me/code/app/a,b.rs failed",
+                "open [path] failed",
+            ),
+            ("cwd ~/docs/taxes (2024).pdf", "cwd ~/[path]"),
+            (r"open C:\Users\me\taxes (2024).pdf", "open [path]"),
+        ] {
+            assert_eq!(s.scrub(input), expected, "{input}");
+        }
+        // What follows a path in prose is still there.
+        for (input, expected) in [
+            (
+                "open /Users/me/x.txt (os error 2)",
+                "open ~/[path] (os error 2)",
+            ),
+            (
+                "open /Users/me/x.txt (No such file or directory).",
+                "open ~/[path] (No such file or directory).",
+            ),
+            (
+                "open /Users/me/x.txt: not found",
+                "open ~/[path]: not found",
+            ),
+            ("at /Users/me/src/main.rs:12:5", "at ~/[path]:12:5"),
+            ("read /tmp/a/b, then /tmp/c/d", "read [path], then [path]"),
+            (
+                "PATH=/usr/bin:/bin:/Users/me/bin",
+                "PATH=/usr/bin:/bin:~/[path]",
+            ),
+            (
+                "see [the file](/Users/me/a/b.md) and go on",
+                "see [the file](~/[path]) and go on",
+            ),
+            ("(/Users/me/a/b.md), next", "(~/[path]), next"),
+        ] {
+            assert_eq!(s.scrub(input), expected, "{input}");
         }
     }
 }

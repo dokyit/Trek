@@ -312,22 +312,25 @@ fn crash_reports_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("crash-reports")
 }
 
-fn write_crash_report(data_dir: &Path, mut report: CrashReport) {
-    // Not `known()`: this may be the thread changing the list. If it is locked, don't
-    // persist a report whose session secrets we couldn't remove.
-    let Some(secrets) = trek_core::session_secrets::try_known() else {
-        return;
-    };
-    let scrubber = trek_core::scrub::Scrubber::new(
+/// What a panic's words go through before they're kept (the report, the note): paths, web
+/// addresses, emails, keys by their shape, and the secrets agents were given. Those are read
+/// without waiting (not `known()`): this may be the thread changing the list.
+fn crash_scrubber(data_dir: &Path) -> trek_core::scrub::Scrubber {
+    trek_core::scrub::Scrubber::new(
         Some(trek_core::paths::home().display().to_string()),
         vec![
             (data_dir.display().to_string(), "[Trek data]"),
             (log_dir().display().to_string(), "[Trek logs]"),
         ],
         &[],
-        secrets.as_ref().clone(),
+        vec![],
         trek_core::scrub::redact_secrets,
-    );
+    )
+    .with_live_secrets()
+}
+
+fn write_crash_report(data_dir: &Path, mut report: CrashReport) {
+    let scrubber = crash_scrubber(data_dir);
     report.message = trek_core::scrub::without_quoted_text(&report.message);
     for text in [
         &mut report.message,
@@ -403,7 +406,12 @@ fn crash_note_path(data_dir: &Path) -> PathBuf {
     data_dir.join("last-crash.txt")
 }
 
+/// `what` is scrubbed as the crash report beside it is: a panic's message can quote a path, an
+/// address or a key, and the note stays on disk until the next launch.
 fn write_crash_note(data_dir: &Path, what: &str) {
+    let what = crash_scrubber(data_dir)
+        .scrub(&trek_core::scrub::without_quoted_text(what))
+        .replace(['\n', '\r'], " ");
     let note = format!(
         "{}\n{what}\n",
         chrono::Local::now().format("%Y-%m-%d %H:%M")
@@ -491,22 +499,20 @@ impl DailyFile {
     }
 }
 
-/// A log line with the secrets agents were given this run taken out, and any private key
-/// removed. Paths, emails and web addresses stay: the file is local, and they make it useful.
+/// A log line with the secrets agents were given this run taken out, any private key removed,
+/// and whatever has the shape of a key or token (`sk-…`, `ghp_…`, `API_KEY=…`, a login in a web
+/// address). Paths, emails and web addresses stay: the file is local, and they make it useful.
 fn scrub_log_line(text: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
     let secrets = trek_core::session_secrets::try_known();
-    let has_secret = secrets.as_ref().is_some_and(|s| !s.is_empty());
-    if !has_secret && !text.contains("PRIVATE KEY") {
-        return std::borrow::Cow::Borrowed(text);
+    let mut out = trek_core::session_secrets::scrub(text, &secrets);
+    // Its patterns are compiled once; a line costs a few microseconds (`redact_secrets` takes
+    // out private keys too).
+    let shaped = trek_core::scrub::redact_secrets(&out);
+    if shaped != *out {
+        out = Cow::Owned(shaped);
     }
-    let mut out = text.to_string();
-    if let Some(secrets) = secrets {
-        out = trek_core::session_secrets::scrub(&out, &secrets).into_owned();
-    }
-    if out.contains("PRIVATE KEY") {
-        out = trek_core::scrub::redact_private_keys(&out);
-    }
-    std::borrow::Cow::Owned(out)
+    out
 }
 
 struct LogWriter(&'static DailyFile);
@@ -881,5 +887,86 @@ pub mod tests {
         assert!(note.contains("src/x.rs:3: boom"), "{note}");
         assert_eq!(take_crash_note(&dir), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The note beside the report is scrubbed as the report is: it's on disk until the next
+    /// launch, and a panic's message can quote anything.
+    #[test]
+    fn a_crash_note_is_scrubbed_like_the_report() {
+        let dir = scratch();
+        let secret = "crash-note-secret-41c7";
+        trek_core::session_secrets::remember("NOTE_TOKEN", secret);
+        write_crash_note(
+            &dir,
+            &format!(
+                "/Users/alice/private/plan.rs:3: bad key sk-proj-1234567890abcdefghijklmnop for me@example.com at https://private.example/x with {secret} in `words from a document`"
+            ),
+        );
+        let raw = std::fs::read_to_string(crash_note_path(&dir)).unwrap();
+        for gone in [
+            "alice",
+            "plan.rs",
+            "1234567890",
+            "me@example.com",
+            "private.example",
+            secret,
+            "words from",
+        ] {
+            assert!(!raw.contains(gone), "{gone} survived in {raw}");
+        }
+        assert!(
+            raw.contains("[path]:3: bad key [redacted] for [email]"),
+            "{raw}"
+        );
+        assert_eq!(raw.lines().count(), 2, "when, then what: {raw}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The log file loses what's shaped like a key, and keeps the paths and addresses that make
+    /// it useful.
+    #[test]
+    fn a_log_line_loses_keys_by_their_shape_and_keeps_the_rest() {
+        for (line, kept) in [
+            (
+                "WARN provider said no: key sk-proj-1234567890abcdefghijklmnop\n",
+                "WARN provider said no: key [redacted]\n",
+            ),
+            (
+                "INFO pushing with ghp_abcdefghijklmnopqrstuvwxyz0123 to origin\n",
+                "INFO pushing with [redacted] to origin\n",
+            ),
+            (
+                "DEBUG env OPENAI_API_KEY=abc123def456 set\n",
+                "DEBUG env OPENAI_API_KEY=[redacted] set\n",
+            ),
+            (
+                "DEBUG clone https://me:hunter2pw@example.com/repo.git\n",
+                "DEBUG clone https://[redacted]@example.com/repo.git\n",
+            ),
+        ] {
+            assert_eq!(scrub_log_line(line), kept);
+        }
+        let plain = "2026-01-02T03:04:05Z INFO trek_app::workspace: opened /Users/me/code/app (3 threads) from https://github.com/x/y in 12ms\n";
+        assert!(matches!(
+            scrub_log_line(plain),
+            std::borrow::Cow::Borrowed(same) if same == plain
+        ));
+    }
+
+    /// The shape pass runs on every line written: it has to stay far below what writing the
+    /// line costs. Prints what a line took (`--nocapture`).
+    #[test]
+    fn scrubbing_a_log_line_is_cheap() {
+        let line = "2026-01-02T03:04:05Z INFO trek_app::workspace::orchestrate: session started thread=\"0b7e\" agent=claude-code model=opus cwd=/Users/me/code/app servers=5 elapsed=12ms\n";
+        let _ = scrub_log_line(line);
+        let n = 20_000;
+        let start = std::time::Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(scrub_log_line(std::hint::black_box(line)));
+        }
+        let each = start.elapsed() / n;
+        println!("scrub_log_line: {each:?} a line");
+        // Generous (a debug build on a busy machine): a regression to milliseconds is the worry.
+        assert!(each < std::time::Duration::from_micros(500), "{each:?}");
     }
 }

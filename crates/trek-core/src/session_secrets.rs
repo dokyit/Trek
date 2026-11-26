@@ -43,12 +43,12 @@ pub fn known() -> Arc<Vec<(String, String)>> {
 
 /// `known`, without waiting: a lock-free snapshot for a panic hook, which may run on the very
 /// thread that's changing the list, where waiting would never end.
-pub fn try_known() -> Option<Arc<Vec<(String, String)>>> {
+pub fn try_known() -> Arc<Vec<(String, String)>> {
     let ptr = KNOWN_FAST.load(Ordering::Acquire);
     // Every pointer published above is intentionally kept alive.
     unsafe {
         Arc::increment_strong_count(ptr);
-        Some(Arc::from_raw(ptr))
+        Arc::from_raw(ptr)
     }
 }
 
@@ -316,7 +316,26 @@ mod tests {
         let value = "contention-secret-value";
         remember("TOKEN", value);
         let _writer = KNOWN.write().unwrap();
-        let snapshot = try_known().expect("the panic path always has a snapshot");
+        let snapshot = try_known();
         assert_eq!(scrub(value, &snapshot), "[TOKEN hidden]");
+    }
+
+    /// A scrubber made before a value was given (telemetry's is made once, at launch) takes it
+    /// out all the same, when it reads the values at the time it scrubs.
+    #[test]
+    fn a_scrubber_made_earlier_takes_out_a_secret_given_later() {
+        with_data_dir(|_| {
+            let made = |live: bool| {
+                let s = crate::scrub::Scrubber::new(None, vec![], &[], vec![], str::to_owned);
+                if live { s.with_live_secrets() } else { s }
+            };
+            let (fixed, live) = (made(false), made(true));
+            let value = "given-later-7f3a9c1e";
+            let line = format!("got {value}");
+            assert_eq!(live.scrub(&line), line);
+            remember("LATER", value);
+            assert_eq!(live.scrub(&line), "got [LATER hidden]");
+            assert_eq!(fixed.scrub(&line), line, "only what it was made with");
+        });
     }
 }

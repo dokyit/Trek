@@ -74,9 +74,12 @@ pub fn scrubber(ws: &Workspace) -> trek_telemetry::Scrubber {
             (data.display().to_string(), "[Trek data]"),
         ],
         &folders,
-        trek_core::session_secrets::known().as_ref().clone(),
+        // None of its own: made once at launch, it reads them as it scrubs, so a value an
+        // agent is given later in the run is taken out too.
+        vec![],
         crate::share::render::redact_secrets,
     )
+    .with_live_secrets()
 }
 
 /// The setup's few numbers, for the day's `setup` event (with a yes to usage totals).
