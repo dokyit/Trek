@@ -9,10 +9,10 @@ unclaimed = [
 ]
 
 [gates]
-"crates/trek-agents/src/acp.rs" = 2
+"crates/trek-agents/src/acp.rs" = 3
 "crates/trek-agents/src/claude.rs" = 1
 "crates/trek-agents/src/codex.rs" = 1
-"crates/trek-agents/src/direct.rs" = 29
+"crates/trek-agents/src/direct.rs" = 31
 "crates/trek-agents/src/direct/executor.rs" = 29
 "crates/trek-agents/src/direct/script.rs" = 1
 "crates/trek-agents/src/direct/search.rs" = 2
@@ -52,7 +52,7 @@ unclaimed = [
 "crates/trek-app/src/onboarding.rs" = 1
 "crates/trek-app/src/onboarding/steps.rs" = 2
 "crates/trek-app/src/panels/branch_graph.rs" = 2
-"crates/trek-app/src/panels/browser.rs" = 126
+"crates/trek-app/src/panels/browser.rs" = 127
 "crates/trek-app/src/panels/browser/agent.rs" = 3
 "crates/trek-app/src/panels/browser/agent_core.rs" = 1
 "crates/trek-app/src/panels/browser/asks.rs" = 5
@@ -163,7 +163,7 @@ unclaimed = [
 "crates/trek-core/src/store/adopted.rs" = 1
 "crates/trek-core/src/update.rs" = 82
 "crates/trek-core/src/update/closed.rs" = 4
-"crates/trek-core/src/update/relocate.rs" = 6
+"crates/trek-core/src/update/relocate.rs" = 7
 "crates/trek-core/src/verification.rs" = 8
 "crates/trek-core/src/wipe.rs" = 4
 "crates/trek-core/src/worktree.rs" = 2
