@@ -971,11 +971,6 @@ pub fn instructions_prompt(instructions: &str, text: &str) -> String {
     )
 }
 
-/// Whether `name` is one of Trek's own MCP servers.
-pub(crate) fn is_trek_server(name: &str) -> bool {
-    TREK_TOOLS.iter().any(|(server, _)| *server == name)
-}
-
 /// Whether `name` is a server of Trek's that asks the user itself before it does what the
 /// thread's level wants asked: sub-agents and threads (which run at the asker's own level) and
 /// the browser (its own cards for passwords, submitting and downloads). Computer use, the

@@ -10357,8 +10357,8 @@ print(`line 2: ${text}; lines: ${stdout.trim()}; exit ${exit_code}`);
         let (output, ok) = s.tool_finished().await;
         assert!(ok && output == "x", "{output}");
         assert_eq!(s.turn_complete().await, None);
-        assert!(crate::is_trek_server("trek-browser"));
-        assert!(!crate::is_trek_server("fake"));
+        assert!(crate::asks_for_itself("trek-browser"));
+        assert!(!crate::asks_for_itself("fake"));
         s.finish().await;
     }
 
