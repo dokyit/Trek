@@ -9,8 +9,6 @@ struct SearchView: View {
     /// while one is open, as on the other tabs.
     @Binding var path: [String]
     @State private var query = ""
-    /// The field has the keyboard: it takes it when the tab is chosen.
-    @FocusState private var typing: Bool
     /// The Mac's answer, and the text it answers.
     @State private var found: [SearchResult] = []
     @State private var foundFor = ""
@@ -82,19 +80,14 @@ struct SearchView: View {
             .navigationTitle("Search")
             .toolbar { ToolbarItem(placement: .topBarTrailing) { MachinePicker() } }
             // In the bar and always there: left to itself the field sat in the navigation bar's
-            // drawer, out of sight until the list was pulled down, so the tab opened with nothing
-            // to type in (seen on an iPhone with iOS 27.2).
+            // drawer, which an iPhone with iOS 27.2 opened collapsed, out of sight until the list
+            // was pulled down: the tab came up with nothing to type in.
             .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always),
                         prompt: onMac ? "Threads and messages" : "Threads, projects, agents, branches")
-            .searchFocused($typing)
             .navigationDestination(for: String.self) { ThreadView(threadID: $0) }
             // Typed: the Mac is asked once the typing pauses (and again once it says it can).
             .task(id: "\(onMac) \(link?.id ?? "") \(trimmed)") { await askTheMac(trimmed) }
-            .onAppear {
-                if let q = Launch.search, query.isEmpty { query = q }
-                // Choosing Search is asking to type; coming back from a result isn't.
-                if path.isEmpty, query.isEmpty, Launch.search == nil { typing = true }
-            }
+            .onAppear { if let q = Launch.search, query.isEmpty { query = q } }
         }
         .environment(\.openThread, OpenThreadAction { path.append($0) })
     }
