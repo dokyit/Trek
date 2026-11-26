@@ -2644,8 +2644,15 @@ fn is_safe_here(cmd: &str, cwd: &Path) -> bool {
     if trimmed.starts_with("git ") && agent_made_repo(cwd) {
         return false;
     }
-    !shell_words(trimmed).iter().skip(1).any(|w| {
-        let a = w.text.as_str();
+    // The words as a POSIX shell reads them, and as cmd.exe does (backslashes kept: on Windows
+    // `C:\Users\me\.ssh\id_rsa` is a path, which the first reading turns into `C:Usersme.sshid_rsa`).
+    let posix = shell_words(trimmed).into_iter().skip(1).map(|w| w.text);
+    let cmd = trimmed
+        .split_whitespace()
+        .skip(1)
+        .map(|w| w.replace(['\'', '"'], ""));
+    !posix.chain(cmd).any(|text| {
+        let a = text.as_str();
         let value = match a.strip_prefix('-') {
             Some(flag) => match flag.split_once('=') {
                 Some((_, v)) => v,
