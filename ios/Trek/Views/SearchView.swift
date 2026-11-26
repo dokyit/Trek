@@ -5,8 +5,12 @@ import SwiftUI
 /// thread the Mac has, settled long ago or a sub-agent's, and each one opens.
 struct SearchView: View {
     @Environment(AppModel.self) private var model
+    /// The threads opened from the results, kept by the tab view: it hides its "New thread" pill
+    /// while one is open, as on the other tabs.
+    @Binding var path: [String]
     @State private var query = ""
-    @State private var path: [String] = []
+    /// The field has the keyboard: it takes it when the tab is chosen.
+    @FocusState private var typing: Bool
     /// The Mac's answer, and the text it answers.
     @State private var found: [SearchResult] = []
     @State private var foundFor = ""
@@ -77,11 +81,20 @@ struct SearchView: View {
             }
             .navigationTitle("Search")
             .toolbar { ToolbarItem(placement: .topBarTrailing) { MachinePicker() } }
-            .searchable(text: $query, prompt: onMac ? "Threads and messages" : "Threads, projects, agents, branches")
+            // In the bar and always there: left to itself the field sat in the navigation bar's
+            // drawer, out of sight until the list was pulled down, so the tab opened with nothing
+            // to type in (seen on an iPhone with iOS 27.2).
+            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always),
+                        prompt: onMac ? "Threads and messages" : "Threads, projects, agents, branches")
+            .searchFocused($typing)
             .navigationDestination(for: String.self) { ThreadView(threadID: $0) }
             // Typed: the Mac is asked once the typing pauses (and again once it says it can).
             .task(id: "\(onMac) \(link?.id ?? "") \(trimmed)") { await askTheMac(trimmed) }
-            .onAppear { if let q = Launch.search, query.isEmpty { query = q } }
+            .onAppear {
+                if let q = Launch.search, query.isEmpty { query = q }
+                // Choosing Search is asking to type; coming back from a result isn't.
+                if path.isEmpty, query.isEmpty, Launch.search == nil { typing = true }
+            }
         }
         .environment(\.openThread, OpenThreadAction { path.append($0) })
     }

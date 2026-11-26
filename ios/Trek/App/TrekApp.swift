@@ -302,6 +302,7 @@ struct MainView: View {
     @State private var path: [String] = []
     @State private var basecampPath: [BasecampRoute] = []
     @State private var notesPath: [String] = []
+    @State private var searchPath: [String] = []
     @State private var showNew = false
 
     /// No "New thread" while the Mac can't be trusted or has refused this iPhone.
@@ -328,7 +329,7 @@ struct MainView: View {
                 SettingsView()
             }
             Tab(value: MainTab.search, role: .search) {
-                SearchView()
+                SearchView(path: $searchPath)
             }
         }
         .tabBarMinimizeBehavior(.onScrollDown)
@@ -389,7 +390,9 @@ extension MainView {
         case .threads: !path.isEmpty
         case .basecamp: basecampPath.contains { if case .thread = $0 { true } else { false } }
         case .notes: !notesPath.isEmpty
-        case .settings, .search: false
+        // A thread opened from a result: without this the pill stayed under its composer.
+        case .search: !searchPath.isEmpty
+        case .settings: false
         }
     }
 
