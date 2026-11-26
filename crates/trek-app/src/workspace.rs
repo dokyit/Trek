@@ -1730,6 +1730,8 @@ pub enum WorkspaceEvent {
         message: String,
         thread: String,
         button: Option<&'static str>,
+        /// What kind of news it is, for the log's line about the alert (`system::alert_line`).
+        event: crate::system::AlertEvent,
     },
     FocusComposer,
     /// The editor's AI side bar takes the keys (a chat tab switched or opened, the editor shown).
@@ -7274,12 +7276,18 @@ impl Workspace {
                 });
             }
         }
+        // The turn's end is what the log's line calls it, unless it stopped to ask.
+        let mut notify_event = match self.thread(id).map(|t| t.run_state) {
+            Some(RunState::Failed) => crate::system::AlertEvent::Failed,
+            _ => crate::system::AlertEvent::Finished,
+        };
         if let Some(why) = notify_why {
             let title = self
                 .thread(id)
                 .map(|t| t.title.as_str())
                 .unwrap_or_default();
             notify_text = Some(why.alert(title));
+            notify_event = crate::system::AlertEvent::NeedsYou;
         }
         if let Some(message) = notify_text.filter(|_| !side_chat) {
             let button = self
@@ -7290,6 +7298,7 @@ impl Workspace {
                 message,
                 thread: id.to_string(),
                 button,
+                event: notify_event,
             });
         }
         if let Some(first) = live_group {

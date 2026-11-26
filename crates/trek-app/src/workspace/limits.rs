@@ -233,6 +233,7 @@ impl Workspace {
                 message: format!("Continued on {}: {}", next.label, thread.title),
                 thread: id.to_string(),
                 button: None,
+                event: crate::system::AlertEvent::Resumed,
             });
             return;
         }
@@ -245,6 +246,7 @@ impl Workspace {
                 message: notice,
                 thread: id.to_string(),
                 button: None,
+                event: crate::system::AlertEvent::Limit,
             });
         }
         self.schedule_limits(cx);
@@ -785,6 +787,7 @@ impl Workspace {
                 message: format!("Resumed: {title}"),
                 thread: id.to_string(),
                 button: None,
+                event: crate::system::AlertEvent::Resumed,
             });
         }
     }

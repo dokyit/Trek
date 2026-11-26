@@ -338,6 +338,7 @@ impl Workspace {
             message,
             thread: thread.to_string(),
             button: None,
+            event: crate::system::AlertEvent::NeedsYou,
         });
         cx.notify();
     }

@@ -1551,7 +1551,8 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     cx.on_system_notification_response(move |response, cx| {
         let Some(ws) = ws.upgrade() else { return };
         // The banner that said Trek went to the tray brings its window back.
-        if response.tag.as_ref() == TRAY_TAG {
+        // So does the test banner from Settings › Notifications, which is about no thread.
+        if response.tag.as_ref() == TRAY_TAG || response.tag.as_ref() == crate::banner::TEST_TAG {
             show_main(ws, cx);
             return;
         }
@@ -1572,9 +1573,10 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
             message,
             thread,
             button,
+            event,
         } => {
             ws.update(cx, |ws, _| ws.push_alert(message, thread));
-            attention(&ws, message.clone(), thread, *button, cx)
+            attention(&ws, message.clone(), thread, *button, *event, cx)
         }
         WorkspaceEvent::ActivateMain => show_main(ws, cx),
         WorkspaceEvent::OpenPalette => show_palette(ws, cx),
@@ -2063,38 +2065,53 @@ fn notice_window(
 /// A thread needs the user or finished: toast, banner and sound per the notification settings.
 /// Decided once for all windows, so a sound or banner never doubles up. Clicking either opens
 /// the thread.
+///
+/// Whether the user is in Trek is the system's word that Trek is the app in front, a window of
+/// Trek's having the keys, and the user being at the computer (`system::Presence`): a Trek left
+/// in front of a locked screen, or one nobody has touched for two minutes, alerts as one behind.
+/// Every decision is a line in the log (`system::alert_line`), and so is what the system said to
+/// the banner (`banner::post`).
 fn attention(
     workspace: &Entity<Workspace>,
     message: String,
     thread: &str,
     button: Option<&'static str>,
+    event: crate::system::AlertEvent,
     cx: &mut App,
 ) {
     let front = key_window(cx);
+    let presence = crate::system::Presence::now(front.is_some());
+    // The window in front, for what's on screen and where a note goes: none while the user
+    // isn't in Trek.
+    let front = front.filter(|_| presence.focused());
     let ws = workspace.read(cx);
-    let alert = crate::system::alert_for(
+    let viewing = ws.viewing(thread, front);
+    let alert = crate::system::alert_for(&ws.settings.notifications, presence.focused(), viewing);
+    crate::system::log_alert(crate::system::alert_line(
+        thread,
+        event,
         &ws.settings.notifications,
-        front.is_some(),
-        ws.viewing(thread, front),
-    );
+        presence,
+        viewing,
+        alert,
+    ));
     if alert.sound {
         crate::system::play_alert_sound();
     }
     if alert.banner {
-        #[cfg(all(windows, not(any(test, feature = "test-support"))))]
-        register_toast_identity();
         // Posted by Trek rather than through a toast's system delivery, so it goes out with no
         // window open too, and its tag says which thread to open when it's clicked.
-        let banner = SystemNotification {
-            tag: attention_tag(thread),
-            title: message.clone().into(),
-            body: SharedString::default(),
-            actions: Vec::new(),
-        };
-        match banner_link(thread) {
-            Some(link) => cx.show_system_notification_with_launch(banner, link),
-            None => cx.show_system_notification(banner),
-        }
+        post_banner(
+            SystemNotification {
+                tag: attention_tag(thread),
+                title: message.clone().into(),
+                body: SharedString::default(),
+                actions: Vec::new(),
+            },
+            banner_link(thread),
+            thread,
+            cx,
+        );
     }
     if alert.toast {
         let Some(target) = notice_window(workspace, front, cx) else {
@@ -2135,6 +2152,56 @@ fn attention(
         }
         .on_click(move |_, _, cx| reveal_thread(&ws, &thread, cx));
         let _ = target.update(cx, |_, window, cx| crate::toast::push(window, note, cx));
+    }
+}
+
+/// Hand the system a banner, and write its answer to the log (`banner::post`).
+fn post_banner(banner: SystemNotification, link: Option<String>, thread: &str, cx: &mut App) {
+    #[cfg(all(windows, not(any(test, feature = "test-support"))))]
+    register_toast_identity();
+    crate::banner::post(banner, link, thread, cx);
+}
+
+/// Settings › Notifications' test: the banner and the sound the settings ask for, now, whatever
+/// is in front (the user was given a moment to switch away, and may not have). With alerts off
+/// there's nothing to test. What the system says to it is `banner::test_answer`.
+pub fn test_alert(workspace: &Entity<Workspace>, cx: &mut App) {
+    use trek_core::settings::NotifyMode;
+    let n = workspace.read(cx).settings.notifications.clone();
+    let presence = crate::system::Presence::now(key_window(cx).is_some());
+    let alert = crate::system::Alert {
+        toast: false,
+        banner: matches!(n.mode, NotifyMode::Banner | NotifyMode::BannerAndSound),
+        sound: matches!(n.mode, NotifyMode::Sound | NotifyMode::BannerAndSound),
+    };
+    crate::system::log_alert(crate::system::alert_line(
+        "-",
+        crate::system::AlertEvent::Test,
+        &n,
+        presence,
+        false,
+        alert,
+    ));
+    crate::banner::test_begins();
+    if alert.sound {
+        crate::system::play_alert_sound();
+    }
+    if alert.banner {
+        post_banner(
+            SystemNotification {
+                tag: crate::banner::TEST_TAG.into(),
+                title: "Trek's banners work".into(),
+                body: format!(
+                    "This is the test from Settings › Notifications on {}.",
+                    crate::words::words().this_computer
+                )
+                .into(),
+                actions: Vec::new(),
+            },
+            None,
+            "",
+            cx,
+        );
     }
 }
 

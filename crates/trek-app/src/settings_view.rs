@@ -389,8 +389,29 @@ pub struct SettingsView {
     /// the last one was left.
     scroll: ScrollHandle,
     scrolled_page: Option<SettingsPage>,
+    /// Notifications page: the test of this computer's banner, and its wait before it's sent.
+    pub(super) banner_test: BannerTest,
+    pub(super) _banner_test: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
+
+/// Where Settings › Notifications' "Send a test" stands.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) enum BannerTest {
+    #[default]
+    Idle,
+    /// Clicked: it goes in a moment, so the user can switch to another app first.
+    Waiting,
+    /// Gone: whether a banner was part of it (not with alerts set to sound alone), and what the
+    /// system said to the banner, if it has answered.
+    Sent {
+        banner: bool,
+        answer: Option<Result<(), String>>,
+    },
+}
+
+/// How long after the click the test goes: time to bring another app to the front.
+pub(super) const BANNER_TEST_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Agents whose Install or Sign in was handed to a terminal, and when. Trek can't see that command
 /// end, so the button reads "Installing…" or "Signing in…" until the agent's state changes, Scan
@@ -825,6 +846,8 @@ impl SettingsView {
             renaming: None,
             scroll: ScrollHandle::new(),
             scrolled_page: None,
+            banner_test: BannerTest::default(),
+            _banner_test: None,
             _subscriptions: subs,
         }
     }

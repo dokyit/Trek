@@ -614,3 +614,416 @@ fn the_dock_shows_the_app_icon_picked_in_appearance() {
         assert_eq!(APP_ICON.with(|i| i.get()), Some(AppIcon::Night));
     });
 }
+
+/// The log's lines for alerts decided since the last look.
+fn alert_log() -> Vec<String> {
+    trek_app::system::ALERT_LOG.with(|l| std::mem::take(&mut *l.borrow_mut()))
+}
+
+/// A thread another thread's agent started (`start_thread`), as the store has one.
+fn started_by(trek: &Trek, cx: &mut TestAppContext, parent: &str, title: &str) -> String {
+    trek.update(cx, |ws, cx| {
+        let mut t = ws
+            .store
+            .create_thread(
+                Some(&trek.project),
+                common::mock(),
+                None,
+                trek_core::Effort::Medium,
+                trek_core::HandHolding::Auto,
+            )
+            .expect("thread");
+        t.title = title.into();
+        t.started_by = Some(parent.to_string());
+        ws.store.save_thread(&t).expect("save");
+        ws.reload(cx);
+        t.id
+    })
+}
+
+/// The user sent `id` a prompt: a turn of theirs is open. (A turn the agent starts by itself,
+/// woken by its background work, alerts once in a while at most; theirs always does.)
+fn prompted(trek: &Trek, cx: &mut TestAppContext, id: &str) {
+    trek.update(cx, |ws, cx| {
+        ws.load_for_view(id, cx);
+        ws.live.get_mut(id).expect("live").turn_started = Some(std::time::Instant::now());
+    });
+}
+
+/// `finish`, for a turn the user started.
+fn finish_prompted(trek: &Trek, cx: &mut TestAppContext, id: &str, error: Option<&str>) {
+    prompted(trek, cx, id);
+    finish(trek, cx, id, error);
+}
+
+/// A shell command the agent left running between turns.
+fn background_command(trek: &Trek, cx: &mut TestAppContext, id: &str) {
+    let task = trek_agents::BackgroundTask {
+        id: "bg-1".into(),
+        kind: trek_agents::BackgroundKind::Shell,
+        title: "npm run dev".into(),
+        call: None,
+        readable: true,
+        stoppable: true,
+    };
+    trek.update(cx, |ws, cx| {
+        ws.apply_events(id, vec![AgentEvent::Background(vec![task])], cx)
+    });
+}
+
+/// The report this answers, as it happened on a Mac with 0.4.64, alerts set to banner and sound
+/// and only in the background: two turns ended while Trek was the app in front, and the Mac made
+/// no banner and no sound while the phone got its note both times. That was the setting at work,
+/// which nothing said: now the log has a line for each, saying where the user was and why the
+/// Mac stayed quiet. The same two turns with another app in front post a banner and play the
+/// sound, as the one alert Trek did post that morning (with another app in front) had.
+#[test]
+fn the_reported_turns_were_quiet_because_trek_was_in_front_and_the_log_says_so() {
+    run(async |cx| {
+        let trek = alerting(cx, NotifyMode::BannerAndSound);
+        let said = attention(&trek, cx);
+        let here = titled(&trek, cx, "Trek dev");
+        focus(&trek, cx);
+        alert_log();
+
+        // Test 1: the turn of the thread on screen ends with a command of its still running in
+        // the background. The turn is over, so it's "Finished", command or no command; and it's
+        // the thread being looked at, in the window in front: nothing at all.
+        background_command(&trek, cx, &here);
+        finish_prompted(&trek, cx, &here, None);
+        assert_eq!(*said.borrow(), ["Finished: Trek dev"]);
+        assert_eq!((toasts(&trek, cx), banners(cx).len(), sounds()), (0, 0, 0));
+        let short = &here[..8];
+        assert_eq!(
+            alert_log(),
+            [format!(
+                "alert thread={short} event=finished focused=true viewing=true app_active=true key_window=true away=false mode=banner-and-sound only_when_unfocused=true -> no banner or sound: the thread is on screen in the window in front"
+            )]
+        );
+
+        // Test 2: a thread that one started (`start_thread`) finishes, Trek still in front: a
+        // note in the window with the way to it, and no banner or sound.
+        let child = started_by(&trek, cx, &here, "Notification test");
+        finish_prompted(&trek, cx, &child, None);
+        assert_eq!(
+            said.borrow().last().map(String::as_str),
+            Some("Thread completed · Notification test")
+        );
+        assert_eq!((toasts(&trek, cx), banners(cx).len(), sounds()), (1, 0, 0));
+        let log = alert_log();
+        assert_eq!(log.len(), 1, "{log:?}");
+        assert!(
+            log[0].ends_with(
+                "focused=true viewing=false app_active=true key_window=true away=false mode=banner-and-sound only_when_unfocused=true -> no banner or sound: Trek is in front and alerts wait for the background, a note in the window"
+            ),
+            "{log:?}"
+        );
+        assert!(
+            !log[0].contains("Notification test") && !log[0].contains(&child[8..]),
+            "no title, and the id cut short: {log:?}"
+        );
+
+        // The same two with another app in front: a banner and the sound each, and the log has
+        // what the system said to each banner.
+        blur(&trek, cx);
+        finish_prompted(&trek, cx, &child, None);
+        assert_eq!(
+            banners(cx).last(),
+            Some(&(
+                format!("trek-attention-{child}"),
+                "Thread completed · Notification test".to_string()
+            ))
+        );
+        assert_eq!(sounds(), 1);
+        let child_short = &child[..8];
+        assert_eq!(
+            alert_log(),
+            [
+                format!(
+                    "alert thread={child_short} event=finished focused=false viewing=false app_active=true key_window=false away=false mode=banner-and-sound only_when_unfocused=true -> banner and sound, a note in the window"
+                ),
+                format!(
+                    "alert thread={child_short} banner: {} took it (allowed)",
+                    trek_app::banner::system_name()
+                ),
+            ]
+        );
+        finish_prompted(&trek, cx, &here, None);
+        assert_eq!(
+            banners(cx).last(),
+            Some(&(
+                format!("trek-attention-{here}"),
+                "Finished: Trek dev".to_string()
+            ))
+        );
+        assert_eq!(sounds(), 2, "with its command still running");
+        alert_log();
+
+        // A banner the system turns down is said too, with its reason.
+        trek_app::banner::fake::refuse(Some("Notifications are not allowed for this application"));
+        finish_prompted(&trek, cx, &here, Some("The agent crashed"));
+        let log = alert_log();
+        assert!(
+            log[0].starts_with(&format!("alert thread={short} event=failed ")),
+            "{log:?}"
+        );
+        assert_eq!(
+            log[1],
+            format!(
+                "alert thread={short} banner: {} refused it (allowed): Notifications are not allowed for this application",
+                trek_app::banner::system_name()
+            )
+        );
+        trek_app::banner::fake::refuse(None);
+    });
+}
+
+/// "In front" is the user being in Trek, which takes more than a window that says it has the
+/// keys: the system's word that Trek is the app in front, and someone at the computer.
+#[test]
+fn a_trek_nobody_is_in_alerts_as_one_in_the_background() {
+    run(async |cx| {
+        let trek = alerting(cx, NotifyMode::BannerAndSound);
+        let away = titled(&trek, cx, "Fix the login bug");
+        titled(&trek, cx, "Write the docs");
+        focus(&trek, cx);
+        alert_log();
+
+        // In Trek: a note in the window, as before.
+        finish_prompted(&trek, cx, &away, None);
+        assert_eq!((banners(cx).len(), sounds()), (0, 0));
+
+        // Another app is in front while Trek's window still counts itself as having the keys
+        // (its word that it lost them never came, or a panel of Trek's took them): a banner.
+        trek_app::system::fake_presence(false, false);
+        finish_prompted(&trek, cx, &away, None);
+        assert_eq!((banners(cx).len(), sounds()), (1, 1));
+        assert!(alert_log().iter().any(|l| {
+            l.contains("focused=false viewing=false app_active=false key_window=true away=false")
+        }));
+
+        // Trek left in front of a locked screen, or of a keyboard nobody has touched for a
+        // while: nobody is looking, so the banner (it waits in the notification center and on
+        // the lock screen) and the sound go out.
+        trek_app::system::fake_presence(true, true);
+        ask(&trek, cx, &away);
+        assert_eq!((banners(cx).len(), sounds()), (2, 2));
+        assert!(alert_log().iter().any(|l| l.contains(
+            "event=needs-you focused=false viewing=false app_active=true key_window=true away=true"
+        )));
+
+        // Back at the keyboard, in Trek: quiet again.
+        trek_app::system::fake_presence(true, false);
+        finish_prompted(&trek, cx, &away, None);
+        assert_eq!((banners(cx).len(), sounds()), (2, 2));
+    });
+}
+
+/// What "finished" means while work goes on after the turn. A command left running (a server,
+/// a watcher) doesn't hold the alert back: the turn is over and the agent has said its piece.
+/// Sub-agents of the agent's own still out do: the thread isn't done until the turn their
+/// reports start has ended, and says so then.
+#[test]
+fn a_turn_is_finished_with_a_command_still_running_but_not_with_sub_agents_out() {
+    run(async |cx| {
+        let trek = alerting(cx, NotifyMode::BannerAndSound);
+        let said = attention(&trek, cx);
+        let id = titled(&trek, cx, "Build the importer");
+        blur(&trek, cx);
+
+        background_command(&trek, cx, &id);
+        finish_prompted(&trek, cx, &id, None);
+        assert_eq!(*said.borrow(), ["Finished: Build the importer"]);
+        assert_eq!((banners(cx).len(), sounds()), (1, 1));
+
+        // A sub-agent of its own goes on in the background as the next turn ends: no alert.
+        let scout = |done| AgentEvent::Task {
+            id: "toolu_scout".into(),
+            description: Some("Scout the parser".into()),
+            activity: None,
+            tool_uses: None,
+            done,
+        };
+        let out = trek_agents::BackgroundTask {
+            id: "agent-1".into(),
+            kind: trek_agents::BackgroundKind::Agent,
+            title: "Scout the parser".into(),
+            call: Some("toolu_scout".into()),
+            readable: false,
+            stoppable: true,
+        };
+        prompted(&trek, cx, &id);
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![
+                    AgentEvent::TextDelta("Scouting.".into()),
+                    scout(None),
+                    AgentEvent::Background(vec![out]),
+                    AgentEvent::TurnComplete { error: None },
+                ],
+                cx,
+            )
+        });
+        assert_eq!(said.borrow().len(), 1, "it waits on its sub-agent");
+        assert_eq!((banners(cx).len(), sounds()), (1, 1));
+
+        // The sub-agent reports, the agent takes its turn for that, and that turn's end is the
+        // thread's: now it's finished.
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![
+                    scout(Some(true)),
+                    AgentEvent::Background(vec![]),
+                    AgentEvent::TextDelta("The parser is fine.".into()),
+                    AgentEvent::TurnComplete { error: None },
+                ],
+                cx,
+            )
+        });
+        assert_eq!(said.borrow().len(), 2);
+        assert_eq!(
+            said.borrow().last().map(String::as_str),
+            Some("Finished: Build the importer")
+        );
+        assert_eq!((banners(cx).len(), sounds()), (2, 2));
+    });
+}
+
+/// Settings › Notifications' "Send a test": five seconds after the click, the banner and the
+/// sound the settings ask for, whatever is in front, and under the button what the system says.
+#[test]
+fn the_test_in_settings_sends_a_real_banner_and_says_what_the_system_made_of_it() {
+    use trek_app::banner::{self, Os};
+    use trek_app::settings_view::shown;
+    use trek_app::workspace::SettingsPage;
+    let said = |trek: &Trek, cx: &mut TestAppContext| -> Vec<String> {
+        shown::take();
+        trek.render(cx);
+        shown::take()
+    };
+    let has = |texts: &[String], part: &str| texts.iter().any(|t| t.contains(part));
+    run(async |cx| {
+        let trek = alerting(cx, NotifyMode::BannerAndSound);
+        focus(&trek, cx);
+        trek.update(cx, |ws, cx| {
+            ws.navigate(Route::Settings(SettingsPage::Notifications), cx)
+        });
+        let system = banner::system_name();
+
+        // What "only in the background" comes to is said under it, in plain words.
+        let texts = said(&trek, cx);
+        assert!(
+            has(&texts, "Trek stays quiet on") && has(&texts, "while its window is in front"),
+            "{texts:?}"
+        );
+        assert!(has(&texts, &format!("{system} allows Trek's banners.")));
+        assert!(!trek.visible(cx, "banner-settings"));
+
+        // The click sends nothing yet: there's time to switch to another app.
+        alert_log();
+        trek.click(cx, "banner-test");
+        assert!(has(&said(&trek, cx), "Sending in 5 seconds."));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(4));
+        cx.run_until_parked();
+        assert_eq!((banners(cx).len(), sounds()), (0, 0));
+        // Then it goes, though Trek is in front and alerts wait for the background.
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(2));
+        cx.run_until_parked();
+        assert_eq!(
+            banners(cx),
+            [(
+                "trek-test-banner".to_string(),
+                "Trek's banners work".to_string()
+            )]
+        );
+        assert_eq!(sounds(), 1);
+        assert!(has(
+            &said(&trek, cx),
+            &format!("Sent, and {system} took it.")
+        ));
+        let log = alert_log();
+        assert!(
+            log[0].starts_with("alert thread=- event=test ")
+                && log[0].ends_with("-> banner and sound"),
+            "{log:?}"
+        );
+        assert_eq!(
+            log[1],
+            format!("alert thread=- banner: {system} took it (allowed)")
+        );
+
+        // The system has Trek's notifications off: the row says so, the test says why nothing
+        // showed, and a button opens the system's settings for it.
+        banner::fake::set(Os::Denied);
+        banner::fake::refuse(Some("Notifications are not allowed for this application"));
+        trek.click(cx, "banner-test");
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(6));
+        cx.run_until_parked();
+        let texts = said(&trek, cx);
+        assert!(
+            has(
+                &texts,
+                "Not shown: Notifications are not allowed for this application. Denied:"
+            ),
+            "{texts:?}"
+        );
+        assert_eq!(banners(cx).len(), 1, "none posted");
+        trek.click(cx, "banner-settings");
+        assert_eq!(
+            banner::fake::opened(),
+            [trek_app::permissions::Permission::Notifications
+                .pane()
+                .to_string()]
+        );
+        banner::fake::refuse(None);
+
+        // A Focus holds banners back without refusing them: said by name, and its settings open.
+        banner::fake::set(Os::Focus(Some("Do Not Disturb".into())));
+        trek.click(cx, "banner-test");
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(6));
+        cx.run_until_parked();
+        assert!(has(&said(&trek, cx), "Sent. Focus is on (Do Not Disturb):"));
+        // Delivered quietly: allowed, with no banner style.
+        banner::fake::set(Os::Quiet);
+        assert!(has(&said(&trek, cx), "Delivered quietly:"));
+        assert!(trek.visible(cx, "banner-settings"));
+        banner::fake::set(Os::Allowed);
+
+        // Sound alone: the test plays it and posts nothing. Off: nothing to send.
+        trek.update(cx, |ws, cx| {
+            ws.settings.notifications.mode = NotifyMode::Sound;
+            cx.notify()
+        });
+        let (posted, played) = (banners(cx).len(), sounds());
+        trek.click(cx, "banner-test");
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(6));
+        cx.run_until_parked();
+        assert_eq!((banners(cx).len(), sounds()), (posted, played + 1));
+        assert!(has(&said(&trek, cx), "Played the sound."));
+        trek.update(cx, |ws, cx| {
+            ws.settings.notifications.mode = NotifyMode::Off;
+            cx.notify()
+        });
+        assert!(has(&said(&trek, cx), "Alerts are off"));
+        trek.click(cx, "banner-test");
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(6));
+        cx.run_until_parked();
+        assert_eq!((banners(cx).len(), sounds()), (posted, played + 1));
+
+        // With the switch off, the words under it say what that comes to.
+        trek.update(cx, |ws, cx| {
+            ws.settings.notifications.mode = NotifyMode::BannerAndSound;
+            ws.settings.notifications.only_when_unfocused = false;
+            cx.notify()
+        });
+        assert!(has(&said(&trek, cx), "while you're in Trek too"));
+    });
+}

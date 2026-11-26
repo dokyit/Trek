@@ -215,6 +215,22 @@ fn away(idle: f64, locked: bool) -> bool {
     locked || idle >= AWAY_AFTER.as_secs_f64()
 }
 
+/// The user is away from the computer, for its own alerts: the screen is locked, or nothing has
+/// touched the keyboard or mouse for `AWAY_AFTER`. A Trek left in front then is in front of
+/// nobody, so its banner and sound go out as if it were behind (`system::Presence`). Where the
+/// system can't say (Linux, or a Windows that won't), the user counts as there: a phone gets the
+/// benefit of the doubt (`due`), a window that says it has the keys is believed.
+pub fn user_away() -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    return crate::system::PRESENCE.with(|p| p.get().1);
+    #[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
+    return away(idle_seconds(), screen_locked());
+    #[cfg(all(windows, not(any(test, feature = "test-support"))))]
+    return screen_locked() || crate::winsys::idle_seconds().is_some_and(|idle| away(idle, false));
+    #[cfg(not(any(target_os = "macos", windows, test, feature = "test-support")))]
+    false
+}
+
 /// Whether a note goes out now: always, or when the user is away. The system is asked (idle time,
 /// lock state) only when it matters, as that is a call per alert.
 fn due(when: PushWhen, idle: impl FnOnce() -> f64, locked: impl FnOnce() -> bool) -> bool {
