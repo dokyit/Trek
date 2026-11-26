@@ -2447,7 +2447,8 @@ fn push_tool_results(
 }
 
 /// Whether Auto mode may run `cmd` without asking: a read-only command from a short list, run
-/// as it is. The shell runs whatever else the line holds, so anything that chains, substitutes or
+/// as it is. No builds: `cargo check` runs the project's `build.rs` and takes `--config`, and
+/// Auto lets an agent write both unasked, so a build is the agent's own code run without a card. The shell runs whatever else the line holds, so anything that chains, substitutes or
 /// redirects is out, and so are the flags that make a listed tool write, delete or run commands.
 fn is_safe_command(cmd: &str) -> bool {
     let trimmed = cmd.trim();
@@ -2463,8 +2464,6 @@ fn is_safe_command(cmd: &str) -> bool {
         "git log",
         "git show",
         "git branch",
-        "cargo check",
-        "cargo clippy",
         "ls",
         "cat",
         "head",
@@ -2535,9 +2534,12 @@ fn is_safe_command(cmd: &str) -> bool {
                     .iter()
                     .any(|f| a.starts_with(f))
             }
-            "git diff" | "git log" | "git show" => a.starts_with("--output"),
-            "rg" => a.starts_with("--pre"),
-            "cargo check" | "cargo clippy" => a == "--fix",
+            // Writes a file, or runs the programs the repository's config names for diffs.
+            "git diff" | "git log" | "git show" => {
+                a.starts_with("--output") || a == "--ext-diff" || a == "--textconv"
+            }
+            // Programs of the caller's choosing: a preprocessor, and the one asked for a name.
+            "rg" => a.starts_with("--pre") || a.starts_with("--hostname-bin"),
             // Follows forever.
             "tail" => short(a, "fF") || a.starts_with("--follow") || a == "--retry",
             _ => false,
@@ -2717,12 +2719,34 @@ fn edit_permission(
         cwd.join(path_str)
     };
     if crate::acp::within(&path, cwd) {
+        // Git's own folder isn't the project's files: its config and hooks name programs that
+        // `git status` and `git diff` run, which Auto runs unasked. A write there asks like one
+        // outside the project.
+        if in_git_dir(&path, cwd) {
+            let key = format!("{tool}:git:{}", path.display());
+            let ask =
+                hand_holding != HandHolding::FullAccess && !allowed_for_session.contains(&key);
+            return (ask, key);
+        }
         let ask = hand_holding == HandHolding::Supervised && !allowed_for_session.contains(tool);
         return (ask, tool.to_string());
     }
     let key = format!("{tool}:outside:{}", path.display());
     let ask = hand_holding != HandHolding::FullAccess && !allowed_for_session.contains(&key);
     (ask, key)
+}
+
+/// Whether `path`, in the project `cwd`, is inside a `.git` folder (the project's or a nested
+/// repository's), whatever the case of its name (the Mac's and Windows' disks don't care).
+fn in_git_dir(path: &Path, cwd: &Path) -> bool {
+    path.strip_prefix(cwd)
+        .unwrap_or(path)
+        .components()
+        .any(|c| {
+            c.as_os_str()
+                .to_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case(".git"))
+        })
 }
 
 /// Whether a thread's level, by itself, asks before `tool` (`bash`, `mcp`, `web_fetch`,
@@ -2749,14 +2773,14 @@ fn level_asks(
             (need_ask, "Run command", target.to_string())
         }
         // A tool on an MCP server that doesn't say it only reads (those don't come here below
-        // Supervised). Auto trusts Trek's own servers, which have approvals of their own, and asks
+        // Supervised). Auto trusts the servers of Trek's that ask the user themselves, and asks
         // about the rest, as it does for an ACP agent.
         "mcp" => {
             let server = target.split(' ').next().unwrap_or_default();
             let need_ask = match hand_holding {
                 HandHolding::FullAccess => false,
                 HandHolding::Auto => {
-                    !crate::is_trek_server(server) && !allowed_for_session.contains(target)
+                    !crate::asks_for_itself(server) && !allowed_for_session.contains(target)
                 }
                 HandHolding::AutoAcceptEdits | HandHolding::Supervised => {
                     !allowed_for_session.contains(target)
@@ -6519,7 +6543,11 @@ mod tests {
     fn safe_command_checks() {
         assert!(is_safe_command("git status"));
         assert!(is_safe_command("git log -n 5"));
-        assert!(is_safe_command("cargo check"));
+        assert!(!is_safe_command("cargo check"));
+        assert!(!is_safe_command("cargo clippy"));
+        assert!(!is_safe_command("git diff --ext-diff"));
+        assert!(!is_safe_command("git log -p --textconv"));
+        assert!(!is_safe_command("rg --hostname-bin ./x foo"));
         assert!(is_safe_command("ls -la"));
         assert!(!is_safe_command("rm -rf /"));
         assert!(!is_safe_command("git status; rm -rf ."));
@@ -7626,6 +7654,59 @@ mod tests {
         assert!(out.starts_with("a✓✓"));
         assert!(out.ends_with("✓"));
         assert!(out.len() < MAX_OUT + 300);
+    }
+
+    /// Git's folder holds what `git status` runs (config, hooks): a write there asks at every
+    /// level but Full access, in the project's own `.git` or a nested one, in any case.
+    #[test]
+    fn edits_in_gits_folder_ask_below_full_access() {
+        let cwd = std::env::temp_dir().join("trek_edit_permission_git");
+        let none = HashSet::new();
+        for path in [
+            ".git/config",
+            ".GIT/hooks/pre-commit",
+            "vendor/x/.git/config",
+        ] {
+            for (h, asks) in [
+                (HandHolding::Supervised, true),
+                (HandHolding::AutoAcceptEdits, true),
+                (HandHolding::Auto, true),
+                (HandHolding::FullAccess, false),
+            ] {
+                assert_eq!(
+                    edit_permission("write_file", h, path, &cwd, &none).0,
+                    asks,
+                    "{path} {h:?}"
+                );
+            }
+        }
+        // Files that only look like it are the project's own.
+        for path in [".gitignore", ".github/workflows/ci.yml", "src/.gitkeep"] {
+            assert!(!edit_permission("write_file", HandHolding::Auto, path, &cwd, &none).0);
+        }
+    }
+
+    /// At Auto, only the servers of Trek's that ask the user themselves go unasked: computer
+    /// use, the Simulator and the iPhone are asked about.
+    #[test]
+    fn auto_asks_about_computer_use() {
+        let cwd = std::env::temp_dir();
+        let none = HashSet::new();
+        for (server, asks) in [
+            ("trek-orchestrate", false),
+            ("trek-browser", false),
+            ("trek-computer", true),
+            ("trek-simulator", true),
+            ("trek-phone", true),
+            ("someone-elses", true),
+        ] {
+            let target = format!("{server} a_tool");
+            assert_eq!(
+                level_asks("mcp", &target, &cwd, HandHolding::Auto, &none).0,
+                asks,
+                "{server}"
+            );
+        }
     }
 
     #[test]

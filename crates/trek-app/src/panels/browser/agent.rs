@@ -955,8 +955,12 @@ impl Run<'_> {
 
     async fn press(&mut self, key: &str, r: Option<&str>) -> Result<Value, String> {
         let key = core::parse_key(key)?;
-        if key["key"] == "Enter" {
-            let probe = self.page_js("probe", &[json!(r), json!("Enter")]).await?;
+        // Enter can submit a form, and a key that types is typing: a password spelled out a key
+        // at a time is still one typed into a password field.
+        if key["key"] == "Enter" || core::types_a_character(&key) {
+            let probe = self
+                .page_js("probe", &[json!(r), key["key"].clone()])
+                .await?;
             self.approve("browser_press", &self.call.params.clone(), Some(&probe))
                 .await?;
         }

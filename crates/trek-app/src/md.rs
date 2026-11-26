@@ -915,7 +915,11 @@ impl MarkdownPlugin for PathChips {
                 el.cursor_pointer()
                     .hover(move |s| s.bg(hover))
                     .on_click(move |_, window, cx| {
-                        if path.is_dir() {
+                        // A folder that is really a program (an app bundle) is shown in
+                        // its folder, not started: a link to one asks first (`click`).
+                        if path.is_dir() && runs_when_opened(&path) {
+                            cx.reveal_path(&path)
+                        } else if path.is_dir() {
                             cx.open_with_system(&path)
                         } else if crate::image_preview::showable(&path) {
                             crate::image_preview::open(vec![path.clone()], 0, window, cx)
