@@ -79,7 +79,10 @@ fn clone_url_ok(url: &str) -> bool {
     }
 }
 
-fn clone_folder_ok(folder: &str) -> bool {
+/// Whether a clone may go into `folder` (see `CloneProjectRequest::check`). The host checks it
+/// again on the folder as its disk resolves it (`clone_folder` in Trek's remote host), so a link
+/// in a parent folder can't lead into one of the folders refused here.
+pub fn clone_folder_ok(folder: &str) -> bool {
     if folder.is_empty() || folder.len() > 4096 || folder.chars().any(char::is_control) {
         return false;
     }
@@ -101,13 +104,17 @@ fn clone_folder_ok(folder: &str) -> bool {
     // Not a hidden folder (`~/.config/git`, whose `config` would be git's own for every
     // repository) nor where the system runs what it finds (`~/Library/LaunchAgents`, Windows'
     // Startup folder under `AppData`).
+    // Each part as Windows reads it, too: it drops dots and spaces at a name's end, so
+    // `AppData.` and `Library ` are those folders.
     let mut parts = rest.split(['/', '\\']).filter(|p| !p.is_empty()).peekable();
     parts.peek().is_some()
         && parts.all(|p| {
+            let name = p.trim_end_matches(['.', ' ']);
             p != ".."
+                && !name.is_empty()
                 && !p.starts_with('.')
-                && !p.eq_ignore_ascii_case("Library")
-                && !p.eq_ignore_ascii_case("AppData")
+                && !name.eq_ignore_ascii_case("Library")
+                && !name.eq_ignore_ascii_case("AppData")
         })
 }
 
@@ -397,6 +404,10 @@ mod tests {
             "~/Library/LaunchAgents",
             "C:\\Users\\me\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup",
             "/Users/me/.ssh",
+            // As a Windows host reads them.
+            "C:\\Users\\me\\AppData.\\Roaming\\x",
+            "~/Library /LaunchAgents",
+            "~/code/ /x",
         ] {
             assert!(req("https://h/r", folder).check().is_err(), "{folder}");
         }

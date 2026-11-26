@@ -130,13 +130,38 @@ impl Workspace {
     }
 }
 
-/// Where a clone goes: `~/…` under the home folder, else the absolute path as given.
+/// Where a clone goes: `~/…` under the home folder, else the absolute path as given; none when
+/// the folder, as the disk resolves it, is one a clone mayn't go into (`clone_folder_ok`): a link
+/// in a parent (`~/code/cfg` → `~/.config`) leads where the words don't say.
 fn clone_folder(folder: &str) -> Option<PathBuf> {
     let path = match folder.strip_prefix("~/") {
         Some(rest) => trek_core::paths::home().join(rest),
         None => PathBuf::from(folder),
     };
-    path.is_absolute().then_some(path)
+    if !path.is_absolute() {
+        return None;
+    }
+    let real = resolved(&path);
+    tr::clone_folder_ok(&real.to_string_lossy()).then_some(path)
+}
+
+/// `path` with its longest existing ancestor resolved through links (and Windows' `\\?\` prefix
+/// left off), the rest as written.
+fn resolved(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut base = path;
+    loop {
+        if let Some(real) = crate::system::canonical(base) {
+            return rest.iter().rev().fold(real, |acc, part| acc.join(part));
+        }
+        match (base.file_name(), base.parent()) {
+            (Some(name), Some(parent)) => {
+                rest.push(name.to_os_string());
+                base = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
 }
 
 /// `git clone --progress -- <url> <folder>`, its output (stderr) to `progress` line by line.
@@ -388,4 +413,24 @@ fn write_file(root: &Path, file: &tr::FileUpload) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&temp);
     }
     written
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::clone_folder;
+
+    #[test]
+    fn a_clone_folder_is_judged_where_its_links_lead() {
+        let dir = std::env::temp_dir().join(format!("trek_clone_folder_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".config")).unwrap();
+        std::fs::create_dir_all(dir.join("code")).unwrap();
+        std::os::unix::fs::symlink(dir.join(".config"), dir.join("code").join("cfg")).unwrap();
+        let at = |rel: &str| clone_folder(&dir.join(rel).to_string_lossy());
+        // The words say `code/cfg/git`; the disk says `.config/git`.
+        assert_eq!(at("code/cfg/git"), None);
+        assert_eq!(at(".config/git"), None);
+        assert_eq!(at("code/trek"), Some(dir.join("code").join("trek")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
