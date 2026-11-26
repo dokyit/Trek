@@ -4,13 +4,20 @@ import UIKit
 
 /// Rows going in and out of the transcript list never leave UIKit with counts that don't add up.
 /// On 21 November 2026 (0.4.63, a Simulator) the app stopped in `performBatchUpdates`
-/// (`_Bug_Detected_In_Client_Of_UICollectionView_Invalid_Batch_Updates`): the list's rows were
-/// already the new ones when the batch began, so a collection view that reloaded first (its
-/// layout not up to date, which UIKit's documentation warns "a reload may occur" for) counted the
-/// new rows as the ones before the update, and the inserts on top didn't add up.
+/// (`_Bug_Detected_In_Client_Of_UICollectionView_Invalid_Batch_Updates`). The crash report doesn't
+/// say which counts were off, and these cases (a stale layout, let-go data, no window) don't bring
+/// it back on the code before the fix either: they hold the list to UIKit's contract (the rows
+/// change inside the batch) so a change that breaks it shows here, not on a phone.
 @MainActor
 struct TranscriptBatchTests {
     private let store = ThreadStore(id: "h:t1", host: "h", summary: nil)
+    private let model = AppModel()
+
+    /// What the rows draw with, as the thread view hands it over.
+    private func environment() -> TranscriptEnvironment {
+        TranscriptEnvironment(model: model, projectHue: nil, liveThreadID: nil, calm: true, compact: false,
+                              openThread: nil, dynamicTypeSize: .large)
+    }
 
     private func host() -> (TranscriptController, UIWindow, UICollectionView) {
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 800))
@@ -18,6 +25,7 @@ struct TranscriptBatchTests {
         window.rootViewController = c
         window.makeKeyAndVisible()
         c.loadViewIfNeeded()
+        c.setEnvironment(environment())
         c.view.frame = window.bounds
         c.view.layoutIfNeeded()
         let cv = c.view.subviews.compactMap { $0 as? UICollectionView }.first!
@@ -63,6 +71,7 @@ struct TranscriptBatchTests {
     @Test func rowsInWithNoWindow() {
         let c = TranscriptController()
         c.loadViewIfNeeded()
+        c.setEnvironment(environment())
         c.update(rows: short, generation: 1)
         c.update(rows: long, generation: 1)
         c.update(rows: short, generation: 1)
