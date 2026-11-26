@@ -102,20 +102,25 @@ pub fn clone_folder_ok(folder: &str) -> bool {
         return false;
     };
     // Not a hidden folder (`~/.config/git`, whose `config` would be git's own for every
-    // repository) nor where the system runs what it finds (`~/Library/LaunchAgents`, Windows'
-    // Startup folder under `AppData`).
-    // Each part as Windows reads it, too: it drops dots and spaces at a name's end, so
-    // `AppData.` and `Library ` are those folders.
-    let mut parts = rest.split(['/', '\\']).filter(|p| !p.is_empty()).peekable();
-    parts.peek().is_some()
-        && parts.all(|p| {
-            let name = p.trim_end_matches(['.', ' ']);
-            p != ".."
-                && !name.is_empty()
-                && !p.starts_with('.')
-                && !name.eq_ignore_ascii_case("Library")
-                && !name.eq_ignore_ascii_case("AppData")
+    // repository) nor where the system runs what it finds: the Mac's `~/Library`
+    // (`LaunchAgents`), Windows' roaming app data and its Start Menu (the Startup folder). Each
+    // part as Windows reads it, too: it drops dots and spaces at a name's end, so `AppData.` and
+    // `Library ` are those folders.
+    let parts: Vec<&str> = rest
+        .split(['/', '\\'])
+        .filter(|p| !p.is_empty())
+        .map(|p| p.trim_end_matches(['.', ' ']))
+        .collect();
+    let raw = rest.split(['/', '\\']).filter(|p| !p.is_empty());
+    let is = |p: &str, name: &str| p.eq_ignore_ascii_case(name);
+    !parts.is_empty()
+        && raw.clone().all(|p| p != ".." && !p.starts_with('.'))
+        && parts.iter().all(|p| {
+            !p.is_empty() && !is(p, "Library") && !is(p, "Start Menu") && !is(p, "Startup")
         })
+        && !parts
+            .windows(2)
+            .any(|w| is(w[0], "AppData") && is(w[1], "Roaming"))
 }
 
 /// The most `put_files` carries in one message, decoded (the 8 MiB frame limit caps the base64
@@ -387,7 +392,13 @@ mod tests {
         ] {
             assert!(req(url, "~/trek").check().is_err(), "{url}");
         }
-        for folder in ["/Users/me/trek", "~/code/trek", "C:\\Users\\me\\trek"] {
+        for folder in [
+            "/Users/me/trek",
+            "~/code/trek",
+            "C:\\Users\\me\\trek",
+            // A temporary folder (CI's, a test's) is under local app data on Windows.
+            "C:\\Users\\me\\AppData\\Local\\Temp\\trek",
+        ] {
             assert_eq!(req("https://h/r", folder).check(), Ok(()), "{folder}");
         }
         for folder in [
@@ -406,6 +417,8 @@ mod tests {
             "/Users/me/.ssh",
             // As a Windows host reads them.
             "C:\\Users\\me\\AppData.\\Roaming\\x",
+            "C:\\Users\\me\\AppData\\Roaming \\x",
+            "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Startup",
             "~/Library /LaunchAgents",
             "~/code/ /x",
         ] {

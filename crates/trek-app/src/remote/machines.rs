@@ -141,8 +141,14 @@ fn clone_folder(folder: &str) -> Option<PathBuf> {
     if !path.is_absolute() {
         return None;
     }
+    // Judged as the request's words are: under the home folder, by what's below it (`~/…`).
     let real = resolved(&path);
-    tr::clone_folder_ok(&real.to_string_lossy()).then_some(path)
+    let home = resolved(&trek_core::paths::home());
+    let judged = match real.strip_prefix(&home) {
+        Ok(rest) => format!("~/{}", rest.to_string_lossy()),
+        Err(_) => real.to_string_lossy().into_owned(),
+    };
+    tr::clone_folder_ok(&judged).then_some(path)
 }
 
 /// `path` with its longest existing ancestor resolved through links (and Windows' `\\?\` prefix
