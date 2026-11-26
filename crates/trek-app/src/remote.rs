@@ -3169,7 +3169,13 @@ fn item_body(
                 tool: tr::ToolKind::from_title(title),
                 title: clip_text_to(if op.verb.is_empty() { title } else { &op.verb }, 64 << 10),
                 detail: clip_text_to(
-                    if op.text.is_empty() { detail } else { &op.text },
+                    // A row that says what it did in words has no more to show than `op` made
+                    // of it, which for a call without arguments is nothing.
+                    if op.text.is_empty() && !crate::activity::labelled(title) {
+                        detail
+                    } else {
+                        &op.text
+                    },
                     256 << 10,
                 ),
                 status: match status {
