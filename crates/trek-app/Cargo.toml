@@ -85,7 +85,7 @@ image = { version = "0.25", default-features = false, features = ["png", "tiff",
 # Draws added agents' and projects' SVG icons for the phone. The version GPUI draws SVGs with.
 resvg = { version = "0.46", default-features = false }
 portable-pty = "0.9"
-vt100 = "0.16"
+vt100 = "0.18"
 gpui-wry = "=0.7.0"
 # `transparent`: an interactive artifact's page shows the card through it (macOS).
 wry = { version = "0.53.3", package = "lb-wry", features = ["devtools", "transparent"] }
