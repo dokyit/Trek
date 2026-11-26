@@ -2450,7 +2450,14 @@ fn push_tool_results(
 /// as it is. No builds: `cargo check` runs the project's `build.rs` and takes `--config`, and
 /// Auto lets an agent write both unasked, so a build is the agent's own code run without a card. The shell runs whatever else the line holds, so anything that chains, substitutes or
 /// redirects is out, and so are the flags that make a listed tool write, delete or run commands.
+#[cfg(test)]
 fn is_safe_command(cmd: &str) -> bool {
+    safe_line(cmd, &|| true)
+}
+
+/// `is_safe_command`, where `dashed` says whether the folder the command runs in holds a name
+/// that starts with `-` (asked only for a word that starts with a glob, which can expand into one).
+fn safe_line(cmd: &str, dashed: &dyn Fn() -> bool) -> bool {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
         return true;
@@ -2494,10 +2501,12 @@ fn is_safe_command(cmd: &str) -> bool {
     let words = shell_words(&trimmed[prefix.len()..]);
     // A glob the shell expands into names the agent chose: `rg x *` beside a file called
     // `--pre=sh` runs `sh`, `find . -d*` beside one called `-delete` deletes. A pattern that
-    // starts with something fixed other than `-` (`src/*.rs`, `'*.rs'`) can't become a flag.
+    // starts with something fixed other than `-` (`src/*.rs`, `'*.rs'`) can't become a flag; one
+    // that starts with the glob can only where a name in the folder starts with `-` (the agent's
+    // calls run one at a time, so none is made between this look and the command).
     if words
         .iter()
-        .any(|w| w.glob && (w.glob_first || w.text.starts_with('-')))
+        .any(|w| w.glob && (w.text.starts_with('-') || (w.glob_first && dashed())))
     {
         return false;
     }
@@ -2634,7 +2643,7 @@ fn shell_words(line: &str) -> Vec<Word> {
 /// user's (a key, a token) or a folder holding them, and git won't find a repository the agent
 /// could have written itself.
 fn is_safe_here(cmd: &str, cwd: &Path) -> bool {
-    if !is_safe_command(cmd) {
+    if !safe_line(cmd, &|| dashed_names(cwd)) {
         return false;
     }
     let trimmed = cmd.trim();
@@ -2646,6 +2655,13 @@ fn is_safe_here(cmd: &str, cwd: &Path) -> bool {
     }
     // The words as a POSIX shell reads them, and as cmd.exe does (backslashes kept: on Windows
     // `C:\Users\me\.ssh\id_rsa` is a path, which the first reading turns into `C:Usersme.sshid_rsa`).
+    // `echo`, `which` and `pwd` read no file: what they name is only printed.
+    if ["echo", "which", "pwd"]
+        .iter()
+        .any(|p| trimmed == *p || trimmed.starts_with(&format!("{p} ")))
+    {
+        return true;
+    }
     let posix = shell_words(trimmed).into_iter().skip(1).map(|w| w.text);
     let cmd = trimmed
         .split_whitespace()
@@ -2660,8 +2676,34 @@ fn is_safe_here(cmd: &str, cwd: &Path) -> bool {
             },
             None => a,
         };
-        !value.is_empty() && private_path(&shell_path(value, cwd))
+        !value.is_empty() && private_path(&shell_path(glob_root(value), cwd))
     })
+}
+
+/// The folder a glob starts in, spelled as it is (`~/.ss?/id_rsa` is `~`, `../.*` is `..`,
+/// `*.rs` is ``, the folder the command runs in): its fixed part, up to its last separator. A
+/// word with no glob is itself. What the glob reaches is judged by that folder: one that holds a
+/// private place or is in one (`private_path`) can expand into keys.
+fn glob_root(word: &str) -> &str {
+    match word.find(['*', '?', '[']) {
+        None => word,
+        Some(i) => match word[..i].rfind(['/', '\\']) {
+            Some(0) => &word[..1],
+            Some(sep) => &word[..sep],
+            None => "",
+        },
+    }
+}
+
+/// Whether a name in `dir` starts with `-` (one a glob there could expand into a flag). A folder
+/// that can't be read counts as one.
+fn dashed_names(dir: &Path) -> bool {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => entries
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with('-')),
+        Err(_) => true,
+    }
 }
 
 /// The path a shell word names, run in `cwd`: `~` is the home folder (`~user` another's, whose
@@ -2722,23 +2764,28 @@ const PRIVATE_IN_HOME: [&str; 24] = [
 ];
 
 /// Whether reading `path` could read the user's keys or tokens: it's in one of the places they
-/// keep them, or it's the home folder or above it (a search from there goes into them). The
-/// secrets a thread was handed (`request_secret`) are its own to read.
+/// keep them, or it holds one (`~/.config`, which holds `~/.config/gh`; the home folder and
+/// above), so a search or a glob from there goes into them. The secrets a thread was handed
+/// (`request_secret`) are its own to read.
 fn private_path(path: &Path) -> bool {
     let path = crate::acp::resolve(path);
     let home = crate::acp::resolve(&trek_core::paths::home());
-    if home.starts_with(&path) {
-        return true;
-    }
-    PRIVATE_IN_HOME
-        .iter()
-        .any(|p| path.starts_with(crate::acp::resolve(&home.join(p))))
+    PRIVATE_IN_HOME.iter().any(|p| {
+        let place = crate::acp::resolve(&home.join(p));
+        path.starts_with(&place) || place.starts_with(&path)
+    })
 }
 
 /// Whether a read-only session may run `cmd`: what Auto would run unasked, less the builds, which
 /// run the project's own code.
+#[cfg(test)]
 fn is_read_only_command(cmd: &str) -> bool {
     !cmd.trim_start().starts_with("cargo") && is_safe_command(cmd)
+}
+
+/// `is_read_only_command`, run in `cwd` (a leading glob is fine where no name starts with `-`).
+fn is_read_only_here(cmd: &str, cwd: &Path) -> bool {
+    !cmd.trim_start().starts_with("cargo") && safe_line(cmd, &|| dashed_names(cwd))
 }
 
 fn tool_display(name: &str, args_json: &str) -> (&'static str, String) {
@@ -3189,7 +3236,7 @@ async fn execute_tool(
                 return Ok(("Error: empty command".into(), false, None));
             }
             // Read-only sessions can still look around: what can't change anything runs.
-            if read_only && !is_read_only_command(command) {
+            if read_only && !is_read_only_here(command, cwd) {
                 return Ok((
                     "Not run: this session is read-only, so bash only runs single commands that just read (git status, git log, git diff, git show, ls, cat, head, tail, grep, rg, find, wc, stat, file, which, pwd, echo), with no pipes or redirects. Use read_file, grep, glob and list_dir for the rest.".into(),
                     false,
@@ -10161,6 +10208,67 @@ print(`line 2: ${text}; lines: ${stdout.trim()}; exit ${exit_code}`);
         ] {
             assert!(is_safe_command(command), "{command}");
         }
+    }
+
+    #[test]
+    fn a_leading_glob_runs_where_no_name_could_become_a_flag() {
+        let cwd = scratch("glob_dash");
+        std::fs::write(cwd.join("a.rs"), "").unwrap();
+        for command in ["ls *", "ls *.rs", "rg x *", "git diff *", "wc -l *.rs"] {
+            assert!(is_safe_here(command, &cwd), "{command}");
+            assert!(is_read_only_here(command, &cwd), "{command}");
+        }
+        // A name the agent could have written that the glob turns into a flag.
+        std::fs::write(cwd.join("--pre=sh"), "").unwrap();
+        for command in ["ls *", "rg x *", "git diff *", "rg x */a"] {
+            assert!(!is_safe_here(command, &cwd), "{command}");
+            assert!(!is_read_only_here(command, &cwd), "{command}");
+        }
+        // A pattern starting with `-` is a flag whatever the folder holds.
+        std::fs::remove_file(cwd.join("--pre=sh")).unwrap();
+        assert!(!is_safe_here("find . -d*", &cwd));
+        assert!(is_safe_here("ls src/*.rs", &cwd));
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn a_glob_into_the_users_keys_asks() {
+        let home = trek_core::paths::home();
+        let cwd = home.join("trek-no-such-project").join("sub");
+        // Each expands into `~/.netrc`, `~/.ssh/id_rsa`, `~/.aws/credentials`…, which the word
+        // as written isn't under.
+        for command in [
+            "cat ~/.*",
+            "cat ~/.ss?/id_rsa",
+            "cat ~/.[a-z]*/credentials",
+            "cat ~/.*/*",
+            "cat ../../.ssh/*",
+            "cat ../../.*",
+            "grep -r token ~/.config/*",
+            "cat /Users/*/.ssh/id_rsa",
+            "head ~other/.ssh/*",
+        ] {
+            assert!(is_safe_command(command), "{command}: fine as a line");
+            assert!(!is_safe_here(command, &cwd), "{command}");
+        }
+        // A folder that holds a private place is one: a search from it goes in.
+        assert!(private_path(&home.join(".config")));
+        assert!(private_path(&home.join("Library")));
+        assert!(!private_path(
+            &home.join(".config").join("nvim").join("init.lua")
+        ));
+        assert!(!is_safe_here("grep -r token ~/.config", &cwd));
+        assert!(is_safe_here("cat src/*.rs", &cwd));
+        assert!(is_safe_here("cat ~/.config/nvim/init.lua", &cwd));
+        // Printing a path reads nothing.
+        for command in ["echo ~", "echo ~/.ssh", "which ls", "pwd"] {
+            assert!(is_safe_here(command, &cwd), "{command}");
+        }
+        assert_eq!(glob_root("~/.ss?/id_rsa"), "~");
+        assert_eq!(glob_root("../../.ssh/*"), "../../.ssh");
+        assert_eq!(glob_root("*.rs"), "");
+        assert_eq!(glob_root("/*"), "/");
+        assert_eq!(glob_root("src/main.rs"), "src/main.rs");
     }
 
     #[test]
