@@ -85,7 +85,7 @@ impl Scrubber {
                     // already-scrubbed value (such as `[url]`).
                     let path = path.trim_end_matches(char::is_whitespace);
                     let gap = &c[0][path.len()..c[0].len() - boundary.len()];
-                    format!("[path]{}{}{}", self.scrub(tail), gap, boundary)
+                    format!("[path]{}{}{}", self.scrub(tail.trim_end()), gap, boundary)
                 })
                 .into_owned();
         }
