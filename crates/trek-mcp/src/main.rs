@@ -1,6 +1,6 @@
 //! `trek-mcp` — a Model Context Protocol server over stdio.
 //!
-//! Usage: `trek-mcp computer` (computer use on macOS and Windows), `trek-mcp simulator`
+//! Usage: `trek-mcp computer` (computer use on macOS, Windows and Linux's X11), `trek-mcp simulator`
 //! (iOS Simulator via `xcrun simctl` + AXe), `trek-mcp video` (`watch_video`: frames and a
 //! transcript of a video, through ffmpeg), `trek-mcp orchestrate` (sub-agents, run by the Trek
 //! that started the agent), `trek-mcp browser` (browser use in that Trek's own Browser tool) or
@@ -10,21 +10,17 @@
 
 // Trek's Browser tool, which has a web view on every platform (WebKitGTK on Linux).
 mod browser;
-#[cfg(any(target_os = "macos", windows))]
+// Computer use: the Mac's, Windows' and (through X11 and AT-SPI) Linux's.
 mod computer;
-#[cfg(any(target_os = "macos", windows))]
 mod desktop;
-#[cfg(any(target_os = "macos", windows))]
 mod keys;
 mod orchestrate;
-#[cfg(any(target_os = "macos", windows))]
 mod outline;
 #[cfg(any(target_os = "macos", windows))]
 mod phone;
 mod rpc;
 #[cfg(target_os = "macos")]
 mod simulator;
-#[cfg(any(target_os = "macos", windows))]
 mod util;
 #[cfg(any(target_os = "macos", windows))]
 mod video;
@@ -50,13 +46,7 @@ USAGE:
 fn main() {
     let arg = std::env::args().nth(1).unwrap_or_default();
     match arg.as_str() {
-        #[cfg(any(target_os = "macos", windows))]
         "computer" => serve(Box::new(computer::Computer::default())),
-        #[cfg(not(any(target_os = "macos", windows)))]
-        "computer" => {
-            eprintln!("trek-mcp: the computer tools run only on macOS and Windows");
-            std::process::exit(2);
-        }
         #[cfg(not(target_os = "macos"))]
         "simulator" | "sim" => {
             eprintln!("trek-mcp: the {arg} tools run only on macOS");
