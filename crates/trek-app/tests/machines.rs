@@ -3471,3 +3471,186 @@ fn show_more_opens_a_long_message_whole_and_wrapped_here_and_on_a_machine() {
         check(&trek, cx, "on machine B");
     });
 }
+
+/// A thread of the scripted machine `host`, listed and open here.
+async fn open_scripted_thread(
+    trek: &Trek,
+    cx: &mut TestAppContext,
+    machine: &tr::RemoteHandle,
+    host: &str,
+    thread: &str,
+) -> String {
+    machine.push(tr::HostEvent::Thread(tr::ThreadSummary {
+        id: thread.into(),
+        title: "A thread there".into(),
+        ..Default::default()
+    }));
+    let id = local_id(host, thread);
+    trek.wait(cx, "its row here", |ws| ws.thread(&id).is_some())
+        .await;
+    trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
+    trek.wait(cx, "its transcript here", |ws| {
+        ws.live
+            .get(&id)
+            .is_some_and(|l| l.loaded && !l.items.is_empty())
+    })
+    .await;
+    trek.render(cx);
+    id
+}
+
+/// What a review of the first cut found. A machine's item ids are positions, so once a thread is
+/// rewound there and goes another way, `i0` is another message. A long message opened here with
+/// "Show more" stayed "open" under that id, and a rewind confirmation left waiting would have
+/// asked the machine to rewind whatever now had its id. When the machine says the thread was
+/// rewritten, nothing kept by id stays: the new message under the id shows cut, and the
+/// confirmation is closed.
+#[test]
+fn a_machines_thread_rewritten_there_lets_go_of_what_was_open_by_its_item_ids_here() {
+    run(async |cx| {
+        // Another long message altogether, for the id the first one had.
+        let other = format!("On second thoughts, start over.\n{LONG_PROMPT}");
+        let trek = open(cx);
+        let said: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![LONG_PROMPT.to_string()]));
+        let now = said.clone();
+        let (link, machine) = scripted("Machine C", move |req, _| match req {
+            tr::HostRequest::Transcript { reply, .. } => {
+                let said = now.lock().unwrap();
+                let texts: Vec<&str> = said.iter().map(String::as_str).collect();
+                let _ = reply.send(Ok(transcript_of(&texts)));
+            }
+            tr::HostRequest::MarkSeen { reply, .. } => {
+                let _ = reply.send(Ok(()));
+            }
+            _ => {}
+        });
+        pair_scripted(&trek, cx, "machine-c", link).await;
+        let id = open_scripted_thread(&trek, cx, &machine, "machine-c", "t-rw").await;
+        let line = trek.read(cx, |ws, _| ws.settings.appearance.transcript_font_size()) * 1.5;
+
+        // Opened whole.
+        let (closed, _) = message_text(&trek, cx);
+        trek.click(cx, ("user-more", 0usize));
+        let (open, _) = message_text(&trek, cx);
+        assert!(open >= closed + line * 4., "{closed} closed, {open} open");
+
+        // Rewound there and gone another way: another long message is `i0` now.
+        *said.lock().unwrap() = vec![other.clone()];
+        machine.push(tr::HostEvent::TranscriptReset("t-rw".into()));
+        trek.wait_explained(
+            cx,
+            "the rewritten thread here",
+            REAL_TIME_LIMIT,
+            |ws| typed_in(ws, &id) == [other.as_str()],
+            |ws| format!("{:?}", typed_in(ws, &id)),
+        )
+        .await;
+        let (now_shown, _) = message_text(&trek, cx);
+        assert!(
+            (now_shown - line * 10.).abs() <= line / 2.,
+            "the message that took the id shows cut, not opened in the other's place ({now_shown})"
+        );
+
+        // A rewind of that message asked about, and the thread rewritten again before it's
+        // answered: the confirmation doesn't wait to act on whatever has the id next.
+        trek.click(cx, ("rewind-user", 0usize));
+        trek.render(cx);
+        let view = trek.thread_view(cx);
+        assert!(
+            view.read_with(cx, |v, _| v.confirm_files()).is_some(),
+            "the confirmation is up"
+        );
+        let before = trek.read(cx, |ws, _| ws.live.get(&id).map_or(0, |l| l.replaced));
+        *said.lock().unwrap() = vec!["a short one".to_string()];
+        machine.push(tr::HostEvent::TranscriptReset("t-rw".into()));
+        trek.wait(cx, "the thread rewritten again", |ws| {
+            typed_in(ws, &id) == ["a short one"]
+        })
+        .await;
+        trek.render(cx);
+        assert_eq!(
+            view.read_with(cx, |v, _| v.confirm_files()),
+            None,
+            "no confirmation waits to act on an id that names another message"
+        );
+        // An edit begun before a rewrite is refused by the same count (`Editing::replaced`).
+        assert!(trek.read(cx, |ws, _| ws.live.get(&id).map_or(0, |l| l.replaced)) > before);
+    });
+}
+
+/// What a review of the first cut found: an edited message is the machine's rewind followed by
+/// a send, and when the send then failed (the link dropped between the two, the machine refused
+/// it) the edited words were gone with only a toast to show for it. They go back into the
+/// composer, as a message that can't be sent to a machine out of reach does.
+#[test]
+fn an_edited_message_the_machine_then_doesnt_take_goes_back_into_the_composer() {
+    run(async |cx| {
+        let trek = open(cx);
+        let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = asked.clone();
+        let (link, machine) = scripted("Machine C", move |req, _| match req {
+            tr::HostRequest::Transcript { reply, .. } => {
+                let _ = reply.send(Ok(transcript_of(&["first message"])));
+            }
+            tr::HostRequest::MarkSeen { reply, .. } => {
+                let _ = reply.send(Ok(()));
+            }
+            // The rewind goes through.
+            tr::HostRequest::TurnAction { req, reply } => {
+                seen.lock()
+                    .unwrap()
+                    .push(format!("{:?} {}", req.action, req.item_id));
+                let _ = reply.send(Ok(tr::TurnActionDone::default()));
+            }
+            // The message that follows it doesn't.
+            tr::HostRequest::Send { req, reply } => {
+                seen.lock().unwrap().push(format!("send {}", req.text));
+                let _ = reply.send(Err(tr::HostError::conflict("The thread is busy")));
+            }
+            _ => {}
+        });
+        pair_scripted(&trek, cx, "machine-c", link).await;
+        let id = open_scripted_thread(&trek, cx, &machine, "machine-c", "t-edit").await;
+        let (heard, _sub) = listen(&trek, cx);
+        let first = message_id(&trek, cx, &id, "first message");
+        let sent = trek.update(cx, |ws, cx| {
+            ws.edit_and_resend(
+                &id,
+                &first,
+                "first message, edited".into(),
+                vec![],
+                false,
+                cx,
+            )
+        });
+        assert!(sent, "asked of the machine");
+        trek.wait_explained(
+            cx,
+            "the edited words back in the composer",
+            REAL_TIME_LIMIT,
+            |_| !heard.lock().unwrap().given_back.is_empty(),
+            |_| {
+                format!(
+                    "asked {:?}, toasts {:?}",
+                    asked.lock().unwrap(),
+                    heard.lock().unwrap().toasts
+                )
+            },
+        )
+        .await;
+        assert_eq!(
+            asked.lock().unwrap().as_slice(),
+            ["Rewind i0", "send first message, edited"]
+        );
+        let heard = heard.lock().unwrap();
+        assert_eq!(heard.given_back, ["first message, edited"]);
+        assert!(
+            heard
+                .toasts
+                .iter()
+                .any(|t| t == "Couldn't send the message on Machine C: The thread is busy"),
+            "{:?}",
+            heard.toasts
+        );
+    });
+}

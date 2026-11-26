@@ -115,7 +115,8 @@ Now A asks, B does the work on its own thread, and A shows what B answers:
   connection, and nowhere on A.
 - **A folder** attached on A goes as one zip of its files (what git ignores, and `.git`, stay
   behind), named `<folder> folder.zip`, over the same route as any file; A's transcript still
-  shows the folder. B needs nothing new (0.4.61 takes files).
+  shows the folder. B needs nothing new (0.4.61 takes files). What in it can't be read is left
+  out, and a toast says how much.
 - **The start of a long thread**: a thread opens with its last 300 items, and A now reads the
   ones before them in pages (`transcript_before`) until the whole conversation is there.
 - **The composer reads B**: the model menu lists the agents and models set up on B (its
@@ -124,6 +125,15 @@ Now A asks, B does the work on its own thread, and A shows what B answers:
   unread or fails, as for a thread of A's own. A's phone isn't pushed for it: B pushes its own.
 - **`/new` and `/clear`** typed in a thread on B open a new draft on A, set to start on B (B
   answers them with "open a new thread", which A used to drop).
+
+**B's item ids are positions.** `i200` is the 200th item, so after a rewind on B it can be
+another message. When B says a thread was rewritten (`transcript_reset`), or sends a transcript
+again whose items aren't the ones their ids named (`machines::rewritten`), A lets go of what it
+kept by id: messages opened with "Show more", a rewind confirmation left waiting, an edit begun
+in the composer ("That message can't be edited any more."). A page of earlier items asked for
+before the transcript came again is dropped and asked for anew. An edited message is B's rewind
+and then a send: if B rewinds and then doesn't take the message, the words and pictures go back
+into A's composer.
 
 **Where the line is.** B keeps its own locks. A can't lift B's Full access lock (it's a setting of
 B's Trek that nothing arriving over a network may change: a paired device that could would make

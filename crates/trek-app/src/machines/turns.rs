@@ -298,8 +298,10 @@ impl Workspace {
 
     /// Send `text` in place of message `item` of a machine's thread: the machine rewinds to just
     /// before it, then takes the new message (with what's attached here, sent ahead as any
-    /// message's is). False when nothing was asked. If the machine refuses the rewind, the edited
-    /// words go back into the composer.
+    /// message's is). False when nothing was asked. If the machine refuses the rewind, or
+    /// rewinds and then doesn't take the message (the link dropped between the two, it refused
+    /// it: `machine_send` gives it back), the edited words and pictures go back into the
+    /// composer.
     pub fn machine_edit_and_resend(
         &mut self,
         id: &str,

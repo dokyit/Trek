@@ -205,12 +205,18 @@ impl Composer {
                         .spawn(async move { crate::machines::files::pack_folder(&dir, &into) })
                         .await;
                     match made {
-                        Ok(zip) => {
+                        Ok(made) => {
                             total.store(
-                                std::fs::metadata(&zip).map_or(0, |m| m.len()),
+                                std::fs::metadata(&made.zip).map_or(0, |m| m.len()),
                                 Ordering::Relaxed,
                             );
-                            packed = Some(zip);
+                            // What couldn't be read isn't in the zip: said, and the rest goes.
+                            if made.skipped > 0 {
+                                let words =
+                                    crate::machines::files::skipped_words(made.skipped, &label);
+                                let _ = this.update(cx, |this, cx| this.toast(words, cx));
+                            }
+                            packed = Some(made.zip);
                         }
                         Err(e) => {
                             let _ = this.update(cx, |this, cx| {

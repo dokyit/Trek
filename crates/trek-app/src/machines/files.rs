@@ -98,6 +98,8 @@ pub enum PackError {
     TooBig(u64),
     /// More files than a zip of it takes.
     TooMany,
+    /// None of what's in it could be read (how many files and folders that was).
+    Unreadable(usize),
     Io(String),
 }
 
@@ -115,6 +117,9 @@ impl PackError {
             PackError::TooMany => format!(
                 "{folder} has more than {FOLDER_FILES} files: too many to send to {machine} at once."
             ),
+            PackError::Unreadable(_) => format!(
+                "Nothing in {folder} could be read, so it wasn't sent to {machine}. Check the folder's permissions."
+            ),
             PackError::Io(why) => format!("Couldn't pack {folder} to send to {machine}: {why}"),
         }
     }
@@ -131,10 +136,28 @@ pub fn folder_zip_name(dir: &Path) -> String {
     format!("{name} folder.zip")
 }
 
+/// A folder packed to go to a machine.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Packed {
+    pub zip: PathBuf,
+    /// Files and folders in it that couldn't be read (no permission, gone as they were read) and
+    /// so aren't in the zip: said in a toast, not passed over in silence.
+    pub skipped: usize,
+}
+
+/// What a toast says of what a folder's zip leaves out because it couldn't be read.
+pub fn skipped_words(skipped: usize, folder: &str) -> String {
+    match skipped {
+        1 => format!("1 file or folder in {folder} couldn't be read and was left out."),
+        n => format!("{n} files or folders in {folder} couldn't be read and were left out."),
+    }
+}
+
 /// Zip folder `dir` into a new folder under `into`, to go to a machine as one file: its files as
 /// git would list them (what `.gitignore` leaves out stays behind, and `.git` itself), under the
-/// folder's own name. Symbolic links aren't followed. Blocks on the disk.
-pub fn pack_folder(dir: &Path, into: &Path) -> Result<PathBuf, PackError> {
+/// folder's own name. Symbolic links aren't followed. What can't be read is left out and
+/// counted (`Packed::skipped`). Blocks on the disk.
+pub fn pack_folder(dir: &Path, into: &Path) -> Result<Packed, PackError> {
     use std::io::Write as _;
     let io = |e: std::io::Error| PackError::Io(e.to_string());
     let top = dir
@@ -156,7 +179,13 @@ pub fn pack_folder(dir: &Path, into: &Path) -> Result<PathBuf, PackError> {
         .build();
     let mut files: Vec<(PathBuf, String, u64)> = vec![];
     let mut total = 0u64;
-    for entry in walk.flatten() {
+    let mut skipped = 0usize;
+    for entry in walk {
+        // A folder that can't be listed, an entry that went as it was read.
+        let Ok(entry) = entry else {
+            skipped += 1;
+            continue;
+        };
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
@@ -177,21 +206,29 @@ pub fn pack_folder(dir: &Path, into: &Path) -> Result<PathBuf, PackError> {
         }
         files.push((entry.path().to_path_buf(), format!("{top}/{rel}"), len));
     }
-    if files.is_empty() {
+    if files.is_empty() && skipped == 0 {
         return Err(PackError::Empty);
     }
     files.sort_by(|a, b| a.1.cmp(&b.1));
     std::fs::create_dir_all(into).map_err(io)?;
     let path = into.join(folder_zip_name(dir));
+    let mut packed_files = 0usize;
     let made = (|| -> std::io::Result<()> {
         let mut zip = zip::ZipWriter::new(std::fs::File::create(&path)?);
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
             .large_file(true);
         for (file, name, _) in &files {
+            // A file that can't be opened (no permission) is left out and counted; one that
+            // fails part way would leave half a file in the zip, so that ends the packing.
+            let Ok(mut from) = std::fs::File::open(file) else {
+                skipped += 1;
+                continue;
+            };
             zip.start_file(name.as_str(), options)
                 .map_err(std::io::Error::other)?;
-            std::io::copy(&mut std::fs::File::open(file)?, &mut zip)?;
+            std::io::copy(&mut from, &mut zip)?;
+            packed_files += 1;
         }
         zip.finish().map_err(std::io::Error::other)?.flush()
     })();
@@ -199,12 +236,16 @@ pub fn pack_folder(dir: &Path, into: &Path) -> Result<PathBuf, PackError> {
         let _ = std::fs::remove_file(&path);
         return Err(io(e));
     }
+    if packed_files == 0 {
+        let _ = std::fs::remove_file(&path);
+        return Err(PackError::Unreadable(skipped));
+    }
     let packed = std::fs::metadata(&path).map_err(io)?.len();
     if packed > tr::MAX_UPLOAD {
         let _ = std::fs::remove_file(&path);
         return Err(PackError::TooBig(packed));
     }
-    Ok(path)
+    Ok(Packed { zip: path, skipped })
 }
 
 /// What goes with a message of `typed` words: the strip's `images` and `files`, then the files of
@@ -548,7 +589,9 @@ mod tests {
         std::fs::write(assets.join(".gitignore"), "build/\n").unwrap();
         std::fs::write(assets.join("build/out.bin"), [7u8; 64]).unwrap();
         std::fs::write(assets.join(".git/HEAD"), "ref: refs/heads/main").unwrap();
-        let zip = pack_folder(&assets, &d.join("out")).unwrap();
+        let packed = pack_folder(&assets, &d.join("out")).unwrap();
+        assert_eq!(packed.skipped, 0);
+        let zip = packed.zip;
         assert_eq!(
             zip.file_name().and_then(|n| n.to_str()),
             Some("assets folder.zip")
@@ -580,6 +623,58 @@ mod tests {
             PackError::Empty.words("empty", "T-Book"),
             "empty has no files to send to T-Book (what git ignores stays behind)."
         );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// What a folder holds that can't be read is left out of its zip and counted, for a toast
+    /// to say (it was passed over in silence); a folder with nothing readable isn't sent.
+    #[cfg(unix)]
+    #[test]
+    fn what_cant_be_read_in_a_folder_is_left_out_and_counted() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let d = dir("unreadable");
+        let assets = d.join("assets");
+        std::fs::create_dir_all(assets.join("locked")).unwrap();
+        std::fs::write(assets.join("readme.txt"), "what these are").unwrap();
+        std::fs::write(assets.join("secret.key"), "no").unwrap();
+        std::fs::write(assets.join("locked/inside.txt"), "no").unwrap();
+        let lock = |p: &Path| std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o000));
+        let unlock = |p: &Path| std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755));
+        lock(&assets.join("secret.key")).unwrap();
+        lock(&assets.join("locked")).unwrap();
+        // Root reads anything: nothing to check as root.
+        if std::fs::File::open(assets.join("secret.key")).is_ok() {
+            unlock(&assets.join("locked")).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+        let packed = pack_folder(&assets, &d.join("out")).unwrap();
+        assert_eq!(
+            packed.skipped, 2,
+            "the file, and the folder that couldn't be listed"
+        );
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&packed.zip).unwrap()).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().unwrap().to_string())
+            .collect();
+        assert_eq!(names, ["assets/readme.txt"]);
+        assert_eq!(
+            skipped_words(2, "assets"),
+            "2 files or folders in assets couldn't be read and were left out."
+        );
+        assert_eq!(
+            skipped_words(1, "assets"),
+            "1 file or folder in assets couldn't be read and was left out."
+        );
+        // Nothing readable at all: not sent, and said.
+        lock(&assets.join("readme.txt")).unwrap();
+        assert_eq!(
+            pack_folder(&assets, &d.join("out2")),
+            Err(PackError::Unreadable(3))
+        );
+        for p in ["secret.key", "readme.txt", "locked"] {
+            unlock(&assets.join(p)).unwrap();
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

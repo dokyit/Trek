@@ -329,6 +329,10 @@ pub struct LiveThread {
     /// For a thread on another machine (`machines`): its sub-agents' rows as that machine reads
     /// them, by the row each stands for (`SubAgentRow::read` takes them from here).
     pub machine_subs: HashMap<String, trek_remote::SubAgentLink>,
+    /// For a thread on another machine: how often its transcript was rewritten there (a rewind,
+    /// an edit) since it was opened here. Its item ids are positions, so what a view keeps by id
+    /// (a long message opened, a confirmation waiting) is let go of when this moves.
+    pub replaced: u64,
     /// When the user last stopped its agent's own sub-agents between turns. Claude Code takes a
     /// turn of its own to say they were stopped; that turn is no news (`quiet_turn`).
     stopped_out: Option<Instant>,

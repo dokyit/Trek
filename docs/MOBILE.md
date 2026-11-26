@@ -1017,8 +1017,14 @@ with the card's answers as it does a question's), and what the agent prints of i
 before. No `value` declines: the agent is told to carry on without it. `bad_request` for an empty
 value, or a request that isn't a secret's; `conflict` once it's answered. The transcript's item
 for the request stays the notice it was (`r<request_id>`), so a client that doesn't know `secret`
-shows what it always did; one that does shows its card in the notice's place. The iPhone app
-doesn't offer it yet. A computer whose machine doesn't list `secret_answer` says so by name:
+shows what it always did; one that does shows its card in the notice's place.
+
+Any paired device may send it, a phone as well as another computer's Trek: the host doesn't ask
+what kind of client answers. That is meant. A device that holds a token can already allow the
+thread's commands, which is more than handing it a value, and the value only ever travels
+towards the computer that asked: nothing a device is sent holds it. (The two things a phone
+can't do by default, allowing for a whole session and writing permission rules, widen what an
+agent may do without asking; a secret doesn't.) The iPhone app doesn't offer the card yet. A computer whose machine doesn't list `secret_answer` says so by name:
 "T-Book needs Trek 0.4.68 or later to take it from here."
 
 **`turn_preview`**: what the Mac's confirmation before an `undo`, `retry` or `rewind` says, for the

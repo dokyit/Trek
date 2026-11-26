@@ -155,6 +155,9 @@ struct Editing {
     files: EditFiles,
     /// What the composer held before (text, images): back on cancel, and once the edit is sent.
     draft: (String, Vec<PathBuf>),
+    /// `LiveThread::replaced` when the edit began: a thread on another machine rewritten there
+    /// since has other items under its ids, and `item` may no longer be this message.
+    replaced: u64,
     _check: Option<Task<()>>,
 }
 
@@ -652,7 +655,9 @@ impl Composer {
             let ws = self.workspace.read(cx);
             let why = if ws.turn_running(&e.thread) {
                 Some("Stop the running turn to send the edited message.")
-            } else if !ws.can_rewind(&e.thread, &e.item) {
+            } else if !ws.can_rewind(&e.thread, &e.item)
+                || ws.live.get(&e.thread).map_or(0, |l| l.replaced) != e.replaced
+            {
                 Some("That message can't be edited any more.")
             } else {
                 None
@@ -777,6 +782,7 @@ impl Composer {
             None => self.take_written(cx),
         };
         let ws = self.workspace.read(cx);
+        let replaced = ws.live.get(thread).map_or(0, |l| l.replaced);
         // A message of a thread on another machine: the machine says which files sending it
         // again would put back there (`turn_preview`), and puts them back when it has them.
         if crate::machines::is_remote(thread) {
@@ -806,6 +812,7 @@ impl Composer {
                 why_not: "Its machine isn't connected.".into(),
                 files: EditFiles::Checking,
                 draft,
+                replaced,
                 _check: check,
             });
             self.put_back(text, images.to_vec(), Some(text.len()), window, cx);
@@ -846,6 +853,7 @@ impl Composer {
             why_not,
             files: EditFiles::Checking,
             draft,
+            replaced,
             _check: check,
         });
         self.put_back(text, images.to_vec(), Some(text.len()), window, cx);

@@ -3,8 +3,10 @@
 //!
 //! A secret comes through `request_secret` on Trek's own MCP server, not through the chat. The
 //! card's value goes to a private file (`trek_core::session_secrets`) and the agent gets the path
-//! and nothing more. It's never in a `Call`'s reply, an item, a notice, a log line or anything the
-//! phone is sent: the phone is told only that a request is waiting on this computer.
+//! and nothing more. It's never in a `Call`'s reply, an item, a notice, a log line or anything a
+//! paired device is sent: a device is told only that a request is waiting. Since 0.4.68 a device
+//! may answer it (`remote_answer`, `secret_answer`): the value comes in over its connection and
+//! goes where the card's does, and still nothing that holds it goes out.
 
 use super::{Item, LiveThread, PendingPermission, Workspace, WorkspaceEvent};
 use crate::ipc::{Call, Reply};

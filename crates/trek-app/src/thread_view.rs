@@ -458,6 +458,9 @@ pub struct ThreadView {
     /// front of it since (the earlier part of a long thread on another machine, read in pages)
     /// are added to the scroller at the front, so what's on screen stays where it is.
     first_item: Option<String>,
+    /// `LiveThread::replaced` as last seen: when it moves (a thread on another machine was
+    /// rewritten there), what's kept by item id is let go of.
+    replaced: u64,
     /// Markdown documents by item id. Built when a row is first drawn, so opening a long thread
     /// doesn't parse all of it; kept by what they weigh (`MD_BUDGET`).
     md: Documents,
@@ -620,6 +623,7 @@ struct Stashed {
     expanded_gen: u64,
     count: usize,
     first_item: Option<String>,
+    replaced: u64,
     revision: u64,
     end: Option<usize>,
     scroller: Entity<MessageScrollerState>,
@@ -778,6 +782,7 @@ impl ThreadView {
             revision: 0,
             count: 0,
             first_item: None,
+            replaced: 0,
             md: Documents::new(MD_BUDGET, MD_CAP),
             draws: 0,
             expanded: HashSet::new(),
@@ -842,6 +847,7 @@ impl ThreadView {
                 expanded_gen: self.expanded_gen,
                 count: self.count,
                 first_item: self.first_item.take(),
+                replaced: self.replaced,
                 revision: self.revision,
                 end: self.end,
                 scroller: self.scroller.clone(),
@@ -905,6 +911,7 @@ impl ThreadView {
         self.expanded_gen = s.expanded_gen;
         self.count = s.count;
         self.first_item = s.first_item;
+        self.replaced = s.replaced;
         self.revision = s.revision;
         self.end = s.end;
         self.scroller = s.scroller;
@@ -937,6 +944,7 @@ impl ThreadView {
         let ws = self.workspace.read(cx);
         let live = id.as_ref().and_then(|id| ws.live.get(id));
         let revision = live.map_or(0, |l| l.revision);
+        let replaced = live.map_or(0, |l| l.replaced);
         let opened = live.and_then(|l| l.opened.clone());
         // A sub-agent's row asked for (from the working bar's list, the hub): where it is.
         let revealed = live.and_then(|l| l.revealed.clone());
@@ -1078,6 +1086,17 @@ impl ThreadView {
             self.current = id;
             self.confirm = None;
             self.flash = None;
+        }
+        // A thread on another machine was rewritten there (a rewind, an edit) since this last
+        // looked: its item ids are positions, so the ones kept here may name other items now.
+        // Nothing stays open on their strength, and no confirmation waits to act on one.
+        if replaced != self.replaced {
+            self.replaced = replaced;
+            if !switched {
+                self.confirm = None;
+                self.expanded.clear();
+                self.expanded_gen += 1;
+            }
         }
         let quiet = appended
             && !switched

@@ -1086,6 +1086,28 @@ pub fn background_of(
         .collect()
 }
 
+/// Whether a transcript sent again (`new`) is another conversation than the one held (`old`)
+/// under the same item ids. A machine's ids are positions (`i200`), so after a rewind there
+/// `i200` may be another message: an id both hold that names another kind of item or other
+/// words of the user's, or an item held that lies past where the new one ends. A transcript
+/// sent again as it was (a reconnect), or longer, or starting later (its earlier part is read
+/// in pages), is the same one.
+pub(crate) fn rewritten(old: &[tr::Item], new: &[tr::Item]) -> bool {
+    let place = |id: &str| id.strip_prefix('i').and_then(|n| n.parse::<u64>().ok());
+    let now: HashMap<&str, &tr::Item> = new.iter().map(|i| (i.id.as_str(), i)).collect();
+    let Some(end) = new.iter().filter_map(|i| place(&i.id)).max() else {
+        // Nothing left of it: whatever was held is gone.
+        return old.iter().any(|i| place(&i.id).is_some());
+    };
+    old.iter().any(|was| match now.get(was.id.as_str()) {
+        Some(is) => match (&was.body, &is.body) {
+            (tr::ItemBody::User { text: a, .. }, tr::ItemBody::User { text: b, .. }) => a != b,
+            (a, b) => std::mem::discriminant(a) != std::mem::discriminant(b),
+        },
+        None => place(&was.id).is_some_and(|n| n > end),
+    })
+}
+
 /// The words a machine's notice about a secret's request starts and goes on with (`remote.rs`
 /// `secret_elsewhere`: "Needs GITHUB_TOKEN. Enter it on this PC.").
 fn secret_notice(text: &str) -> bool {
@@ -1587,6 +1609,8 @@ impl Workspace {
         // What to tell the user of: (thread, the alert's words).
         let mut alerts: Vec<(String, String)> = vec![];
         let listed = matches!(msg, tr::ServerMessage::Thread { .. });
+        // Transcripts sent again whose items aren't the ones their ids named (`rewritten`).
+        let mut replaced: Vec<String> = vec![];
         // Transcripts that came without their start: it's read next.
         let mut earlier: Vec<String> = vec![];
         match msg {
@@ -1632,8 +1656,16 @@ impl Workspace {
             } => {
                 let f = m.followed.entry(thread_id.clone()).or_default();
                 if reset {
+                    // Its item ids are positions: if what they name changed (a rewind there,
+                    // then other messages), nothing kept here by id stands any more.
+                    if rewritten(&f.items, &items) {
+                        replaced.push(thread_id.clone());
+                    }
                     f.items = items;
                     f.more = more;
+                    // A page asked for before this transcript came is of the one it replaced:
+                    // let go of, and asked for again from where this one starts.
+                    f.paging = None;
                 } else {
                     for item in items {
                         upsert(&mut f.items, item);
@@ -1653,7 +1685,18 @@ impl Workspace {
             }
             tr::ServerMessage::TranscriptReset { thread_id } => {
                 if m.followed.remove(&thread_id).is_some() {
-                    self.follow_machine_thread(&local_id(host, &thread_id), cx);
+                    let local = local_id(host, &thread_id);
+                    // Rewound or rewritten there: what's open or asked here by item id (a long
+                    // message shown whole, a confirmation) is of items that may be others now.
+                    if let Some(live) = self.live.get_mut(&local) {
+                        live.replaced += 1;
+                        live.revision += 1;
+                    }
+                    cx.emit(WorkspaceEvent::Transcript {
+                        id: local.clone(),
+                        appended: false,
+                    });
+                    self.follow_machine_thread(&local, cx);
                 }
                 return;
             }
@@ -1675,6 +1718,11 @@ impl Workspace {
         }
         m.refresh_threads();
         self.threads_gen += 1;
+        for tid in replaced {
+            if let Some(live) = self.live.get_mut(&local_id(host, &tid)) {
+                live.replaced += 1;
+            }
+        }
         for tid in touched {
             self.machine_live(host, &tid, cx);
         }
@@ -1917,6 +1965,8 @@ impl Workspace {
             trek_core::settings::FollowUp::Steer => tr::SendMode::Steer,
             trek_core::settings::FollowUp::Queue => tr::SendMode::Queue,
         });
+        // As written here, for the composer to have back if the machine doesn't take it.
+        let back = (text.clone(), images.clone());
         // Files and pictures sent ahead (`files`): named by their copies there.
         let host = split_id(id).map_or_else(String::new, |(host, _)| host.to_string());
         let (text, files, inline) = self.machine_shaped(&host, &text, &images);
@@ -1955,9 +2005,19 @@ impl Workspace {
                     ws.set_draft_machine(None, Some(host), cx);
                 }
                 Ok(_) => {}
-                Err(e) => cx.emit(WorkspaceEvent::Failure {
-                    message: turns::refused(&e, &name, "send the message", None),
-                }),
+                // Refused, or the link dropped: the composer let go of the message as it was
+                // sent, so its words and pictures go back there rather than be lost (an edited
+                // message most of all: its thread has already been rewound for it).
+                Err(e) => {
+                    cx.emit(WorkspaceEvent::Failure {
+                        message: turns::refused(&e, &name, "send the message", None),
+                    });
+                    let (text, images) = back;
+                    cx.emit(WorkspaceEvent::InsertIntoComposer(text));
+                    for image in images {
+                        cx.emit(WorkspaceEvent::AttachImage(image));
+                    }
+                }
             });
         })
         .detach();
@@ -2750,6 +2810,70 @@ mod tests {
             not_sent(&["a".into(), "b".into()], "Studio"),
             "2 pictures couldn't be sent to Studio."
         );
+    }
+
+    /// A machine's item ids are positions, so a transcript sent again is another conversation
+    /// under the same ids when an id names another kind of item or other words of the user's, or
+    /// when what was held runs past its end (a rewind). Sent again as it was, longer, or from a
+    /// later start (its earlier part comes in pages), it's the same one.
+    #[test]
+    fn a_transcript_sent_again_is_told_from_one_rewritten_under_the_same_ids() {
+        let user = |ix: usize, text: &str| tr::Item {
+            id: format!("i{ix}"),
+            seq: 0,
+            at: None,
+            body: tr::ItemBody::User {
+                text: text.into(),
+                images: 0,
+                aside: false,
+                videos: vec![],
+                image_paths: vec![],
+            },
+        };
+        let answer = |ix: usize, text: &str| tr::Item {
+            id: format!("i{ix}"),
+            seq: 0,
+            at: None,
+            body: tr::ItemBody::Assistant {
+                text: text.into(),
+                streaming: false,
+            },
+        };
+        let held = vec![
+            user(0, "first"),
+            answer(1, "one"),
+            user(2, "second"),
+            answer(3, "two"),
+        ];
+        assert!(!rewritten(&held, &held), "as it was (a reconnect)");
+        let mut longer = held.clone();
+        longer[3] = answer(3, "two, and more of it");
+        longer.push(user(4, "third"));
+        assert!(
+            !rewritten(&held, &longer),
+            "an answer that grew, a message more"
+        );
+        assert!(
+            !rewritten(&held, &longer[2..]),
+            "its last items alone: the rest comes in pages"
+        );
+        assert!(
+            rewritten(&held, &held[..2]),
+            "rewound: what was held runs past its end"
+        );
+        let edited = vec![
+            user(0, "first"),
+            answer(1, "one"),
+            user(2, "second, edited"),
+        ];
+        assert!(rewritten(&held, &edited), "other words under the same id");
+        let other = vec![user(0, "first"), user(1, "another message")];
+        assert!(
+            rewritten(&held, &other),
+            "another kind of item under the same id"
+        );
+        assert!(rewritten(&held, &[]), "nothing left of it");
+        assert!(!rewritten(&[], &held), "nothing was held");
     }
 
     #[test]
