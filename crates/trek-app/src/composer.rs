@@ -302,6 +302,9 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> Self {
         let cmd_enter = workspace.read(cx).settings.general.send_with_cmd_enter;
+        // Linux: what the session can take a snapshot through is asked for now, off this thread,
+        // so the + menu knows by the time it's opened.
+        screenclip::desktop::warm();
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(2, 12)
@@ -2667,17 +2670,32 @@ impl Composer {
         attachments::arrived(self, n, failed, window, cx);
     }
 
-    /// Take a screenshot with macOS's own picker and attach it. `mode`: "window", "area" or "screen".
-    /// The snapshot ⌘⇧S takes (Settings → App Snapshots).
-    /// Whether this platform takes snapshots: macOS (`screencapture`) and Windows (Snipping Tool).
-    /// Linux has no capture tool Trek drives (the desktop portal's Screenshot would bring one), so
-    /// the + menu, the shortcut and Settings offer none there.
-    pub fn snapshots_offered() -> bool {
-        !crate::words::is_linux()
+    /// What takes snapshots here: `screencapture` on a Mac, Snipping Tool on Windows, and on Linux
+    /// the desktop's screenshot portal and the X server, as far as the session has them (a
+    /// runtime value: `screenclip::desktop`, which a test stands in for on any platform).
+    pub fn snapshot_tool() -> screenclip::Tool {
+        if let Some(desktop) = screenclip::desktop::capture() {
+            screenclip::Tool::Desktop(desktop.session())
+        } else if crate::words::is_linux() {
+            screenclip::Tool::Desktop(screenclip::desktop::Session::default())
+        } else if cfg!(windows) {
+            screenclip::Tool::Snipping
+        } else {
+            screenclip::Tool::Screencapture
+        }
     }
 
+    /// Whether snapshots are there at all: the + menu's rows and Settings › App Snapshots. Not on
+    /// a Linux session with neither a screenshot portal nor an X server of its own.
+    pub fn snapshots_offered() -> bool {
+        Self::snapshot_tool().offered()
+    }
+
+    /// The snapshot ⌘⇧S takes (Settings → App Snapshots).
     pub fn snapshot_default(&mut self, cx: &mut Context<Self>) {
         if !Self::snapshots_offered() {
+            // The shortcut is bound all the same: say why nothing happens.
+            self.toast(screenclip::desktop::NOTHING_TO_CAPTURE_WITH.into(), cx);
             return;
         }
         let mode = match self.workspace.read(cx).settings.snapshots.default_mode {
@@ -2688,11 +2706,25 @@ impl Composer {
         self.snapshot(mode, cx);
     }
 
-    /// Take a screenshot with macOS's own picker and attach it. `mode`: "window", "area" or "screen".
+    /// Take a screenshot with the system's own picker and attach it. `mode`: "window", "area" or
+    /// "screen".
     fn snapshot(&mut self, mode: &'static str, cx: &mut Context<Self>) {
-        if cfg!(windows) {
+        match Self::snapshot_tool() {
+            screenclip::Tool::Desktop(session) => {
+                // The desktop's picker decides between a window and an area; where nothing picks
+                // (a bare X11 session), the shortcut takes the screen.
+                let wanted = match mode {
+                    "screen" => screenclip::desktop::Mode::Screen,
+                    _ => screenclip::desktop::Mode::Pick,
+                };
+                return match session.nearest(wanted) {
+                    Some(mode) => self.snapshot_by_desktop(mode, cx),
+                    None => self.toast(screenclip::desktop::NOTHING_TO_CAPTURE_WITH.into(), cx),
+                };
+            }
             // Snipping Tool's overlay picks the window or area itself, so `mode` has no say.
-            return self.snapshot_by_screenclip(cx);
+            screenclip::Tool::Snipping => return self.snapshot_by_screenclip(cx),
+            screenclip::Tool::Screencapture => {}
         }
         if self.snapshotting {
             return;
@@ -2824,6 +2856,68 @@ impl Composer {
                 cx.notify();
             });
         }));
+    }
+
+    /// Linux: take `mode` the way the session has (the desktop's screenshot portal, or the screen
+    /// from the X server: `screenclip::desktop`) and attach it. Hide Trek and Format apply as on a
+    /// Mac; a picker the user closes attaches nothing and says nothing.
+    pub fn snapshot_by_desktop(&mut self, mode: screenclip::desktop::Mode, cx: &mut Context<Self>) {
+        use screenclip::desktop::{Format, NOTHING_TO_CAPTURE_WITH, Taken};
+        if self.snapshotting {
+            return;
+        }
+        let route = screenclip::desktop::capture()
+            .and_then(|desktop| Some((desktop.session().route(mode)?, desktop)));
+        let Some((route, desktop)) = route else {
+            return self.toast(NOTHING_TO_CAPTURE_WITH.into(), cx);
+        };
+        self.snapshotting = true;
+        cx.notify();
+        let prefs = self.workspace.read(cx).settings.snapshots.clone();
+        let format = match prefs.format {
+            trek_core::settings::SnapshotFormat::Jpg => Format::Jpg,
+            trek_core::settings::SnapshotFormat::Png => Format::Png,
+        };
+        let out = mentions::snapshot_path().with_extension(format.extension());
+        // A quiet test run's window is already where nobody sees it, and stays put.
+        let hide = prefs.hide_trek && !crate::system::quiet_test_run();
+        let window = self.window;
+        cx.spawn(async move |this, cx| {
+            if hide {
+                cx.update(|cx| desktop.step_aside(cx));
+                // Let the windows finish going before the screen is read or the picker appears.
+                cx.background_executor().timer(desktop.settle()).await;
+            }
+            let taken = cx
+                .background_executor()
+                .spawn({
+                    let desktop = desktop.clone();
+                    async move {
+                        match screenclip::desktop::take(desktop.as_ref(), route, format, &out) {
+                            // A screen of a large display is over what agents take: made smaller here.
+                            Taken::Saved => {
+                                Some(attachments::fit_in_place(&out).map_err(|e| e.to_string()))
+                            }
+                            Taken::Cancelled => None,
+                            Taken::Failed(why) => Some(Err(why)),
+                        }
+                    }
+                })
+                .await;
+            if hide {
+                cx.update(|cx| desktop.come_back(window, cx));
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.snapshotting = false;
+                match taken {
+                    Some(Ok(path)) => this.outbox.add([path]),
+                    Some(Err(e)) => this.toast(format!("Couldn't attach the snapshot: {e}."), cx),
+                    None => {}
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Files dropped on the composer: images on the strip as thumbnails, the rest as tiles.
@@ -2985,9 +3079,7 @@ impl Composer {
                     .text_color(theme.muted_foreground),
             )
             .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-                let (a, b, c, d, e, f, g, h) = (
-                    me.clone(),
-                    me.clone(),
+                let (a, b, e, f, g, h) = (
                     me.clone(),
                     me.clone(),
                     me.clone(),
@@ -3020,43 +3112,52 @@ impl Composer {
                         },
                     ));
                 }
-                // No snapshot rows (Linux): no line of their own either.
-                let menu = if Self::snapshots_offered() {
+                // What this platform's tool can take, and on Linux this session's: Snipping Tool
+                // and a desktop's portal have the window, area and screen choice in a picker of
+                // their own; a bare X11 session has the screen alone. No rows (a session with
+                // nothing to capture through): no line of their own either.
+                let tool = Self::snapshot_tool();
+                let mut menu = if tool.offered() {
                     menu.separator()
                 } else {
                     menu
                 };
-                // Snipping Tool has the window, area and screen choice in its own toolbar.
-                let menu = if !Self::snapshots_offered() {
-                    let _ = (b, c, d);
-                    menu
-                } else if cfg!(windows) {
-                    menu.item(
-                        PopupMenuItem::new("Take a snapshot")
-                            .icon(crate::assets::Lucide::Camera)
-                            .on_click(move |_, _, cx| b.update(cx, |c, cx| c.snapshot("area", cx))),
-                    )
-                } else {
-                    menu.item(
-                        PopupMenuItem::new("Snapshot a window")
-                            .icon(crate::assets::Lucide::Camera)
-                            .on_click(move |_, _, cx| {
-                                b.update(cx, |c, cx| c.snapshot("window", cx))
-                            }),
-                    )
-                    .item(
-                        PopupMenuItem::new("Snapshot an area")
-                            .icon(crate::assets::Lucide::Crosshair)
-                            .on_click(move |_, _, cx| c.update(cx, |c, cx| c.snapshot("area", cx))),
-                    )
-                    .item(
-                        PopupMenuItem::new("Snapshot the screen")
-                            .icon(crate::assets::Lucide::Monitor)
-                            .on_click(move |_, _, cx| {
-                                d.update(cx, |c, cx| c.snapshot("screen", cx))
-                            }),
-                    )
-                };
+                for &row in tool.rows() {
+                    use crate::assets::Lucide;
+                    use screenclip::Row;
+                    let (label, id, icon, mode) = match row {
+                        Row::Any => ("Take a snapshot", "plus-snapshot", Lucide::Camera, "area"),
+                        Row::Window => (
+                            "Snapshot a window",
+                            "plus-snapshot-window",
+                            Lucide::Camera,
+                            "window",
+                        ),
+                        Row::Area => (
+                            "Snapshot an area",
+                            "plus-snapshot-area",
+                            Lucide::Crosshair,
+                            "area",
+                        ),
+                        Row::Screen => (
+                            "Snapshot the screen",
+                            "plus-snapshot-screen",
+                            Lucide::Monitor,
+                            "screen",
+                        ),
+                    };
+                    // A Linux desktop's rows come and go with the session, so they answer to an
+                    // id (tests and the live check find them by it).
+                    let item = match tool {
+                        screenclip::Tool::Desktop(_) => named(label, id),
+                        _ => PopupMenuItem::new(label),
+                    };
+                    let me = b.clone();
+                    menu = menu.item(
+                        item.icon(icon)
+                            .on_click(move |_, _, cx| me.update(cx, |c, cx| c.snapshot(mode, cx))),
+                    );
+                }
                 menu.separator()
                     .item(
                         hinted("Mention a file", "@", "plus-mention")
@@ -4412,6 +4513,11 @@ const ACCOUNT_ROOM: f32 = 130.;
 
 /// A + menu row that names a key typed in the prompt, the key in the quiet text to its right (as
 /// the thread menu shows its shortcuts).
+/// A menu row that answers to an id of its own.
+fn named(label: &'static str, id: &'static str) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, _| h_flex().id(id).test_support().w_full().child(label))
+}
+
 fn hinted(label: &'static str, key: &'static str, id: &'static str) -> PopupMenuItem {
     PopupMenuItem::element(move |_, cx| {
         h_flex()

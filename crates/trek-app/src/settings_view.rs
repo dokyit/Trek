@@ -144,8 +144,8 @@ pub fn pages() -> impl Iterator<Item = SettingsPage> {
         .filter(|p| offered(*p))
 }
 
-/// Whether this platform has page `p`: Linux has no App Snapshots (no capture tool Trek drives
-/// there; see `Composer::snapshots_offered`).
+/// Whether this computer has page `p`: no App Snapshots on a Linux session that can take none
+/// (neither a screenshot portal nor an X server of its own; see `Composer::snapshots_offered`).
 pub fn offered(p: SettingsPage) -> bool {
     p != SettingsPage::Snapshots || crate::composer::Composer::snapshots_offered()
 }

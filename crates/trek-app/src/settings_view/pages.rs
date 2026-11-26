@@ -1862,11 +1862,66 @@ impl SettingsView {
         };
         let replaced = status == Some(crate::permissions::Status::Replaced);
         let words = crate::words::words();
+        // A Linux desktop, as far as this session can take a snapshot (a runtime value: its
+        // screenshot portal, the X server). Hide Trek and Format apply there; a window's shadow
+        // and the shutter sound are `screencapture`'s alone.
+        let desktop = match crate::composer::Composer::snapshot_tool() {
+            crate::screenclip::Tool::Desktop(session) => Some(session),
+            _ => None,
+        };
         // Where Snipping Tool does the capturing, it decides the mode and the file's format, and
         // has no shadow, sound or hiding of Trek to set: a sentence says so in place of those rows.
-        let capture = match words.snipping_tool_note {
-            Some(note) => Self::note(note, cx),
-            None => ui::group(
+        let capture = match (words.snipping_tool_note, desktop) {
+            (Some(note), _) => Self::note(note, cx),
+            (None, Some(session)) => {
+                use crate::screenclip::desktop::Mode;
+                let mut rows = Vec::new();
+                // The shortcut's choice, where there is one: the desktop's own picker decides
+                // between a window and an area, so the two are one here.
+                if session.route(Mode::Pick).is_some() && session.route(Mode::Screen).is_some() {
+                    rows.push(Self::row(
+                        crate::keys::localize("⌘⇧S takes").into_owned(),
+                        "The + menu in the composer offers both.",
+                        ui::segmented(
+                            "snap-mode",
+                            vec![
+                                (SnapshotMode::Area, "What you pick"),
+                                (SnapshotMode::Screen, "The screen"),
+                            ],
+                            match p.default_mode {
+                                SnapshotMode::Screen => SnapshotMode::Screen,
+                                SnapshotMode::Window | SnapshotMode::Area => SnapshotMode::Area,
+                            },
+                            self.setter(|s, v| s.snapshots.default_mode = v),
+                            cx,
+                        ),
+                        cx,
+                    ));
+                }
+                rows.push(Self::row(
+                    "Hide Trek while capturing",
+                    "Trek's windows are minimized so you can pick what is behind them, and come back after.",
+                    self.switch("snap-hide", p.hide_trek, |s, v| s.snapshots.hide_trek = v),
+                    cx,
+                ));
+                rows.push(Self::row(
+                    "Format",
+                    "PNG is sharp for UI; JPEG is smaller for photos and busy screens.",
+                    ui::segmented(
+                        "snap-format",
+                        vec![(SnapshotFormat::Png, "PNG"), (SnapshotFormat::Jpg, "JPEG")],
+                        p.format,
+                        self.setter(|s, v| s.snapshots.format = v),
+                        cx,
+                    ),
+                    cx,
+                ));
+                v_flex()
+                    .child(ui::group(rows, cx))
+                    .child(div().pt(px(12.)).child(Self::note(session.note(), cx)))
+                    .into_any_element()
+            }
+            (None, None) => ui::group(
                 vec![
                     Self::row(
                         crate::keys::localize("⌘⇧S takes").into_owned(),
