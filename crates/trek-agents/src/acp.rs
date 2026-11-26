@@ -396,11 +396,16 @@ impl FsPolicy {
 }
 
 /// `path` with `.`/`..` removed and its longest existing ancestor resolved through symlinks.
-fn resolve(path: &Path) -> PathBuf {
+/// A `..` goes up from where the path has got to on disk: after a link (`link/..`), that's the
+/// folder the link's target is in, as the system reads it, not the folder holding the link.
+pub(crate) fn resolve(path: &Path) -> PathBuf {
     let mut clean = PathBuf::new();
     for c in path.components() {
         match c {
             Component::ParentDir => {
+                if let Ok(real) = clean.canonicalize() {
+                    clean = real;
+                }
                 clean.pop();
             }
             Component::CurDir => {}
@@ -424,6 +429,37 @@ fn resolve(path: &Path) -> PathBuf {
             _ => return clean,
         }
     }
+}
+
+/// The files an ACP tool call names: its `locations`, else the path in its input.
+fn named_paths(tc: &Value) -> Vec<String> {
+    let mut paths: Vec<String> = tc["locations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|l| l["path"].as_str().map(String::from))
+        .collect();
+    if paths.is_empty() {
+        paths.extend(
+            ["path", "file_path", "filePath"]
+                .iter()
+                .find_map(|k| tc["rawInput"][*k].as_str().map(String::from)),
+        );
+    }
+    paths
+}
+
+/// Whether every one of `paths` is in the project `cwd` and not in a `.git` folder. None: no.
+fn edit_in_project(paths: &[String], cwd: &Path) -> bool {
+    !paths.is_empty()
+        && paths.iter().all(|p| {
+            let path = if Path::new(p).is_absolute() {
+                PathBuf::from(p)
+            } else {
+                cwd.join(p)
+            };
+            within(&path, cwd) && !crate::direct::in_git_dir(&path, cwd)
+        })
 }
 
 pub(crate) fn within(path: &Path, root: &Path) -> bool {
@@ -618,6 +654,8 @@ struct Tool {
     agent: bool,
     /// The tool's own name, where the agent says it (OpenCode 2: `shell`, `subagent`, …).
     name: String,
+    /// The files it names (`named_paths`), as last said.
+    paths: Vec<String>,
     started: bool,
 }
 
@@ -725,6 +763,10 @@ impl Turn {
                 }
                 if let Some(steps) = todo_steps(&u["rawInput"]) {
                     tool.todos = Some(steps);
+                }
+                let paths = named_paths(u);
+                if !paths.is_empty() {
+                    tool.paths = paths;
                 }
                 tool.agent |= is_sub_agent(&tool.name, &u["rawInput"]);
                 let detail = tool_detail(u, &tool.kind);
@@ -2001,9 +2043,23 @@ impl Turn {
             }
             Ruling::Ask | Ruling::Level => {}
         }
+        // Below Full access an edit goes ahead by itself only in the project, never in its git
+        // folder (hooks and config git runs), and only when the request says where. A read-only
+        // session lets only reads through by itself, at any level; plan mode keeps commands
+        // (OpenCode's plan agent may run them), and its edits always ask.
+        let looks = matches!(kind.as_str(), "read" | "search" | "think" | "fetch");
         if ruling == Ruling::Level
             && auto_allow(hand_holding, &kind)
+            && (looks || !read_only)
             && !(planning && edit)
+            && (!edit || hand_holding == HandHolding::FullAccess || {
+                let paths = named_paths(tc);
+                let paths = match (paths.is_empty(), known) {
+                    (true, Some(t)) => t.paths.clone(),
+                    _ => paths,
+                };
+                edit_in_project(&paths, cwd)
+            })
             && let Some(option) = pick_option(&options, Decision::Allow)
         {
             return Ask::Answer(option);
@@ -3666,6 +3722,142 @@ mod tests {
             ),
             Ask::User { .. }
         ));
+    }
+
+    #[test]
+    fn edits_go_ahead_by_themselves_only_in_the_project() {
+        let options = json!([
+            { "optionId": "yes", "kind": "allow_once", "name": "Allow" },
+            { "optionId": "no", "kind": "reject_once", "name": "Reject" },
+        ]);
+        let edit = |locations: Value, raw: Value| {
+            json!({
+                "toolCall": { "toolCallId": "e", "kind": "edit", "title": "Edit", "locations": locations, "rawInput": raw },
+                "options": options,
+            })
+        };
+        let t = Turn::default();
+        let at = |ask: &Value, level, planning, read_only| {
+            t.permission_under(ask, level, planning, &[], Path::new("/p"), read_only)
+        };
+        let inside = edit(json!([{ "path": "/p/src/a.rs" }]), Value::Null);
+        for level in [HandHolding::AutoAcceptEdits, HandHolding::Auto] {
+            assert_eq!(at(&inside, level, false, false), Ask::Answer("yes".into()));
+            for ask in [
+                edit(json!([{ "path": "/Users/x/.zshrc" }]), Value::Null),
+                edit(
+                    json!([{ "path": "/p/a.rs" }, { "path": "/etc/hosts" }]),
+                    Value::Null,
+                ),
+                edit(json!([{ "path": "/p/.git/hooks/pre-commit" }]), Value::Null),
+                edit(json!([{ "path": "/p/../q/a.rs" }]), Value::Null),
+                edit(
+                    Value::Null,
+                    json!({ "filePath": "/Users/x/.ssh/authorized_keys" }),
+                ),
+                // Nothing says where.
+                edit(Value::Null, Value::Null),
+            ] {
+                assert!(
+                    matches!(at(&ask, level, false, false), Ask::User { .. }),
+                    "{level:?} {ask}"
+                );
+            }
+            assert_eq!(
+                at(
+                    &edit(Value::Null, json!({ "filePath": "src/a.rs" })),
+                    level,
+                    false,
+                    false
+                ),
+                Ask::Answer("yes".into())
+            );
+        }
+        // Where the earlier tool call said it would write, when the prompt doesn't repeat it.
+        let mut known = Turn::default();
+        known.update(&json!({"sessionUpdate":"tool_call","toolCallId":"e","title":"Edit","kind":"edit","status":"pending","locations":[{"path":"/Users/x/.zshrc"}]}));
+        let bare = edit(Value::Null, Value::Null);
+        assert!(matches!(
+            known.permission_under(&bare, HandHolding::Auto, false, &[], Path::new("/p"), false),
+            Ask::User { .. }
+        ));
+        // Full access answers wherever it is.
+        assert_eq!(
+            at(
+                &edit(json!([{ "path": "/etc/hosts" }]), Value::Null),
+                HandHolding::FullAccess,
+                false,
+                false
+            ),
+            Ask::Answer("yes".into())
+        );
+    }
+
+    #[test]
+    fn read_only_sessions_only_read_by_themselves() {
+        let run = json!({
+            "toolCall": { "toolCallId": "c", "kind": "execute", "title": "Run", "rawInput": { "command": "rm -rf x" } },
+            "options": [
+                { "optionId": "yes", "kind": "allow_once", "name": "Allow" },
+                { "optionId": "no", "kind": "reject_once", "name": "Reject" },
+            ],
+        });
+        let read = json!({
+            "toolCall": { "toolCallId": "r", "kind": "read", "title": "Read", "locations": [{ "path": "/p/a.rs" }] },
+            "options": run["options"],
+        });
+        let t = Turn::default();
+        // An Ask session at Full access: a command isn't Trek's to allow by itself.
+        assert!(matches!(
+            t.permission_under(
+                &run,
+                HandHolding::FullAccess,
+                false,
+                &[],
+                Path::new("/p"),
+                true
+            ),
+            Ask::User { .. }
+        ));
+        assert_eq!(
+            t.permission_under(
+                &read,
+                HandHolding::FullAccess,
+                false,
+                &[],
+                Path::new("/p"),
+                true
+            ),
+            Ask::Answer("yes".into())
+        );
+        assert_eq!(
+            t.permission_under(
+                &run,
+                HandHolding::FullAccess,
+                false,
+                &[],
+                Path::new("/p"),
+                false
+            ),
+            Ask::Answer("yes".into())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_then_dot_dot_is_where_the_system_goes() {
+        let dir =
+            std::env::temp_dir().join(format!("trek_test_link_dotdot_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (proj, out) = (dir.join("proj"), dir.join("elsewhere").join("deep"));
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        std::os::unix::fs::symlink(&out, proj.join("link")).unwrap();
+        // `proj/link/..` is `elsewhere`, not `proj`.
+        assert!(!within(&proj.join("link").join("..").join("x"), &proj));
+        assert!(within(&proj.join("link").join("x"), &dir.join("elsewhere")));
+        assert!(within(&proj.join("a").join("..").join("b"), &proj));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

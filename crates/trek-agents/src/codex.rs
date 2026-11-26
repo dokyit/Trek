@@ -1007,7 +1007,12 @@ impl Session {
             "input": input,
             "approvalPolicy": approval,
             "approvalsReviewer": reviewer,
-            "sandboxPolicy": sandbox_policy(self.hand_holding),
+            // Planning only reads, whatever the level.
+            "sandboxPolicy": if self.plan {
+                json!({ "type": "readOnly" })
+            } else {
+                sandbox_policy(self.hand_holding)
+            },
             "serviceTier": self.fast.clone().unwrap_or_else(|| "default".into()),
         });
         if let Some(e) = effort_str(self.effort) {
@@ -1396,11 +1401,14 @@ impl Session {
                     .and_then(|i| self.edits.get(i))
                     .cloned()
                     .unwrap_or_default();
+                // Not in a `.git` folder: Codex's sandbox keeps those read-only for a reason (hooks
+                // and config that git runs outside it).
                 let in_project = p["grantRoot"].is_null()
                     && !paths.is_empty()
-                    && paths
-                        .iter()
-                        .all(|f| crate::acp::within(Path::new(f), &self.cwd));
+                    && paths.iter().all(|f| {
+                        crate::acp::within(Path::new(f), &self.cwd)
+                            && !crate::direct::in_git_dir(Path::new(f), &self.cwd)
+                    });
                 let mut targets: Vec<RuleCall> = paths
                     .iter()
                     .map(|f| RuleCall::edit("apply_patch", f.as_str()))
@@ -1420,7 +1428,9 @@ impl Session {
                     && match self.hand_holding {
                         HandHolding::FullAccess => true,
                         HandHolding::Supervised => false,
-                        HandHolding::AutoAcceptEdits | HandHolding::Auto => in_project,
+                        HandHolding::AutoAcceptEdits | HandHolding::Auto => {
+                            in_project && !self.plan
+                        }
                     };
                 if auto {
                     out.send
@@ -3563,6 +3573,44 @@ mod tests {
             &out.events[..],
             [AgentEvent::PermissionRequest { .. }]
         ));
+    }
+
+    #[test]
+    fn writes_into_git_and_while_planning_ask() {
+        let ask_patch = |id: u64, item: &str| {
+            json!({"id": id, "method": "item/fileChange/requestApproval", "params": {
+                "threadId": "t", "turnId": "u", "itemId": item, "reason": null, "grantRoot": null,
+            }})
+        };
+        let mut s = session("t", false);
+        s.rules = Some(vec![]);
+        s.cwd = PathBuf::from("/p");
+        s.command(Command::SetHandHolding(HandHolding::AutoAcceptEdits));
+        s.edits.insert("a".into(), vec!["/p/a.rs".into()]);
+        s.edits
+            .insert("g".into(), vec!["/p/.git/hooks/pre-commit".into()]);
+        let out = s.incoming(&ask_patch(1, "a"));
+        assert_eq!(
+            out.send,
+            vec![json!({"id":1,"result":{"decision":"accept"}})]
+        );
+        let out = s.incoming(&ask_patch(2, "g"));
+        assert!(out.send.is_empty(), "{:?}", out.send);
+        assert!(matches!(
+            &out.events[..],
+            [AgentEvent::PermissionRequest { .. }]
+        ));
+        s.plan = true;
+        let out = s.incoming(&ask_patch(3, "a"));
+        assert!(out.send.is_empty(), "planning: {:?}", out.send);
+        let start = s.turn_start(json!([]));
+        assert_eq!(start["params"]["sandboxPolicy"], json!({"type":"readOnly"}));
+        s.plan = false;
+        let start = s.turn_start(json!([]));
+        assert_eq!(
+            start["params"]["sandboxPolicy"],
+            json!({"type":"workspaceWrite"})
+        );
     }
 
     #[test]

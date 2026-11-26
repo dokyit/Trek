@@ -80,12 +80,21 @@ Trek's four modes, mapped per backend:
 
 | Trek mode | Meaning | Claude Code | Codex | ACP / Direct |
 |---|---|---|---|---|
-| **Supervised** | Ask before edits and commands | `default` | `read-only` + `on-request`, reviewer=user | ask every tool |
-| **Auto-accept edits** | File edits auto-applied; commands ask | `acceptEdits` | `workspace-write` + Trek auto-approves file-change requests | edits allow, exec ask |
-| **Auto** | Runs freely; risky actions checked | `auto` | `workspace-write` + `approvals_reviewer=auto_review` | ACP: allow, deny-list + risk classifier asks. Direct: runs a short allow-list of read-only commands unasked, asks for the rest |
+| **Supervised** | Ask before edits and commands | `default` | `read-only` + `on-request`, reviewer=user (a command that fits the read-only sandbox, no writes and no network, runs without a card: Codex asks only for what the sandbox blocks) | ask every tool |
+| **Auto-accept edits** | File edits auto-applied; commands ask | `acceptEdits` | `workspace-write` + Trek auto-approves file-change requests inside the project and outside its `.git` folders | ACP: edits inside the project (outside `.git`) allowed when the request names its files, the rest ask; exec asks |
+| **Auto** | Runs freely; risky actions checked | `auto` | `workspace-write` + `approvals_reviewer=auto_review` | ACP: reads, searches and fetches allowed, edits as above, the rest ask (there is no deny-list or classifier of Trek's). Direct: runs a short allow-list of read-only commands unasked (never with a glob that could become a flag, `$`-expansions, a path into the user's keys, or git in a folder that isn't a `.git` repository), asks for the rest |
 | **Full access** | No prompts, no sandbox | `bypassPermissions` | `danger-full-access` + `never` | allow all |
 
+At every level below Full access a Direct agent's read of the places keys and tokens live (`~/.ssh`,
+`~/.aws`, `~/.config/gh`, the home folder itself…) asks, as does the Browser opening a `file:` page
+and pulling a file off the iPhone onto this computer. A thread an agent starts in another project
+starts Supervised. Claude's "allow for the session" suggestions are kept to the session (never
+written to a settings file) and never change the mode past `acceptEdits`.
+
 Plan mode is a separate toggle (⇧Tab), not a hand-holding level, matching Claude Code/Codex/Factory.
+In plan mode Codex gets the read-only sandbox and no file change is approved by Trek, and an ACP
+agent's edits go to the user at any level. In a read-only (Ask) session an ACP agent's requests
+other than reads go to the user at any level.
 Full access must be unlocked once in Settings → Permissions (Claude/Codex both gate it this way).
 
 ## 4. Thread import ("pull threads from the machine")

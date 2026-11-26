@@ -168,6 +168,29 @@ fn deny_message(tool: &str) -> &'static str {
     }
 }
 
+/// What of Claude's suggested permission updates "allow for the session" applies: for this
+/// session only (Claude suggests `localSettings` for a command, which would write the rule into
+/// the project's `.claude/settings.local.json` and outlive the thread, at any level), and no
+/// change of mode beyond accepting edits (the level is Trek's to set: `bypassPermissions` there
+/// would be Full access with Trek still showing the thread's own).
+fn session_suggestions(suggested: &Value) -> Vec<Value> {
+    suggested
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|s| match s["type"].as_str() {
+            Some("addRules") => true,
+            Some("setMode") => matches!(s["mode"].as_str(), Some("acceptEdits" | "default")),
+            _ => false,
+        })
+        .map(|s| {
+            let mut s = s.clone();
+            s["destination"] = json!("session");
+            s
+        })
+        .collect()
+}
+
 /// Messages answering the permission prompt `request`. Approving a plan also leaves plan mode
 /// for `mode` (the thread's own level): on its own, Claude would drop to "default".
 fn respond(
@@ -185,11 +208,9 @@ fn respond(
             let mut ok = json!({ "behavior": "allow", "updatedInput": input });
             // Claude's own suggested rules (e.g. allow `gh issue list:*` in this
             // session); applying them stops the same prompt from coming back.
-            if let Some(sug) = request["permission_suggestions"]
-                .as_array()
-                .filter(|a| !a.is_empty())
-            {
-                ok["updatedPermissions"] = Value::Array(sug.clone());
+            let sug = session_suggestions(&request["permission_suggestions"]);
+            if !sug.is_empty() {
+                ok["updatedPermissions"] = Value::Array(sug);
             }
             ok
         }
@@ -2805,6 +2826,34 @@ mod tests {
         assert_eq!(
             denied[0]["response"]["response"]["message"],
             "The user declined this action."
+        );
+    }
+
+    #[test]
+    fn allow_for_the_session_stays_in_the_session() {
+        let request = json!({
+            "tool_name": "Bash",
+            "input": { "command": "npm test" },
+            "permission_suggestions": [
+                { "type": "addRules", "rules": [{ "toolName": "Bash", "ruleContent": "npm test:*" }], "behavior": "allow", "destination": "localSettings" },
+                { "type": "setMode", "mode": "bypassPermissions", "destination": "session" },
+                { "type": "setMode", "mode": "acceptEdits", "destination": "userSettings" },
+                { "type": "addDirectories", "directories": ["/"], "destination": "session" },
+            ],
+        });
+        let msgs = respond(
+            &mut Control { next_id: 0 },
+            "r",
+            &request,
+            Decision::AllowForSession,
+            "default",
+        );
+        assert_eq!(
+            msgs[0]["response"]["response"]["updatedPermissions"],
+            json!([
+                { "type": "addRules", "rules": [{ "toolName": "Bash", "ruleContent": "npm test:*" }], "behavior": "allow", "destination": "session" },
+                { "type": "setMode", "mode": "acceptEdits", "destination": "session" },
+            ])
         );
     }
 
