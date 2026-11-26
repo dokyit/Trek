@@ -314,8 +314,10 @@ pub fn send_web_push(
     trek_core::runtime().spawn(async move {
         let key = vapid_key().ok_or("there's no push key")?;
         let body = webpush::encrypt(&sub, &note.to_bytes()).map_err(|e| e.to_string())?;
+        // Not sent on elsewhere: the endpoint was checked to be a public push service's.
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| e.to_string())?;
         let service = sub.audience();

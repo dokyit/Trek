@@ -98,8 +98,17 @@ fn clone_folder_ok(folder: &str) -> bool {
     } else {
         return false;
     };
+    // Not a hidden folder (`~/.config/git`, whose `config` would be git's own for every
+    // repository) nor where the system runs what it finds (`~/Library/LaunchAgents`, Windows'
+    // Startup folder under `AppData`).
     let mut parts = rest.split(['/', '\\']).filter(|p| !p.is_empty()).peekable();
-    parts.peek().is_some() && parts.all(|p| p != "..")
+    parts.peek().is_some()
+        && parts.all(|p| {
+            p != ".."
+                && !p.starts_with('.')
+                && !p.eq_ignore_ascii_case("Library")
+                && !p.eq_ignore_ascii_case("AppData")
+        })
 }
 
 /// The most `put_files` carries in one message, decoded (the 8 MiB frame limit caps the base64
@@ -202,8 +211,33 @@ pub fn safe_relative_path(path: &str) -> bool {
         return false;
     }
     path.split(['/', '\\']).all(|part| {
-        !part.is_empty() && part != "." && part != ".." && !part.eq_ignore_ascii_case(".git")
+        !part.is_empty() && part != "." && part != ".." && !windows_reads_otherwise(part)
     })
+}
+
+/// Whether a file name, on a Windows host, names something other than it seems, or `.git`:
+/// Windows drops dots and spaces at a name's end (`.git.` is `.git`), reads `name:stream` as a
+/// stream of `name` (`.git::$INDEX_ALLOCATION` is the `.git` folder), keeps 8.3 short names
+/// (`GIT~1` is `.git`), and gives `CON`, `NUL`, `COM1`… to devices whatever their extension.
+fn windows_reads_otherwise(part: &str) -> bool {
+    if part.contains(':') || part.ends_with(['.', ' ']) {
+        return true;
+    }
+    let lower = part.to_ascii_lowercase();
+    if lower == ".git" {
+        return true;
+    }
+    if let Some(n) = lower.strip_prefix("git~")
+        && !n.is_empty()
+        && n.bytes().all(|b| b.is_ascii_digit())
+    {
+        return true;
+    }
+    let stem = lower.split('.').next().unwrap_or_default().trim_end();
+    matches!(stem, "con" | "prn" | "aux" | "nul" | "conin$" | "conout$")
+        || (stem.len() == 4
+            && (stem.starts_with("com") || stem.starts_with("lpt"))
+            && stem.as_bytes()[3].is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -239,8 +273,29 @@ mod tests {
             "sub/.GIT/hooks/x",
             "a\0b",
             "a/",
+            // What a Windows host reads as `.git`, a stream, or a device.
+            ".git./config",
+            ".git /hooks/pre-commit",
+            ".git::$INDEX_ALLOCATION/config",
+            "GIT~1/config",
+            "sub/git~12/hooks/x",
+            "ab:stream",
+            "notes.",
+            "CON",
+            "nul.txt",
+            "a/COM1.log",
+            "lpt9",
         ] {
             assert!(!safe_relative_path(bad), "{bad:?}");
+        }
+        for ok in [
+            "git~/x",
+            "console.txt",
+            "com.apple.plist",
+            ".gitignore",
+            "git/x",
+        ] {
+            assert!(safe_relative_path(ok), "{ok}");
         }
     }
 
@@ -328,7 +383,21 @@ mod tests {
         for folder in ["/Users/me/trek", "~/code/trek", "C:\\Users\\me\\trek"] {
             assert_eq!(req("https://h/r", folder).check(), Ok(()), "{folder}");
         }
-        for folder in ["", "trek", "~", "~/", "/", "~/../etc", "/tmp/../etc", "-x"] {
+        for folder in [
+            "",
+            "trek",
+            "~",
+            "~/",
+            "/",
+            "~/../etc",
+            "/tmp/../etc",
+            "-x",
+            // Where a cloned repository's files would run: git's own config, login items.
+            "~/.config/git",
+            "~/Library/LaunchAgents",
+            "C:\\Users\\me\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup",
+            "/Users/me/.ssh",
+        ] {
             assert!(req("https://h/r", folder).check().is_err(), "{folder}");
         }
         assert!(

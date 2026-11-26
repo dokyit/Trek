@@ -65,8 +65,27 @@ impl PushSubscription {
             .endpoint
             .strip_prefix("https://")
             .ok_or("A push endpoint must be an https:// address")?;
-        let host = rest.split('/').next().unwrap_or_default();
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        let host = authority
+            .rsplit_once(':')
+            .map_or(authority, |(h, _)| h)
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        // A push service is a public name: never this computer or its network (the computer
+        // posts to it, so a paired device naming `https://127.0.0.1:…` would have it post there).
+        // No top-level domain starts with a digit, and every IPv4 spelling does in its last part.
+        let last = host.rsplit('.').next().unwrap_or_default();
         if host.is_empty()
+            || authority.contains('@')
+            || host.starts_with('[')
+            || !host.contains('.')
+            || host == "localhost"
+            || host.ends_with(".localhost")
+            || host.ends_with(".local")
+            || host.ends_with(".internal")
+            || host.ends_with(".lan")
+            || host.ends_with(".home.arpa")
+            || last.starts_with(|c: char| c.is_ascii_digit())
             || self.endpoint.len() > MAX_ENDPOINT
             || self
                 .endpoint
@@ -416,7 +435,40 @@ mod tests {
         assert_eq!(body.len(), 86 + 41 + 1 + 16);
     }
 
-    /// What `encrypt` sends, a phone opens: the browser's side, with a key pair made for the test.
+    #[test]
+    fn a_push_endpoint_is_a_public_service() {
+        let sub = |endpoint: &str| PushSubscription {
+            endpoint: endpoint.into(),
+            p256dh: B64.encode([4u8; 65]),
+            auth: B64.encode([7u8; 16]),
+        };
+        for endpoint in [
+            "https://127.0.0.1:8443/x",
+            "https://127.1/x",
+            "https://10.0.0.2/x",
+            "https://169.254.169.254/latest/meta-data",
+            "https://[::1]/x",
+            "https://localhost:3000/x",
+            "https://router.local/x",
+            "https://intranet/x",
+            "https://user@web.push.apple.com/x",
+            "http://web.push.apple.com/x",
+        ] {
+            assert!(sub(endpoint).check().is_err(), "{endpoint}");
+        }
+        for endpoint in [
+            "https://web.push.apple.com/QGuQyavXutnMH",
+            "https://fcm.googleapis.com/fcm/send/abc:def",
+            "https://updates.push.services.mozilla.com:443/wpush/v2/gAAA",
+        ] {
+            assert_eq!(
+                sub(endpoint).check().map_err(|e| e.to_string()),
+                sub(endpoint).keys().map(|_| ()).map_err(|e| e.to_string()),
+                "{endpoint}"
+            );
+        }
+    }
+
     #[test]
     fn a_note_round_trips_to_the_phone() {
         let rng = SystemRandom::new();
