@@ -744,6 +744,20 @@ code = ["crates/trek-app/src/panels/browser/asks.rs", "crates/trek-app/src/panel
 tests = ["crates/trek-app/src/panels/browser/asks.rs"]
 
 [[feature]]
+id = "browser-passkeys"
+area = "Browser"
+what = "Sign in to sites in the Browser with a passkey"
+macos = "partial"
+windows = "partial"
+linux = "no"
+live_macos = ["route project:{project}", "tools browser", "wait 600", "browser go https://example.com", "wait 5000", "browser expect loaded", "browser eval setTimeout(() => navigator.credentials.get({ publicKey: { challenge: new Uint8Array(32) } }).catch(() => 0), 10); 1", "wait 1500", "count browser-passkey-yes#0 1", "click browser-passkey-yes#0"]
+live_skip = "Windows: the passkey dialog is Windows' own (Windows Hello, in a window of the system's), which Trek's element checks can't see or answer, and a CI machine has no Windows Hello."
+how = { macos = "Trek's own authenticator (`trek-passkeys`): pages' `navigator.credentials` requests are answered natively, after Trek's bar (or an agent thread's approval card) and Touch ID, with keys the Mac's Secure Enclave holds. A list with Delete, and a switch, in Settings › Tools & MCP › Browser.", windows = "WebView2's own (Chromium's WebAuthn through Windows' `webauthn.dll`: Windows Hello, security keys, a phone); Trek adds nothing, and Windows keeps and lists those passkeys." }
+note = "macOS: only passkeys made in Trek's Browser work, and they stay on this Mac. The ones in iCloud Keychain or a password manager, security keys and \"use a phone\" would need Apple's managed entitlement `com.apple.developer.web-browser.public-key-credential`, which takes an Apple-issued provisioning profile that Trek's own signing certificate can't have (a Developer ID and Apple's approval of Trek as a browser would bring them); frames inside a page aren't answered. Windows: WebView2 hands pages Windows' WebAuthn as Edge does, but it has not been tried in Trek on a PC yet, so it stays partial until someone signs in with one there (`a_real_webview2_gives_pages_webauthn_of_its_own` reads what a page sees); an agent driving the Browser there gets Windows' own Hello prompt, with no approval card of Trek's first. Linux: WebKitGTK is built without WebAuthn (`ENABLE_WEB_AUTHN` off in every release so far), so pages have no `PublicKeyCredential`; Trek's authenticator could answer there too (keys in the Secret Service), which is not built."
+code = ["crates/trek-app/src/panels/browser/passkeys.rs", "crates/trek-passkeys/src/keys.rs", "crates/trek-passkeys/src/lib.rs", "crates/trek-passkeys/src/store.rs", "crates/trek-app/src/panels/browser.rs", "crates/trek-app/src/panels/browser/agent_core.rs", "crates/trek-app/src/panels/browser/agent.rs", "crates/trek-app/src/settings_view.rs", "crates/trek-app/src/wipe.rs"]
+tests = ["crates/trek-passkeys/src/ceremony.rs", "crates/trek-passkeys/src/rp.rs", "crates/trek-passkeys/src/wire.rs", "crates/trek-passkeys/src/enclave.rs", "crates/trek-app/src/panels/browser/fixtures/passkeys_check.py"]
+
+[[feature]]
 id = "browser-downloads"
 area = "Browser"
 what = "Downloads said in Trek's toasts"

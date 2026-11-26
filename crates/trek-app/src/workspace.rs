@@ -10593,6 +10593,8 @@ impl Workspace {
                     .filter(|p| p.prompt.is_none())
                     // And so does what a rule says to ask about, every time.
                     .filter(|p| !permission_requests::a_rule_asks(self, id, p))
+                    // And what the Browser asks at every level (a passkey).
+                    .filter(|p| !browser_use::asks_each_time(&p.request_id))
                     .filter(|p| match level {
                         HandHolding::FullAccess => true,
                         HandHolding::AutoAcceptEdits | HandHolding::Auto => {

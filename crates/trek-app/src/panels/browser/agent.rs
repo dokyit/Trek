@@ -36,6 +36,8 @@ const LOAD_WAIT: Duration = Duration::from_secs(20);
 const EVAL_WAIT: Duration = Duration::from_secs(10);
 /// How long the user has to answer an approval.
 const ASK_WAIT: Duration = Duration::from_secs(15 * 60);
+/// How long after an agent's last call a page's passkey request still counts as the agent's.
+const PASSKEY_AFTER: Duration = Duration::from_secs(30);
 /// The longest side of a screenshot of the view, and the size a full page is fitted into.
 const SHOT_SIDE: u32 = 1568;
 const FULL_WIDTH: u32 = 1280;
@@ -107,6 +109,8 @@ impl Drop for AgentCall {
 
 /// What the strip shows: who's at it and what they did last.
 struct Activity {
+    /// The thread whose agent it is.
+    thread: String,
     title: String,
     action: String,
     at: Instant,
@@ -164,6 +168,22 @@ impl Driver {
     pub(super) fn taken_over(&self) -> bool {
         !self.taken.is_empty()
     }
+
+    /// The thread whose agent a passkey request arriving now is put down to: the last one to
+    /// use the Browser, while a call of its is under way, its turn is still running (`running`:
+    /// a page can wait as long as it likes before it asks), or its last call ended a moment ago
+    /// (a page asks for its passkey a beat after the click that led to it: it fetches a
+    /// challenge first). Its approval card asks. Otherwise the user is driving, and the bar
+    /// asks them.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(super) fn passkey_thread(&self, running: impl Fn(&str) -> bool) -> Option<String> {
+        let busy = self.running || !self.queue.is_empty();
+        self.last
+            .as_ref()
+            .filter(|a| busy || a.at.elapsed() < PASSKEY_AFTER || running(&a.thread))
+            .filter(|a| !self.taken.contains_key(&a.thread))
+            .map(|a| a.thread.clone())
+    }
 }
 
 impl BrowserPanel {
@@ -181,6 +201,7 @@ impl BrowserPanel {
         }
         self.agent.turns.insert(call.thread.clone(), call.turn);
         self.agent.last = Some(Activity {
+            thread: call.thread.clone(),
             title: call.title.clone(),
             action: starting(&call.method).into(),
             at: Instant::now(),

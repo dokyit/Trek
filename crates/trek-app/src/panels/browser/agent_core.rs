@@ -329,6 +329,11 @@ pub enum Sensitive {
     /// Opening a file of this computer's (`file:`): a page's text is the agent's to read, and
     /// another page to send it to is one `browser_open` away.
     LocalFile,
+    /// Using or making one of the passkeys Trek keeps, which a page the agent drives asked for
+    /// (`passkeys.rs`). It signs the Browser in to an account, so it's the user's to allow each
+    /// time, whatever the thread's access.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Passkey,
 }
 
 /// One action to ask about: what it is, and what the approval card says (after "<Agent> wants
@@ -362,10 +367,14 @@ pub fn same_page(asked: (u64, &str), now: (u64, &str)) -> bool {
     asked.0 == now.0 && site_of(asked.1) == site_of(now.1)
 }
 
-/// Whether `kind` needs the user's yes at `access`. Full access asks nothing; Auto lets a form go
-/// to another site and a download start, but asks before a password, a script or a file of the
-/// computer's; Supervised and Auto-accept edits ask before all of them.
+/// Whether `kind` needs the user's yes at `access`. A passkey always does. For the rest, Full
+/// access asks nothing; Auto lets a form go to another site and a download start, but asks before
+/// a password, a script or a file of the computer's; Supervised and Auto-accept edits ask before
+/// all of them.
 pub fn needs_asking(kind: &Sensitive, access: HandHolding) -> bool {
+    if *kind == Sensitive::Passkey {
+        return true;
+    }
     match access {
         HandHolding::FullAccess => false,
         HandHolding::Auto => matches!(
@@ -386,6 +395,19 @@ pub fn types_a_character(key: &Value) -> bool {
         && !held("ctrl")
         && !held("alt")
         && !held("meta")
+}
+
+/// The card for a passkey a page asked Trek's authenticator for while an agent drives the
+/// Browser: `title` after "<Agent> wants to:", on `site` (the relying party).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn passkey_ask(title: String, detail: String, site: String) -> Ask {
+    Ask {
+        kind: Sensitive::Passkey,
+        title,
+        detail,
+        site,
+        hidden: 0,
+    }
 }
 
 pub fn ask_for(tool: &str, args: &Value, probe: Option<&Value>) -> Option<Ask> {
@@ -733,6 +755,12 @@ Focused: textbox \"Email\"
         assert!(needs_asking(&Sensitive::Eval, Auto));
         assert!(!needs_asking(&Sensitive::ForeignSubmit, Auto));
         assert!(!needs_asking(&Sensitive::Download, Auto));
+        // A passkey signs in to an account: asked at every level, Full access included.
+        for access in [Supervised, AutoAcceptEdits, Auto, FullAccess] {
+            assert!(needs_asking(&Sensitive::Passkey, access), "{access:?}");
+        }
+        let card = passkey_ask("Sign in".into(), "why".into(), "example.com".into());
+        assert_eq!((card.kind, card.hidden), (Sensitive::Passkey, 0));
     }
 
     #[test]

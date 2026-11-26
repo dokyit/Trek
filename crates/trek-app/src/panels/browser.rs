@@ -34,6 +34,8 @@ pub use agent::{AgentCall, AgentCallSlot};
 // What pages ask of the user, and what wry leaves out of WebKit's delegates and WebView2's events
 // (popups, dialogs, permissions, links for other apps, why a load failed).
 mod asks;
+#[cfg(target_os = "macos")]
+mod passkeys;
 mod prompts;
 #[cfg(target_os = "macos")]
 mod webkit;
@@ -788,6 +790,17 @@ enum Msg {
     },
     /// The page's web content process ended.
     Crashed(u64),
+    /// A page asked Trek's authenticator for a passkey, or took such a request back
+    /// (`passkeys.rs`): WebKit's reply handler `id` waits, and `origin` and `main_frame` are
+    /// WebKit's own account of the frame that asked.
+    #[cfg(target_os = "macos")]
+    Passkey {
+        tab: u64,
+        id: u64,
+        origin: trek_passkeys::Origin,
+        main_frame: bool,
+        body: String,
+    },
     /// A download started (`path`: where it's saved), or ended.
     Download {
         tab: u64,
@@ -1071,6 +1084,10 @@ pub struct BrowserPanel {
     asks: Vec<Ask>,
     /// The text field of a `prompt` on show, by its ask's id (and its Enter).
     prompt: Option<(u64, Entity<InputState>, Subscription)>,
+    /// Passkey requests pages wait on the user for (`passkeys.rs`); the bar shows the front
+    /// tab's.
+    #[cfg(target_os = "macos")]
+    passkeys: Vec<passkeys::PasskeyAsk>,
     /// The page area, as last laid out (a popup's sheet is sized to fit it).
     area: Rc<std::cell::Cell<Bounds<Pixels>>>,
     /// Downloads under way: where each is saved, by its URL (the same file twice: in order).
@@ -1079,7 +1096,15 @@ pub struct BrowserPanel {
     _subscriptions: Vec<Subscription>,
 }
 
-/// Open `url` in Safari, for a site that won't work in an embedded view (a passkey, say).
+/// The Settings switch for passkeys (macOS): views made from now on, popups included, answer
+/// passkey requests with Trek's authenticator (`on`), or leave them to WebKit.
+#[cfg(target_os = "macos")]
+pub fn set_passkeys(on: bool) {
+    passkeys::set_enabled(on);
+}
+
+/// Open `url` in Safari, for a site that won't work in an embedded view (one that wants a
+/// passkey kept in iCloud Keychain, say: Trek's Browser has only its own).
 fn open_in_safari(url: &str) {
     let _ = std::process::Command::new("/usr/bin/open")
         .args(["-a", "Safari", url])
@@ -1753,6 +1778,8 @@ impl BrowserPanel {
             agent: Default::default(),
             asks: vec![],
             prompt: None,
+            #[cfg(target_os = "macos")]
+            passkeys: Vec::new(),
             area: Rc::default(),
             downloads: HashMap::new(),
             _tasks: vec![pump],
@@ -2006,6 +2033,8 @@ impl BrowserPanel {
                     )
                 })
             };
+            // Before the first page: its scripts run at each document's start.
+            passkeys::install(&built, id, tx.clone());
             webkit::hook(&built, id, tx, Some(make));
             if !is_popup {
                 let _ = built.load_url(&to_view(url));
@@ -2122,6 +2151,9 @@ impl BrowserPanel {
         let url = url.to_string();
         let (tx, vars) = (self.tx.clone(), self.page_vars.clone());
         let dark = self.wants_dark(cx);
+        // The view, and the popups its pages open, answer passkeys as the setting says now.
+        #[cfg(target_os = "macos")]
+        passkeys::set_enabled(!self.workspace.read(cx).settings.browser.passkeys_off);
         self._tasks.push(cx.spawn_in(window, async move |this, cx| {
             let built = Self::build_view(id, &url, dark, &parent, tx, vars, None);
             let _ = this.update_in(cx, |this, window, cx| match built {
@@ -2241,7 +2273,10 @@ impl BrowserPanel {
         tab.view.update(cx, |v, _| v.hide());
         self.forget_asks(id);
         #[cfg(target_os = "macos")]
-        webkit::unhook(id);
+        {
+            self.passkeys_gone(id, cx);
+            webkit::unhook(id);
+        }
         #[cfg(windows)]
         webview2::unhook(id);
         if self.tabs.is_empty() {
@@ -2410,6 +2445,11 @@ impl BrowserPanel {
                 if !finished && self.active == id {
                     self.picking = false;
                 }
+                // A new page: what the last one asked Trek's authenticator for is over.
+                #[cfg(target_os = "macos")]
+                if !finished {
+                    self.passkeys_gone(id, cx);
+                }
                 if finished {
                     self.force_dark_page(id, cx);
                     self.check_drawn_scheme(id, cx);
@@ -2524,6 +2564,11 @@ impl BrowserPanel {
                 }
             }
             Msg::Crashed(id) => {
+                // The page that asked for a passkey is gone with its process: an answer still
+                // on its way (Touch ID up) reaches nobody, so a passkey being made must not take
+                // an older one's place.
+                #[cfg(target_os = "macos")]
+                self.passkeys_gone(id, cx);
                 let Some(tab) = self.tab_mut(id) else { return };
                 let again = tab
                     .crashed
@@ -2566,6 +2611,14 @@ impl BrowserPanel {
             Msg::Ipc { tab, origin, body } => {
                 self.handle_ipc(tab, from_view(origin), body, window, cx)
             }
+            #[cfg(target_os = "macos")]
+            Msg::Passkey {
+                tab,
+                id,
+                origin,
+                main_frame,
+                body,
+            } => self.passkey_message(tab, id, origin, main_frame, body, cx),
             Msg::Drawn { tab: id, dark } => {
                 let Some(tab) = self.tab_mut(id) else { return };
                 if dark.is_some() && dark != tab.dark && tab.scheme_reloads > 0 {
@@ -3727,6 +3780,26 @@ impl BrowserPanel {
                     },
                 ))
             })
+            // Trek's own passkeys (macOS): the list, and the switch, are in Settings.
+            .when(cfg!(target_os = "macos"), |el| {
+                el.child(row(
+                    "browser-passkeys",
+                    Icon::new(Lucide::Key),
+                    "Passkeys…",
+                    true,
+                    cx,
+                    |this, cx| {
+                        this.workspace.update(cx, |ws, cx| {
+                            ws.navigate(
+                                crate::workspace::Route::Settings(
+                                    crate::workspace::SettingsPage::Tools,
+                                ),
+                                cx,
+                            )
+                        });
+                    },
+                ))
+            })
             .when(browser_extensions::AVAILABLE, |el| {
                 el.child(
                     ui::menu_row("browser-extensions-open", false, cx)
@@ -3875,6 +3948,29 @@ impl BrowserPanel {
             // Counted by the capture build's checks (a page's popup is a tab of its own on Linux).
             .test_support()
             .into_any_element()
+    }
+
+    /// The toolbar's key, when the front tab has a passkey on offer (macOS).
+    fn passkey_offer_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        #[cfg(target_os = "macos")]
+        {
+            let site = self.passkey_offer()?;
+            Some(
+                tool_button(
+                    "browser-passkey-offer",
+                    Lucide::Key,
+                    format!("Sign in to {site} with a passkey Trek keeps"),
+                )
+                .selected(true)
+                .on_click(cx.listener(|this, _, _, cx| this.passkey_open_offer(cx)))
+                .into_any_element(),
+            )
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = cx;
+            None
+        }
     }
 
     fn render_url_pill(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -4067,6 +4163,47 @@ impl BrowserPanel {
                 };
                 self.answer_front_ask(reply, cx);
             }
+            // Trek's passkeys (macOS). `passkey yes [n]|no`: the bar's answer to the page in
+            // front (`n`: which account, from 0). `passkey-uv allow|deny`: what the stand-in for
+            // Touch ID says from now on. `passkey-delete <site>`: delete the passkeys kept for
+            // a site, as Settings does.
+            // `passkey offer`: the toolbar's key, which opens an offered passkey on the bar.
+            #[cfg(target_os = "macos")]
+            "passkey" if arg == "offer" => {
+                if self.passkey_offer().is_none() {
+                    anyhow::bail!("browser passkey offer: the toolbar offers no passkey");
+                }
+                self.passkey_open_offer(cx)
+            }
+            #[cfg(target_os = "macos")]
+            "passkey" => {
+                let (id, _) = self.passkey_front().ok_or_else(|| {
+                    anyhow::anyhow!("browser passkey: no passkey request on the bar")
+                })?;
+                match arg.split_once(' ').unwrap_or((arg, "")) {
+                    ("no", _) => self.passkey_no(id, cx),
+                    ("yes", n) => self.passkey_yes(id, n.trim().parse().unwrap_or(0), cx),
+                    _ => anyhow::bail!("browser passkey yes [n]|no"),
+                }
+            }
+            #[cfg(target_os = "macos")]
+            "passkey-uv" => trek_passkeys::set_stand_in(arg != "deny"),
+            // `passkeys on|off`: the setting, for tabs opened from now on.
+            #[cfg(target_os = "macos")]
+            "passkeys" => {
+                set_passkeys(arg != "off");
+                self.workspace.update(cx, |ws, cx| {
+                    ws.settings.browser.passkeys_off = arg == "off";
+                    ws.save_settings(cx);
+                })
+            }
+            #[cfg(target_os = "macos")]
+            "passkey-delete" => {
+                let store = trek_passkeys::Store::default();
+                for p in store.for_site(arg.trim()).map_err(anyhow::Error::msg)? {
+                    trek_passkeys::delete(&store, &p.id).map_err(anyhow::Error::msg)?;
+                }
+            }
             // Bring tab `<id>` to the front.
             "tab" => {
                 let id: u64 = arg.trim().parse()?;
@@ -4087,7 +4224,7 @@ impl BrowserPanel {
                 self.toggle_allow_site(site, cx);
             }
             _ => anyhow::bail!(
-                "browser: unknown command {cmd:?} (go <address>|back|forward|reload|focus|unfocus|press <keys>|eval <js>|state|snap <name>|ask yes|no|text <words>|tab <id>|adblock-import <path>|adblock on|off|adblock-allow|ext-page|ext-install <folder, file or id>|ext-list|ext-on|ext-off|ext-remove <id or name>|ext-allow|ext-deny|ext-options <id or name>|ext-popup <js>)"
+                "browser: unknown command {cmd:?} (go <address>|back|forward|reload|focus|unfocus|press <keys>|eval <js>|state|snap <name>|ask yes|no|text <words>|passkey yes [n]|no|offer|passkey-uv allow|deny|passkey-delete <site>|passkeys on|off|tab <id>|adblock-import <path>|adblock on|off|adblock-allow|ext-page|ext-install <folder, file or id>|ext-list|ext-on|ext-off|ext-remove <id or name>|ext-allow|ext-deny|ext-options <id or name>|ext-popup <js>)"
             ),
         }
         Ok(())
@@ -4183,7 +4320,18 @@ impl BrowserPanel {
                 "buttons": a.buttons(),
                 "blocks_page": a.blocks_page(),
             })).collect::<Vec<_>>(),
+            // Passkey requests waiting on the user, and the passkeys Trek keeps (macOS).
+            "passkeys": self.shots_passkeys(),
         })
+    }
+
+    fn shots_passkeys(&self) -> serde_json::Value {
+        #[cfg(target_os = "macos")]
+        {
+            self.passkeys_state()
+        }
+        #[cfg(not(target_os = "macos"))]
+        serde_json::Value::Null
     }
 
     /// The page as WebKit draws it (TIFF), whether or not the window is on screen.
@@ -4571,6 +4719,10 @@ impl Render for BrowserPanel {
             .child(div().w(px(4.)))
             .child(self.render_url_pill(cx))
             .child(div().w(px(4.)))
+            // A passkey Trek keeps for the site in front, which its page would take (autofill's
+            // quiet request): pressing the key asks. In the toolbar, so the page is the same
+            // size with it as without.
+            .children(self.passkey_offer_button(cx))
             .child(
                 tool_button(
                     "browser-scheme",
@@ -4630,6 +4782,10 @@ impl Render for BrowserPanel {
         });
 
         let ask_bar = self.ask_bar(window, cx);
+        #[cfg(target_os = "macos")]
+        let passkey_bar = self.passkey_bar(cx);
+        #[cfg(not(target_os = "macos"))]
+        let passkey_bar: Option<AnyElement> = None;
         let area = self.area.clone();
         v_flex()
             .size_full()
@@ -4639,6 +4795,7 @@ impl Render for BrowserPanel {
             .children(browser_extensions::prompt_strips(cx))
             .children(self.agent_strip(cx))
             .children(ask_bar)
+            .children(passkey_bar)
             .child(
                 div()
                     .relative()
@@ -5566,6 +5723,59 @@ mod tests {
             }),
             r#"{"v":false}"#
         );
+
+        unsafe { DestroyWindow(parent as _) };
+        pump();
+        view.finish();
+    }
+
+    /// WebView2 is Chromium: a page gets WebAuthn from it (Windows Hello and Windows' own passkey
+    /// dialog, through `webauthn.dll`), and Trek neither adds to it nor takes from it. This is
+    /// what a page there sees; Trek's own authenticator (`passkeys.rs`) is the Mac's alone.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "creates a real WebView2 window, which needs a desktop session and the WebView2 runtime (CI runs without one)"]
+    fn a_real_webview2_gives_pages_webauthn_of_its_own() {
+        use real::{Server, View, eval, parent_window, pump, wait_for};
+        use windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow;
+
+        let server = Server::start(vec![(
+            "/",
+            "<!doctype html><title>Passkeys</title><p>passkeys".into(),
+        )]);
+        let parent = parent_window();
+        // On localhost: WebAuthn is for secure pages, and loopback by name counts as one.
+        let page = server.url("localhost", "/");
+        let view = View::build(parent, 1, Some(page.as_str()), None);
+        view.loaded(&page);
+        assert_eq!(eval(&view.wv, "window.isSecureContext"), "true");
+        assert_eq!(
+            eval(
+                &view.wv,
+                "[typeof PublicKeyCredential, typeof navigator.credentials.create, typeof navigator.credentials.get].join(' ')"
+            ),
+            r#""function function function""#
+        );
+        // Nothing of Trek's is in the page: these are Chromium's own functions.
+        assert_eq!(
+            eval(
+                &view.wv,
+                "/\\[native code\\]/.test(Function.prototype.toString.call(navigator.credentials.get))"
+            ),
+            "true"
+        );
+        // Whether there is a platform authenticator is the PC's to say: true with Windows Hello
+        // set up, false without (a server, a virtual machine). Either is WebView2's own answer.
+        eval(
+            &view.wv,
+            "window.__r = null; Promise.all([PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable(), PublicKeyCredential.isConditionalMediationAvailable()]).then(([uvpaa, conditional]) => { window.__r = { uvpaa, conditional } }); true",
+        );
+        let answer = wait_for("the platform authenticator's answer", || {
+            let r = eval(&view.wv, "window.__r");
+            (r != "null").then_some(r)
+        });
+        eprintln!("WebView2 reports {answer}");
+        assert!(answer.contains("\"uvpaa\":"), "{answer}");
 
         unsafe { DestroyWindow(parent as _) };
         pump();
