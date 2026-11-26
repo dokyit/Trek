@@ -1050,7 +1050,7 @@ impl Workspace {
                 host.name = "Trek test (isolated)".into();
                 let lan = Addresses::find_in(&AddressInputs::read())
                     .lan
-                    .ok_or_else(|| anyhow::anyhow!("this Mac has no address on a local network"))?;
+                    .ok_or_else(|| anyhow::anyhow!("no address on a local network to pair over"))?;
                 (
                     SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
                     SocketAddr::from((lan, port)).to_string(),
