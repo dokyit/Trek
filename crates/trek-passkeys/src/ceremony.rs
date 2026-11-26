@@ -458,16 +458,10 @@ mod tests {
     use crate::cbor;
     use crate::keys::{StandIn, set_stand_in, verifies};
     use crate::store::tests::temp_store;
-    use std::sync::Mutex;
 
-    /// The stand-in's switch is the process's: tests that flip it take turns.
-    static SWITCH: Mutex<()> = Mutex::new(());
-
+    /// The stand-in's switch is the process's: tests that use it take turns.
     fn isolated() -> std::sync::MutexGuard<'static, ()> {
-        trek_core::paths::isolate(std::env::temp_dir().join("trek-passkeys-tests"));
-        let guard = SWITCH.lock().unwrap_or_else(|e| e.into_inner());
-        set_stand_in(true);
-        guard
+        crate::keys::stand_in_for_test()
     }
 
     fn origin(url: &str) -> Origin {

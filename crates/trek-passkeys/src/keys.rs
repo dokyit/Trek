@@ -228,14 +228,26 @@ pub(crate) mod keychain {
     }
 }
 
+/// For this crate's tests: an isolated process with the stand-in saying yes, and the turn to
+/// use it. The switch is the process's and tests run side by side, so every test that asks the
+/// stand-in to verify (or flips it) holds this while it does: one that didn't had its yes turned
+/// into a no by another's "the user cancels".
+#[cfg(test)]
+pub(crate) fn stand_in_for_test() -> std::sync::MutexGuard<'static, ()> {
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    trek_core::paths::isolate(std::env::temp_dir().join("trek-passkeys-tests"));
+    let guard = TURN.lock().unwrap_or_else(|e| e.into_inner());
+    set_stand_in(true);
+    guard
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn the_stand_in_makes_keys_that_sign_and_obeys_its_switch() {
-        // trek-core's paths are isolated in every test process that links it.
-        trek_core::paths::isolate(std::env::temp_dir().join("trek-passkeys-tests"));
+        let _turn = stand_in_for_test();
         let auth = platform().expect("an isolated process has the stand-in");
         assert!(auth.stand_in());
         let key = auth.create("make a key").unwrap();
@@ -249,6 +261,14 @@ mod tests {
         let other = auth.create("another").unwrap();
         assert_ne!(other.point, key.point);
         assert!(!verifies(&other.point, b"message", &der));
+        // Told to say no (the person who cancels at the sensor), it makes and signs nothing.
+        set_stand_in(false);
+        assert!(matches!(auth.create("a third"), Err(KeyError::Cancelled)));
+        assert!(matches!(
+            auth.sign(&key.handle, b"message", "sign"),
+            Err(KeyError::Cancelled)
+        ));
+        set_stand_in(true);
         assert!(matches!(
             auth.sign("se:AAAA", b"m", "sign"),
             Err(KeyError::Failed(_))
