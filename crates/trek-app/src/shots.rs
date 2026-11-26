@@ -4257,7 +4257,11 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                 );
                 crate::plugins::open_panel(plugin, panel.trim(), &ws, cx);
             }
-            "on" => crate::plugins::set_on(rest, true, &ws, cx),
+            // As the user allowing what it asks, read out.
+            "on" => match crate::plugins::Shown::now(rest, cx) {
+                Some(shown) => crate::plugins::allow_shown(rest, &shown, &ws, cx),
+                None => crate::plugins::set_on(rest, true, &ws, cx),
+            },
             "off" => crate::plugins::set_on(rest, false, &ws, cx),
             "reread" => crate::plugins::reread(&ws, cx),
             "running" => anyhow::ensure!(
