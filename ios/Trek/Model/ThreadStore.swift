@@ -30,6 +30,9 @@ nonisolated struct Block: Identifiable, Equatable {
         /// A sub-agent's call: a row of its own, as on the Mac, that opens it (a Mac that says
         /// which sub-agent a row stands for, `ToolCall.subAgent`).
         case subAgent(ToolCall)
+        /// Items of a kind this app doesn't know (a newer Mac's), one after another: one muted
+        /// row says there's something here an update would show.
+        case unsupported
     }
 
     let id: String
@@ -99,11 +102,24 @@ nonisolated struct Block: Identifiable, Equatable {
             case .group, .assistant, .resolved, .subAgent: worked = true; stop = nil
             case .error, .limit: stop = b.id
             case .notice: if worked { stop = b.id }
-            case .changes, .handoff, .threadLink, .card: break
+            case .changes, .handoff, .threadLink, .card, .unsupported: break
             }
         }
         if !open { close() }
         return ends
+    }
+
+    /// What the row for items this app doesn't know says.
+    static let unsupportedText = "Update Trek on this iPhone to see this"
+
+    /// The row for a run of items of kinds this app doesn't know.
+    static func unsupported(_ run: [TItem]) -> Block {
+        Block(id: "u-\(run[0].id)", itemID: run[0].id, kind: .unsupported,
+              version: run.reduce(Int64.min) { max($0, $1.seq) }, count: run.count)
+    }
+
+    static func isUnknown(_ item: TItem) -> Bool {
+        if case .unknown = item.body { true } else { false }
     }
 
     static func folds(_ item: TItem) -> Bool {
@@ -131,14 +147,30 @@ nonisolated struct Block: Identifiable, Equatable {
             runStart = nil
             run = []
         }
+        // Items of kinds this app doesn't know, one after another: one row for the run. They were
+        // left out without a word, and still cut a tool group in two around nothing.
+        var strangers: [TItem] = []
+        var strangersStart = 0
+        func flushStrangers() {
+            guard !strangers.isEmpty else { return }
+            blocks.append(unsupported(strangers))
+            starts.append(strangersStart)
+            strangers = []
+        }
         var i = from
         while i < items.count {
             let item = items[i]
-            if folds(item) {
+            if isUnknown(item) {
+                flush()
+                if strangers.isEmpty { strangersStart = i }
+                strangers.append(item)
+            } else if folds(item) {
+                flushStrangers()
                 if runStart == nil { runStart = i }
                 run.append(i)
             } else if !item.isPendingRequest {
                 flush()
+                flushStrangers()
                 if let b = single(item) {
                     blocks.append(b)
                     starts.append(i)
@@ -147,6 +179,7 @@ nonisolated struct Block: Identifiable, Equatable {
             i += 1
         }
         flush()
+        flushStrangers()
         return (blocks, starts)
     }
 }
@@ -173,6 +206,13 @@ final class ThreadStore {
     private(set) var more = false
     /// A page of earlier items is on its way.
     var loadingEarlier = false
+    /// Why the transcript couldn't be fetched (the Mac refused, or never answered), while none of
+    /// it is here: the thread says so, with Try again, where it would otherwise spin for ever.
+    var failure: String?
+    /// Bumped whenever the items before the earliest loaded one stop being the ones a page asked
+    /// for would hold (the transcript rewritten, the list trimmed): a page that arrives after
+    /// that is dropped (`prepend`).
+    @ObservationIgnored private(set) var paging = 0
     /// Bumped when the transcript is replaced whole (the host rewrote it): the view draws it
     /// afresh, at the latest, rather than keep places that no longer fit it.
     private(set) var generation = 0
@@ -198,6 +238,8 @@ final class ThreadStore {
     @ObservationIgnored private var flushScheduled = false
     /// Called after the items change (to save them to the cache).
     @ObservationIgnored var onChange: (() -> Void)?
+    /// Called when something came from the Mac: a reply, live items (not a page of earlier ones).
+    @ObservationIgnored var onArrived: (() -> Void)?
     /// Bumped as a hold on the working line starts and ends: a timer only ends its own.
     @ObservationIgnored private var hold: Int?
     @ObservationIgnored private var holds = 0
@@ -234,27 +276,39 @@ final class ThreadStore {
     }
 
     /// The Mac's reply to a subscribe: the whole (last part of the) transcript, or what changed.
-    /// `rewritten`: the host said it rewrote the transcript (a rewind): what was here goes. Else a
-    /// reset only means the host lost track of this phone (a reconnect, a restart): its last page
-    /// lines up with what's here, and the earlier items stay, with the reader's place.
-    func applyReply(reset: Bool, seq: Int64, items new: [TItem], more: Bool, rewritten: Bool = false) {
+    ///
+    /// A page sent whole (`reset`) doesn't say why: the Mac sends one after a rewind, and also
+    /// whenever it can't serve what's newer (this phone fell behind on events, a reconnect, a
+    /// restart). The page itself tells the two apart (`Fit`): one that lines up with what's here
+    /// continues it, and the earlier pages stay, with the reader's place; only a transcript that
+    /// was rewritten replaces everything and is drawn afresh.
+    func applyReply(reset: Bool, seq: Int64, items new: [TItem], more: Bool) {
         flushQueued()
-        if reset, !rewritten, loaded, let first = new.first, let at = index[first.id],
-           Self.linesUp(items[at...].map(\.id), with: new.map(\.id)) {
-            // The page carries every request still open: one kept from before that isn't among
-            // them was closed while this phone wasn't listening (it went on asking for an
-            // answer the Mac had long had).
-            let kept = Self.closingMissed(Array(items[..<at]), open: new)
-            replaceAll(kept + new, more: self.more)
-        } else if reset {
-            replaceAll(new, more: more)
-            if loaded, !items.isEmpty { generation += 1 }
-        } else {
+        if failure != nil { failure = nil }
+        if !reset {
             upsert(new)
+        } else {
+            switch loaded ? Self.fit(new, onto: items) : .rewritten {
+            case .continues(let keep):
+                // The page carries every request still open: one kept from before that isn't
+                // among them was closed while this phone wasn't listening (it went on asking for
+                // an answer the Mac had long had).
+                let kept = Self.closingMissed(Array(items[..<keep]), open: new)
+                replaceAll(kept + new, more: self.more)
+            case .covers:
+                replaceAll(new, more: more)
+            case .rewritten:
+                replaceAll(new, more: more)
+                // A page of earlier items asked for before this isn't this transcript's.
+                paging += 1
+                if loadingEarlier { loadingEarlier = false }
+                if loaded, !items.isEmpty { generation += 1 }
+            }
         }
         self.seq = max(reset ? seq : self.seq, seq)
         if !loaded { loaded = true }
         onChange?()
+        onArrived?()
     }
 
     /// `kept` with each request still waiting there but not open in `open` (a page sent whole,
@@ -264,11 +318,66 @@ final class ThreadStore {
         return kept.map { $0.isPendingRequest && !stillOpen.contains($0.id) ? $0.closed : $0 }
     }
 
-    /// Whether a page sent whole continues what's here from the same item: the ids here, from
-    /// it on, are the page's first ones in order (the page may hold more after them).
-    nonisolated static func linesUp(_ here: [String], with page: [String]) -> Bool {
-        let n = min(here.count, page.count)
-        return n > 0 && here.prefix(n).elementsEqual(page.prefix(n))
+    /// How a page sent whole sits on what's here.
+    nonisolated enum Fit: Equatable {
+        /// It carries on from the item at this index here: the items before it stay.
+        case continues(keep: Int)
+        /// It starts before everything here and holds all of it: it replaces what's here, in place.
+        case covers
+        /// It isn't what's here any more (a rewind, a rewrite), or shares nothing with it.
+        case rewritten
+    }
+
+    /// Whether `page` (the last items of the transcript as the Mac has it now) is the same
+    /// transcript as `here`, further on. Compared on the items that stand in order on both sides:
+    /// not requests (the Mac puts every open one at a page's end, wherever it was asked) nor a
+    /// turn's changed files (counted a moment after its end, so one side may not have them yet).
+    ///
+    /// Where the two overlap, each pair must be the same item (`same`), not just the same id:
+    /// the Mac's ids are positions (`i<n>`), so after a rewind new items take the old ones' ids.
+    /// And the page must reach at least as far as what's here: the Mac's transcript shorter than
+    /// this one was rewound.
+    nonisolated static func fit(_ page: [TItem], onto here: [TItem]) -> Fit {
+        func stands(_ item: TItem) -> Bool {
+            switch item.body {
+            case .approval, .question, .plan, .changes: false
+            default: true
+            }
+        }
+        let mine = here.indices.filter { stands(here[$0]) }
+        let theirs = page.filter(stands)
+        guard let first = theirs.first, let oldest = mine.first else { return .rewritten }
+        if let at = mine.firstIndex(where: { here[$0].id == first.id }) {
+            let tail = mine[at...]
+            guard tail.count <= theirs.count, zip(tail, theirs).allSatisfy({ same(here[$0], $1) }) else { return .rewritten }
+            return .continues(keep: mine[at])
+        }
+        if let at = theirs.firstIndex(where: { $0.id == here[oldest].id }) {
+            let tail = theirs[at...]
+            guard mine.count <= tail.count, zip(mine, tail).allSatisfy({ same(here[$0], $1) }) else { return .rewritten }
+            return .covers
+        }
+        return .rewritten
+    }
+
+    /// Whether `b` is `a` as it is now: the same id and kind, and what an item keeps for life the
+    /// same (a message's words and time, a tool call's id, a turn end's time, how an answer
+    /// starts). What changes as an item goes on (an answer growing, a tool finishing) doesn't count.
+    nonisolated static func same(_ a: TItem, _ b: TItem) -> Bool {
+        guard a.id == b.id else { return false }
+        switch (a.body, b.body) {
+        case (.user(let x, _, _), .user(let y, _, _)): return x == y && a.at == b.at
+        case (.tool(let x), .tool(let y)): return x.callId == y.callId
+        case (.assistant(let x, _), .assistant(let y, _)), (.reasoning(let x), .reasoning(let y)):
+            let n = min(x.count, y.count, 48)
+            return x.prefix(n) == y.prefix(n)
+        case (.turnEnd, .turnEnd): return a.at == b.at
+        case (.notice, .notice), (.error, .error), (.limit, .limit), (.handoff, .handoff), (.threadLink, .threadLink),
+             (.card, .card), (.unknown, .unknown), (.approval, .approval), (.question, .question), (.plan, .plan),
+             (.changes, .changes):
+            return true
+        default: return false
+        }
     }
 
     /// From the cache on disk: shown at once, and the subscription asks only for what's newer.
@@ -299,16 +408,23 @@ final class ThreadStore {
         seq = batch.reduce(seq) { max($0, $1.seq) }
         if hold != nil { endHold() }
         onChange?()
+        onArrived?()
     }
 
-    /// A page of earlier items, put before the ones loaded.
-    func prepend(_ page: [TItem], more: Bool) {
+    /// A page of earlier items, put before the ones loaded. `asked`: `paging` as it was when the
+    /// page was asked for. A page from before the transcript was rewritten (or trimmed) holds
+    /// items of a transcript that isn't this one any more, or ones that no longer meet the
+    /// earliest here: it's dropped, and the next scroll to the top asks afresh. False then.
+    @discardableResult
+    func prepend(_ page: [TItem], more: Bool, asked: Int? = nil) -> Bool {
+        if let asked, asked != paging { return false }
         let fresh = page.filter { index[$0.id] == nil }
         loadingEarlier = false
         if self.more != more { self.more = more }
-        guard !fresh.isEmpty else { return }
+        guard !fresh.isEmpty else { return true }
         replaceAll(fresh + items, more: more)
         onChange?()
+        return true
     }
 
     /// Keeps the last `count` items (and requests still pending): a thread left after scrolling
@@ -317,6 +433,9 @@ final class ThreadStore {
         guard items.count > count else { return }
         let cut = items.count - count
         replaceAll(items.prefix(cut).filter(\.isPendingRequest) + items.suffix(count), more: true)
+        // A page on its way was for before the old earliest item: it would leave a hole now.
+        paging += 1
+        if loadingEarlier { loadingEarlier = false }
     }
 
     /// The item to ask for earlier items before: the first one loaded that isn't a request
