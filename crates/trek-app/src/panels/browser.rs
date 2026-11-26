@@ -1088,6 +1088,33 @@ fn open_in_safari(url: &str) {
 
 /// Where an isolated run saves a download wry named `name` (`file (2).txt`: numbered against
 /// another folder): `dir`, under the name the page gave, numbered against `dir` alone.
+/// Files a double-click runs, or follows elsewhere, with no installer or warning of its own in the
+/// way: launchers and links on every desktop. Installers (`.exe`, `.msi`, `.pkg`, `.dmg`) aren't
+/// here: one the user chose to download is the point, and the system checks those as it opens
+/// them.
+const RUNS_WHEN_OPENED: [&str; 12] = [
+    ".desktop",
+    ".lnk",
+    ".url",
+    ".scf",
+    ".command",
+    ".tool",
+    ".webloc",
+    ".inetloc",
+    ".terminal",
+    ".appref-ms",
+    ".application",
+    ".library-ms",
+];
+
+/// What Windows runs when opened as well: scripts for its own hosts (cmd, Windows Script Host,
+/// HTML applications), screen savers and old program shortcuts. Elsewhere these are ordinary files
+/// (a `.js` file is source).
+const RUNS_WHEN_OPENED_ON_WINDOWS: [&str; 14] = [
+    ".bat", ".cmd", ".ps1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".hta", ".scr", ".pif",
+    ".cpl", ".jar",
+];
+
 /// Where a download the page names `suggested` is kept, in `dir`: its last part only, with no
 /// leading dots (not a hidden file, not `..`), a file the desktop would run when opened
 /// (`.desktop`, `.lnk`, `.url`…) kept as `name.download`, and numbered past a file already there.
@@ -1100,20 +1127,11 @@ fn download_destination(dir: &Path, suggested: &Path) -> PathBuf {
         .trim_end();
     let name = if name.is_empty() { "download" } else { name };
     let lower = name.to_ascii_lowercase();
-    let runs = [
-        ".desktop",
-        ".lnk",
-        ".url",
-        ".scf",
-        ".command",
-        ".webloc",
-        ".inetloc",
-        ".terminal",
-        ".appref-ms",
-        ".library-ms",
-    ]
-    .iter()
-    .any(|e| lower.ends_with(e));
+    let runs = RUNS_WHEN_OPENED.iter().any(|e| lower.ends_with(e))
+        || (cfg!(windows)
+            && RUNS_WHEN_OPENED_ON_WINDOWS
+                .iter()
+                .any(|e| lower.ends_with(e)));
     if runs {
         isolated_download(dir, &format!("{name}.download"))
     } else {
@@ -1163,6 +1181,22 @@ mod isolated_download_tests {
             dir.join("Report.LNK.download")
         );
         assert_eq!(at("report.pdf"), dir.join("report.pdf"));
+        assert_eq!(
+            at("Invoice.application"),
+            dir.join("Invoice.application.download")
+        );
+        assert_eq!(
+            at("setup.exe"),
+            dir.join("setup.exe"),
+            "an installer the user chose"
+        );
+        if cfg!(windows) {
+            assert_eq!(at("run.BAT"), dir.join("run.BAT.download"));
+            assert_eq!(at("x.vbs"), dir.join("x.vbs.download"));
+            assert_eq!(at("app.js"), dir.join("app.js.download"));
+        } else {
+            assert_eq!(at("app.js"), dir.join("app.js"), "source, off Windows");
+        }
         std::fs::write(dir.join("report.pdf"), "").unwrap();
         assert_eq!(at("/elsewhere/report.pdf"), dir.join("report (1).pdf"));
         let _ = std::fs::remove_dir_all(&dir);
