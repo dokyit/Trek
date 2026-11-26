@@ -1,0 +1,201 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Passkeys check</title>
+<style>
+  body { font: 15px/1.5 -apple-system, system-ui, sans-serif; margin: 32px; max-width: 640px; }
+  button { font: inherit; margin: 0 8px 8px 0; padding: 6px 12px; }
+  pre { background: #8881; padding: 12px; border-radius: 8px; white-space: pre-wrap; word-break: break-all; }
+</style>
+<h1>Passkeys check</h1>
+<p>A relying party in one page: it registers a passkey, signs in with it, and checks what comes
+back as a server would (the challenge, the origin, the flags, and the signature, with WebCrypto).</p>
+<p>
+  <button id="register" onclick="register('ada@example.test')">Create a passkey</button>
+  <button id="signin" onclick="signIn()">Sign in with a passkey</button>
+</p>
+<p id="status">Nothing yet.</p>
+<pre id="out"></pre>
+<iframe id="frame" src="about:blank" hidden></iframe>
+<script>
+const b64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const unb64 = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+const hex = (buf) => Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
+const same = (a, b) => hex(a) === hex(b);
+const sha256 = (data) => crypto.subtle.digest('SHA-256', data);
+// (Both cope with a document that was opened again and has neither element any more.)
+const show = () => {
+  const out = document.getElementById('out');
+  if (out) out.textContent = JSON.stringify(window.__pk, null, 2);
+};
+const status = (text) => {
+  const line = document.getElementById('status');
+  if (line) line.textContent = text;
+  else document.title = text;
+};
+
+// What the "server" remembers: each account's credential id, public key and user handle.
+const accounts = () => JSON.parse(sessionStorage.getItem('accounts') || '[]');
+const remember = (account) => sessionStorage.setItem('accounts', JSON.stringify([...accounts(), account]));
+
+window.__pk = {};
+
+// What the page can see of passkey support, in `where` (this window, or a frame's).
+async function features(where = window) {
+  const P = where.PublicKeyCredential;
+  const out = {
+    secure: where.isSecureContext,
+    credentials: typeof where.navigator.credentials,
+    create: typeof (where.navigator.credentials && where.navigator.credentials.create),
+    PublicKeyCredential: typeof P,
+  };
+  if (P) {
+    const ask = async (name) => {
+      if (typeof P[name] !== 'function') return 'missing';
+      try { return await P[name](); } catch (e) { return `throws ${e.name}`; }
+    };
+    out.uvpaa = await ask('isUserVerifyingPlatformAuthenticatorAvailable');
+    out.conditional = await ask('isConditionalMediationAvailable');
+    out.capabilities = await ask('getClientCapabilities');
+    out.parseCreationOptionsFromJSON = typeof P.parseCreationOptionsFromJSON;
+  }
+  window.__pk.features = out;
+  show();
+  return out;
+}
+
+// DER ECDSA signature to the raw r || s WebCrypto takes.
+function rawSignature(der) {
+  const b = new Uint8Array(der);
+  let at = 2;
+  if (b[1] & 0x80) at += b[1] & 0x7f;
+  const int = () => {
+    if (b[at++] !== 0x02) throw new Error('not a DER integer');
+    const len = b[at++];
+    let v = b.slice(at, at + len);
+    at += len;
+    while (v.length > 32 && v[0] === 0) v = v.slice(1);
+    const out = new Uint8Array(32);
+    out.set(v, 32 - v.length);
+    return out;
+  };
+  const r = int(), s = int();
+  const out = new Uint8Array(64);
+  out.set(r, 0); out.set(s, 32);
+  return out;
+}
+
+async function register(name, options = {}) {
+  const key = options.key || 'register';
+  window.__pk[key] = { pending: true };
+  show();
+  const challenge = crypto.getRandomValues(new Uint8Array(32));
+  const userId = new TextEncoder().encode(`id-of-${name}`);
+  try {
+    const publicKey = {
+      rp: { name: 'Passkeys check', ...(options.rpId ? { id: options.rpId } : {}) },
+      user: { id: userId, name, displayName: name.split('@')[0] },
+      challenge,
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+      authenticatorSelection: { residentKey: 'required', userVerification: 'required', ...(options.selection || {}) },
+      attestation: 'none',
+      extensions: { credProps: true },
+      excludeCredentials: options.exclude
+        ? accounts().map((a) => ({ type: 'public-key', id: unb64(a.id) }))
+        : [],
+    };
+    const cred = await (options.where || window).navigator.credentials.create({ publicKey, signal: options.signal });
+    const r = cred.response;
+    const client = JSON.parse(new TextDecoder().decode(r.clientDataJSON));
+    const data = new Uint8Array(r.getAuthenticatorData());
+    const rpId = options.rpId || location.hostname;
+    const idLength = (data[53] << 8) | data[54];
+    const checks = {
+      instance: cred instanceof PublicKeyCredential && r instanceof AuthenticatorAttestationResponse,
+      type: client.type === 'webauthn.create' && cred.type === 'public-key',
+      challenge: client.challenge === b64(challenge),
+      origin: client.origin === location.origin,
+      crossOrigin: client.crossOrigin === false,
+      rpIdHash: same(data.slice(0, 32), await sha256(new TextEncoder().encode(rpId))),
+      flags: data[32] === 0x45,
+      counter: hex(data.slice(33, 37)) === '00000000',
+      id: same(data.slice(55, 55 + idLength), cred.rawId) && cred.id === b64(cred.rawId),
+      algorithm: r.getPublicKeyAlgorithm() === -7,
+      transports: JSON.stringify(r.getTransports()) === '["internal"]',
+      attachment: cred.authenticatorAttachment === 'platform',
+      credProps: cred.getClientExtensionResults().credProps.rk === true,
+      attestationNone: b64(r.attestationObject).startsWith('o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YV'),
+      json: JSON.parse(JSON.stringify(cred)).response.attestationObject === b64(r.attestationObject),
+    };
+    // The key must import as a P-256 public key: it's what sign-ins are checked against.
+    await crypto.subtle.importKey('spki', r.getPublicKey(), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+    remember({ name, id: cred.id, publicKey: b64(r.getPublicKey()), userHandle: b64(userId) });
+    const ok = Object.values(checks).every(Boolean);
+    window.__pk[key] = { ok, checks, id: cred.id, aaguid: hex(data.slice(37, 53)) };
+    status(ok ? `registered ${name}` : `registered ${name}, but a check failed`);
+  } catch (e) {
+    window.__pk[key] = { error: e.name, message: e.message };
+    status(`not registered: ${e.name}`);
+  }
+  show();
+}
+
+async function signIn(options = {}) {
+  const key = options.key || 'signin';
+  window.__pk[key] = { pending: true };
+  show();
+  const challenge = crypto.getRandomValues(new Uint8Array(32));
+  try {
+    const publicKey = {
+      challenge,
+      userVerification: 'required',
+      ...(options.rpId ? { rpId: options.rpId } : {}),
+      ...(options.named ? { allowCredentials: accounts().filter((a) => a.name === options.named).map((a) => ({ type: 'public-key', id: unb64(a.id) })) } : {}),
+    };
+    const cred = await (options.where || window).navigator.credentials.get({
+      publicKey, mediation: options.mediation, signal: options.signal,
+    });
+    const r = cred.response;
+    const account = accounts().find((a) => a.id === cred.id);
+    if (!account) throw new Error('a credential the server never registered');
+    const client = JSON.parse(new TextDecoder().decode(r.clientDataJSON));
+    const data = new Uint8Array(r.authenticatorData);
+    const rpId = options.rpId || location.hostname;
+    const publicKeyObject = await crypto.subtle.importKey('spki', unb64(account.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+    const signed = new Uint8Array([...data, ...new Uint8Array(await sha256(r.clientDataJSON))]);
+    const checks = {
+      instance: cred instanceof PublicKeyCredential && r instanceof AuthenticatorAssertionResponse,
+      type: client.type === 'webauthn.get',
+      challenge: client.challenge === b64(challenge),
+      origin: client.origin === location.origin,
+      rpIdHash: same(data.slice(0, 32), await sha256(new TextEncoder().encode(rpId))),
+      flags: data[32] === 0x05,
+      length: data.length === 37,
+      userHandle: b64(r.userHandle) === account.userHandle,
+      signature: await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKeyObject, rawSignature(r.signature), signed),
+    };
+    const ok = Object.values(checks).every(Boolean);
+    window.__pk[key] = { ok, checks, as: account.name };
+    status(ok ? `signed in as ${account.name}` : `signed in as ${account.name}, but a check failed`);
+  } catch (e) {
+    window.__pk[key] = { error: e.name, message: e.message };
+    status(`not signed in: ${e.name}`);
+  }
+  show();
+}
+
+// A sign-in that the page takes back after `ms` (an AbortController, as sites use around autofill).
+function signInThenAbort(ms, options = {}) {
+  const controller = new AbortController();
+  window.__pk.controller = controller;
+  setTimeout(() => controller.abort(), ms);
+  return signIn({ ...options, signal: controller.signal });
+}
+
+// The same calls from a frame of this origin: frames get what WebKit itself answers.
+function frameWindow() { return document.getElementById('frame').contentWindow; }
+
+features();
+const auto = new URLSearchParams(location.search).get('auto');
+if (auto === 'signin') addEventListener('load', () => signIn());
+if (auto === 'register') addEventListener('load', () => register('agent@example.test'));
+</script>

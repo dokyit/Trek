@@ -143,10 +143,14 @@ pub fn request(ws: &Workspace) -> Request {
         path,
         what: what.to_string(),
     };
-    let mut roots = vec![root(
-        paths::data_dir(),
-        "Threads and their transcripts, settings, notes, pictures, uploads from phones, pairings, plugins and themes, and what Trek downloaded (its Node.js, agents, the browser's extensions)",
-    )];
+    // A Mac's data folder also holds the passkeys its Browser keeps (`trek_passkeys::Store`):
+    // deleted here, their Secure Enclave keys can't be used again.
+    let data = if cfg!(target_os = "macos") {
+        "Threads and their transcripts, settings, notes, pictures, uploads from phones, pairings, the Browser's passkeys, plugins and themes, and what Trek downloaded (its Node.js, agents, the browser's extensions)"
+    } else {
+        "Threads and their transcripts, settings, notes, pictures, uploads from phones, pairings, plugins and themes, and what Trek downloaded (its Node.js, agents, the browser's extensions)"
+    };
+    let mut roots = vec![root(paths::data_dir(), data)];
     roots.push(root(
         paths::local_data_dir(),
         "Downloads kept on this computer only (the video tools, the speech model)",
