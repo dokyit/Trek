@@ -434,6 +434,9 @@ pub struct Store {
     /// Each thread's transcript as a plain-text log beside the database (`session_log`), kept in
     /// step by `save_transcript`. `None` in memory.
     logs: Option<Arc<Mutex<crate::session_log::Logs>>>,
+    /// The access level a thread made for an imported session starts at (`set_import_level`):
+    /// the user's own default, as a new thread's. Supervised until the app says.
+    import_level: Arc<Mutex<HandHolding>>,
 }
 
 const SCHEMA: &str = r#"
@@ -733,6 +736,7 @@ impl Store {
             reader: None,
             newer_schema,
             logs: None,
+            import_level: Arc::new(Mutex::new(HandHolding::Supervised)),
         })
     }
 
@@ -1248,18 +1252,30 @@ impl Store {
     /// Insert or refresh imported threads, in one transaction. Imported history arrives settled
     /// so it doesn't flood the Inbox. Sessions that aren't conversations are never added, and
     /// threads imported before a rule matched them are archived.
+    /// The access level threads made for imported sessions start at from now on: the user's
+    /// default for new threads. Resuming a session never runs it looser than a new thread would
+    /// (whatever the session itself was run with: `bypassPermissions`, `approval_policy: never`).
+    pub fn set_import_level(&self, level: HandHolding) {
+        *lock(&self.import_level) = level;
+    }
+
     pub fn upsert_imported(&self, found: &[ImportedThread]) -> Result<Vec<Upserted>> {
+        let level = *lock(&self.import_level);
         let mut conn = lock(&self.conn);
         let tx = conn.transaction()?;
         let out = found
             .iter()
-            .map(|imp| Self::upsert_one(&tx, imp))
+            .map(|imp| Self::upsert_one(&tx, imp, level))
             .collect::<rusqlite::Result<Vec<_>>>()?;
         tx.commit()?;
         Ok(out)
     }
 
-    fn upsert_one(c: &Connection, imp: &ImportedThread) -> rusqlite::Result<Upserted> {
+    fn upsert_one(
+        c: &Connection,
+        imp: &ImportedThread,
+        level: HandHolding,
+    ) -> rusqlite::Result<Upserted> {
         let mut out = Upserted::default();
         let existing = c
             .query_row(
@@ -1273,7 +1289,7 @@ impl Store {
             .optional()?;
         let Some(mut t) = existing else {
             if imp.skip.is_none() {
-                Self::save_thread_in(c, &Self::new_imported(c, imp)?)?;
+                Self::save_thread_in(c, &Self::new_imported(c, imp, level)?)?;
                 out.added = true;
             }
             out.left_out = imp.skip.is_some();
@@ -1333,7 +1349,11 @@ impl Store {
         Ok(out)
     }
 
-    fn new_imported(c: &Connection, imp: &ImportedThread) -> rusqlite::Result<Thread> {
+    fn new_imported(
+        c: &Connection,
+        imp: &ImportedThread,
+        level: HandHolding,
+    ) -> rusqlite::Result<Thread> {
         // In a worktree brought in from another app: its repository's project, not one per folder.
         let adopted = imp
             .cwd
@@ -1357,7 +1377,7 @@ impl Store {
             agent: imp.source.agent().unwrap_or(AgentId::ClaudeCode),
             model: imp.model.clone(),
             effort: imp.effort.unwrap_or_default(),
-            hand_holding: HandHolding::default(),
+            hand_holding: level,
             source: imp.source,
             native_id: Some(imp.native_id.clone()),
             cwd: imp.cwd.clone(),
@@ -1417,6 +1437,7 @@ impl Store {
     /// Show a session the import left out after all: its thread is added, or brought back if an
     /// import archived it, and later imports leave it in the sidebar.
     pub fn keep_imported(&self, imp: &ImportedThread) -> Result<Thread> {
+        let level = *lock(&self.import_level);
         let mut conn = lock(&self.conn);
         let tx = conn.transaction()?;
         let existing = tx
@@ -1431,7 +1452,7 @@ impl Store {
             .optional()?;
         let mut t = match existing {
             Some(t) => t,
-            None => Self::new_imported(&tx, imp)?,
+            None => Self::new_imported(&tx, imp, level)?,
         };
         if t.import_hidden.take().is_some() {
             t.archived_at = None;
@@ -3361,6 +3382,33 @@ mod tests {
         t.branch = Some("feature".into());
         t.become_trek_thread();
         assert_eq!(t.branch.as_deref(), Some("feature"));
+    }
+
+    #[test]
+    fn an_imported_session_starts_at_the_users_level_not_looser() {
+        let s = Store::in_memory().unwrap();
+        s.upsert_imported(&[imported("first", "x")]).unwrap();
+        let level = |id: &str| {
+            s.threads()
+                .unwrap()
+                .into_iter()
+                .find(|t| t.native_id.as_deref() == Some(id))
+                .unwrap()
+                .hand_holding
+        };
+        assert_eq!(
+            level("first"),
+            HandHolding::Supervised,
+            "until the app says"
+        );
+        s.set_import_level(HandHolding::Auto);
+        s.upsert_imported(&[imported("second", "x")]).unwrap();
+        assert_eq!(level("second"), HandHolding::Auto);
+        s.set_import_level(HandHolding::Supervised);
+        let kept = s.keep_imported(&imported("third", "x")).unwrap();
+        assert_eq!(kept.hand_holding, HandHolding::Supervised);
+        // A thread already in keeps what the user set it to.
+        assert_eq!(level("second"), HandHolding::Auto);
     }
 
     #[test]

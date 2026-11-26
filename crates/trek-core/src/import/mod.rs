@@ -16,15 +16,60 @@ use std::collections::{BTreeMap, HashSet};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
+/// The longest line of a session file read: a line longer is passed over without being held
+/// (a session's lines hold pictures, a few MB each; a file of one endless line would otherwise
+/// take all the memory there is, at each import).
+pub(crate) const MAX_JSONL_LINE: usize = 64 << 20;
+
 /// The lines of a JSONL session file, each converted lossily: a line that isn't valid UTF-8
-/// doesn't end the read as it does with `BufRead::lines`. Stops at a read error.
+/// doesn't end the read as it does with `BufRead::lines`. Stops at a read error. Lines over
+/// [`MAX_JSONL_LINE`] are left out.
 pub(crate) fn jsonl_lines(reader: impl BufRead) -> impl Iterator<Item = String> {
-    reader.split(b'\n').map_while(Result::ok).map(|mut line| {
-        if line.last() == Some(&b'\r') {
-            line.pop();
+    jsonl_lines_up_to(reader, MAX_JSONL_LINE)
+}
+
+fn jsonl_lines_up_to(mut reader: impl BufRead, max: usize) -> impl Iterator<Item = String> {
+    use std::io::Read as _;
+    std::iter::from_fn(move || {
+        loop {
+            let mut line = Vec::new();
+            let read = (&mut reader)
+                .take(max as u64 + 1)
+                .read_until(b'\n', &mut line)
+                .ok()?;
+            if read == 0 {
+                return None;
+            }
+            if line.last() == Some(&b'\n') {
+                line.pop();
+            } else if line.len() > max {
+                // Too long: the rest of it goes by unread into memory.
+                loop {
+                    let buf = reader.fill_buf().ok()?;
+                    if buf.is_empty() {
+                        return None;
+                    }
+                    match buf.iter().position(|b| *b == b'\n') {
+                        Some(i) => {
+                            reader.consume(i + 1);
+                            break;
+                        }
+                        None => {
+                            let n = buf.len();
+                            reader.consume(n);
+                        }
+                    }
+                }
+                continue;
+            }
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            return Some(
+                String::from_utf8(line)
+                    .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()),
+            );
         }
-        String::from_utf8(line)
-            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
     })
 }
 
@@ -1736,5 +1781,35 @@ mod tests {
         });
         t.complete(Some(8_000));
         assert_eq!(footers(&t.finish()), vec![(8_000, 3)]);
+    }
+}
+
+#[cfg(test)]
+mod line_tests {
+    use super::jsonl_lines_up_to;
+
+    /// A reader of `n` bytes of `x` and no newline, made as it's read.
+    struct Endless(usize);
+    impl std::io::Read for Endless {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = buf.len().min(self.0);
+            buf[..n].fill(b'x');
+            self.0 -= n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn a_line_too_long_is_passed_over_not_held() {
+        let text = b"{\"a\":1}\r\n0123456789abcdef\n{\"b\":2}\nshort";
+        let lines: Vec<String> = jsonl_lines_up_to(&text[..], 10).collect();
+        assert_eq!(lines, ["{\"a\":1}", "{\"b\":2}", "short"]);
+        // A whole file of one line, far longer than the limit: nothing, and read through in
+        // pieces (the limit of a few bytes is all that's ever held).
+        let reader = std::io::BufReader::with_capacity(64, Endless(1 << 20));
+        assert_eq!(jsonl_lines_up_to(reader, 100).count(), 0);
+        // A line of exactly the limit is kept.
+        let lines: Vec<String> = jsonl_lines_up_to(&b"0123456789\nz"[..], 10).collect();
+        assert_eq!(lines, ["0123456789", "z"]);
     }
 }
