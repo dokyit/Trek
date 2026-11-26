@@ -6,10 +6,22 @@
 //! inside it, offset, so scrolling moves the page under the transcript's edges without reflowing it.
 //!
 //! The sandbox: the document is served under a scheme and origin of its own with Trek's CSP
-//! (`trek_core::artifact::CSP`: https loads only), the frame may not navigate away, new windows and
-//! downloads are refused (a link the reader clicks goes to their browser, through Trek), website
-//! data isn't kept (each view a non-persistent store on macOS, InPrivate on Windows), and there's
-//! no devtools outside debug builds. The page's one channel to Trek is the bootstrap's messages.
+//! (`trek_core::artifact::net`: loads from the open sources and the hosts the user allowed, no
+//! others), the frame may not navigate away, new windows and downloads are refused, website data
+//! isn't kept (each view a non-persistent store on macOS, InPrivate on Windows), WebRTC is off
+//! where the engine has a switch for it, and there's no devtools outside debug builds. The page's
+//! one channel to Trek is the bootstrap's messages.
+//!
+//! A link or window the page asks for is reported with its address (`Event::Wants`) and never
+//! followed here. Whether the user clicked for it is for the app to see, not for the page to say:
+//!
+//! - macOS: every mouse button and key AppKit hands the app is noted before it's dispatched (a
+//!   local event monitor: `platform::Clip::clicked` says when one last went to this view). A
+//!   page's script can't make one.
+//! - Linux: GTK's own button and key signals on the web view's widget, likewise.
+//! - Windows: the page's view takes its input in WebView2's own processes, where the app sees
+//!   none of it. WebView2 says of each new window and each navigation whether a user gesture
+//!   started it (`IsUserInitiated`): that is what's reported (`Event::Wants`'s `engine`).
 
 use super::surface::{Placement, Shot, Surface};
 use gpui_kit::*;
@@ -23,8 +35,11 @@ pub enum Event {
     Message(String),
     /// The document finished loading.
     Loaded,
-    /// The page asked for a new window (a link with `target=_blank`, `window.open`): the URL.
-    Popup(String),
+    /// The page asked to go somewhere else: a link the user clicked, a new window (a link with
+    /// `target=_blank`, `window.open`), or a script sending the frame away. It went nowhere;
+    /// `url` is where. `engine`: what the engine itself says about a user gesture having started
+    /// it (Windows); `None` where the app watches the clicks itself (`Surface::clicked`).
+    Wants { url: String, engine: Option<bool> },
 }
 
 /// What a view is made with.
@@ -33,8 +48,12 @@ pub struct Spec {
     pub origin: String,
     /// The document as served; replaced in place (a theme switch), it's what a reload gets.
     pub document: Rc<RefCell<String>>,
-    /// The policy it's served under.
-    pub csp: &'static str,
+    /// The policy it's served under; replaced in place when the user allows it a host (a reload
+    /// then gets the new one).
+    pub csp: Rc<RefCell<String>>,
+    /// The `Connection-Allowlist` header it's served with (`net::connection_allowlist`), kept in
+    /// step with the policy; empty for none.
+    pub connections: Rc<RefCell<String>>,
     /// A video file a note plays: served, in pieces as the player asks, at `MEDIA_PATH`.
     pub media: Option<std::path::PathBuf>,
     /// The bootstrap script, with the view's secret.
@@ -44,10 +63,12 @@ pub struct Spec {
     pub events: async_channel::Sender<Event>,
 }
 
-/// Serve the document at `/` and nothing anywhere else, with the CSP, never cached.
+/// Serve the document at `/` and nothing anywhere else, with the CSP and the list of what it
+/// may connect to (`connections`, if any), never cached.
 fn respond(
     document: &str,
     csp: &str,
+    connections: &str,
     media: Option<&std::path::Path>,
     path: &str,
     range: Option<&str>,
@@ -56,8 +77,14 @@ fn respond(
         .header("Cache-Control", "no-store")
         .header("X-Content-Type-Options", "nosniff");
     if path == "/" || path.is_empty() {
+        let base = if connections.is_empty() {
+            base
+        } else {
+            base.header("Connection-Allowlist", connections)
+        };
         base.header("Content-Type", "text/html; charset=utf-8")
             .header("Content-Security-Policy", csp)
+            .header("Referrer-Policy", "no-referrer")
             .body(Cow::Owned(document.as_bytes().to_vec()))
             .unwrap_or_default()
     } else if let (Some(file), true) = (media, path == trek_core::artifact::MEDIA_PATH) {
@@ -83,6 +110,9 @@ pub struct NativeSurface {
     web: wry::WebView,
     clip: platform::Clip,
     shown: Option<Placement>,
+    /// Linux: when GTK last handed the view a button or a key.
+    #[cfg(target_os = "linux")]
+    clicked: Rc<std::cell::Cell<Option<std::time::Instant>>>,
 }
 
 impl NativeSurface {
@@ -95,12 +125,15 @@ impl NativeSurface {
             origin,
             document,
             csp,
+            connections,
             media,
             bootstrap,
             background,
             events,
         } = spec;
-        let (t1, t2, t3) = (events.clone(), events.clone(), events);
+        #[cfg(windows)]
+        let watched = (origin.clone(), events.clone());
+        let (t1, t2, t3, t4) = (events.clone(), events.clone(), events.clone(), events);
         let nav_origin = origin.clone();
         // A profile of the artifacts' own, beside the Browser panel's and not in it: a page an
         // agent wrote shares no cookies, logins or storage with the user's own browsing.
@@ -137,7 +170,8 @@ impl NativeSurface {
             .with_custom_protocol(trek_core::artifact::SCHEME.into(), move |_, request| {
                 respond(
                     &document.borrow(),
-                    csp,
+                    &csp.borrow(),
+                    &connections.borrow(),
                     media.as_deref(),
                     request.uri().path(),
                     request.headers().get("range").and_then(|r| r.to_str().ok()),
@@ -149,12 +183,19 @@ impl NativeSurface {
             .with_navigation_handler(move |url| {
                 let ok = trek_core::artifact::navigation_allowed(&url, &nav_origin);
                 if !ok {
-                    tracing::debug!("artifact: navigation to {url} refused");
+                    tracing::debug!("artifact: navigation refused");
+                    // On Windows the engine reports it, with what it knows of a gesture
+                    // (`platform::watch`).
+                    if !cfg!(windows) {
+                        let _ = t4.try_send(Event::Wants { url, engine: None });
+                    }
                 }
                 ok
             })
             .with_new_window_req_handler(move |url, _| {
-                let _ = t2.try_send(Event::Popup(url));
+                if !cfg!(windows) {
+                    let _ = t2.try_send(Event::Wants { url, engine: None });
+                }
                 wry::NewWindowResponse::Deny
             })
             .with_download_started_handler(|_, _| false)
@@ -165,10 +206,18 @@ impl NativeSurface {
             })
             .build_as_child(&parent)
             .map_err(|e| e.to_string())?;
+        // Before the page's first script: its own load is still on its way.
+        platform::harden(&web);
+        #[cfg(windows)]
+        platform::watch(&web, watched.0, watched.1);
+        #[cfg(target_os = "linux")]
+        let clicked = platform::watch_clicks(&web);
         Ok(Self {
             web,
             clip,
             shown: None,
+            #[cfg(target_os = "linux")]
+            clicked,
         })
     }
 }
@@ -247,6 +296,26 @@ impl Surface for NativeSurface {
             let _ = self.web.set_background_color((rgb.0, rgb.1, rgb.2, 255));
         }
     }
+
+    fn clicked(&self) -> Option<std::time::Instant> {
+        #[cfg(target_os = "macos")]
+        {
+            self.clip.clicked()
+        }
+        #[cfg(target_os = "linux")]
+        {
+            self.clicked.get()
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            None
+        }
+    }
+
+    #[cfg(feature = "shots")]
+    fn click_at(&self, x: f64, y: f64) -> Result<(), String> {
+        platform::click_at(&self.web, x, y)
+    }
 }
 
 impl Drop for NativeSurface {
@@ -317,12 +386,67 @@ mod platform {
         host: Retained<NSView>,
     }
 
+    /// A mouse button or a key the user pressed, as AppKit handed it to the app: in which
+    /// window, where (a button, in the window's coordinates) and when.
+    #[derive(Clone, Copy)]
+    struct Press {
+        window: isize,
+        at: Option<NSPoint>,
+        when: std::time::Instant,
+    }
+
+    thread_local! {
+        static WATCHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static PRESSED: std::cell::Cell<Option<Press>> = const { std::cell::Cell::new(None) };
+    }
+
+    /// NSEventType: left, right and other buttons going down and up, and a key going down.
+    const LEFT_DOWN: usize = 1;
+    const LEFT_UP: usize = 2;
+    const RIGHT_DOWN: usize = 3;
+    const RIGHT_UP: usize = 4;
+    const KEY_DOWN: usize = 10;
+    const OTHER_DOWN: usize = 25;
+    const OTHER_UP: usize = 26;
+
+    /// Note every button and key AppKit hands the app, before it's dispatched (once, for the
+    /// app's life): what `Clip::clicked` answers from. These are the system's events; nothing a
+    /// page runs can make one, or reach this.
+    fn watch_presses() {
+        if WATCHING.replace(true) {
+            return;
+        }
+        let mask: u64 = [
+            LEFT_DOWN, LEFT_UP, RIGHT_DOWN, RIGHT_UP, KEY_DOWN, OTHER_DOWN, OTHER_UP,
+        ]
+        .iter()
+        .fold(0, |m, t| m | (1u64 << t));
+        let note = block2::RcBlock::new(
+            |event: NonNull<objc2_app_kit::NSEvent>| -> *mut objc2_app_kit::NSEvent {
+                // SAFETY: AppKit's own event, valid for the call.
+                let e = unsafe { event.as_ref() };
+                let key = e.r#type().0 == KEY_DOWN;
+                PRESSED.set(Some(Press {
+                    window: e.windowNumber(),
+                    at: (!key).then(|| e.locationInWindow()),
+                    when: std::time::Instant::now(),
+                }));
+                event.as_ptr()
+            },
+        );
+        // SAFETY: AppKit copies the block and keeps the monitor until it's removed (never).
+        unsafe {
+            let _: *mut AnyObject = msg_send![objc2::class!(NSEvent), addLocalMonitorForEventsMatchingMask: mask, handler: &*note];
+        }
+    }
+
     impl Clip {
         pub fn new(handle: raw_window_handle::RawWindowHandle) -> Option<Self> {
             let raw_window_handle::RawWindowHandle::AppKit(h) = handle else {
                 return None;
             };
             let mtm = MainThreadMarker::new()?;
+            watch_presses();
             // SAFETY: GPUI's view, alive as long as its window (which outlives every card in it).
             let host: Retained<NSView> = unsafe { Retained::retain(h.ns_view.as_ptr().cast())? };
             let view = NSView::initWithFrame(
@@ -386,6 +510,47 @@ mod platform {
             }
         }
 
+        /// When the user last pressed a mouse button over this view, or a key while a view in it
+        /// had the keys, as AppKit handed it to the app (`watch_presses`). `None`: the last
+        /// press went elsewhere, or there was none.
+        pub fn clicked(&self) -> Option<std::time::Instant> {
+            let press = PRESSED.get()?;
+            let window = self.host.window()?;
+            if window.windowNumber() != press.window || self.view.isHidden() {
+                return None;
+            }
+            let ours = match press.at {
+                Some(at) => {
+                    let frame = self.view.convertRect_toView(self.view.bounds(), None);
+                    at.x >= frame.origin.x
+                        && at.x <= frame.origin.x + frame.size.width
+                        && at.y >= frame.origin.y
+                        && at.y <= frame.origin.y + frame.size.height
+                }
+                None => self.holds_keys(&window),
+            };
+            ours.then_some(press.when)
+        }
+
+        /// Whether a view inside the container is the window's first responder.
+        fn holds_keys(&self, window: &objc2_app_kit::NSWindow) -> bool {
+            // SAFETY: plain AppKit getters on the main thread; the responder is the window's
+            // own, alive for the call.
+            unsafe {
+                let responder: *mut AnyObject = msg_send![window, firstResponder];
+                match responder.as_ref() {
+                    Some(r) => {
+                        let is_view: bool = msg_send![r, isKindOfClass: objc2::class!(NSView)];
+                        is_view && {
+                            let inside: bool = msg_send![r, isDescendantOf: &*self.view];
+                            inside
+                        }
+                    }
+                    None => false,
+                }
+            }
+        }
+
         /// Make GPUI's view the window's first responder again.
         pub fn release_keys(&self) {
             if let Some(window) = self.host.window() {
@@ -401,22 +566,7 @@ mod platform {
             let Some(window) = self.host.window() else {
                 return;
             };
-            // SAFETY: plain AppKit getters on the main thread; the responder is the window's
-            // own, alive for the call.
-            let inside = unsafe {
-                let responder: *mut AnyObject = msg_send![&*window, firstResponder];
-                match responder.as_ref() {
-                    Some(r) => {
-                        let is_view: bool = msg_send![r, isKindOfClass: objc2::class!(NSView)];
-                        is_view && {
-                            let inside: bool = msg_send![r, isDescendantOf: &*self.view];
-                            inside
-                        }
-                    }
-                    None => false,
-                }
-            };
-            if inside {
+            if self.holds_keys(&window) {
                 window.makeFirstResponder(Some(&self.host));
             }
         }
@@ -546,6 +696,105 @@ mod platform {
                     }
                 }
                 other => return Err(format!("{other}?")),
+            }
+        }
+        Ok(())
+    }
+
+    /// What a page's view does without that no policy directive stops in WebKit, by WebKit's own
+    /// name for each switch: WebRTC (a peer connection reaches whatever server it's given), and
+    /// `<link rel="preconnect">` and its kin (a connection, and a DNS lookup, to any host named).
+    const OFF: &[&str] = &[
+        "PeerConnectionEnabled",
+        "LinkPreconnect",
+        "LinkPreconnectEarlyHintsEnabled",
+        "LinkPrefetchEnabled",
+        "SpeculationRulesPrefetchEnabled",
+    ];
+
+    /// Turn `OFF` off in this view (its preferences are its own: the Browser's pages keep
+    /// theirs). The switches are WebKit's own, not in its public headers, so each is used only
+    /// if this WebKit has it; one it lacks is logged, and for WebRTC the bootstrap's removal of
+    /// the constructors still stands.
+    pub fn harden(web: &wry::WebView) {
+        use wry::WebViewExtMacOS as _;
+        let view = web.webview();
+        let mut off: Vec<String> = Vec::new();
+        // SAFETY: the view's own configuration and preferences, on the main thread; each
+        // selector is called only if WebKit answers to it, with the types its headers give.
+        unsafe {
+            let config: *mut AnyObject = msg_send![&*view, configuration];
+            if config.is_null() {
+                return;
+            }
+            let prefs: *mut AnyObject = msg_send![config, preferences];
+            let Some(prefs) = prefs.as_ref() else {
+                return;
+            };
+            let has: bool =
+                msg_send![prefs, respondsToSelector: objc2::sel!(_setPeerConnectionEnabled:)];
+            if has {
+                let _: () = msg_send![prefs, _setPeerConnectionEnabled: false];
+                off.push(OFF[0].to_string());
+            }
+            let class = objc2::class!(WKPreferences);
+            let lists: bool = msg_send![class, respondsToSelector: objc2::sel!(_features)];
+            let sets: bool =
+                msg_send![prefs, respondsToSelector: objc2::sel!(_setEnabled:forFeature:)];
+            if lists && sets {
+                let features: *mut AnyObject = msg_send![class, _features];
+                let count: usize = if features.is_null() {
+                    0
+                } else {
+                    msg_send![features, count]
+                };
+                for i in 0..count {
+                    let feature: *mut AnyObject = msg_send![features, objectAtIndex: i];
+                    let key: *mut objc2_foundation::NSString = msg_send![feature, key];
+                    let Some(key) = key.as_ref().map(|k| k.to_string()) else {
+                        continue;
+                    };
+                    if OFF.contains(&key.as_str()) {
+                        let _: () = msg_send![prefs, _setEnabled: false, forFeature: feature];
+                        if !off.contains(&key) {
+                            off.push(key);
+                        }
+                    }
+                }
+            }
+        }
+        for name in OFF.iter().filter(|n| !off.iter().any(|o| o == *n)) {
+            tracing::warn!("artifact: this WebKit has no switch named {name}");
+        }
+    }
+
+    /// The capture build's `artifacts click-page x y`: a click at (`x`, `y`) of the page (CSS px
+    /// from its top left), made as AppKit makes one and handed to the app as AppKit hands one
+    /// (`sendEvent:`), so it passes the event monitor and reaches the page as the user's own.
+    #[cfg(feature = "shots")]
+    pub fn click_at(web: &wry::WebView, x: f64, y: f64) -> Result<(), String> {
+        use wry::WebViewExtMacOS as _;
+        let view = web.webview();
+        // SAFETY: the live view and its window on the main thread; the events are made with
+        // AppKit's own constructor.
+        unsafe {
+            let window: *mut AnyObject = msg_send![&*view, window];
+            if window.is_null() {
+                return Err("the page's view is in no window".into());
+            }
+            let flipped: bool = msg_send![&*view, isFlipped];
+            let bounds: NSRect = msg_send![&*view, bounds];
+            let local = NSPoint::new(x, if flipped { y } else { bounds.size.height - y });
+            let none: *mut AnyObject = std::ptr::null_mut();
+            let at: NSPoint = msg_send![&*view, convertPoint: local, toView: none];
+            let number: isize = msg_send![window, windowNumber];
+            let app: *mut AnyObject = msg_send![objc2::class!(NSApplication), sharedApplication];
+            for kind in [LEFT_DOWN, LEFT_UP] {
+                let event: *mut AnyObject = msg_send![objc2::class!(NSEvent), mouseEventWithType: kind, location: at, modifierFlags: 0usize, timestamp: 0f64, windowNumber: number, context: none, eventNumber: 0isize, clickCount: 1isize, pressure: 1f32];
+                if event.is_null() {
+                    return Err("AppKit made no event".into());
+                }
+                let _: () = msg_send![app, sendEvent: event];
             }
         }
         Ok(())
@@ -740,6 +989,76 @@ mod platform {
         Err(format!("{what}: macOS only"))
     }
 
+    /// Nothing to switch off here: WebView2 has no setting for WebRTC. The policy's `webrtc`
+    /// directive and the bootstrap's removal of the constructors are what stand.
+    pub fn harden(_: &wry::WebView) {}
+
+    /// Report what the page asks to open, with what WebView2 says of a user gesture: a new
+    /// window (`NewWindowRequested`; never made, whoever else hears the event) and a navigation
+    /// away from the document at `origin` (`NavigationStarting`; cancelled here as wry's own
+    /// handler cancels it).
+    pub fn watch(web: &wry::WebView, origin: String, events: async_channel::Sender<super::Event>) {
+        use webview2_com::{NavigationStartingEventHandler, NewWindowRequestedEventHandler};
+        use windows_61::core::{BOOL, PWSTR};
+        use wry::WebViewExtWindows as _;
+        fn text(get: impl FnOnce(*mut PWSTR) -> windows_61::core::Result<()>) -> String {
+            let mut s = PWSTR::null();
+            match get(&mut s) {
+                Ok(()) => webview2_com::take_pwstr(s),
+                Err(_) => String::new(),
+            }
+        }
+        let webview = web.webview();
+        let mut token = 0;
+        let (opened, away) = (events.clone(), events);
+        // SAFETY: COM calls on the view's own thread, which WebView2 calls the handlers back
+        // on; the arguments are each event's own.
+        unsafe {
+            let _ = webview.add_NewWindowRequested(
+                &NewWindowRequestedEventHandler::create(Box::new(move |_, args| {
+                    let Some(args) = args else {
+                        return Ok(());
+                    };
+                    let _ = args.SetHandled(true);
+                    let mut user = BOOL::default();
+                    let said = args.IsUserInitiated(&mut user).is_ok();
+                    let url = text(|p| args.Uri(p));
+                    let _ = opened.try_send(super::Event::Wants {
+                        url,
+                        engine: Some(said && user.as_bool()),
+                    });
+                    Ok(())
+                })),
+                &mut token,
+            );
+            let _ = webview.add_NavigationStarting(
+                &NavigationStartingEventHandler::create(Box::new(move |_, args| {
+                    let Some(args) = args else {
+                        return Ok(());
+                    };
+                    let url = text(|p| args.Uri(p));
+                    if trek_core::artifact::navigation_allowed(&url, &origin) {
+                        return Ok(());
+                    }
+                    let _ = args.SetCancel(true);
+                    let mut user = BOOL::default();
+                    let said = args.IsUserInitiated(&mut user).is_ok();
+                    let _ = away.try_send(super::Event::Wants {
+                        url,
+                        engine: Some(said && user.as_bool()),
+                    });
+                    Ok(())
+                })),
+                &mut token,
+            );
+        }
+    }
+
+    #[cfg(feature = "shots")]
+    pub fn click_at(_: &wry::WebView, _: f64, _: f64) -> Result<(), String> {
+        Err("click-page: macOS only".into())
+    }
+
     /// The page as WebView2 draws it (CapturePreview): a PNG.
     pub fn snapshot(
         web: &wry::WebView,
@@ -859,6 +1178,133 @@ mod platform {
         false
     }
 
+    /// What a page's view does without that no policy directive stops in WebKit, by WebKit's own
+    /// name for each switch (as on the Mac): WebRTC, and `<link rel="preconnect">` and its kin.
+    const OFF: &[&str] = &[
+        "PeerConnectionEnabled",
+        "LinkPreconnect",
+        "LinkPreconnectEarlyHintsEnabled",
+        "LinkPrefetchEnabled",
+        "SpeculationRulesPrefetchEnabled",
+    ];
+
+    /// No WebRTC in a page's view, no window a script opens by itself (both WebKitGTK's
+    /// defaults, set here so they don't depend on it), no DNS prefetching, and `OFF` switched
+    /// off where this WebKitGTK has its feature switches.
+    pub fn harden(web: &wry::WebView) {
+        use webkit2gtk::{SettingsExt as _, WebViewExt as _};
+        use wry::WebViewExtUnix as _;
+        let Some(settings) = web.webview().settings() else {
+            return;
+        };
+        settings.set_enable_webrtc(false);
+        settings.set_javascript_can_open_windows_automatically(false);
+        settings.set_enable_dns_prefetching(false);
+        let off = features_off(&settings);
+        for name in OFF.iter().skip(1).filter(|n| !off.iter().any(|o| o == *n)) {
+            tracing::warn!("artifact: this WebKitGTK has no switch named {name}");
+        }
+    }
+
+    /// Switch `OFF` off in `settings` through WebKitGTK's feature list (2.42 and later), and
+    /// say which were found. The bindings Trek builds with stop at 2.40, so the six functions
+    /// are looked up in the running library by name: an older WebKitGTK has none of them, and
+    /// nothing is called.
+    fn features_off(settings: &webkit2gtk::Settings) -> Vec<String> {
+        use gtk::glib::object::ObjectType as _;
+        use std::ffi::{CStr, c_char, c_int, c_void};
+        /// The function named `name` in the running process, as a pointer to cast.
+        fn find(name: &CStr) -> Option<*mut c_void> {
+            // SAFETY: a lookup by name among the libraries already loaded; no call is made.
+            let found = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
+            (!found.is_null()).then_some(found)
+        }
+        type All = unsafe extern "C" fn() -> *mut c_void;
+        type Length = unsafe extern "C" fn(*mut c_void) -> usize;
+        type Get = unsafe extern "C" fn(*mut c_void, usize) -> *mut c_void;
+        type Identifier = unsafe extern "C" fn(*mut c_void) -> *const c_char;
+        type Set = unsafe extern "C" fn(*mut c_void, *mut c_void, c_int);
+        type Unref = unsafe extern "C" fn(*mut c_void);
+        let (Some(all), Some(length), Some(get), Some(identifier), Some(set), Some(unref)) = (
+            find(c"webkit_settings_get_all_features"),
+            find(c"webkit_feature_list_get_length"),
+            find(c"webkit_feature_list_get"),
+            find(c"webkit_feature_get_identifier"),
+            find(c"webkit_settings_set_feature_enabled"),
+            find(c"webkit_feature_list_unref"),
+        ) else {
+            return Vec::new();
+        };
+        let mut off = Vec::new();
+        // SAFETY: WebKitGTK's own functions, found by their documented names and called with
+        // their documented signatures (`WebKitFeatureList* webkit_settings_get_all_features(void)`,
+        // `gsize webkit_feature_list_get_length(WebKitFeatureList*)`, `WebKitFeature*
+        // webkit_feature_list_get(WebKitFeatureList*, gsize)`, `const char*
+        // webkit_feature_get_identifier(WebKitFeature*)`, `void
+        // webkit_settings_set_feature_enabled(WebKitSettings*, WebKitFeature*, gboolean)`, `void
+        // webkit_feature_list_unref(WebKitFeatureList*)`), on GTK's thread, with the view's own
+        // settings; the list is held until the loop is done, and each name is copied out.
+        unsafe {
+            let all: All = std::mem::transmute(all);
+            let length: Length = std::mem::transmute(length);
+            let get: Get = std::mem::transmute(get);
+            let identifier: Identifier = std::mem::transmute(identifier);
+            let set: Set = std::mem::transmute(set);
+            let unref: Unref = std::mem::transmute(unref);
+            let list = all();
+            if list.is_null() {
+                return off;
+            }
+            for i in 0..length(list) {
+                let feature = get(list, i);
+                if feature.is_null() {
+                    continue;
+                }
+                let name = identifier(feature);
+                if name.is_null() {
+                    continue;
+                }
+                let name = CStr::from_ptr(name).to_string_lossy().into_owned();
+                if OFF.contains(&name.as_str()) {
+                    set(settings.as_ptr().cast(), feature, 0);
+                    off.push(name);
+                }
+            }
+            unref(list);
+        }
+        off
+    }
+
+    /// Note when GTK hands the page's view a mouse button or a key: the system's own events,
+    /// which nothing a page runs can make.
+    pub fn watch_clicks(
+        web: &wry::WebView,
+    ) -> std::rc::Rc<std::cell::Cell<Option<std::time::Instant>>> {
+        use gtk::prelude::WidgetExt as _;
+        use wry::WebViewExtUnix as _;
+        let clicked = std::rc::Rc::new(std::cell::Cell::new(None));
+        let view = web.webview();
+        let (down, up, key) = (clicked.clone(), clicked.clone(), clicked.clone());
+        view.connect_button_press_event(move |_, _| {
+            down.set(Some(std::time::Instant::now()));
+            gtk::glib::Propagation::Proceed
+        });
+        view.connect_button_release_event(move |_, _| {
+            up.set(Some(std::time::Instant::now()));
+            gtk::glib::Propagation::Proceed
+        });
+        view.connect_key_press_event(move |_, _| {
+            key.set(Some(std::time::Instant::now()));
+            gtk::glib::Propagation::Proceed
+        });
+        clicked
+    }
+
+    #[cfg(feature = "shots")]
+    pub fn click_at(_: &wry::WebView, _: f64, _: f64) -> Result<(), String> {
+        Err("click-page: macOS only".into())
+    }
+
     #[cfg(feature = "shots")]
     pub fn keys_holder(_: &gpui_kit::Window) -> String {
         "trek".into()
@@ -896,6 +1342,13 @@ mod platform {
         false
     }
 
+    pub fn harden(_: &wry::WebView) {}
+
+    #[cfg(feature = "shots")]
+    pub fn click_at(_: &wry::WebView, _: f64, _: f64) -> Result<(), String> {
+        Err("click-page: macOS only".into())
+    }
+
     #[cfg(feature = "shots")]
     pub fn keys_holder(_: &gpui_kit::Window) -> String {
         "trek".into()
@@ -917,11 +1370,18 @@ mod tests {
 
     #[test]
     fn the_document_is_served_at_its_root_with_the_csp_and_nothing_else_is() {
-        let page = respond("<p>hi</p>", trek_core::artifact::CSP, None, "/", None);
+        let page = respond(
+            "<p>hi</p>",
+            &trek_core::artifact::net::page_csp(&[]),
+            "",
+            None,
+            "/",
+            None,
+        );
         assert_eq!(page.status(), 200);
         assert_eq!(
             page.headers()["content-security-policy"],
-            trek_core::artifact::CSP
+            &trek_core::artifact::net::page_csp(&[])
         );
         assert_eq!(page.headers()["content-type"], "text/html; charset=utf-8");
         assert_eq!(page.headers()["cache-control"], "no-store");
@@ -934,7 +1394,14 @@ mod tests {
             "/_trek/katex/fonts/../katex.min.js",
             "/_trek/katex/nothing.js",
         ] {
-            let r = respond("<p>hi</p>", trek_core::artifact::CSP, None, other, None);
+            let r = respond(
+                "<p>hi</p>",
+                &trek_core::artifact::net::page_csp(&[]),
+                "",
+                None,
+                other,
+                None,
+            );
             assert_eq!(r.status(), 404, "{other}");
             assert!(r.body().is_empty());
         }
@@ -951,7 +1418,8 @@ mod tests {
         ] {
             let r = respond(
                 "<p>hi</p>",
-                trek_core::artifact::STUDY_CSP,
+                &trek_core::artifact::net::study_csp(&[]),
+                "",
                 None,
                 &path(rel),
                 None,
@@ -968,28 +1436,29 @@ mod tests {
         std::fs::write(&file, (0..=255u8).collect::<Vec<u8>>()).unwrap();
         let csp = trek_core::artifact::VIDEO_CSP;
         let media = trek_core::artifact::MEDIA_PATH;
-        let part = respond("<video>", csp, Some(&file), media, Some("bytes=10-19"));
+        let part = respond("<video>", csp, "", Some(&file), media, Some("bytes=10-19"));
         assert_eq!(part.status(), 206);
         assert_eq!(&part.body()[..], &(10..20u8).collect::<Vec<u8>>()[..]);
         assert_eq!(part.headers()["content-range"], "bytes 10-19/256");
         assert_eq!(part.headers()["content-type"], "video/mp4");
         assert_eq!(
-            respond("<video>", csp, Some(&file), media, None).status(),
+            respond("<video>", csp, "", Some(&file), media, None).status(),
             200
         );
         // The page carries the video policy; another path, or a document with no file, is a 404.
         assert_eq!(
-            respond("<video>", csp, Some(&file), "/", None).headers()["content-security-policy"],
+            respond("<video>", csp, "", Some(&file), "/", None).headers()["content-security-policy"],
             csp
         );
         assert_eq!(
-            respond("<video>", csp, Some(&file), "/other.mp4", None).status(),
+            respond("<video>", csp, "", Some(&file), "/other.mp4", None).status(),
             404
         );
         assert_eq!(
             respond(
                 "<p>hi</p>",
-                trek_core::artifact::CSP,
+                &trek_core::artifact::net::page_csp(&[]),
+                "",
                 None,
                 media,
                 Some("bytes=0-1")

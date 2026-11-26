@@ -990,6 +990,11 @@ pub struct General {
     /// Agents are told they may answer with live HTML (`artifact::AGENT_INSTRUCTIONS`), and
     /// `trek-html` blocks run in a sandboxed web view in the answer; off, they show as code.
     pub interactive_artifacts: bool,
+    /// The sites the user chose "Always allow" for on an artifact's card (or "Always from this
+    /// site" on a video from the web): every page an agent writes may load from them, besides
+    /// what loads without asking (`artifact::net::OPEN_SOURCES`). Public https hosts by name
+    /// (`artifact::net::clean_hosts`).
+    pub artifact_hosts: Vec<String>,
 }
 
 impl Default for General {
@@ -1012,6 +1017,7 @@ impl Default for General {
             resume_message: crate::interrupted::RESUME_MESSAGE.into(),
             ask_recap: true,
             interactive_artifacts: true,
+            artifact_hosts: vec![],
         }
     }
 }

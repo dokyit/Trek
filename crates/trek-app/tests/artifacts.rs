@@ -556,3 +556,140 @@ fn a_cards_send_waits_while_its_thread_asks_for_a_secret() {
         assert!(!items.contains("ghp_typed-in-the-page"), "{items}");
     });
 }
+
+/// The hole this closes: a page's `window.open` (or a link it clicked itself) went straight to
+/// the user's browser, with whatever the page put in the address. Now the page's asking is one
+/// thing and the user's click another, and the click is the app's own to see.
+#[test]
+fn a_page_opens_a_link_only_on_a_click_the_app_saw() {
+    run(async |cx| {
+        let log = fake_web(true).unwrap();
+        let trek = open(cx);
+        answered(&trek, cx, &answer(PAGE), true);
+        let wants = |trek: &Trek, cx: &mut TestAppContext, url: &str, engine: Option<bool>| {
+            trek.window(cx, |window, cx| {
+                trek_app::artifact::wants(window, url, engine, cx)
+            });
+        };
+        // As the page loads, with no click anywhere: a window, with what the agent read in its
+        // address.
+        wants(&trek, cx, "https://evil.example.org/?secret=hunter2", None);
+        assert_eq!(cx.opened_url(), None, "no click, no window");
+        // The page's own word that there was a click is no click: no message opens a link,
+        // even one with the secret only Trek's script has.
+        trek.window(cx, |window, cx| {
+            trek_app::artifact::post(
+                window,
+                r#"{"n":"{nonce}","t":"open","u":"https://evil.example.org/said-so"}"#,
+                cx,
+            )
+        });
+        assert_eq!(cx.opened_url(), None);
+        // The user clicks a link in the page: the system's click, then the page's asking.
+        log.borrow_mut().click();
+        wants(&trek, cx, "https://threejs.org/docs", None);
+        assert_eq!(cx.opened_url().as_deref(), Some("https://threejs.org/docs"));
+        // One click opens one address: a second riding on it goes nowhere.
+        wants(&trek, cx, "https://evil.example.org/rides-along", None);
+        assert_eq!(cx.opened_url().as_deref(), Some("https://threejs.org/docs"));
+        // Where the engine vouches for each request (Windows): its "no" is no, a "yes" opens
+        // web and mail addresses only, and no faster than one a second.
+        wants(&trek, cx, "https://example.org/too-soon", Some(true));
+        assert_eq!(cx.opened_url().as_deref(), Some("https://threejs.org/docs"));
+        std::thread::sleep(std::time::Duration::from_millis(1050));
+        wants(&trek, cx, "https://evil.example.org/by-script", Some(false));
+        wants(&trek, cx, "file:///etc/passwd", Some(true));
+        assert_eq!(cx.opened_url().as_deref(), Some("https://threejs.org/docs"));
+        wants(&trek, cx, "https://example.org/clicked", Some(true));
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some("https://example.org/clicked")
+        );
+    });
+}
+
+/// A page starts with the open sources and no other host. What its policy stops, the card asks
+/// about; the user's answer is for exactly the hosts named.
+#[test]
+fn a_host_the_policy_stopped_is_the_users_to_allow() {
+    run(async |cx| {
+        let log = fake_web(true).unwrap();
+        let trek = open(cx);
+        answered(&trek, cx, &answer(PAGE), true);
+        let post = |trek: &Trek, cx: &mut TestAppContext, body: &str| {
+            trek.window(cx, |window, cx| trek_app::artifact::post(window, body, cx));
+            settle(trek, cx);
+        };
+        let hosts = |trek: &Trek, cx: &mut TestAppContext| {
+            trek.update(cx, |ws, _| ws.settings.general.artifact_hosts.clone())
+        };
+        let policy = |log: &std::rc::Rc<std::cell::RefCell<trek_app::artifact::FakeLog>>| {
+            log.borrow().policies.last().cloned().unwrap_or_default()
+        };
+        assert_eq!(policy(&log), trek_core::artifact::net::page_csp(&[]));
+        assert!(!policy(&log).contains("jsdelivr"));
+        assert!(on_screen(&trek, cx, "artifact-allow-once-").is_none());
+
+        // The engine stopped a script from jsDelivr.
+        post(
+            &trek,
+            cx,
+            r#"{"n":"{nonce}","t":"blocked","u":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"}"#,
+        );
+        // A report without the secret is the page's own, and an address on this machine is
+        // nobody's to allow: neither is asked about.
+        post(
+            &trek,
+            cx,
+            r#"{"t":"blocked","u":"https://evil.example.org/x"}"#,
+        );
+        post(
+            &trek,
+            cx,
+            r#"{"n":"{nonce}","t":"blocked","u":"https://127.0.0.1:8443/x"}"#,
+        );
+        let once = on_screen(&trek, cx, "artifact-allow-once-").expect("the card asks");
+        assert_eq!(log.borrow().reloads, 0, "nothing loads until the user says");
+        trek.click(cx, once);
+        settle(&trek, cx);
+        assert_eq!(log.borrow().reloads, 1, "allowed, the page loads again");
+        let allowed = policy(&log);
+        assert_eq!(
+            allowed,
+            trek_core::artifact::net::page_csp(&["cdn.jsdelivr.net".to_string()])
+        );
+        assert!(!allowed.contains("evil") && !allowed.contains("127.0.0.1"));
+        assert!(hosts(&trek, cx).is_empty(), "once is for this page alone");
+        assert!(on_screen(&trek, cx, "artifact-allow-once-").is_none());
+
+        // Another host, allowed for good: it's kept in settings.
+        post(
+            &trek,
+            cx,
+            r#"{"n":"{nonce}","t":"blocked","u":"https://api.github.com/repos/x/y"}"#,
+        );
+        let always = on_screen(&trek, cx, "artifact-allow-always-").expect("the card asks");
+        trek.click(cx, always);
+        settle(&trek, cx);
+        assert_eq!(hosts(&trek, cx), ["api.github.com"]);
+        assert_eq!(log.borrow().reloads, 2);
+        assert!(
+            policy(&log).contains(" https://api.github.com https://cdn.jsdelivr.net;")
+                || policy(&log).contains(" https://cdn.jsdelivr.net https://api.github.com;"),
+            "{}",
+            policy(&log)
+        );
+
+        // A third, refused: nothing changes, and the card doesn't ask about it again.
+        let tracker = r#"{"n":"{nonce}","t":"blocked","u":"https://tracker.example.org/p.gif"}"#;
+        post(&trek, cx, tracker);
+        let deny = on_screen(&trek, cx, "artifact-deny-").expect("the card asks");
+        trek.click(cx, deny);
+        settle(&trek, cx);
+        assert_eq!(log.borrow().reloads, 2);
+        assert!(!policy(&log).contains("tracker"));
+        post(&trek, cx, tracker);
+        assert!(on_screen(&trek, cx, "artifact-deny-").is_none());
+        assert_eq!(hosts(&trek, cx), ["api.github.com"]);
+    });
+}

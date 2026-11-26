@@ -1053,7 +1053,7 @@ mod tests {
             );
             let doc = artifact::document(html, ":root{}");
             assert!(
-                doc.contains(artifact::CSP) && doc.contains("const DATA = {"),
+                doc.contains(&artifact::net::page_csp(&[])) && doc.contains("const DATA = {"),
                 "{name}"
             );
             // Nothing the policy blocks: https only.

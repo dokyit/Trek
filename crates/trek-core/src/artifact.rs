@@ -2,18 +2,22 @@
 //! `trek-html` block, which Trek runs in a sandboxed web view inline in the answer (a 3D model to
 //! turn, a simulation, an explorable diagram, a tabbed report).
 //!
-//! Unlike `trek-viz` (inert JSON Trek draws itself), the document is code the agent wrote, so it
-//! runs fenced in: served from an origin of its own, under a Content-Security-Policy that lets it
-//! load scripts, styles, images and fonts over https (CDNs such as jsdelivr and unpkg: that's what
-//! makes it useful) and nothing over http, from `file:` or from the machine; it may not navigate
-//! away from itself, and besides its height it can tell Trek only that it wants a link opened in the
-//! user's browser, or, right after the user clicked in it, that it has text to send as their next
-//! message or to copy (`Action`: `trek.send`, `trek.copy`). Messages carry a per-view secret only
-//! Trek's own bootstrap script knows, so the page's scripts can't speak for it.
+//! Unlike `trek-viz` (inert JSON Trek draws itself), the document is code the agent wrote, and an
+//! agent can be talked into things by what it reads. So it runs fenced in: served from an origin
+//! of its own, under a Content-Security-Policy that lets it load only from hosts where nobody can
+//! watch what's asked for (a library CDN's reviewed files, fonts: `net::OPEN_SOURCES`) and from
+//! the hosts the user allowed for it (the card asks: `net::Asks`), nothing over http, from `file:`
+//! or from the machine. It may not navigate away from itself: a link opens in the user's browser,
+//! and only on their own click as the app saw it (`net::LinkGate`). Besides its height it can
+//! tell Trek, right after the user clicked in it, that it has text to send as their next message
+//! or to copy (`Action`: `trek.send`, `trek.copy`). Messages carry a per-view secret only Trek's
+//! own bootstrap script knows, so the page's scripts can't speak for it.
 //!
 //! This module holds the parts that are plain data and text (fence and title, the document as
 //! served, the theme's CSS variables, the bootstrap script, message and navigation checks); the
 //! app owns the web view.
+
+pub mod net;
 
 use std::fmt::Write as _;
 
@@ -47,30 +51,20 @@ pub const OPEN_ON_PHONE: &str = "Open this on my iPhone";
 /// Told to every session while interactive artifacts are on, after the `trek-viz` note. Terse:
 /// every session carries it (`instructions_stay_compact`), and the page's rules are in the skill it
 /// names (`skills::TREK_HTML`), read only by an agent about to write a page.
-pub const AGENT_INSTRUCTIONS: &str = "When an interactive or rich visual genuinely helps (a 3D model, a simulation, an explorable diagram, a tabbed report), add one fenced `trek-html` block, a self-contained HTML page Trek runs inline, then state its takeaway in prose; prefer `trek-viz` for simple charts. Read Trek's built-in skill trek-html before writing one, and for a map, pull request or database migration card follow the skill map-card, pull-request-card or database-migration-card.";
-
-/// The Content-Security-Policy the document is served with. Scripts, styles, images, fonts,
-/// media and `fetch` over https only (CDNs); inline code and `eval` (it's the agent's own
-/// document); `blob:`/`data:` for what libraries build in memory (workers, textures). No http
-/// (nothing on the local network or the machine), no `file:`, no plugins, no forms, no `<base>`.
-pub const CSP: &str = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https: blob:; style-src 'unsafe-inline' https:; img-src https: data: blob:; font-src https: data:; media-src https: data: blob:; connect-src https: data: blob:; worker-src blob: https:; child-src blob: data:; frame-src blob: data:; object-src 'none'; form-action 'none'; base-uri 'none'";
+pub const AGENT_INSTRUCTIONS: &str = "When an interactive or rich visual genuinely helps (a 3D model, a simulation, an explorable diagram, a tabbed report), add one fenced `trek-html` block, a self-contained HTML page Trek runs inline (only cdnjs loads unasked), then state its takeaway in prose; prefer `trek-viz` for simple charts. Read Trek's skill trek-html before writing one; for a map, pull request or database migration card, the skill map-card, pull-request-card or database-migration-card.";
 
 /// Where a document may fetch KaTeX, bundled in the app (`trek_assets::assets::katex_file`), from
 /// its own origin: `/_trek/katex/katex.min.js`, `auto-render.min.js`, `katex.min.css` and
 /// `fonts/KaTeX_*.woff2`. A study question card draws its formulas with it, so it asks no CDN.
 pub const KATEX_PATH: &str = "/_trek/katex/";
 
-/// The policy a document that uses the bundled KaTeX (`KATEX_PATH`) is served under: the same as
-/// `CSP`, except that scripts, styles and fonts come from the document's own origin (the bundled
-/// files) and inline code, and not from the web or `eval`. A study card needs nothing from a CDN.
-pub const STUDY_CSP: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src https: data: blob:; font-src 'self' data:; media-src https: data: blob:; connect-src https: data: blob:; worker-src blob: https:; child-src blob: data:; frame-src blob: data:; object-src 'none'; form-action 'none'; base-uri 'none'";
-
-/// The policy `html` is served under: `STUDY_CSP` when it loads the bundled KaTeX, else `CSP`.
-pub fn csp_for(html: &str) -> &'static str {
+/// The policy `html` is served under, `hosts` being the sites the user allowed its page:
+/// `net::study_csp` when it loads the bundled KaTeX, else `net::page_csp`.
+pub fn csp_for(html: &str, hosts: &[String]) -> String {
     if html.contains(KATEX_PATH) {
-        STUDY_CSP
+        net::study_csp(hosts)
     } else {
-        CSP
+        net::page_csp(hosts)
     }
 }
 
@@ -317,11 +311,11 @@ pub fn theme_update_script(css: &str) -> String {
 }
 
 /// The document as it's served: `html` with Trek's head first (charset, the CSP again — the
-/// response carries it too —, viewport and the theme's stylesheet, `theme_css`), so the document's
-/// own styles come after and win. A fragment (no
+/// response carries it too —, that it sends no referrer, viewport and the theme's stylesheet,
+/// `theme_css`), so the document's own styles come after and win. A fragment (no
 /// `<html>` or `<head>`) is made a whole document with it as the body.
 pub fn document(html: &str, theme_css: &str) -> String {
-    document_with(html, theme_css, CSP)
+    document_with(html, theme_css, &net::page_csp(&[]))
 }
 
 /// What a note's video plays under: nothing runs, nothing loads but the file Trek serves it.
@@ -338,7 +332,9 @@ pub const MEDIA_PATH: &str = "/media";
 /// down its edge, until the card was live again.
 pub const VIDEO_HTML: &str = "<style>html,body{margin:0;background:transparent;overflow:hidden}::-webkit-scrollbar{display:none}video{display:block;width:100%;height:auto;max-height:720px;background:#000;object-fit:contain}</style><video src=\"/media#t=0.001\" controls controlslist=\"nodownload\" disablepictureinpicture preload=\"metadata\" playsinline></video>";
 
-/// What a video from the web plays under: as `VIDEO_CSP`, its media from https only.
+/// What a video from the web plays under: as `VIDEO_CSP`, its media from https only. The page is
+/// Trek's own and runs nothing; where its one address goes is the user's to allow first (the
+/// card asks before it loads: a link an agent wrote can carry anything in it).
 pub const REMOTE_VIDEO_CSP: &str = "default-src 'none'; media-src https:; style-src 'unsafe-inline'; form-action 'none'; object-src 'none'; base-uri 'none'";
 
 /// The page a video from the web (`url`, an https link `media::remote_video` took) plays in: as
@@ -373,7 +369,7 @@ pub fn seek_script(secs: f64) -> String {
 /// `document` under another policy (`csp`).
 pub fn document_with(html: &str, theme_css: &str, csp: &str) -> String {
     let ours = format!(
-        "<meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style id=\"{THEME_STYLE_ID}\">{}</style>",
+        "<meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\"><meta name=\"referrer\" content=\"no-referrer\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style id=\"{THEME_STYLE_ID}\">{}</style>",
         theme_css.replace("</", "<\\/")
     );
     let lower = html.to_ascii_lowercase();
@@ -402,10 +398,16 @@ pub fn document_with(html: &str, theme_css: &str, csp: &str) -> String {
 /// secret. It holds on to the native message channel before the page can touch it and reports,
 /// tagged with the secret: the content's height as it changes (`h`, debounced to a frame), that
 /// the page took the pointer or the keys (`focus`, so Trek's shortcuts stand aside), an Esc the
-/// page didn't use (`esc`, so the keys go back to Trek), and a click on a link to elsewhere
-/// (`open`, for the user's browser; the frame itself never leaves the document), and a wheel it
-/// had no use for (`w`, so the answer scrolls on past it). It also gives the page `trek.send` and
-/// `trek.copy` (`ACTIONS_JS`), heard only within `GESTURE_WINDOW` of the user's own click or key.
+/// page didn't use (`esc`, so the keys go back to Trek), a load the page's policy stopped
+/// (`blocked`, so the card can ask about its host), and a wheel it had no use for (`w`, so the
+/// answer scrolls on past it). It also gives the page `trek.send` and `trek.copy` (`ACTIONS_JS`),
+/// heard only within `GESTURE_WINDOW` of the user's own click or key.
+///
+/// It says nothing about links: a link the user clicks navigates, the app refuses the navigation
+/// and opens the address itself if it saw the click (`net::LinkGate`). And it takes WebRTC's
+/// constructors off the page before any of its scripts run: a peer connection asks whatever
+/// server it's told to, and no policy directive stops it in WebKit (the app turns WebRTC off in
+/// the view as well, where the engine lets it).
 pub fn bootstrap(nonce: &str) -> String {
     bootstrap_with(nonce, &Extras::default())
 }
@@ -624,16 +626,24 @@ const BOOTSTRAP: &str = r#"(() => {
     const dx = e.deltaX * k, dy = e.deltaY * k;
     if (!scrolls(e.target, dx, dy)) post({ t: 'w', x: dx, y: dy });
   }, { passive: true });
-  window.addEventListener('click', (e) => {
-    if (!e.isTrusted || e.defaultPrevented || e.button !== 0) return;
-    const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
-    if (!a) return;
-    let u;
-    try { u = new URL(a.href, location.href); } catch (_) { return; }
-    if (u.origin === location.origin && u.pathname === location.pathname) return;
-    e.preventDefault();
-    if (/^(https?|mailto):$/.test(u.protocol)) post({ t: 'open', u: u.href });
-  });
+  // A load the policy stopped, as the engine reports it (a report the page makes up isn't
+  // trusted): the card asks the user about its host. Each site once, a few dozen sites a page.
+  let reports = 0;
+  const reported = make(null);
+  document.addEventListener('securitypolicyviolation', (e) => {
+    if (!e.isTrusted || reports >= 40) return;
+    const u = e.blockedURI;
+    if (typeof u !== 'string' || u.length > 2048 || !/^(https|wss):\/\/[^\/?#]/.test(u)) return;
+    const site = /^[a-z]+:\/\/[^\/?#]*/.exec(u)[0];
+    if (reported[site]) return;
+    reported[site] = true;
+    reports++;
+    post({ t: 'blocked', u });
+  }, true);
+  // No WebRTC: a peer connection reaches any server it's given, past the policy.
+  for (const name of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel', 'RTCIceTransport', 'RTCSctpTransport', 'RTCDtlsTransport']) {
+    try { Object.defineProperty(window, name, { value: undefined, configurable: false, writable: false }); } catch (_) {}
+  }
 })();"#;
 
 /// What the page told Trek (`bootstrap`), once checked.
@@ -645,8 +655,9 @@ pub enum Message {
     Focus,
     /// Esc, which it didn't use.
     Escape,
-    /// A link to open in the user's browser (`external` already passed it).
-    Open(String),
+    /// The page's policy stopped a load from this address (https or wss, at most 2 KB; the
+    /// host is read by `net::host_of`), as the engine reported it.
+    Blocked(String),
     /// A wheel the page didn't use, in CSS px (positive: right, down), for the answer around it.
     Wheel(f32, f32),
     /// `trek.dictate(on)`: start Trek's dictation into the page (`true`), or end the take
@@ -662,7 +673,8 @@ pub enum Message {
 
 /// `body`, a message from the page, if it's one Trek's bootstrap sent with `nonce` and says
 /// something Trek listens to, within bounds. Anything else (no or the wrong secret, an unknown
-/// type, a height that isn't a sane number, a link that isn't http, https or mailto) is `None`.
+/// type, a height that isn't a sane number) is `None`. No message opens a link: that's the app's
+/// to do, on a click it saw itself (`net::LinkGate`).
 pub fn parse_message(body: &str, nonce: &str) -> Option<Message> {
     if body.len() > MAX_MESSAGE_BYTES || nonce.is_empty() {
         return None;
@@ -679,7 +691,11 @@ pub fn parse_message(body: &str, nonce: &str) -> Option<Message> {
         }
         "focus" => Some(Message::Focus),
         "esc" => Some(Message::Escape),
-        "open" => external(object.get("u")?.as_str()?).map(Message::Open),
+        "blocked" => {
+            let url = object.get("u")?.as_str()?;
+            (url.len() <= MAX_URL_CHARS && !url.chars().any(|c| c.is_control()))
+                .then(|| Message::Blocked(url.to_string()))
+        }
         "w" => {
             let (x, y) = (object.get("x")?.as_f64()?, object.get("y")?.as_f64()?);
             (x.is_finite() && y.is_finite() && x.abs() <= 10_000. && y.abs() <= 10_000.)
@@ -794,10 +810,11 @@ pub fn origin(hash: u64, windows: bool) -> String {
     }
 }
 
-/// Whether the frame may go to `url` given the document's `origin`: only to itself (its first
-/// load, a reload, a `#fragment`), or to what scripts make in memory (`about:blank`,
-/// `about:srcdoc`, `blob:`). Everything else stays where it is; a link the user clicked was already
-/// sent to their browser by the bootstrap (`Message::Open`).
+/// Whether a frame may go to `url` given the document's `origin`: only to itself (its first
+/// load, a reload, a `#fragment`), or to a frame the page writes itself (`about:blank`,
+/// `about:srcdoc`: both keep the page's policy). Everything else stays where it is, a `blob:`
+/// or `data:` document too (what policy one runs under differs by engine); the address goes to
+/// the user's browser if they clicked for it (`net::LinkGate`).
 pub fn navigation_allowed(url: &str, origin: &str) -> bool {
     let lower = url.to_ascii_lowercase();
     let origin = origin.to_ascii_lowercase();
@@ -806,7 +823,6 @@ pub fn navigation_allowed(url: &str, origin: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '#', '?']))
         || lower == "about:blank"
         || lower == "about:srcdoc"
-        || lower.starts_with("blob:")
 }
 
 #[cfg(test)]
@@ -861,8 +877,7 @@ mod tests {
         );
         let doc = document_with(VIDEO_HTML, "", VIDEO_CSP);
         assert!(
-            doc.contains(&format!("content=\"{VIDEO_CSP}\""))
-                && !doc.contains(&format!("content=\"{CSP}\""))
+            doc.contains(&format!("content=\"{VIDEO_CSP}\"")) && !doc.contains(&net::page_csp(&[]))
         );
         assert!(VIDEO_HTML.contains(&format!("src=\"{MEDIA_PATH}")));
         assert!(
@@ -954,10 +969,21 @@ mod tests {
         );
         assert_eq!(
             parse_message(
+                r#"{"n":"3f9a","t":"blocked","u":"https://cdn.jsdelivr.net/npm/three"}"#,
+                n
+            ),
+            Some(Message::Blocked(
+                "https://cdn.jsdelivr.net/npm/three".into()
+            ))
+        );
+        // No message opens a link, whoever sends it: the page shares the bootstrap's world, so
+        // what's said from there is no proof of a click (`net::LinkGate` wants the app's own).
+        assert_eq!(
+            parse_message(
                 r#"{"n":"3f9a","t":"open","u":"https://threejs.org/docs"}"#,
                 n
             ),
-            Some(Message::Open("https://threejs.org/docs".into()))
+            None
         );
         assert_eq!(
             parse_message(r#"{"n":"3f9a","t":"w","x":0,"y":-120.5}"#, n),
@@ -1005,13 +1031,18 @@ mod tests {
             None
         );
         assert_eq!(
-            parse_message(r#"{"n":"3f9a","t":"open","u":"file:///etc/passwd"}"#, n),
+            parse_message(r#"{"n":"3f9a","t":"blocked","u":"https://a.b/\u0000"}"#, n),
             None
         );
         assert_eq!(
-            parse_message(r#"{"n":"3f9a","t":"open","u":"javascript:alert(1)"}"#, n),
+            parse_message(r#"{"n":"3f9a","t":"blocked","u":7}"#, n),
             None
         );
+        let long = format!(
+            r#"{{"n":"3f9a","t":"blocked","u":"https://a.example.com/{}"}}"#,
+            "x".repeat(MAX_URL_CHARS)
+        );
+        assert_eq!(parse_message(&long, n), None);
         assert_eq!(parse_message("not json", n), None);
         assert_eq!(parse_message(r#"["n","3f9a"]"#, n), None);
         let huge = format!(
@@ -1360,6 +1391,25 @@ process.stdout.write(JSON.stringify({ sent, out: out === undefined ? null : out 
         );
     }
 
+    /// The iPhone runs a page on a tap, under a policy of its own text. It's the Mac's, for a
+    /// page the user has allowed no host: what's open on the Mac is open there, and nothing else.
+    #[test]
+    fn the_phone_serves_pages_under_the_macs_policy() {
+        let swift = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../ios/Trek/Views/LivePage.swift"
+        ))
+        .expect("LivePage.swift");
+        assert!(
+            swift.contains(&format!("static let csp = \"{}\"", net::page_csp(&[]))),
+            "LivePage.swift's `LivePage.csp` should be `artifact::net::page_csp(&[])`"
+        );
+        assert!(
+            !swift.contains("connect-src https:")
+                && !swift.contains("script-src 'unsafe-inline' 'unsafe-eval' https:")
+        );
+    }
+
     #[test]
     fn links_go_to_the_browser_only_if_they_are_web_or_mail() {
         assert_eq!(
@@ -1401,12 +1451,9 @@ process.stdout.write(JSON.stringify({ sent, out: out === undefined ? null : out 
         assert!(navigation_allowed(&format!("{o}/"), &o), "its first load");
         assert!(navigation_allowed(&format!("{o}/#tab-2"), &o), "a fragment");
         assert!(navigation_allowed(&o, &o));
-        assert!(
-            navigation_allowed("about:blank", &o)
-                && navigation_allowed("about:srcdoc", &o)
-                && navigation_allowed("blob:trek-artifact://x/1", &o)
-        );
+        assert!(navigation_allowed("about:blank", &o) && navigation_allowed("about:srcdoc", &o));
         for away in [
+            "blob:trek-artifact://a0000000000000abc/1",
             "https://example.com/",
             "http://localhost:3000/",
             "file:///etc/passwd",
@@ -1465,7 +1512,8 @@ process.stdout.write(JSON.stringify({ sent, out: out === undefined ? null : out 
         );
         assert!(doc.find("id=\"trek-theme\"").unwrap() < doc.find("color:red").unwrap());
         assert!(doc.contains(&format!(
-            "<meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\">"
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"{}\"><meta name=\"referrer\" content=\"no-referrer\">",
+            net::page_csp(&[])
         )));
         // A head-less document, and a fragment.
         let doc = document("<html><body><canvas></canvas></body></html>", &css);
@@ -1540,9 +1588,11 @@ process.stdout.write(JSON.stringify({ sent, out: out === undefined ? null : out 
             js.contains("window.webkit.messageHandlers.ipc")
                 && js.contains("window.chrome.webview")
         );
-        for t in ["t: 'h'", "t: 'focus'", "t: 'esc'", "t: 'open'", "t: 'w'"] {
+        for t in ["t: 'h'", "t: 'focus'", "t: 'esc'", "t: 'blocked'", "t: 'w'"] {
             assert!(js.contains(t), "{t}");
         }
+        // It asks for no link to be opened: that's the app's to see and do.
+        assert!(!js.contains("t: 'open'") && !js.contains("closest('a[href]')"));
     }
 
     #[test]
@@ -1554,34 +1604,23 @@ process.stdout.write(JSON.stringify({ sent, out: out === undefined ? null : out 
     }
 
     #[test]
-    fn the_csp_allows_https_only_and_no_forms_or_plugins() {
-        assert!(CSP.starts_with("default-src 'none'"));
-        assert!(!CSP.contains("http:") && !CSP.contains("file:") && !CSP.contains("'self'"));
-        assert!(CSP.contains("script-src 'unsafe-inline' 'unsafe-eval' https:"));
-        assert!(
-            CSP.contains("form-action 'none'")
-                && CSP.contains("object-src 'none'")
-                && CSP.contains("base-uri 'none'")
-        );
-    }
-
-    #[test]
     fn a_document_with_the_bundled_katex_gets_its_own_origin_and_no_cdn() {
         let card = "<script defer src=\"/_trek/katex/katex.min.js\"></script>";
-        assert_eq!(csp_for(card), STUDY_CSP);
+        assert_eq!(csp_for(card, &[]), net::study_csp(&[]));
         assert_eq!(
-            csp_for("<script src=\"https://cdn.jsdelivr.net/x.js\">"),
-            CSP
+            csp_for("<script src=\"https://cdn.jsdelivr.net/x.js\">", &[]),
+            net::page_csp(&[])
         );
-        // Scripts, styles and fonts: its own files, no web host. The rest is `CSP`'s.
+        let (study, page) = (net::study_csp(&[]), net::page_csp(&[]));
+        // Scripts, styles and fonts: its own files, no web host. The rest is the page's.
         for directive in ["script-src", "style-src", "font-src"] {
-            let own = STUDY_CSP
+            let own = study
                 .split("; ")
                 .find(|d| d.starts_with(directive))
                 .unwrap();
             assert!(own.contains("'self'") && !own.contains("https:"), "{own}");
         }
-        assert!(!STUDY_CSP.contains("'unsafe-eval'") && !STUDY_CSP.contains("http:"));
+        assert!(!study.contains("'unsafe-eval'") && !study.contains("http:"));
         let same = |csp: &str| {
             csp.split("; ")
                 .filter(|d| {
@@ -1592,7 +1631,129 @@ process.stdout.write(JSON.stringify({ sent, out: out === undefined ? null : out 
                 .map(str::to_string)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(same(STUDY_CSP), same(CSP));
+        assert_eq!(same(&study), same(&page));
+        // A host the user allowed reaches both, for what a card fetches or shows.
+        let hosts = vec!["api.example.com".to_string()];
+        assert!(
+            csp_for(card, &hosts).contains("connect-src data: blob: ")
+                && csp_for(card, &hosts).contains(" https://api.example.com;")
+        );
+    }
+
+    /// Runs the bootstrap as a page gets it, with `RTCPeerConnection` there beforehand, then
+    /// `after`, which may `report(trusted, uri)` a policy violation as the engine (or a page
+    /// pretending) would. What reached Trek, and what `after` evaluated to.
+    fn run_with_document(after: &str) -> Option<(Vec<String>, serde_json::Value)> {
+        use std::io::Write as _;
+        let driver = r#"
+const vm = require('vm');
+const [bootstrap, after] = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const sent = [], heard = {};
+const sandbox = {
+  TextEncoder,
+  document: { readyState: 'complete', body: null, documentElement: {}, addEventListener(type, fn) { (heard[type] = heard[type] || []).push(fn); } },
+  setTimeout() {}, requestAnimationFrame() {}, addEventListener() {},
+  RTCPeerConnection: function () {}, webkitRTCPeerConnection: function () {}, RTCDataChannel: function () {},
+};
+sandbox.window = sandbox;
+sandbox.report = (trusted, uri) => (heard.securitypolicyviolation || []).forEach((fn) => fn({ isTrusted: trusted, blockedURI: uri }));
+sandbox.webkit = { messageHandlers: { ipc: { postMessage(m) { sent.push(m); } } } };
+const ctx = vm.createContext(sandbox);
+vm.runInContext(bootstrap, ctx);
+const out = vm.runInContext(after, ctx);
+process.stdout.write(JSON.stringify({ sent, out: out === undefined ? null : out }));
+"#;
+        let mut child = std::process::Command::new("node")
+            .args(["-e", driver])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .ok()?;
+        let input = serde_json::json!([bootstrap("c0ffee"), after]).to_string();
+        child.stdin.take()?.write_all(input.as_bytes()).ok()?;
+        let output = child.wait_with_output().ok()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+        let sent = value["sent"]
+            .as_array()?
+            .iter()
+            .filter_map(|m| m.as_str().map(str::to_string))
+            .collect();
+        Some((sent, value["out"].clone()))
+    }
+
+    #[test]
+    fn the_card_hears_what_the_policy_stopped_from_the_engine_alone() {
+        let after = "report(true, 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js'); \
+            report(false, 'https://made-up.example.com/x'); \
+            report(true, 'inline'); report(true, 'eval'); report(true, 'http://plain.example.com/'); \
+            report(true, 'data'); report(true, 7); report(true, 'https://x.example.com/' + 'a'.repeat(3000)); \
+            report(true, 'wss://live.example.com/socket'); \
+            for (let i = 0; i < 9; i++) report(true, 'https://cdn.jsdelivr.net/npm/again-' + i); \
+            for (let i = 0; i < 200; i++) report(true, 'https://h' + i + '.example.com/'); 1";
+        let Some((sent, _)) = run_with_document(after) else {
+            return; // no node here: the checks on the script's text still run
+        };
+        let heard: Vec<_> = sent
+            .iter()
+            .filter_map(|m| parse_message(m, "c0ffee"))
+            .collect();
+        assert_eq!(
+            heard[..2],
+            [
+                Message::Blocked(
+                    "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js".into()
+                ),
+                Message::Blocked("wss://live.example.com/socket".into()),
+            ]
+        );
+        assert_eq!(sent.len(), 40, "a page can't report without end");
+        assert_eq!(sent.len(), heard.len());
+    }
+
+    #[test]
+    fn the_page_gets_no_peer_connections() {
+        let after = "[typeof RTCPeerConnection, typeof webkitRTCPeerConnection, typeof RTCDataChannel, \
+            (() => { try { window.RTCPeerConnection = function () {}; } catch (_) {} return typeof RTCPeerConnection; })(), \
+            (() => { try { Object.defineProperty(window, 'RTCPeerConnection', { value: 1 }); return 'redefined'; } catch (_) { return 'kept'; } })()]";
+        let Some((_, out)) = run_with_document(after) else {
+            return;
+        };
+        assert_eq!(
+            out,
+            serde_json::json!(["undefined", "undefined", "undefined", "undefined", "kept"])
+        );
+    }
+
+    /// Trek's own card recipes are written to the same rule as an agent's page: what they load
+    /// as they open is in `net::OPEN_SOURCES`, so a recipe followed to the letter asks nothing.
+    #[test]
+    fn the_card_recipes_load_only_from_open_sources() {
+        let mut loads = 0;
+        for name in crate::skills::CARD_RECIPES {
+            let (_, md) = crate::skills::SHIPPED
+                .iter()
+                .find(|(n, _)| *n == name)
+                .expect("shipped");
+            for line in md.lines().map(str::trim) {
+                let tag = line.starts_with("<script src=")
+                    || line.starts_with("<link rel=\"stylesheet\"");
+                for (at, _) in line.match_indices("\"https://") {
+                    let url = line[at + 1..].split('"').next().unwrap_or_default();
+                    // What a `<script>` or stylesheet names, and the map's tiles and glyphs.
+                    if tag || url.contains("openfreemap") {
+                        loads += 1;
+                        assert!(net::allowed(url, &[]), "{name}: {url}");
+                    }
+                }
+            }
+        }
+        assert!(loads >= 7, "{loads}");
     }
 
     #[test]
@@ -1627,7 +1788,8 @@ process.stdout.write(JSON.stringify({ sent, out: out === undefined ? null : out 
             "<title>",
             "160 to 720 px",
             "200 KB",
-            "over https",
+            "cdnjs.cloudflare.com",
+            "asks the user",
             "never from local files",
             "transparent page background",
             "trek.send(text)",

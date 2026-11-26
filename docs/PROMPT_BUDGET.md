@@ -367,12 +367,12 @@ Not done:
 - `crates/trek-app/src/workspace/prompt_budget.rs` builds the notes with `agent_notes`, the function
   `session_notes` uses, for default settings and with a verification skill, and asserts their size
   (3,250 and 3,700 chars since 2026-11-13: the notes are 2,997 and 3,441 with the Trek themes
-  sentence, about 8% under each; on 2026-11-26, added up from the source and not measured in a
-  run, about 3,239 and 3,674, under 1% of headroom, so the next sentence added needs one taken
-  out or a new budget), that the wrapper stays small,
+  sentence, about 8% under each; on 2026-11-26, measured with `TREK_PROMPT_DUMP`, 3,249 and
+  3,697: one and three characters of headroom, so the next sentence added needs one taken out
+  or a new budget), that the wrapper stays small,
   and that each piece goes in once. It also builds Codex's first-message notes with
   `trek_agents::message_notes`: the tool-search line is held to 220 chars and Codex's notes with
-  everything on to 4,000 (3,688 today).
+  everything on to 4,000 (3,944 on 2026-11-26).
 - `crates/trek-mcp/src/main.rs`, `prompt_budget`: each family's server instructions and tool schemas,
   as `initialize` and `tools/list` return them, against a per-family budget, and all of them
   together (45,000 chars since 2026-11-13; 46,200 since elements; 40,500 before). Since
@@ -384,6 +384,12 @@ Not done:
   `tool_search_is_forced_only_for_anthropics_own_api` hold the command line and the environment.
 - `trek_core::visualization`'s and `trek_core::artifact`'s own compactness tests now stop at 1,600
   and 500 chars; `artifact`'s checks the skill keeps every rule the note used to carry.
+
+The `trek-html` note grew by 8 characters on 2026-11-26 (453 to 461): it now says "(only cdnjs
+loads unasked)", since a page loads from other hosts only once the user allows them on its card,
+and an agent that doesn't know writes pages that open with a question. The words came out of the
+same note ("built-in", "and", "follow"); what loads without asking, and what asks, is in full in
+the `trek-html` skill, which costs nothing until an agent writes a page.
 
 To raise a budget on purpose: re-measure as above, update the tables here, and set the constant to
 the new size plus about 10%. Every character goes out with every request of every thread, so look
