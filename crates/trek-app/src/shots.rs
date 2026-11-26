@@ -2486,6 +2486,39 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         cx.refresh_windows();
         return Ok(());
     }
+    // A real iPhone pairs with this isolated Trek: the phone server on the local network at the
+    // port given (never the owner's 7420), a pairing code offered, and what to type on the phone
+    // written to `pair-device.txt` in the shot folder (address, code, short fingerprint, and the
+    // link). The phone lists it as "Trek test (isolated)", one more machine beside the owner's;
+    // its threads are this run's mock ones. `pair-device <port>`.
+    if verb == "pair-device" {
+        let port: u16 = arg
+            .parse()
+            .map_err(|_| anyhow::anyhow!("pair-device: a port, e.g. 7437"))?;
+        let offer = ws.update(cx, |ws, cx| -> anyhow::Result<trek_remote::PairingOffer> {
+            ws.start_device_remote(port, cx)?;
+            ws.offer_pairing(cx);
+            ws.remote
+                .as_ref()
+                .and_then(|r| r.offer.clone())
+                .ok_or_else(|| anyhow::anyhow!("pair-device: no pairing code"))
+        })?;
+        let link = crate::machines::PairLink::parse(&offer.url).map_err(anyhow::Error::msg)?;
+        if let Some(dir) = std::env::var_os("TREK_SHOT_DIR") {
+            std::fs::write(
+                Path::new(&dir).join("pair-device.txt"),
+                format!(
+                    "address {}\ncode {}\nfingerprint {}\nlink {}\n",
+                    link.routes.first().cloned().unwrap_or_default(),
+                    offer.code,
+                    offer.fingerprint.clone().unwrap_or_default(),
+                    offer.url,
+                ),
+            )?;
+        }
+        cx.refresh_windows();
+        return Ok(());
+    }
     if verb == "pair-phone" {
         static STAND_IN: std::sync::Mutex<Option<Arc<trek_remote::client::Client>>> =
             std::sync::Mutex::new(None);

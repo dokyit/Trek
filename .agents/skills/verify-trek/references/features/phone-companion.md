@@ -21,7 +21,14 @@ What the phone does beside the thread itself: a Live Activity (Lock Screen and D
 ./.agents/skills/verify-trek/scripts/trek-dev screenshot phone-settings
 ```
 
-Pairing and push are unavailable by design under `TREK_SHOT_DIR`: the isolated process does not start the remote service, has notifications off, and has no real thread/account data. Validate the settings UI here and use a dedicated test Mac/iPhone pair for protocol E2E work.
+Pairing and push are off by design under `TREK_SHOT_DIR`: the isolated process does not start the remote service by itself, has notifications off, and has no real thread or account data. Two commands start its phone server when a check asks: `control pair-phone` (a stand-in iPhone on the loopback, as `parity-live` uses) and, for a real iPhone:
+
+```sh
+./.agents/skills/verify-trek/scripts/trek-dev control pair-device 7437   # any free port but the owner's 7420
+cat "$(./.agents/skills/verify-trek/scripts/trek-dev status | jq -r .runtime_dir)/shot/pair-device.txt"   # address, code, fingerprint, link
+```
+
+The server listens on the local network at that port under the name "Trek test (isolated)", with an id of its own, so the iPhone lists it as one more machine beside the owner's Trek and neither pairing touches the other. On the phone: Settings › Add a machine… › Enter address and code (the address, the code and the short fingerprint from the file). Its threads are the run's mock ones, so sending, approvals, background commands and sub-agents can be tried end to end from a real phone without touching a real thread. Unpair it on the phone afterwards (Settings › that machine › Unpair).
 
 ## Code
 
