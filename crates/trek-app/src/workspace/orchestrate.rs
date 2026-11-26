@@ -180,12 +180,17 @@ impl Workspace {
     /// session key of their own. Background computer use gets the same key, to tell Trek what it's doing (for its
     /// picture-in-picture window). Returns the key too, to name the session's thread and to
     /// retire it.
-    pub(super) fn session_mcp(
+    ///
+    /// The session's channel (`ipc.env`: where Trek listens, its token, the key) goes only to
+    /// servers Trek built here, never to one of the user's, whatever it's named or set to.
+    pub fn session_mcp(
         &mut self,
         agent: &AgentId,
         thread: Option<&str>,
     ) -> (Vec<McpServer>, Option<String>) {
-        let mut servers = self.mcp_servers();
+        let mut servers = self.own_mcp_servers();
+        let own = servers.len();
+        servers.extend(self.user_mcp_servers());
         // The mock talks to Trek itself; a real agent needs the server binary.
         let mock = matches!(agent, AgentId::Direct(p) if p == catalog::MOCK_PROVIDER);
         let bin = super::trek_mcp_binary();
@@ -195,7 +200,8 @@ impl Workspace {
         let orchestrate = self.settings.tools.orchestration && transcript;
         let browser = self.browser_tools() && (mock || bin.is_some());
         let phone = self.phone_tools() && bin.is_some();
-        let behind = servers.iter().position(|s| {
+        // Among Trek's own only: the user's come after them.
+        let behind = servers[..own].iter().position(|s| {
             s.name == COMPUTER_SERVER
                 && s.env().iter().any(|(k, v)| {
                     k == trek_ipc::ENV_COMPUTER_MODE && v == trek_ipc::COMPUTER_BACKGROUND

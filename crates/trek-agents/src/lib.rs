@@ -203,12 +203,21 @@ pub(crate) fn not_installed(name: &str, key: &str) -> String {
 
 /// Keep Trek's own channel variables out of an agent process's environment. They belong to the
 /// MCP servers Trek starts for the session, never to the agent (or anything it spawns).
+///
+/// Every program Trek starts already leaves out the ones Trek itself inherited
+/// (`trek_core::procs::command`); this also takes back any set on `cmd` since, so call it after
+/// the last `env`/`envs`.
 pub(crate) fn strip_channel_env(cmd: &mut tokio::process::Command) {
-    for name in [
-        trek_ipc::ENV_SOCKET,
-        trek_ipc::ENV_TOKEN,
-        trek_ipc::ENV_SESSION,
-    ] {
+    let set: Vec<std::ffi::OsString> = cmd
+        .as_std()
+        .get_envs()
+        .map(|(name, _)| name.to_os_string())
+        .filter(|name| trek_core::procs::is_channel_env(&name.to_string_lossy()))
+        .collect();
+    for name in set {
+        cmd.env_remove(name);
+    }
+    for name in trek_core::procs::CHANNEL_ENV {
         cmd.env_remove(name);
     }
 }
@@ -1833,6 +1842,32 @@ pub(crate) fn load_image(path: &std::path::Path) -> anyhow::Result<(&'static str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The names `trek_core::procs` keeps out of what Trek starts are `trek_ipc`'s (the crates
+    /// don't share them), and an agent's command loses any set on it, in any case.
+    #[test]
+    fn an_agents_command_never_carries_treks_channel() {
+        assert_eq!(
+            trek_core::procs::CHANNEL_ENV,
+            [
+                trek_ipc::ENV_SOCKET,
+                trek_ipc::ENV_TOKEN,
+                trek_ipc::ENV_SESSION
+            ]
+        );
+        let mut cmd = trek_core::procs::async_command("x");
+        cmd.env(trek_ipc::ENV_TOKEN, "t")
+            .env("trek_ipc_session", "s")
+            .env("KEEP", "yes");
+        strip_channel_env(&mut cmd);
+        let set: Vec<String> = cmd
+            .as_std()
+            .get_envs()
+            .filter(|(_, value)| value.is_some())
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(set, ["KEEP"]);
+    }
 
     #[test]
     fn a_missing_agent_is_told_the_install_line_trek_uses() {

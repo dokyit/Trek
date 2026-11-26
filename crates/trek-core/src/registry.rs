@@ -602,9 +602,12 @@ impl AddedAgent {
     }
 
     /// Its environment, secrets read from the Keychain (one that can't be read is left out).
+    /// Never Trek's own channel variables, whatever its settings name: an agent isn't handed
+    /// (or made to carry) a session's token.
     pub fn launch_env(&self) -> Vec<(String, String)> {
         self.env
             .iter()
+            .filter(|v| !crate::procs::is_channel_env(&v.name))
             .filter_map(|v| {
                 let value = if v.secret {
                     secret(&self.id, &v.name)?
@@ -1748,6 +1751,19 @@ mod tests {
         let a = custom("A", "", abs, vec![], env("TOKEN"), &[]).unwrap();
         assert_eq!(a.launch_env(), [("TOKEN".to_string(), "v".to_string())]);
         assert_eq!(a.command_line(), abs);
+        // Trek's own channel is never an agent's to be given, however the name is cased.
+        let mut posing = a.clone();
+        for name in ["TREK_IPC_TOKEN", "trek_ipc_socket", "Trek_Ipc_Session"] {
+            posing.env.push(EnvVar {
+                name: name.into(),
+                value: "x".into(),
+                secret: false,
+            });
+        }
+        assert_eq!(
+            posing.launch_env(),
+            [("TOKEN".to_string(), "v".to_string())]
+        );
     }
 
     #[test]

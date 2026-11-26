@@ -20,11 +20,29 @@ pub enum McpCheck {
 /// Whether `name` is one of Trek's own channel variables. A server the user configured must
 /// never be handed them: the token lets a process act as that session (`request_secret`, sub-
 /// agents), so a pasted or agent-written config could otherwise read it from its own env.
+/// In any case: Windows' variable names have none.
 fn is_trek_channel(name: &str) -> bool {
-    matches!(
-        name,
-        trek_ipc::ENV_SOCKET | trek_ipc::ENV_TOKEN | trek_ipc::ENV_SESSION
-    )
+    trek_core::procs::is_channel_env(name)
+}
+
+/// The names Trek's own tool servers go by. Agents call their tools by these names
+/// (`mcp__trek-computer__click`) and Trek hands some of them a session's channel, so a server of
+/// the user's (pasted, or written into the settings by an agent) can't take one: it's left out of
+/// every session.
+pub const RESERVED_SERVERS: [&str; 6] = [
+    super::orchestrate::COMPUTER_SERVER,
+    "trek-simulator",
+    "trek-video",
+    trek_ipc::browser::SERVER,
+    trek_ipc::phone::SERVER,
+    trek_core::orchestrate::SERVER,
+];
+
+/// Whether `name` is one of Trek's own servers' (in any case, with space around it or not).
+pub fn is_reserved_server(name: &str) -> bool {
+    RESERVED_SERVERS
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(name.trim()))
 }
 
 /// `s` as a session is given it, its tokens read back from the Keychain (one that's gone isn't

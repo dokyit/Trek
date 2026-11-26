@@ -144,6 +144,7 @@ impl Agent {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        crate::strip_channel_env(&mut command);
         let mut child = crate::spawn_group(&mut command)
             .with_context(|| format!("failed to start {}", bin.display()))?;
         let stderr = StderrTail::capture(child.stderr.take().unwrap(), "acp");
