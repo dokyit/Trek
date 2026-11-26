@@ -426,6 +426,7 @@ impl Run<'_> {
         let r = s("ref");
         match self.call.method.as_str() {
             "browser_open" => {
+                self.approve("browser_open", &p, None).await?;
                 self.open(&s("url"), p["new_tab"].as_bool() == Some(true))
                     .await
             }

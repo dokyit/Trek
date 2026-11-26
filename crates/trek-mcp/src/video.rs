@@ -194,6 +194,71 @@ fn public_host(url: &str) -> Result<String, String> {
     Ok(host)
 }
 
+/// Whether `ip` is an address on the public internet: not this computer, its network, a
+/// link-local or cloud metadata address (169.254.169.254), shared address space, multicast or the
+/// unspecified address.
+fn is_public_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            !(v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || a == 0
+                || (a == 100 && (64..128).contains(&b))
+                || (a == 198 && (b == 18 || b == 19))
+                || a >= 240)
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_public_ip(IpAddr::V4(v4));
+            }
+            let first = v6.segments()[0];
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80)
+        }
+    }
+}
+
+/// `url`'s host (a public name, `public_host`), looked up: every address it has must be public,
+/// so a name that points at this computer or its network (`127.0.0.1.nip.io`) is refused too.
+/// The `host:port:address` for curl's `--resolve`, which holds curl to the address checked.
+fn public_addr(url: &str) -> Result<String, String> {
+    use std::net::ToSocketAddrs as _;
+    let host = public_host(url)?;
+    let rest = &url["https://".len()..];
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    let port = authority
+        .rsplit_once(':')
+        .and_then(|(_, p)| p.parse::<u16>().ok())
+        .unwrap_or(443);
+    let addrs: Vec<std::net::SocketAddr> = (host.as_str(), port)
+        .to_socket_addrs()
+        .map_err(|e| format!("{host} couldn't be looked up: {e}"))?
+        .collect();
+    let first = addrs
+        .first()
+        .ok_or_else(|| format!("{host} has no address"))?;
+    if addrs.iter().any(|a| !is_public_ip(a.ip())) {
+        return Err(format!(
+            "{host} points at this computer or its local network, which isn't fetched"
+        ));
+    }
+    let ip = match first.ip() {
+        std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+        v4 => v4.to_string(),
+    };
+    Ok(format!("{host}:{port}:{ip}"))
+}
+
 fn parse_https(url: &str) -> Result<Source, String> {
     let host = public_host(url)?;
     let bare = ["www.", "m.", "mobile.", "music."]
@@ -1120,9 +1185,14 @@ fn download(url: &str, dir: &Path) -> Result<PathBuf, String> {
     // hosts as the link the agent gave.
     let mut current = url.to_string();
     for hop in 0..=MAX_REDIRECTS {
+        let pin = public_addr(&current).map_err(|e| format!("Couldn't download {url}: {e}"))?;
         let printed = util::run_ok(
             path_str(&curl)?,
             &[
+                // No `.curlrc`: options of its own (a proxy, `--insecure`) aren't the agent's.
+                "-q",
+                "--resolve",
+                &pin,
                 "--fail",
                 "--silent",
                 "--show-error",
@@ -1193,7 +1263,13 @@ fn fetch_with_ytdlp(url: &str, site: &str, dir: &Path, fetch: bool) -> Result<Pa
     // yt-dlp joins the picture and the sound with ffmpeg, which it finds on PATH: not the copy
     // Trek downloaded, so it's told where it is.
     let ffmpeg = find("ffmpeg");
+    // A name on this computer or its network is refused before yt-dlp looks it up again (it
+    // can't be held to the address checked, as curl is, but a name that plainly points home is
+    // stopped).
+    public_addr(url)?;
     let mut args = vec![
+        // Its own config files (`--exec`, a proxy) aren't the agent's to bring in.
+        "--ignore-config",
         "--no-playlist",
         "--no-progress",
         "--max-filesize",
@@ -1568,6 +1644,39 @@ mod tests {
                 .contains("No file")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_public_addresses_are_fetched() {
+        // What a public name can point at (`127.0.0.1.nip.io`, a record of an attacker's own).
+        for ip in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+            "224.0.0.1",
+            "255.255.255.255",
+            "::1",
+            "::",
+            "fe80::1",
+            "fd00::1",
+            "::ffff:127.0.0.1",
+            "::ffff:169.254.169.254",
+        ] {
+            assert!(!is_public_ip(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in [
+            "93.184.215.14",
+            "8.8.8.8",
+            "2606:2800:21f:cb07:6820:80da:af6b:8b2c",
+        ] {
+            assert!(is_public_ip(ip.parse().unwrap()), "{ip}");
+        }
+        // Refused by name before any lookup.
+        assert!(public_addr("https://localhost/a.mp4").is_err());
     }
 
     #[test]
