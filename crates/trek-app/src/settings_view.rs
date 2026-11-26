@@ -1196,7 +1196,11 @@ impl SettingsView {
         let theme = cx.theme().clone();
         let mut rows = vec![Self::row_with(
             "Passkeys in the Browser",
-            "Sign in to sites in Trek's Browser with passkeys Trek keeps on this Mac, in its Secure Enclave; Touch ID or your password confirms each use. They are Trek's own, not the ones in iCloud Keychain or a password manager: sign in to a site here another way once, add a passkey in the account's security settings, and use it from then on. Applies to new tabs.",
+            format!(
+                "Sign in to sites in Trek's Browser with passkeys Trek keeps on {}, in its Secure Enclave; Touch ID or your password confirms each use. They are Trek's own, not the ones in {}: sign in to a site here another way once, add a passkey in the account's security settings, and use it from then on. Applies to new tabs.",
+                crate::words::words().this_computer,
+                "iCloud Keychain or a password manager", // words: ok (Apple's own name for it)
+            ),
             kept.as_ref().err().map(|e| {
                 div()
                     .id("passkeys-error")
@@ -3087,7 +3091,8 @@ fn confirm_delete_passkey(
         alert
             .title(format!("Delete the passkey for {account} on {site}?"))
             .description(format!(
-                "Trek can't sign you in to {site} with it again: its key is deleted from this Mac and can't be brought back. The account still lists the passkey until you remove it in the site's security settings."
+                "Trek can't sign you in to {site} with it again: its key is deleted from {} and can't be brought back. The account still lists the passkey until you remove it in the site's security settings.",
+                crate::words::words().this_computer
             ))
             .footer(
                 DialogFooter::new()

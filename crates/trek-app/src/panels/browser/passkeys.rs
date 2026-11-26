@@ -271,7 +271,12 @@ impl PasskeyAsk {
 
     /// What the bar says for this request at this stage (`None`: it isn't on the bar).
     fn words(&self) -> Option<BarWords> {
-        const CONFIRMS: &str = "Touch ID or your Mac’s password confirms it. The passkey is one Trek keeps on this Mac.";
+        // The computer by the name Trek's word table gives it; iCloud Keychain by Apple's own.
+        let here = crate::words::words().this_computer;
+        let elsewhere = "iCloud Keychain or a password manager"; // words: ok
+        let confirms = format!(
+            "Touch ID or your password confirms it. The passkey is one Trek keeps on {here}."
+        );
         let site = self.site();
         let just = |headline: String, note: &str| BarWords {
             headline,
@@ -319,18 +324,23 @@ impl PasskeyAsk {
                         "On {site}: create a passkey for “{}”?",
                         account_words(&c.user_name, &c.user_display_name)
                     ),
-                    if self.replaces {
-                        "Trek keeps it on this Mac and signs you in with it in this browser, in place of the passkey it has for this account now. It is not saved to iCloud Keychain or a password manager."
-                    } else {
-                        "Trek keeps it on this Mac and signs you in with it in this browser. It is not saved to iCloud Keychain or a password manager."
-                    },
+                    &format!(
+                        "Trek keeps it on {here} and signs you in with it in this browser{}. It is not saved to {elsewhere}.",
+                        if self.replaces {
+                            ", in place of the passkey it has for this account now"
+                        } else {
+                            ""
+                        }
+                    ),
                 )
             },
             Request::Get(_) if self.candidates.is_empty() => BarWords {
                 yes: vec!["OK".into()],
                 ..just(
                     format!("On {site}: Trek has no passkey for this site"),
-                    "Passkeys in iCloud Keychain or a password manager can’t be used in this browser. Sign in another way, then add a passkey in the account’s security settings here: Trek keeps it for next time.",
+                    &format!(
+                        "Passkeys in {elsewhere} can’t be used in this browser. Sign in another way, then add a passkey in the account’s security settings here: Trek keeps it for next time."
+                    ),
                 )
             },
             Request::Get(g) => {
@@ -341,7 +351,7 @@ impl PasskeyAsk {
                         yes: vec![if g.conditional { "Sign In" } else { "Continue" }.into()],
                         ..just(
                             format!("On {site}: sign in as “{}”?", one.account()),
-                            CONFIRMS,
+                            &confirms,
                         )
                     }
                 } else {
@@ -350,7 +360,7 @@ impl PasskeyAsk {
                         yes: self.candidates.iter().map(Passkey::account).collect(),
                         ..just(
                             format!("On {site}: sign in with a passkey. Which account?"),
-                            CONFIRMS,
+                            &confirms,
                         )
                     }
                 }
@@ -367,7 +377,10 @@ impl PasskeyAsk {
                     "Create a passkey on {site} for “{}”",
                     account_words(&c.user_name, &c.user_display_name)
                 ),
-                "adds a passkey to that account, kept in Trek on this Mac",
+                format!(
+                    "adds a passkey to that account, kept in Trek on {}",
+                    crate::words::words().this_computer
+                ),
             ),
             Request::Get(_) => (
                 match self.candidates.as_slice() {
@@ -377,7 +390,7 @@ impl PasskeyAsk {
                     ),
                     _ => format!("Sign in to {site} with one of your passkeys"),
                 },
-                "signs the Browser in to that account",
+                "signs the Browser in to that account".to_string(),
             ),
         };
         core::passkey_ask(
@@ -749,15 +762,22 @@ impl BrowserPanel {
                 if let Some(passkey) = made {
                     settle_created(passkey.clone(), delivered);
                     if delivered {
-                        let place = match trek_passkeys::kept_in(passkey) {
-                            "Keychain" => " (in the Keychain: this Mac has no Secure Enclave)",
-                            _ => "",
+                        let w = crate::words::words();
+                        // A key the Secure Enclave didn't make is said to be elsewhere.
+                        let place = if passkey.key.starts_with("keychain:") {
+                            format!(
+                                " (in {}: {} has no Secure Enclave)",
+                                w.your_credential_store, w.this_computer
+                            )
+                        } else {
+                            String::new()
                         };
                         self.toast(
                             format!(
-                                "Passkey for {} on {} saved in Trek on this Mac{place}",
+                                "Passkey for {} on {} saved in Trek on {}{place}",
                                 passkey.account(),
-                                passkey.rp_id
+                                passkey.rp_id,
+                                w.this_computer
                             ),
                             cx,
                         );
