@@ -176,8 +176,6 @@ pub(crate) mod tests {
         // A5 / 01 02 / 03 26 / 20 01 / 21 58 20 x / 22 58 20 y
         let want = format!("a5010203262001215820{X}225820{Y}");
         assert_eq!(hex(&cose_key(&example_point())), want);
-        // And it is a point on the curve, which a made-up example wouldn't be.
-        assert!(p256::ecdsa::VerifyingKey::from_sec1_bytes(&example_point()).is_ok());
     }
 
     #[test]

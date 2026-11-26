@@ -11,8 +11,11 @@
 //!   verification ([`set_stand_in`]): it never shows a prompt and never reaches the Keychain.
 
 use crate::wire::{b64, unb64};
-use p256::ecdsa::signature::Signer as _;
-use p256::ecdsa::{Signature, SigningKey};
+use ring::rand::SystemRandom;
+use ring::signature::{
+    ECDSA_P256_SHA256_ASN1, ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, KeyPair as _,
+    UnparsedPublicKey,
+};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -75,36 +78,69 @@ pub fn platform() -> Option<Arc<dyn Authenticator>> {
     }
 }
 
-/// A new P-256 key from the system's random source.
-fn new_signing_key() -> Result<SigningKey, KeyError> {
-    for _ in 0..8 {
-        let mut scalar = [0u8; 32];
-        getrandom::fill(&mut scalar)
-            .map_err(|e| KeyError::Failed(format!("no random numbers: {e}")))?;
-        // Zero and anything at or past the curve's order are no key (one in 2^32 at worst).
-        if let Ok(key) = SigningKey::from_slice(&scalar) {
-            return Ok(key);
-        }
+/// A software key: a P-256 key pair with what keeps it (its PKCS#8 document, base64url).
+struct SoftKey {
+    pair: EcdsaKeyPair,
+    kept: String,
+}
+
+impl SoftKey {
+    /// A new key from the system's random source.
+    fn new() -> Result<SoftKey, KeyError> {
+        let failed = |_| KeyError::Failed("couldn't make a key".into());
+        let document =
+            EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &SystemRandom::new())
+                .map_err(failed)?;
+        SoftKey::from(&b64(document.as_ref()))
     }
-    Err(KeyError::Failed("couldn't make a key".into()))
+
+    /// The key `kept` holds.
+    fn from(kept: &str) -> Result<SoftKey, KeyError> {
+        let unreadable = || KeyError::Failed("the passkey's key can't be read".into());
+        let document = unb64(kept).ok_or_else(unreadable)?;
+        let pair = EcdsaKeyPair::from_pkcs8(
+            &ECDSA_P256_SHA256_ASN1_SIGNING,
+            &document,
+            &SystemRandom::new(),
+        )
+        .map_err(|_| unreadable())?;
+        Ok(SoftKey {
+            pair,
+            kept: kept.to_string(),
+        })
+    }
+
+    /// Its public half, `04 || x || y`.
+    fn point(&self) -> Result<[u8; 65], KeyError> {
+        self.pair
+            .public_key()
+            .as_ref()
+            .try_into()
+            .map_err(|_| KeyError::Failed("the public key isn't a P-256 point".into()))
+    }
+
+    /// ECDSA over `message`'s SHA-256, DER encoded.
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, KeyError> {
+        self.pair
+            .sign(&SystemRandom::new(), message)
+            .map(|signature| signature.as_ref().to_vec())
+            .map_err(|_| KeyError::Failed("couldn't sign".into()))
+    }
+
+    fn new_key(self, prefix: &str, named: &str) -> Result<NewKey, KeyError> {
+        Ok(NewKey {
+            handle: format!("{prefix}{named}"),
+            point: self.point()?,
+        })
+    }
 }
 
-fn point_of(key: &SigningKey) -> [u8; 65] {
-    let encoded = key.verifying_key().to_encoded_point(false);
-    let mut point = [0u8; 65];
-    point.copy_from_slice(encoded.as_bytes());
-    point
-}
-
-fn sign_with(key: &SigningKey, message: &[u8]) -> Vec<u8> {
-    let signature: Signature = key.sign(message);
-    signature.to_der().as_bytes().to_vec()
-}
-
-fn key_from(scalar: &str) -> Result<SigningKey, KeyError> {
-    unb64(scalar)
-        .and_then(|bytes| SigningKey::from_slice(&bytes).ok())
-        .ok_or_else(|| KeyError::Failed("the passkey's key can't be read".into()))
+/// Whether `signature` (DER) is the key `point`'s over `message`: what a relying party checks,
+/// and every test of a signature here.
+pub fn verifies(point: &[u8], message: &[u8], signature: &[u8]) -> bool {
+    UnparsedPublicKey::new(&ECDSA_P256_SHA256_ASN1, point)
+        .verify(message, signature)
+        .is_ok()
 }
 
 /// The isolated process's authenticator: keys in their handles, and [`set_stand_in`] for the
@@ -129,19 +165,17 @@ impl StandIn {
 impl Authenticator for StandIn {
     fn create(&self, _reason: &str) -> Result<NewKey, KeyError> {
         self.verify()?;
-        let key = new_signing_key()?;
-        Ok(NewKey {
-            handle: format!("plain:{}", b64(&key.to_bytes())),
-            point: point_of(&key),
-        })
+        let key = SoftKey::new()?;
+        let kept = key.kept.clone();
+        key.new_key("plain:", &kept)
     }
 
     fn sign(&self, handle: &str, message: &[u8], _reason: &str) -> Result<Vec<u8>, KeyError> {
         self.verify()?;
-        let scalar = handle.strip_prefix("plain:").ok_or_else(|| {
+        let kept = handle.strip_prefix("plain:").ok_or_else(|| {
             KeyError::Failed("this passkey's key isn't kept in this profile".into())
         })?;
-        Ok(sign_with(&key_from(scalar)?, message))
+        SoftKey::from(kept)?.sign(message)
     }
 
     fn forget(&self, _handle: &str) {}
@@ -165,22 +199,19 @@ pub(crate) mod keychain {
     }
 
     pub fn create() -> Result<NewKey, KeyError> {
-        let key = new_signing_key()?;
+        let key = SoftKey::new()?;
         let mut name = [0u8; 12];
         getrandom::fill(&mut name).map_err(|e| KeyError::Failed(e.to_string()))?;
         let account = format!("passkey {}", b64(&name));
-        keychain::write(&account, &b64(&key.to_bytes()))
+        keychain::write(&account, &key.kept)
             .map_err(|e| KeyError::Failed(format!("the Keychain didn't take the key: {e:#}")))?;
-        Ok(NewKey {
-            handle: format!("{PREFIX}{account}"),
-            point: point_of(&key),
-        })
+        key.new_key(PREFIX, &account)
     }
 
     pub fn sign(handle: &str, message: &[u8]) -> Result<Vec<u8>, KeyError> {
         let account = handle.strip_prefix(PREFIX).unwrap_or_default();
         match keychain::read(account) {
-            Lookup::Found(scalar) => Ok(sign_with(&key_from(&scalar)?, message)),
+            Lookup::Found(kept) => SoftKey::from(&kept)?.sign(message),
             Lookup::Missing => Err(KeyError::Failed(
                 "this passkey's key is no longer in the Keychain".into(),
             )),
@@ -200,8 +231,6 @@ pub(crate) mod keychain {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use p256::ecdsa::VerifyingKey;
-    use p256::ecdsa::signature::Verifier as _;
 
     #[test]
     fn the_stand_in_makes_keys_that_sign_and_obeys_its_switch() {
@@ -213,13 +242,13 @@ mod tests {
         assert!(key.handle.starts_with("plain:"));
         assert_eq!(key.point[0], 4);
         let der = auth.sign(&key.handle, b"message", "sign").unwrap();
-        let public = VerifyingKey::from_sec1_bytes(&key.point).unwrap();
-        let signature = Signature::from_der(&der).unwrap();
-        assert!(public.verify(b"message", &signature).is_ok());
-        assert!(public.verify(b"another", &signature).is_err());
+        assert!(verifies(&key.point, b"message", &der));
+        assert!(!verifies(&key.point, b"another", &der));
+        assert!(!verifies(&key.point, b"message", &der[..der.len() - 1]));
         // Another key's handle signs as that key, a handle of another kind not at all.
         let other = auth.create("another").unwrap();
         assert_ne!(other.point, key.point);
+        assert!(!verifies(&other.point, b"message", &der));
         assert!(matches!(
             auth.sign("se:AAAA", b"m", "sign"),
             Err(KeyError::Failed(_))

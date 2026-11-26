@@ -456,10 +456,8 @@ pub fn account_words(user_name: &str, display_name: &str) -> String {
 mod tests {
     use super::*;
     use crate::cbor;
-    use crate::keys::{StandIn, set_stand_in};
+    use crate::keys::{StandIn, set_stand_in, verifies};
     use crate::store::tests::temp_store;
-    use p256::ecdsa::signature::Verifier as _;
-    use p256::ecdsa::{Signature, VerifyingKey};
     use std::sync::Mutex;
 
     /// The stand-in's switch is the process's: tests that flip it take turns.
@@ -535,7 +533,7 @@ mod tests {
 
     /// What a relying party does with a registration: read the attestation, check the client
     /// data and the flags, and keep the public key.
-    fn verify_registration(answer: &Value, rp_id: &str, o: &str) -> (Vec<u8>, VerifyingKey) {
+    fn verify_registration(answer: &Value, rp_id: &str, o: &str) -> (Vec<u8>, Vec<u8>) {
         let response = &answer["response"];
         let client: Value = serde_json::from_slice(&bytes(&response["clientDataJSON"])).unwrap();
         assert_eq!(client["type"], "webauthn.create");
@@ -574,12 +572,12 @@ mod tests {
         assert_eq!(&bytes(&response["publicKey"])[26..], &point[..]);
         assert_eq!(response["publicKeyAlgorithm"], -7);
         assert_eq!(response["transports"], json!(["internal"]));
-        (id, VerifyingKey::from_sec1_bytes(&point).unwrap())
+        (id, point)
     }
 
     /// What a relying party does with an assertion: check the client data and flags, and the
     /// signature over the authenticator data and the client data's hash.
-    fn verify_assertion(answer: &Value, rp_id: &str, o: &str, key: &VerifyingKey) {
+    fn verify_assertion(answer: &Value, rp_id: &str, o: &str, key: &[u8]) {
         let response = &answer["response"];
         let client_raw = bytes(&response["clientDataJSON"]);
         let client: Value = serde_json::from_slice(&client_raw).unwrap();
@@ -592,11 +590,12 @@ mod tests {
         assert_eq!(data[32], flags::UP | flags::UV);
         let mut signed = data.clone();
         signed.extend_from_slice(&wire::sha256(&client_raw));
-        let signature = Signature::from_der(&bytes(&response["signature"])).unwrap();
-        assert!(
-            key.verify(&signed, &signature).is_ok(),
-            "the signature verifies"
-        );
+        let signature = bytes(&response["signature"]);
+        assert!(verifies(key, &signed, &signature), "the signature verifies");
+        // And over nothing else: not the data alone, and not for another page.
+        assert!(!verifies(key, &data, &signature));
+        signed[0] ^= 1;
+        assert!(!verifies(key, &signed, &signature));
     }
 
     #[test]

@@ -335,8 +335,7 @@ impl Authenticator for Mac {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use p256::ecdsa::signature::Verifier as _;
-    use p256::ecdsa::{Signature, VerifyingKey};
+    use crate::keys::verifies;
 
     /// The mechanism, on a Mac with a Secure Enclave: a key made there signs when its blob is
     /// handed back, and what it signs verifies against its public point. The key here needs no
@@ -358,14 +357,8 @@ mod tests {
         );
         let der =
             enclave_sign(blob, b"what a relying party checks", "sign a test message").unwrap();
-        let public = VerifyingKey::from_sec1_bytes(&key.point).unwrap();
-        let signature = Signature::from_der(&der).unwrap();
-        assert!(
-            public
-                .verify(b"what a relying party checks", &signature)
-                .is_ok()
-        );
-        assert!(public.verify(b"something else", &signature).is_err());
+        assert!(verifies(&key.point, b"what a relying party checks", &der));
+        assert!(!verifies(&key.point, b"something else", &der));
         // A blob that isn't the enclave's is refused, not signed with something else.
         let refused = enclave_sign(&b64(&[7u8; 300]), b"m", "sign");
         assert!(matches!(refused, Err(KeyError::Failed(_))), "{refused:?}");

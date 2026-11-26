@@ -14,8 +14,9 @@ base64 = "0.22"
 sha2 = "0.10"
 getrandom = "0.3"
 # The keys of the stand-in authenticator (tests, the verify app) and of a Mac without a Secure
-# Enclave, and the check every test makes of a signature.
-p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+# Enclave, and the check every test makes of a signature: ECDSA P-256 from the ring that rustls
+# and trek-remote already build.
+ring = "0.17"
 # The Public Suffix List, compiled in: an rpId may be the page's registrable domain, never a
 # public suffix (`co.uk`, `github.io`).
 psl = "2"
