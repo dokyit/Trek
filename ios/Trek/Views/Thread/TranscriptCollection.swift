@@ -343,11 +343,18 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
         return e
     }
 
-    /// A row's measured height: kept, and, for a row that starts above the screen's top, the
-    /// offset to move by so what's on screen doesn't move (nil: none).
+    /// A row's measured height: kept, and the offset to move by so what's on screen doesn't move
+    /// (nil: none). A row wholly above the screen's top moves everything under it. One that
+    /// crosses the top does when it's measured for the first time (scrolling up brings it in
+    /// from above at its estimate: what's on screen is its foot and the rows after it). But a
+    /// row already measured that crosses the top and changes height is the answer being read
+    /// while it's still being written: it grows at its foot, below what's being read, and the
+    /// offset stays. It used to move by every line that arrived, so the text ran away under the
+    /// reader for as long as the answer streamed (seen on an iPhone).
     fileprivate func measured(_ h: CGFloat, at i: Int) -> CGFloat? {
         guard i < rows.count else { return nil }
         let old = heights[i]
+        let first = measured[rows[i].id] == nil
         heights[i] = h
         measured[rows[i].id] = h
         guard !pinned, let cv = collectionView else { return nil }
@@ -355,9 +362,17 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
         // A row going from empty to drawn (or back) takes (or gives back) the gap before it too.
         if (old == 0) != (h == 0) { delta += h > 0 ? gaps[i] : -gaps[i] }
         let top = cv.contentOffset.y + cv.adjustedContentInset.top
-        let above = layout.origin(of: i) < top - 0.5
-        if ScrollProbe.on, abs(delta) > 0.5 { ScrollProbe.note("measured \(rows[i].id): \(Int(old))→\(Int(h))\(above ? ", above the screen: offset \(Int(delta))" : "")") }
-        return above ? delta : nil
+        let moves = Self.movesWhatIsRead(origin: layout.origin(of: i), height: old, top: top, first: first)
+        if ScrollProbe.on, abs(delta) > 0.5 { ScrollProbe.note("measured \(rows[i].id): \(Int(old))→\(Int(h))\(moves ? ", above the screen: offset \(Int(delta))" : "")") }
+        return moves ? delta : nil
+    }
+
+    /// Whether a change in the height of a row at `origin`, `height` tall until now, moves what
+    /// is on screen below `top` (so the offset must follow it): `first`, it had only been
+    /// estimated.
+    nonisolated static func movesWhatIsRead(origin: CGFloat, height: CGFloat, top: CGFloat, first: Bool) -> Bool {
+        guard origin < top - 0.5 else { return false }
+        return first || origin + height <= top + 0.5
     }
 
     // MARK: Keeping the reader's place
