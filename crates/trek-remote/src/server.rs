@@ -2026,7 +2026,10 @@ async fn call<H: RemoteHost>(
     match result {
         Ok(reply) => ServerEnvelope::reply(re, reply),
         Err(err) => {
-            tracing::debug!(kind, %err, "remote request failed");
+            // In the log at its ordinary level: a phone showing "Couldn't load" (every picture
+            // of a note, from a real Mac) left nothing here to say which request the Mac
+            // refused, or why. The words are Trek's own, never the user's.
+            tracing::info!(kind, %err, "remote request failed");
             error(re, err.code, err.message)
         }
     }

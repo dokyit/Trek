@@ -935,6 +935,14 @@ impl PhonePanel {
                 this.clock = clock.or(this.clock);
                 this.untrusted = untrusted;
                 this.driver_built_here = built_here;
+                // A new install (the script, the phone updater) answers a start that failed on
+                // the old one: "Trek's iPhone app is build 1452 but Trek Driver was built with
+                // 1428: reinstall the driver" stayed up, on a real phone, after the reinstall,
+                // until something tapped.
+                if this.driver_install != install {
+                    this.driver.forgive();
+                    this.driver_frames_retry = None;
+                }
                 this.driver_install = install;
                 // Gone, or unplugged while it ran for the cable (it serves the phone's loopback
                 // only, which Wi-Fi can't reach): the driver (and its xcodebuild) goes rather than
