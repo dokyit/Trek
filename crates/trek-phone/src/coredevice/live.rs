@@ -128,6 +128,16 @@ pub(super) async fn stop(session: &mut Option<Session>, generation: u64) {
     }
 }
 
+/// The next audio datagram, or never when the audio socket has been let go.
+async fn recv_audio(
+    socket: Option<&idevice::tcp::handle::UdpSocketHandle>,
+) -> std::io::Result<idevice::tcp::adapter::UdpDatagram> {
+    match socket {
+        Some(socket) => socket.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// The receive loop, on the phone worker's runtime: RTP in, decoded frames out, the RTCP Apple's
 /// encoder expects back (RCTL about every 50ms, a liveness report every few seconds, a keyframe
 /// request until the first frame, a frame ACK per decoded frame).
@@ -145,6 +155,10 @@ async fn receive_loop(
     } = started_media;
     let mut stream = Stream::new(frames, our_ssrc);
     let mut audio = audio_config.and_then(audio::AudioStream::new);
+    // The socket lives only as long as something plays what arrives on it. Bound with nobody
+    // reading, it would queue the phone's hundred packets a second, without limit, for as long
+    // as the live view is open; dropped, it's unbound and they're discarded on arrival.
+    let mut audio_socket = audio.is_some().then_some(audio_socket);
     let mut peer_port = None;
     let mut fir_seq = 0u8;
     let started = Instant::now();
@@ -162,8 +176,15 @@ async fn receive_loop(
         let input = tokio::select! {
             _ = &mut stop => break,
             dg = video.recv() => match dg { Ok(dg) => Input::Video(dg), Err(_) => break },
-            dg = audio_socket.recv(), if audio.is_some() => match dg { Ok(dg) => Input::Audio(dg), Err(_) => { audio = None; continue } },
-            _ = audio_rr.tick(), if audio.is_some() => Input::Rr,
+            dg = recv_audio(audio_socket.as_ref()), if audio_socket.is_some() => match dg {
+                Ok(dg) => Input::Audio(dg),
+                Err(_) => {
+                    audio = None;
+                    audio_socket = None;
+                    continue;
+                }
+            },
+            _ = audio_rr.tick(), if audio_socket.is_some() => Input::Rr,
         };
         let dg = match input {
             Input::Audio(dg) => {
@@ -172,12 +193,13 @@ async fn receive_loop(
                     .is_some_and(|playback| playback.push(&dg.data).is_err())
                 {
                     audio = None;
+                    audio_socket = None;
                 }
                 continue;
             }
             Input::Rr => {
-                if let Some(playback) = audio.as_ref() {
-                    let _ = audio_socket
+                if let (Some(playback), Some(socket)) = (audio.as_ref(), audio_socket.as_ref()) {
+                    let _ = socket
                         .send_to(playback.source_port(), playback.receiver_report())
                         .await;
                 }
