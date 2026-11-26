@@ -29,6 +29,11 @@ futures = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 async-channel.workspace = true
+# The live screen's HEVC decode (VideoToolbox), for `coredevice`'s live stream.
+video-toolbox = { version = "0.3.1", optional = true }
+core-media = { version = "0.8", optional = true }
+core-video = { version = "0.6", optional = true }
+core-foundation = { version = "0.10", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 # Whether Apple Mobile Device Service is installed and running, when usbmuxd doesn't answer.
@@ -55,6 +60,10 @@ coredevice = [
     "idevice/dvt",
     "dep:uuid",
     "dep:futures",
+    "dep:video-toolbox",
+    "dep:core-media",
+    "dep:core-video",
+    "dep:core-foundation",
 ]
 
 [[example]]

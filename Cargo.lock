@@ -1287,6 +1287,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "core-audio-types"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9650b9f98d8bdb52688fbe26c81e4fc4b3cb911bc002fb7d52011e206f0f769"
+dependencies = [
+ "objc2-core-audio-types",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1387,6 +1396,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "core-graphics2"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b65858d95344d2711161cd92196732f67d6c5fea238cf12f994584828731a5c"
+dependencies = [
+ "bitflags 2.13.2",
+ "block",
+ "cfg-if",
+ "core-foundation 0.10.1",
+ "libc",
+]
+
+[[package]]
+name = "core-media"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db28ab254c42005e5c12bd2b5f6ea5670f53210455ee5aeb24f0898954942bf0"
+dependencies = [
+ "block",
+ "cfg-if",
+ "core-audio-types",
+ "core-foundation 0.10.1",
+ "core-graphics2 0.6.1",
+ "core-video 0.6.1",
+ "libc",
+]
+
+[[package]]
 name = "core-text"
 version = "21.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1406,10 +1443,24 @@ checksum = "139679cc63eb9504bdbe37e37874b0247136177655f0008588781e90863afa62"
 dependencies = [
  "block",
  "core-foundation 0.10.1",
- "core-graphics2",
+ "core-graphics2 0.5.2",
  "io-surface",
  "libc",
  "metal",
+]
+
+[[package]]
+name = "core-video"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0f83d7bc2e8fbc517a71dcf3227003db7646e6c7aa5b0b5ab3acc89bc692641"
+dependencies = [
+ "block",
+ "core-foundation 0.10.1",
+ "core-graphics2 0.6.1",
+ "libc",
+ "objc2-core-foundation",
+ "objc2-io-surface",
 ]
 
 [[package]]
@@ -2996,7 +3047,7 @@ dependencies = [
  "bindgen",
  "bitflags 2.13.2",
  "chrono",
- "core-video",
+ "core-video 0.5.2",
  "ctor",
  "derive_more 2.1.1",
  "embed-resource",
@@ -3063,7 +3114,7 @@ dependencies = [
  "cbindgen",
  "cocoa 0.26.1",
  "core-foundation 0.10.1",
- "core-video",
+ "core-video 0.5.2",
  "derive_more 2.1.1",
  "etagere",
  "foreign-types",
@@ -9408,7 +9459,7 @@ dependencies = [
 
 [[package]]
 name = "trek-agents"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -9440,7 +9491,7 @@ dependencies = [
 
 [[package]]
 name = "trek-app"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -9543,7 +9594,7 @@ dependencies = [
 
 [[package]]
 name = "trek-assets"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "gpui-kit",
  "rust-embed",
@@ -9554,7 +9605,7 @@ dependencies = [
 
 [[package]]
 name = "trek-bench"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -9567,14 +9618,14 @@ dependencies = [
 
 [[package]]
 name = "trek-brand"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "gpui-kit",
 ]
 
 [[package]]
 name = "trek-core"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "anyhow",
  "chrono",
@@ -9611,7 +9662,7 @@ dependencies = [
 
 [[package]]
 name = "trek-dictate"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "async-channel",
  "block2 0.6.2",
@@ -9629,7 +9680,7 @@ dependencies = [
 
 [[package]]
 name = "trek-format"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "tokio",
  "tracing",
@@ -9640,7 +9691,7 @@ dependencies = [
 
 [[package]]
 name = "trek-integrations"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "serde_json",
  "trek-core",
@@ -9648,7 +9699,7 @@ dependencies = [
 
 [[package]]
 name = "trek-ipc"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "getrandom 0.3.4",
  "libc",
@@ -9660,7 +9711,7 @@ dependencies = [
 
 [[package]]
 name = "trek-ipc-ui"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "async-channel",
  "libc",
@@ -9672,7 +9723,7 @@ dependencies = [
 
 [[package]]
 name = "trek-job"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "tokio",
  "tracing",
@@ -9681,7 +9732,7 @@ dependencies = [
 
 [[package]]
 name = "trek-languages"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "gpui-kit",
  "ropey",
@@ -9695,7 +9746,7 @@ dependencies = [
 
 [[package]]
 name = "trek-line-breakdown"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "gpui-kit",
  "trek-core",
@@ -9704,7 +9755,7 @@ dependencies = [
 
 [[package]]
 name = "trek-logging"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "anyhow",
  "chrono",
@@ -9723,21 +9774,21 @@ dependencies = [
 
 [[package]]
 name = "trek-mascot"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "gpui-kit",
 ]
 
 [[package]]
 name = "trek-math"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "gpui-kit",
 ]
 
 [[package]]
 name = "trek-mcp"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "base64 0.22.1",
  "block2 0.6.2",
@@ -9762,7 +9813,7 @@ dependencies = [
 
 [[package]]
 name = "trek-mentions"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "chrono",
  "trek-core",
@@ -9770,14 +9821,14 @@ dependencies = [
 
 [[package]]
 name = "trek-motion"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "gpui-kit",
 ]
 
 [[package]]
 name = "trek-palette"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "gpui-kit",
  "serde_json",
@@ -9786,7 +9837,7 @@ dependencies = [
 
 [[package]]
 name = "trek-parity"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "serde",
  "toml 0.9.12+spec-1.1.0",
@@ -9795,7 +9846,7 @@ dependencies = [
 
 [[package]]
 name = "trek-perf"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "async-channel",
  "chrono",
@@ -9805,9 +9856,12 @@ dependencies = [
 
 [[package]]
 name = "trek-phone"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "async-channel",
+ "core-foundation 0.10.1",
+ "core-media",
+ "core-video 0.6.1",
  "futures",
  "getrandom 0.3.4",
  "idevice",
@@ -9816,19 +9870,20 @@ dependencies = [
  "tokio",
  "trek-words",
  "uuid",
+ "video-toolbox",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "trek-private"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "trek-remote"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "async-channel",
  "base64 0.22.1",
@@ -9855,7 +9910,7 @@ dependencies = [
 
 [[package]]
 name = "trek-screenclip"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -9865,7 +9920,7 @@ dependencies = [
 
 [[package]]
 name = "trek-script"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "async-trait",
  "rquickjs",
@@ -9875,7 +9930,7 @@ dependencies = [
 
 [[package]]
 name = "trek-shortcuts"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "tracing",
  "trek-core",
@@ -9884,7 +9939,7 @@ dependencies = [
 
 [[package]]
 name = "trek-telemetry"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -9904,7 +9959,7 @@ dependencies = [
 
 [[package]]
 name = "trek-test-fixtures"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "base64 0.22.1",
  "minisign-verify",
@@ -9914,7 +9969,7 @@ dependencies = [
 
 [[package]]
 name = "trek-time"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "chrono",
  "trek-core",
@@ -9922,7 +9977,7 @@ dependencies = [
 
 [[package]]
 name = "trek-update"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "trek-test-fixtures",
  "windows-sys 0.61.2",
@@ -9930,7 +9985,7 @@ dependencies = [
 
 [[package]]
 name = "trek-updater"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "semver",
  "tracing",
@@ -9941,7 +9996,7 @@ dependencies = [
 
 [[package]]
 name = "trek-window-place"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "gpui-kit",
  "serde",
@@ -9952,7 +10007,7 @@ dependencies = [
 
 [[package]]
 name = "trek-winlook"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "gpui-kit",
  "raw-window-handle",
@@ -9961,7 +10016,7 @@ dependencies = [
 
 [[package]]
 name = "trek-words"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "tracing",
 ]
@@ -10295,6 +10350,21 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "video-toolbox"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "123d2173cc401c8ec92fb12f3c37b7ffb1ed82ce9778163e25bb835f99627f97"
+dependencies = [
+ "bitflags 2.13.2",
+ "block",
+ "core-foundation 0.10.1",
+ "core-graphics2 0.6.1",
+ "core-media",
+ "core-video 0.6.1",
+ "libc",
+]
 
 [[package]]
 name = "vswhom"
