@@ -3057,7 +3057,8 @@ fn a_secret_asked_for_on_machine_b_is_given_from_here() {
         let Some(Ok(Reply::Done(Ok(told)))) = got else {
             panic!("B's agent wasn't told the secret was saved");
         };
-        let told = told.to_string();
+        // Its words, not their JSON (a Windows path's backslashes are doubled in that).
+        let told = told["text"].as_str().unwrap_or_default().to_string();
         assert!(told.contains("GITHUB_TOKEN is saved in the file"), "{told}");
         assert!(
             !told.contains(value),
