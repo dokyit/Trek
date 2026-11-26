@@ -1470,7 +1470,7 @@ SwiftUI, iOS 26 (Liquid Glass), bundle id `dev.trek.TrekMobile`, no third-party 
 ### Transcript components: Mac and phone
 
 What the Mac's transcript and composer draw, and what the phone draws for the same thing
-(inventory of 2026-10-30, after the live cards; updated 2026-10-31 for the transcript parity). *same*: the phone draws it as the Mac does, in
+(inventory of 2026-10-30, after the live cards; updated 2026-10-31 for the transcript parity and 2026-11-26 for how answers' Markdown reads). *same*: the phone draws it as the Mac does, in
 its own layout; *reduced*: it shows less; *missing*: it shows nothing, or raw text.
 
 | Component (Mac source) | Phone | Phone source | Note |
@@ -1488,13 +1488,13 @@ its own layout; *reduced*: it shows less; *missing*: it shows nothing, or raw te
 | "Asked to restate it first" line (`restate::split_restate`) | same | `Model/MessageParts.swift`, `Thread/MessageNotes.swift` | |
 | Videos attached to a message (`video::AttachedVideos`) | same | `Thread/MediaViews.swift` AttachedVideos | `user.videos`; poster, then plays here, fetched with `media` (a Mac without it: "on your Mac"). |
 | Wake row: folded "↳ summary" of sub-agent results (Row::Wake) | same | `Thread/MessageNotes.swift` WakeRow | Folded to the Mac's summary; tap for what came back. No edit, rewind or fork on it. |
-| Assistant answer, long-answer parts (Row::Assistant) | same | `MarkdownText.swift` | |
-| Code blocks (`md.rs`) | same | `CodeBlockView.swift` | Language over the code, Copy. |
+| Assistant answer, long-answer parts (Row::Assistant) | same | `MarkdownText.swift`, `MarkdownParser.swift` | CommonMark's blocks as the Mac reads them: rules (the recap's `---`), ATX and setext headings (`#128` is text), lists that keep the number they start at across blank lines and what's under an item, nested by their indentation, task boxes (read-only), a quote as one block, hard line breaks. Not read: indented code, HTML blocks. Parsed in the background as a transcript arrives; a streaming answer is parsed from its last settled block on. |
+| Code blocks (`md.rs`) | same | `CodeBlockView.swift` | Language over the code, Copy. A fence closes only on its own character and at least its own length, so Markdown shown inside Markdown survives. |
 | Tables (`md.rs`) | same | MarkdownText | Scroll sideways. |
 | Math, inline and display (`math`) | same | `Views/Math` | |
-| `trek-viz` visualizations, all 11 kinds (`visualization/`) | same | `Views/Viz` | |
-| `trek-html` interactive artifacts (`artifact/`) | same | `LivePage.swift` | |
-| Local images in answers, `![](path)` (`md.rs` LocalImage) | same | `Thread/MediaViews.swift` AnswerImages | A line of pictures; from the Mac (`media`, scaled) or the web; tap for full screen. |
+| `trek-viz` visualizations, all 11 kinds (`visualization/`) | same | `Views/Viz`, `Model/VisualizationLenient.swift` | Read as leniently as the Mac does (`tidy`, `normalize` and the alias tables, ported): type aliases, comments and trailing commas, a missing `version`, a type inferred from its fields. One that can't be drawn keeps its title and summary over the note. |
+| `trek-html` interactive artifacts (`artifact/`) | same | `LivePage.swift` | Run on a tap. While its fence is open: a quiet "Building…" card (a `trek-study` block too), nothing to run. Never finished, or past the Mac's 512 KB: a note saying why, over its source. |
+| Local images in answers, `![](path)` (`md.rs` LocalImage) | same | `Thread/MediaViews.swift` AnswerImages | Wherever they're written (a line of their own, after text, in a list item or a quote): drawn under the text they follow, where the Mac draws them in the line; from the Mac (`media`, scaled) or the web; tap for full screen. |
 | Videos linked in answers (`video::AnswerVideos`) | same | `Thread/MediaViews.swift` AnswerVideo | A link to a video on a line of its own: a file on the Mac comes in pieces (`media`), an https one plays from the web. |
 | File and path chips in answers (`md::link_path`) | reduced | `InlineMarkdown.swift` | Drawn, but a tap doesn't open the file. |
 | Reasoning, "Thought" (Row::Reasoning) | same | Transcript ToolRow | Markdown, in the group. |
@@ -1502,11 +1502,11 @@ its own layout; *reduced*: it shows less; *missing*: it shows nothing, or raw te
 | Tool row: chips, status, output (Row::Tool) | reduced | Transcript ToolRow | File chips with lines, and the Mac's status mark at the end (spinner, tick, red cross); output is the last 4 KiB. |
 | `watch_video` row with player and frames (`video::WatchedVideo`) | same | `Thread/MediaViews.swift` WatchedVideoView | `tool.watch`: the video card and the frames the model saw, each opening full screen. |
 | Sub-agent row: live state, answer as markdown (Row::SubAgent) | reduced | ToolRow, `Thread/SubAgentsCard.swift` | In the transcript an "Agent" step with 4 KiB of raw output; live state in the footer card. |
-| Notice row (Row::Notice) | same | ThreadView `.notice` | Markdown marks show raw. |
+| Notice row (Row::Notice) | same | ThreadView `.notice` | Its inline Markdown is drawn (bold, `code`), where the Mac drops the marks. |
 | Error row (Row::Error) | same | ThreadView `.error` | |
 | Limit row (Row::Limit) | same | ThreadView `.limit` | |
 | Handoff row (Row::Handoff) | same | `Thread/TurnBadges.swift` HandoffRow | `from_agent`/`to_agent` glyphs. |
-| Thread links (Row::Lineage) | same | `Thread/ThreadLinkRow.swift` | |
+| Thread links (Row::Lineage) | same | `Thread/ThreadLinkRow.swift` | A `trek://thread/<id>` link in an answer opens that thread when this iPhone lists it (`Model/TrekLink.swift`), and says so when it doesn't. |
 | Turn footer: copy, time, undo, retry, fork (Row::TurnEnd) | same | MessageActions TurnActions | |
 | "Verified" badge on the turn footer | same | `Thread/TurnBadges.swift` VerifiedBadge | `turn_end.verified`; a tap says what ran. Just the seal on the latest turn, where the actions are out. |
 | Restate check: "Is that what you meant?" | same | `Thread/RestateCheck.swift` | Go ahead sends the Mac's go-ahead (with the held-back consult); Not quite brings the keyboard up. |
