@@ -1088,6 +1088,39 @@ fn open_in_safari(url: &str) {
 
 /// Where an isolated run saves a download wry named `name` (`file (2).txt`: numbered against
 /// another folder): `dir`, under the name the page gave, numbered against `dir` alone.
+/// Where a download the page names `suggested` is kept, in `dir`: its last part only, with no
+/// leading dots (not a hidden file, not `..`), a file the desktop would run when opened
+/// (`.desktop`, `.lnk`, `.url`…) kept as `name.download`, and numbered past a file already there.
+fn download_destination(dir: &Path, suggested: &Path) -> PathBuf {
+    let name = suggested
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .trim_start_matches(['.', ' '])
+        .trim_end();
+    let name = if name.is_empty() { "download" } else { name };
+    let lower = name.to_ascii_lowercase();
+    let runs = [
+        ".desktop",
+        ".lnk",
+        ".url",
+        ".scf",
+        ".command",
+        ".webloc",
+        ".inetloc",
+        ".terminal",
+        ".appref-ms",
+        ".library-ms",
+    ]
+    .iter()
+    .any(|e| lower.ends_with(e));
+    if runs {
+        isolated_download(dir, &format!("{name}.download"))
+    } else {
+        isolated_download(dir, name)
+    }
+}
+
 fn isolated_download(dir: &Path, name: &str) -> PathBuf {
     let (stem, ext) = match name.rfind('.') {
         Some(dot) if dot > 0 => (&name[..dot], &name[dot..]),
@@ -1111,6 +1144,29 @@ fn isolated_download(dir: &Path, name: &str) -> PathBuf {
 #[cfg(test)]
 mod isolated_download_tests {
     use super::isolated_download;
+
+    #[test]
+    fn a_download_is_a_name_in_downloads() {
+        use super::download_destination;
+        let dir = std::env::temp_dir().join(format!("trek-dl-dest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let at = |s: &str| download_destination(&dir, std::path::Path::new(s));
+        assert_eq!(
+            at("/home/u/.config/autostart/x.desktop"),
+            dir.join("x.desktop.download")
+        );
+        assert_eq!(at("/home/u/Downloads/../.bashrc"), dir.join("bashrc"));
+        assert_eq!(at("/home/u/Downloads/.."), dir.join("download"));
+        assert_eq!(
+            at("C:/Users/u/Downloads/Report.LNK"),
+            dir.join("Report.LNK.download")
+        );
+        assert_eq!(at("report.pdf"), dir.join("report.pdf"));
+        std::fs::write(dir.join("report.pdf"), "").unwrap();
+        assert_eq!(at("/elsewhere/report.pdf"), dir.join("report (1).pdf"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn an_isolated_download_is_numbered_against_its_own_folder() {
@@ -1813,13 +1869,20 @@ impl BrowserPanel {
                         // its own data folder: the user's Downloads isn't its to write in. The
                         // name is numbered against that folder, not the one wry looked in (on
                         // Linux it numbers against Downloads, else the working folder).
-                        if trek_core::paths::isolated()
-                            && let Some(name) = path.file_name().and_then(|n| n.to_str())
-                        {
-                            let dir = trek_core::paths::data_dir().join("downloads");
-                            let _ = std::fs::create_dir_all(&dir);
-                            *path = isolated_download(&dir, name);
-                        }
+                        // Otherwise it goes to Downloads, under a name only: WebKitGTK's path is
+                        // Downloads with the page's suggested name pushed on, and a name that is a
+                        // whole path (`/home/u/.config/autostart/x.desktop`) or climbs out
+                        // replaces it.
+                        let dir = if trek_core::paths::isolated() {
+                            Some(trek_core::paths::data_dir().join("downloads"))
+                        } else if cfg!(target_os = "linux") {
+                            Some(trek_core::paths::home().join("Downloads"))
+                        } else {
+                            path.parent().map(Path::to_path_buf)
+                        };
+                        let Some(dir) = dir else { return false };
+                        let _ = std::fs::create_dir_all(&dir);
+                        *path = download_destination(&dir, path);
                         let _ = t5.try_send(Msg::Download {
                             tab: id,
                             url,
