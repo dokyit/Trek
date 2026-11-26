@@ -223,7 +223,8 @@ limitation in `docs/MOBILE.md`); scanning pins the whole thing. See `docs/MOBILE
   installs on the plugged-in iPhone (or one on the same Wi-Fi, once Xcode has paired it). It runs
   for 7 days from when Xcode made its provisioning profile; installing again with the same profile
   doesn't extend that, so the script sets a profile with 2 days or less left aside first and Xcode
-  makes a fresh one.
+  makes a fresh one (`FRESH=1 ios/scripts/install-device.sh` does that whatever is left: the way
+  to renew the 7 days early; `LAUNCH=0` installs without opening Trek on the phone).
 - **Kept up to date by the Mac:** `ios/scripts/install-phone-update.sh` installs a LaunchAgent
   that runs `ios/scripts/phone-update.sh` every 30 minutes: when the iPhone is in reach and Trek on
   the Mac is newer than the app, or the signing has 2 days or less left, it builds the app at the
