@@ -2467,6 +2467,11 @@ impl BrowserPanel {
                 }
             }
             Msg::Crashed(id) => {
+                // The page that asked for a passkey is gone with its process: an answer still
+                // on its way (Touch ID up) reaches nobody, so a passkey being made must not take
+                // an older one's place.
+                #[cfg(target_os = "macos")]
+                self.passkeys_gone(id, cx);
                 let Some(tab) = self.tab_mut(id) else { return };
                 let again = tab
                     .crashed
