@@ -1187,6 +1187,54 @@ impl SettingsView {
         Some(Self::row("Extensions", ext::settings_summary(), open, cx))
     }
 
+    /// Tools & MCP › Browser › Passkeys (macOS): Trek's own authenticator on or off, and the
+    /// passkeys it keeps, each with where its key is and a Delete.
+    #[cfg(target_os = "macos")]
+    fn passkeys_section(&self, s: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let store = trek_passkeys::Store::default();
+        let kept = store.list();
+        let theme = cx.theme().clone();
+        let mut rows = vec![Self::row_with(
+            "Passkeys in the Browser",
+            "Sign in to sites in Trek's Browser with passkeys Trek keeps on this Mac, in its Secure Enclave; Touch ID or your password confirms each use. They are Trek's own, not the ones in iCloud Keychain or a password manager: sign in to a site here another way once, add a passkey in the account's security settings, and use it from then on. Applies to new tabs.",
+            kept.as_ref().err().map(|e| {
+                div()
+                    .id("passkeys-error")
+                    .pt(px(4.))
+                    .text_size(px(text::BODY))
+                    .text_color(theme.red)
+                    .child(e.clone())
+                    .into_any_element()
+            }),
+            self.switch("browser-passkeys", !s.browser.passkeys_off, |s, v| {
+                s.browser.passkeys_off = !v;
+                crate::panels::browser::set_passkeys(v);
+            }),
+            cx,
+        )];
+        for (ix, passkey) in kept.unwrap_or_default().into_iter().enumerate() {
+            let mut about = vec![format!(
+                "{} · added {}",
+                passkey.account(),
+                relative_ago(passkey.created as i64 * 1000)
+            )];
+            if let Some(used) = passkey.last_used {
+                about.push(format!("last used {}", relative_ago(used as i64 * 1000)));
+            }
+            about.push(format!("kept in the {}", trek_passkeys::kept_in(&passkey)));
+            let (view, site) = (cx.entity().downgrade(), passkey.rp_id.clone());
+            let delete = Button::new(("passkey-delete", ix))
+                .small()
+                .outline()
+                .label("Delete")
+                .on_click(move |_, window, cx| {
+                    confirm_delete_passkey(view.clone(), &passkey, window, cx)
+                });
+            rows.push(Self::row(site, about.join(" · "), delete, cx));
+        }
+        vec![Self::heading("Passkeys", cx), ui::group(rows, cx)]
+    }
+
     fn switch(&self, id: &'static str, on: bool, f: fn(&mut Settings, bool)) -> Switch {
         let set = self.setter(f);
         Switch::new(id)
@@ -2458,6 +2506,8 @@ impl SettingsView {
             .collect(),
             cx,
         ));
+        #[cfg(target_os = "macos")]
+        out.extend(self.passkeys_section(&s, cx));
         #[cfg(any(target_os = "macos", windows))]
         {
             // On Windows the words are the PC's (`trek_phone::pc`): the same tools, reached through
@@ -3010,6 +3060,52 @@ fn confirm_remove(
                                 .label("Remove")
                                 .on_click(move |_, _, cx| {
                                     ws.update(cx, |ws, cx| ws.remove_added_agent(&id, cx))
+                                }),
+                        ),
+                    ),
+            )
+    });
+}
+
+/// Ask before deleting one of Trek's passkeys: its key goes for good, and the site still lists
+/// it until it's removed there.
+#[cfg(target_os = "macos")]
+fn confirm_delete_passkey(
+    view: WeakEntity<SettingsView>,
+    passkey: &trek_passkeys::Passkey,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let (id, site, account) = (
+        passkey.id.clone(),
+        passkey.rp_id.clone(),
+        passkey.account().to_string(),
+    );
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        let (view, id) = (view.clone(), id.clone());
+        use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
+        alert
+            .title(format!("Delete the passkey for {account} on {site}?"))
+            .description(format!(
+                "Trek can't sign you in to {site} with it again: its key is deleted from this Mac and can't be brought back. The account still lists the passkey until you remove it in the site's security settings."
+            ))
+            .footer(
+                DialogFooter::new()
+                    .child(
+                        DialogClose::new()
+                            .child(Button::new("passkey-delete-cancel").outline().label("Cancel")),
+                    )
+                    .child(
+                        DialogAction::new().child(
+                            Button::new("passkey-delete-ok")
+                                .with_variant(gpui_kit::component::button::ButtonVariant::Danger)
+                                .label("Delete")
+                                .on_click(move |_, _, cx| {
+                                    let store = trek_passkeys::Store::default();
+                                    if let Err(e) = trek_passkeys::delete(&store, &id) {
+                                        tracing::warn!("passkeys: couldn't delete: {e}");
+                                    }
+                                    let _ = view.update(cx, |_, cx| cx.notify());
                                 }),
                         ),
                     ),

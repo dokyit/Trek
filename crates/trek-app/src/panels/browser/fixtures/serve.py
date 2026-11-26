@@ -88,6 +88,12 @@ class Handler(SimpleHTTPRequestHandler):
                 ],
             )
             return
+        if path == "/sandboxed":
+            # The passkeys page with no origin of its own (a sandbox without allow-same-origin):
+            # such a page is nobody's site, and has no passkeys.
+            with open(os.path.join(HERE, "passkeys.html"), encoding="utf-8") as f:
+                self.send_page(f.read(), headers=[("Content-Security-Policy", "sandbox allow-scripts")])
+            return
         if path == "/to-app":
             # A sign-in that ends by sending the browser to an app's scheme.
             self.send_response(302)

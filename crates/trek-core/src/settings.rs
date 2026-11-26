@@ -900,6 +900,10 @@ pub struct Browser {
     pub ad_blocker: bool,
     /// Sites the ad blocker leaves alone ("Allow ads on this site"): host names, lowercase.
     pub ad_allow: Vec<String>,
+    /// Leave pages' passkey requests to the web view (macOS: WebKit, which refuses them all in
+    /// an app like Trek) instead of answering them with Trek's own authenticator, which keeps
+    /// passkeys on this computer. Off (the authenticator answers) unless the user turns it off.
+    pub passkeys_off: bool,
 }
 
 /// The built-in terminal panel.
