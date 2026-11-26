@@ -367,7 +367,9 @@ Not done:
 - `crates/trek-app/src/workspace/prompt_budget.rs` builds the notes with `agent_notes`, the function
   `session_notes` uses, for default settings and with a verification skill, and asserts their size
   (3,250 and 3,700 chars since 2026-11-13: the notes are 2,997 and 3,441 with the Trek themes
-  sentence, about 8% under each), that the wrapper stays small,
+  sentence, about 8% under each; on 2026-11-26, added up from the source and not measured in a
+  run, about 3,239 and 3,674, under 1% of headroom, so the next sentence added needs one taken
+  out or a new budget), that the wrapper stays small,
   and that each piece goes in once. It also builds Codex's first-message notes with
   `trek_agents::message_notes`: the tool-search line is held to 220 chars and Codex's notes with
   everything on to 4,000 (3,688 today).
@@ -375,7 +377,9 @@ Not done:
   as `initialize` and `tools/list` return them, against a per-family budget, and all of them
   together (45,000 chars since 2026-11-13; 46,200 since elements; 40,500 before). Since
   2026-11-14 also the iPhone's family before a phone is connected (`phone-setup`: 300 and 700
-  chars, 232 and 451 today).
+  chars, 232 and 451 today). The tables above are as measured on their days: by 2026-11-26
+  trek-orchestrate had 14 tools (the transcript pair and `request_secret` came after) and
+  everything on a Mac was 76.
 - `trek_agents::claude`: `the_tools_trek_replaces_are_left_out_unless_the_setting_keeps_them` and
   `tool_search_is_forced_only_for_anthropics_own_api` hold the command line and the environment.
 - `trek_core::visualization`'s and `trek_core::artifact`'s own compactness tests now stop at 1,600

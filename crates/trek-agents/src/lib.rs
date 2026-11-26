@@ -992,9 +992,13 @@ pub fn instructions_prompt(instructions: &str, text: &str) -> String {
     )
 }
 
-/// Whether `name` is one of Trek's own MCP servers.
-pub(crate) fn is_trek_server(name: &str) -> bool {
-    TREK_TOOLS.iter().any(|(server, _)| *server == name)
+/// Whether `name` is a server of Trek's that asks the user itself before it does what the
+/// thread's level wants asked: sub-agents and threads (which run at the asker's own level) and
+/// the browser (its own cards for passwords, submitting and downloads). Computer use, the
+/// Simulator and the iPhone have no cards of their own, so their tools are asked about like any
+/// other server's; Claude Code is answered the same way (`claude::trek_tool_allowed`).
+pub(crate) fn asks_for_itself(name: &str) -> bool {
+    name == trek_core::orchestrate::SERVER || name == trek_ipc::browser::SERVER
 }
 
 /// Trek's own MCP servers, by the name Trek gives each, and what each is for in

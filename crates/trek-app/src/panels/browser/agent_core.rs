@@ -372,6 +372,16 @@ pub fn needs_asking(kind: &Sensitive, access: HandHolding) -> bool {
 
 /// What about `tool` (with `args`) is the user's to allow, given what `probe` found out about
 /// its element first. `None`: nothing; it goes ahead.
+/// Whether pressing `key` (as `parse_key` gives it) puts a character in a field: one character,
+/// with no Control, Alt or Command held.
+pub fn types_a_character(key: &Value) -> bool {
+    let held = |name: &str| key[name].as_bool() == Some(true);
+    key["key"].as_str().is_some_and(|k| k.chars().count() == 1)
+        && !held("ctrl")
+        && !held("alt")
+        && !held("meta")
+}
+
 pub fn ask_for(tool: &str, args: &Value, probe: Option<&Value>) -> Option<Ask> {
     let page = probe.and_then(|p| p["page"].as_str()).unwrap_or_default();
     let host = super::host_of(page).unwrap_or_else(|| "the page".into());
@@ -392,7 +402,11 @@ pub fn ask_for(tool: &str, args: &Value, probe: Option<&Value>) -> Option<Ask> {
         });
     }
     let probe = probe?;
-    if tool == "browser_type" && probe["password"].as_bool() == Some(true) {
+    let types = tool == "browser_type"
+        || tool == "browser_press"
+            && parse_key(args["key"].as_str().unwrap_or_default())
+                .is_ok_and(|key| types_a_character(&key));
+    if types && probe["password"].as_bool() == Some(true) {
         return Some(Ask {
             kind: Sensitive::Password,
             title: format!("Type into a password field on {host}"),
@@ -704,6 +718,22 @@ Focused: textbox \"Email\"
         .unwrap();
         assert_eq!(a.kind, Sensitive::Password);
         assert_eq!(a.title, "Type into a password field on 127.0.0.1:8123");
+        // The same password a key at a time is asked about as well; a key that only moves or
+        // commands (Tab, Control+A) isn't.
+        for (key, asks) in [
+            ("h", true),
+            ("Shift+H", true),
+            ("space", true),
+            ("Tab", false),
+            ("Control+a", false),
+        ] {
+            let a = ask_for("browser_press", &json!({ "key": key }), Some(&field));
+            assert_eq!(
+                a.is_some_and(|a| a.kind == Sensitive::Password),
+                asks,
+                "{key}"
+            );
+        }
         // Clicking a password field, or typing into another, is nothing to ask about.
         assert_eq!(ask_for("browser_click", &json!({}), Some(&field)), None);
         let email = json!({"describe": "textbox \"Email\"", "password": false, "page": page, "submits": {"action": "https://evil.example/collect", "method": "post"}});

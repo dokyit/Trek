@@ -1,7 +1,7 @@
 # Trek's performance measurements and stress run, against a headless, isolated Trek (mock agent
 # only, a throwaway data folder): nothing real is read, touched or typed into. Each run launches
 # a release build with TREK_PERF=1, drives it through the shots harness (crates/trek-app/src/shots.rs)
-# and reads back the `perf:` lines it logs (crates/trek-app/src/perf.rs). See docs/PERF.md.
+# and reads back the `perf:` lines it logs (crates/trek-perf/src/lib.rs). See docs/PERF.md.
 #
 #   pwsh script/perf.ps1                       # every measurement, three runs each, medians
 #   pwsh script/perf.ps1 startup basecamp      # some of them: startup basecamp scroll type inbox stream

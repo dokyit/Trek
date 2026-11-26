@@ -26,7 +26,7 @@ reports, a 2,000-item thread titled "Long transcript", and a 3,000-line Rust fil
 `SEED_SESSIONS=1` adds "Agent session #00", shaped like a day-long agent session: 8,200 items, most
 of them tool calls over 600 files.
 
-Trek measures itself with `TREK_PERF=1` (`crates/trek-app/src/perf.rs`): one `perf:` line per
+Trek measures itself with `TREK_PERF=1` (`crates/trek-perf/src/lib.rs`): one `perf:` line per
 measurement in the log (`<data dir>\logs` when `TREK_DATA_DIR` is set, else
 `%LOCALAPPDATA%\Trek\logs`). A frame is timed from the main window's root render to the end of
 its paint (the main thread's work; the GPU's present and the compositor come after).

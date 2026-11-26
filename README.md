@@ -13,7 +13,7 @@ Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models. On macOS an
   <a href="https://github.com/dokyit/Trek/releases/latest"><img src="https://img.shields.io/github/v/release/dokyit/Trek?label=release&color=F4692B" alt="Latest release"></a>
   <a href="https://github.com/dokyit/Trek/actions/workflows/ci.yml"><img src="https://github.com/dokyit/Trek/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License: Apache-2.0"></a>
-  <img src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows-555" alt="Platforms: macOS, Windows">
+  <img src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-555" alt="Platforms: macOS, Windows, Linux">
 </p>
 
 <p>
@@ -263,7 +263,7 @@ Trek drives each vendor's own CLI, so your subscriptions work as they do in the 
 
 </details>
 
-**Linux**, a preview (Ubuntu 22.04, Debian 12, Fedora 36 or later; x86_64 or Arm), from the first release that carries Linux downloads:
+**Linux**, a preview (Ubuntu 22.04, Debian 12, Fedora 36 or later; x86_64 or Arm):
 
 1. Ubuntu or Debian: download `trek_<version>_amd64.deb` (`_arm64.deb` on Arm) and run `sudo apt install ./trek_<version>_amd64.deb`, which brings what Trek needs. Trek says in **Settings › Updates** when a new version is out; download its `.deb` to update.
 2. Anywhere else: download `Trek-<version>-linux-x86_64.AppImage` (`linux-aarch64` on Arm), `chmod +x` it and run it. It needs GTK 3 and WebKitGTK 4.1 from your package manager (it names them if they're missing), adds itself to your app menu, and updates itself from **Settings › Updates**.
@@ -311,7 +311,7 @@ On Xcode 26+, a missing Metal compiler is one command away: `xcodebuild -downloa
 ## Status
 
 Trek is **0.x**: used every day, moving fast. Expect rough edges.
-Mac (Apple silicon and Intel), Windows x64, and Linux (x86_64 and Arm, a preview) from the first release that carries it. History import covers Claude Code, Codex and OpenCode.
+Mac (Apple silicon and Intel), Windows x64, and Linux (x86_64 and Arm, a preview). History import covers Claude Code, Codex and OpenCode.
 Trek asks once before sharing anonymous usage data, and sends nothing without a yes. What is sent is in [docs/PRIVACY.md](docs/PRIVACY.md).
 See [open issues](https://github.com/dokyit/Trek/issues).
 

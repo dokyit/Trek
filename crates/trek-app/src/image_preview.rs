@@ -190,13 +190,57 @@ fn thumb_bounds(path: &Path, window: &Window, cx: &App) -> Option<Bounds<Pixels>
 }
 
 /// `path`'s width and height in pixels, from its file's header (read once per path).
+///
+/// This is asked while drawing, so the file is read on a thread of its own and waited for only
+/// briefly: a picture whose bytes aren't here yet (one iCloud has taken off the disk, one on a
+/// network share that's gone quiet) held the whole window in `read` for as long as the file
+/// took, which was a freeze. Until a slow one answers, its size is unknown (`None`), and later
+/// asks find the answer once it has come.
 pub fn pixels(path: &Path) -> Option<(u32, u32)> {
-    static SEEN: std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf, Option<(u32, u32)>>>> =
+    pixels_within(path, PIXELS_WAIT, pixels_now)
+}
+
+/// How long drawing waits for a picture's header: far longer than a file on this disk takes,
+/// and too short to notice when one never answers.
+const PIXELS_WAIT: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// A picture's size as far as it's known: asked and not yet answered, or answered.
+#[derive(Clone, Copy)]
+enum Header {
+    Reading,
+    Read(Option<(u32, u32)>),
+}
+
+fn pixels_within(
+    path: &Path,
+    wait: std::time::Duration,
+    read: fn(&Path) -> Option<(u32, u32)>,
+) -> Option<(u32, u32)> {
+    static SEEN: std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf, Header>>> =
         std::sync::LazyLock::new(Default::default);
-    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
-    *seen
-        .entry(path.to_path_buf())
-        .or_insert_with(|| pixels_now(path))
+    let seen = || SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    match seen().get(path) {
+        Some(Header::Read(size)) => return *size,
+        Some(Header::Reading) => return None,
+        None => {}
+    }
+    seen().insert(path.to_path_buf(), Header::Reading);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let owned = path.to_path_buf();
+    let spawned = std::thread::Builder::new()
+        .name("image-size".into())
+        .spawn(move || {
+            let size = read(&owned);
+            seen().insert(owned, Header::Read(size));
+            let _ = tx.send(size);
+        });
+    if spawned.is_err() {
+        // No thread to be had: read it here, as before.
+        let size = read(path);
+        seen().insert(path.to_path_buf(), Header::Read(size));
+        return size;
+    }
+    rx.recv_timeout(wait).ok().flatten()
 }
 
 /// `pixels`, read from the file now: for one that may have changed since it was last looked at
@@ -1241,6 +1285,53 @@ mod tests {
         assert_eq!(
             clamp_offset(point(px(-1500.), px(0.)), content, area),
             point(px(-1000.), px(0.))
+        );
+    }
+}
+
+#[cfg(test)]
+mod pixels_tests {
+    use super::pixels_within;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    fn slow(_: &Path) -> Option<(u32, u32)> {
+        std::thread::sleep(Duration::from_millis(400));
+        Some((40, 30))
+    }
+
+    fn quick(_: &Path) -> Option<(u32, u32)> {
+        Some((8, 6))
+    }
+
+    /// A file that takes its time doesn't hold the caller (drawing): the size is unknown until
+    /// the read ends, and known from then on without reading again.
+    #[test]
+    fn a_slow_file_does_not_hold_the_caller() {
+        let path = Path::new("/trek-test/pixels/slow.png");
+        let began = Instant::now();
+        assert_eq!(pixels_within(path, Duration::from_millis(20), slow), None);
+        assert_eq!(pixels_within(path, Duration::from_millis(20), slow), None);
+        assert!(
+            began.elapsed() < Duration::from_millis(300),
+            "{:?}",
+            began.elapsed()
+        );
+        std::thread::sleep(Duration::from_millis(600));
+        let again = Instant::now();
+        assert_eq!(
+            pixels_within(path, Duration::from_millis(20), slow),
+            Some((40, 30))
+        );
+        assert!(again.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn a_quick_file_answers_at_once() {
+        let path = Path::new("/trek-test/pixels/quick.png");
+        assert_eq!(
+            pixels_within(path, Duration::from_secs(5), quick),
+            Some((8, 6))
         );
     }
 }
