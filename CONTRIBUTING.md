@@ -35,6 +35,7 @@ crates/trek-agents   live sessions: Claude Code, Codex, ACP agents, API and loca
 crates/trek-app      the GPUI app: workspace, sidebar, thread view, composer, tools, settings
 crates/trek-mcp      the MCP server agents use (computer use, iOS Simulator, sub-agents)
 crates/trek-remote   the phone and machine link (WebSocket over pinned TLS)
+crates/…             smaller crates, one job each: `./bin/agent-cli crates` lists them all
 ios/                 Trek for iPhone (SwiftUI)
 vendor/              patched copies of upstream crates (gpui-base, gpui-pre)
 script/              bundle, release, capture and test scripts
@@ -79,7 +80,7 @@ cargo fmt --all
 cargo test --workspace
 ```
 
-CI runs both on macOS and Windows (`cargo fmt --all -- --check`, `cargo test --workspace --locked`).
+CI runs both on macOS, Windows and Linux (`cargo fmt --all -- --check`, `cargo test --workspace --locked`).
 `crates/trek-app/tests` holds headless UI tests: Trek's real views on GPUI's test platform,
 with an in-memory database and the mock agent.
 
@@ -108,8 +109,8 @@ Look at `git log` and match it:
 
 ## Releases
 
-Maintainers publish releases from the GitHub **Release** workflow, which builds the Mac and
-Windows apps and signs the updates. The process is in [docs/RELEASING.md](docs/RELEASING.md).
+Maintainers publish releases from the GitHub **Release** workflow, which builds the Mac,
+Windows and Linux (a preview) apps and signs the updates. The process is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## License
 

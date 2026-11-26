@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Regenerate crates/trek-app/src/math/tables.rs from a KaTeX npm package (MIT).
+"""Regenerate crates/trek-math/src/tables.rs from a KaTeX npm package (MIT).
 
     curl -sL https://registry.npmjs.org/katex/-/katex-0.19.0.tgz | tar -xz -C /tmp/katex
-    python3 -I script/math-tables.py /tmp/katex/package > crates/trek-app/src/math/tables.rs
+    python3 -I script/math-tables.py /tmp/katex/package > crates/trek-math/src/tables.rs
 
 It reads two files: src/fontMetricsData.js (each glyph's depth, height, italic correction, skew
 and width, in ems, for the KaTeX fonts Trek embeds) and src/symbols.ts (every math-mode symbol:

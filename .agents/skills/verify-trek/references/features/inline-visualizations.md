@@ -22,7 +22,7 @@ The mock response contains a labeled service-health heatmap and two side-by-side
 
 ## Code
 
-Schema and validation: `crates/trek-core/src/visualization.rs`. Native GPUI rendering and Markdown block integration: `crates/trek-app/src/visualization.rs`, `md.rs`, and `thread_view.rs`. Agent capability instructions start in `workspace.rs`; the deterministic path is `crates/trek-agents/src/mock.rs`.
+Schema and validation: `crates/trek-core/src/visualization.rs`. Native GPUI rendering and Markdown block integration: `crates/trek-app/src/visualization/` (`mod.rs`, `charts.rs`, `diagrams.rs`, `layout.rs`, `mockup.rs`), `md.rs`, and `thread_view.rs`. Agent capability instructions start in `workspace.rs`; the deterministic path is `crates/trek-agents/src/mock.rs`.
 
 ## Verify
 

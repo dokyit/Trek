@@ -40,7 +40,7 @@ The mock path exercises child-thread presentation without launching another vend
 
 ## Code
 
-`crates/trek-app/src/composer.rs`, `thread_view.rs` (`Row::SubAgent`, `Row::Lineage`), `workspace/orchestrate.rs`, `workspace/lineage.rs`, `ipc.rs`; tool schemas in `crates/trek-ipc/src/lib.rs`, served by `crates/trek-mcp/src/orchestrate.rs`; links and caps in `crates/trek-core/src/lineage.rs` (thread columns `started_by`, `continued_from` in `store.rs`); phone mapping in `remote.rs` (`item_body`); mock scripts in `crates/trek-agents/src/mock.rs`. Tests: `crates/trek-app/src/tests/orchestrate.rs`, `tests/lineage.rs`.
+`crates/trek-app/src/composer.rs`, `thread_view.rs` (`Row::SubAgent`, `Row::Lineage`), `workspace/orchestrate.rs`, `workspace/lineage.rs`, `ipc.rs`; tool schemas in `crates/trek-ipc/src/lib.rs`, served by `crates/trek-mcp/src/orchestrate.rs`; links and caps in `crates/trek-core/src/lineage.rs` (thread columns `started_by`, `continued_from` in `store.rs`); phone mapping in `remote.rs` (`item_body`); mock scripts in `crates/trek-agents/src/mock.rs`. Tests: `crates/trek-app/tests/orchestrate.rs`, `tests/lineage.rs`.
 
 ## Verify
 
