@@ -612,6 +612,27 @@ impl LineLayoutCache {
         SharedString: From<Text>,
     {
         let _font_generation = self.clear_if_font_generation_changed();
+        // Trek: a line laid out under a line clamp stops wrapping where the clamp's lines run
+        // out, and the cache's key doesn't say how many lines it was allowed. Kept in the cache,
+        // that layout answered the same text asked for without a clamp a frame later (a message
+        // opened with "Show more" stayed cut, its last paragraph one unwrapped line), and an
+        // unclamped one answered a clamped ask. A clamped line is worked out each time instead:
+        // its shaping still comes from the cache (`layout_line`), only its breaks are found again.
+        if max_lines.is_some() {
+            let text = SharedString::from(text);
+            let unwrapped_layout = self.layout_line::<&SharedString>(&text, font_size, runs, None);
+            let wrap_boundaries = match wrap_width {
+                Some(wrap_width) => {
+                    unwrapped_layout.compute_wrap_boundaries(text.as_ref(), wrap_width, max_lines)
+                }
+                None => SmallVec::new(),
+            };
+            return Arc::new(WrappedLineLayout {
+                unwrapped_layout,
+                wrap_boundaries,
+                wrap_width,
+            });
+        }
         let key = &CacheKeyRef {
             text: text.as_ref(),
             font_size,

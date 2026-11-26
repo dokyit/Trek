@@ -345,6 +345,12 @@ pub fn part_of<'a>(text: &'a str, cuts: &[usize], n: usize) -> Option<&'a str> {
     text.get(start..end)
 }
 
+/// A message's line height, in its font's sizes.
+const MESSAGE_LINE: f32 = 1.5;
+
+/// The lines of a long message of the user's on show until "Show more".
+const CLAMPED_LINES: f32 = 10.;
+
 /// The key of part `n` of item `key`'s document: the item's own for the first, so an answer that
 /// grows long enough to be cut keeps the document it had.
 fn part_key(key: &str, n: usize) -> String {
@@ -2782,7 +2788,7 @@ impl ThreadView {
                                                 .border_color(fluent::stroke(theme.border, cx))
                                         })
                                         .text_size(text_size)
-                                        .line_height(relative(1.5))
+                                        .line_height(relative(MESSAGE_LINE))
                                         // A Trek theme's conversation font, as the answers have.
                                         .when_some(crate::themes::conversation_font(cx), |el, f| {
                                             el.font_family(f)
@@ -2813,8 +2819,14 @@ impl ThreadView {
                                                         div()
                                                             .flex_1()
                                                             .min_w_0()
+                                                            // Cut by height, not by a line
+                                                            // clamp: clamped, the paragraphs
+                                                            // past the clamp's lines were
+                                                            // still drawn, each as one line
+                                                            // that ran off the bubble's edge.
                                                             .when(long && !open, |el| {
-                                                                el.line_clamp(10)
+                                                                el.max_h(at.line * CLAMPED_LINES)
+                                                                    .overflow_hidden()
                                                             })
                                                             .child(text),
                                                     ),
@@ -5734,6 +5746,8 @@ struct RowContext {
     /// The thread's worktree is missing: no files can be restored until it's back.
     worktree_missing: bool,
     text_size: Pixels,
+    /// A line of a message at that size, as the window draws it (on whole device pixels).
+    line: Pixels,
     /// The column's widest (`Workspace::column`).
     column: Pixels,
     cwd: Option<std::path::PathBuf>,
@@ -5809,6 +5823,9 @@ impl Render for ThreadView {
                 .is_some_and(crate::system::lately::worktree_missing),
             thread,
             text_size: px(ws.settings.appearance.transcript_font_size()),
+            line: window.pixel_snap(
+                px(ws.settings.appearance.transcript_font_size()) * MESSAGE_LINE,
+            ),
             column: ws.column(),
             cwd: ws.cwd_in(&self.scope),
             folder: t.and_then(|t| ws.thread_project_tint(t, cx)),
