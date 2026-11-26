@@ -1628,6 +1628,30 @@ impl Workspace {
         let Some(prompt) = pending else {
             return Err(tr::HostError::conflict("Already answered"));
         };
+        // A secret from another computer (`secret_answer`): its value goes to the thread's
+        // private file, as the card's does here, and nowhere else: not into `answered` (what
+        // devices are shown of a closed card), a reply, an item or a log.
+        if let tr::AnswerResponse::Secret { value } = &req.response {
+            if !matches!(prompt, Some(trek_agents::Prompt::Secret { .. })) {
+                return Err(tr::HostError::bad_request(
+                    "That answer doesn't fit the request",
+                ));
+            }
+            match value.as_ref().map(|v| v.reveal().trim()) {
+                Some("") => {
+                    return Err(tr::HostError::bad_request("The secret is empty"));
+                }
+                Some(value) => self.answer(
+                    &id,
+                    &req.request_id,
+                    vec![(String::new(), value.to_string())],
+                    cx,
+                ),
+                // Declined: its agent is told to carry on without it.
+                None => self.respond(&id, &req.request_id, trek_agents::Decision::Deny, cx),
+            }
+            return Ok(());
+        }
         let phone_response = req.response.clone();
         let mut response = req.response;
         if let (
@@ -2147,6 +2171,17 @@ impl Workspace {
             checks: self.remote_checks(t),
             compact_offer: self.remote_compact_offer(t),
             pending_switch: self.remote_pending_switch(t),
+            // A secret's request, for another computer's card (`secret_answer`).
+            secret: live.and_then(|l| {
+                l.permissions.iter().find_map(|p| match &p.prompt {
+                    Some(trek_agents::Prompt::Secret { name, why }) => Some(tr::SecretAsk {
+                        request_id: p.request_id.clone(),
+                        name: name.clone(),
+                        why: why.clone(),
+                    }),
+                    _ => None,
+                })
+            }),
         };
         self.remote_sub_agent_needs(t, &mut row);
         row

@@ -96,6 +96,10 @@ lsp-types = "0.97"
 # The editor's Explorer: folders read as git would list them (.gitignore respected), and kept
 # up to date by FSEvents, as are open files an agent edits.
 ignore = "0.4"
+# A folder attached to a thread on another machine goes there as one zip (`machines/files.rs`),
+# and the Browser's unpacking tests make extension packages (trek-core's version: nothing new to
+# build).
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 notify = "7"
 ropey = "2.0.0-beta.1"
 # Fixture binaries tests spawn as fake agents/formatters (src/format.rs, src/lsp_client.rs,
@@ -202,8 +206,6 @@ ctor = "1"
 # Integration tests link the library with its test-only surface (test_support, the views' test
 # hooks) on: this dev-dependency on the crate itself is what enables the feature.
 trek-app = { path = ".", features = ["test-support"] }
-# Extension packages for the Browser's unpacking tests (trek-core's version: nothing new to build).
-zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 gpui_macos = { package = "gpui-pre-macos", version = "=0.3.7" }

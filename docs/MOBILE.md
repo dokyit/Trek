@@ -272,6 +272,7 @@ listed, so an older Mac (no list) simply doesn't show them. The protocol version
 | `machine_files` | `upload_part.from` and `.image`, `upload_progress.path`, image uploads attached as images, user items' `image_paths`: another Trek's attachments (0.4.61) |
 | `side_chat` | `side_chat`: a thread's side chat found, or one started beside it (the phone's `/side`) |
 | `sub_agent_view` | tool items' `sub_agent`, at-work rows' `call_id`, and `sub_agent` / `sub_agent_action`: a sub-agent opened from its row, stopped and sent a message |
+| `secret_answer` | a row's `secret` while its thread waits for a secret, and `answer` with a `secret` response: another computer's Trek gives it (0.4.68; see "A secret from another computer") |
 
 `use_reset` to `icon`, and `card_actions` to `consult`, `uploads`, `side_chat` and `sub_agent_view`, are described under "Keeping up with the
 Mac" below, `basecamp_v2` under
@@ -576,6 +577,9 @@ All are acknowledged with `{"type":"ack","re":"<id>"}` or answered with an `erro
 {"type":"ping","id":"15"}
 ```
 
+- `answer` with `{"kind":"secret","value":"…"}` (feature `secret_answer`, Trek 0.4.68) gives a
+  secret the thread's agent asked for; without `value` it declines. See "A secret from another
+  computer" below.
 - `send.mode`: `steer` (inject into the running turn) · `queue` (deliver after it). On an idle thread
   both just start a turn. The Mac's own follow-up setting applies when omitted.
 - Trek's own commands work in `send` as typed on the Mac (`/permissions edits`, `/usage`, `/context`,
@@ -992,6 +996,30 @@ running turn to compact."), while it's paused at a limit, or before any message.
  "compact":"ready"}
 {"type":"thread_action","id":"4","thread_id":"t","action":{"kind":"compact"}}   → ack
 ```
+
+**A secret from another computer** (feature `secret_answer`, Trek 0.4.68). An agent asks for a
+secret through Trek's `request_secret`; the computer that runs the thread puts up a card, saves
+the value in a private file for the thread and gives the agent the file's path. Until 0.4.67 the
+card could be answered on that computer alone: phones and other machines got a notice ("Needs
+GITHUB_TOKEN. Enter it on this Mac."). A paired Trek can now give it. While a thread waits for
+one, its row carries `secret`:
+
+```json
+{"id":"01J…","title":"Open the PR","needs":{"kind":"question","text":"Needs GITHUB_TOKEN. Enter it on this Mac."},"secret":{"request_id":"trek-secret-ask-3","name":"GITHUB_TOKEN","why":"To open the pull request."}}
+{"type":"answer","id":"21","thread_id":"01J…","request_id":"trek-secret-ask-3","response":{"kind":"secret","value":"…"}}
+{"type":"answer","id":"22","thread_id":"01J…","request_id":"trek-secret-ask-3","response":{"kind":"secret"}}
+```
+
+The value travels once, over the device's own authenticated, certificate-pinned connection, and
+goes where the card's value goes: `session_secrets` on the computer that asked. It is in no reply,
+item, notice or log on either end (`SecretValue` prints as `…`; the host doesn't keep the response
+with the card's answers as it does a question's), and what the agent prints of it is scrubbed as
+before. No `value` declines: the agent is told to carry on without it. `bad_request` for an empty
+value, or a request that isn't a secret's; `conflict` once it's answered. The transcript's item
+for the request stays the notice it was (`r<request_id>`), so a client that doesn't know `secret`
+shows what it always did; one that does shows its card in the notice's place. The iPhone app
+doesn't offer it yet. A computer whose machine doesn't list `secret_answer` says so by name:
+"T-Book needs Trek 0.4.68 or later to take it from here."
 
 **`turn_preview`**: what the Mac's confirmation before an `undo`, `retry` or `rewind` says, for the
 same `item_id` `turn_action` would take (a turn's end, or for `rewind` one of the user's

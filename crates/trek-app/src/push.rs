@@ -438,6 +438,11 @@ impl Workspace {
     /// An alert the computer raised: to the phone too, when phone notifications are on (and
     /// you're away, if that's the setting).
     pub fn push_alert(&mut self, message: &str, thread: &str) {
+        // A thread on another machine: that machine tells the phone itself (it's the one the
+        // phone can open the thread on).
+        if crate::machines::is_remote(thread) {
+            return;
+        }
         let m = &self.settings.mobile;
         if !m.push || cfg!(any(test, feature = "test-support")) || !self.has_phone_route() {
             return;

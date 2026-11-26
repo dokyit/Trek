@@ -994,7 +994,15 @@ fn row_menu(
 impl Render for ExplorerPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(root) = self.root.clone() else {
-            return super::empty(self.empty_hint, cx).into_any_element();
+            // A thread on another machine: its files are there (see the Git panel's note).
+            let ws = self.workspace.read(cx);
+            let hint = match ws.on_machine_in(&ws.harness_scope()) {
+                Some(name) => format!(
+                    "This thread's files are on {name}. Browsing {name}'s files here isn't built yet."
+                ),
+                None => self.empty_hint.to_string(),
+            };
+            return super::empty(hint, cx).into_any_element();
         };
         let rows = self.rows(&root);
         let selected = self.selected.clone();

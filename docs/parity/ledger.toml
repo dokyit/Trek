@@ -1230,9 +1230,48 @@ windows = "yes"
 linux = "yes"
 live = ["route no-project", "pair-self", "wait 4000", "machine-draft", "attach {project}{/}README.md", "type What does the README say?", "key enter", "wait 4000", "file uploads{/}*README.md contains Live project", "count user-file* 1", "pair-self leave", "wait 800", "count machine-head* 0"]
 how = { macos = "The other machine keeps them in its data folder's uploads/ and the message names its path to each: a Mac's or a PC's, as that machine writes it.", windows = "The same code: a PC sends its own paths' files and is given the other machine's paths (backslashes on a PC, slashes on a Mac), and takes files into %APPDATA%'s uploads/ as a Mac does." }
-note = "Shared code on both platforms, tested on both CIs against a loopback machine (tests/machines.rs, tests/remote.rs, trek-remote's client tests). No run between two real computers has sent files yet, a PC on either end least of all (docs/MULTI-MACHINE.md). A folder can't go yet (it would need packing up), nor a file over 2 GB; a machine before Trek 0.4.61 takes pictures alone, inline."
+note = "Shared code on both platforms, tested on both CIs against a loopback machine (tests/machines.rs, tests/remote.rs, trek-remote's client tests). No run between two real computers has sent files yet, a PC on either end least of all (docs/MULTI-MACHINE.md). A folder goes as one zip of its files (0.4.68: what git ignores stays behind); a file or folder over 2 GB can't go; a machine before Trek 0.4.61 takes pictures alone, inline."
 code = ["crates/trek-app/src/machines/files.rs", "crates/trek-app/src/composer/machine_upload.rs", "crates/trek-app/src/remote/uploads.rs", "crates/trek-remote/src/protocol/uploads.rs", "crates/trek-remote/src/client.rs"]
 tests = ["crates/trek-app/tests/machines.rs", "crates/trek-app/tests/remote.rs", "crates/trek-app/src/machines/files.rs", "crates/trek-remote/tests/client.rs", "crates/trek-remote/src/protocol/uploads.rs"]
+
+[[feature]]
+id = "machine-from-here"
+area = "Machines"
+what = "A thread on another machine is rewound, edited, retried, forked, snoozed and deleted from here, the machine doing the work"
+macos = "yes"
+windows = "yes"
+linux = "yes"
+live = ["route no-project", "pair-self", "wait 4000", "machine-draft", "type hello there", "key enter", "wait 5000", "count user-msg* 1", "hover user-msg#0", "click rewind-user#0", "wait 1500", "count confirm-card 1", "click confirm-go", "wait 4000", "count user-msg* 0", "pair-self leave", "wait 800", "count machine-head* 0"]
+how = { macos = "`turn_action`, `turn_preview` and `thread_action` over the machine's own connection; the machine rewinds, forks and deletes its own thread and this computer shows what it answers.", windows = "The same code: a PC asks a Mac, and a Mac a PC (the owner's case), with the requests a phone has always made." }
+note = "Until 0.4.67 each said \"Do that in Trek on <machine>\". Shared code, tested on both CIs against a loopback machine (tests/machines.rs). Works with a machine on 0.4.67 (it has served these to phones since 0.4.8). Not yet seen between two real computers. Still the machine's alone: its git panel and diffs, terminal, explorer and editor, side chat, queue, limit bar and PR cards' buttons (docs/MULTI-MACHINE.md)."
+code = ["crates/trek-app/src/machines/turns.rs", "crates/trek-app/src/machines.rs", "crates/trek-app/src/workspace.rs", "crates/trek-app/src/thread_view.rs", "crates/trek-app/src/composer.rs", "crates/trek-app/src/thread_menu.rs"]
+tests = ["crates/trek-app/tests/machines.rs", "crates/trek-app/src/machines/turns.rs"]
+
+[[feature]]
+id = "machine-secret"
+area = "Machines"
+what = "A secret a thread on another machine asks for is given from here"
+macos = "yes"
+windows = "yes"
+linux = "yes"
+live = ["route no-project", "pair-self", "wait 4000", "machine-draft", "type open the pull request", "key enter", "wait 5000", "secret-demo", "wait 2500", "count secret-value 1", "click secret-value", "type not-a-real-secret", "click secret-save", "wait 3000", "count secret-value 0", "private session-secrets", "pair-self leave", "wait 800", "count machine-head* 0"]
+how = { macos = "The machine's row carries the request (`secret`), this computer draws its card, and the value goes as an `answer` of kind `secret` to the machine's private file for the thread.", windows = "The same code on both ends." }
+note = "New in 0.4.68 (feature `secret_answer`): the machine must run it too. One that doesn't keeps its notice, which says \"<machine> needs Trek 0.4.68 or later to take it from here\". The value is in no reply, item or log on either end (tests/machines.rs, trek-remote's protocol tests). Paired with itself the isolated app shows the card twice: its own, and the machine's."
+code = ["crates/trek-remote/src/protocol/from_here.rs", "crates/trek-app/src/remote.rs", "crates/trek-app/src/machines.rs", "crates/trek-app/src/workspace.rs"]
+tests = ["crates/trek-app/tests/machines.rs", "crates/trek-remote/tests/protocol.rs"]
+
+[[feature]]
+id = "message-show-more"
+area = "Threads"
+what = "A long message of yours is cut to ten wrapped lines, and Show more opens it whole"
+macos = "yes"
+windows = "yes"
+linux = "yes"
+live = ["route no-project", "type /goal keep patching and debugging until it fully works, also fixing the black screen from happening", "key shift-enter", "type The debugger I built earlier was broken. It told the game every exception was handled, so one normal, already-caught fault repeated about 770,000 times until the game died. The corrupted hook diagnosis came from that bug, not from the Live Editor.", "key shift-enter", "type Some of my patches made things worse. The four functions I labelled DX12 installers actually install the Live Editor's game hooks, so returning early from them switches off editor features. The other patched function writes database fields, so editing would silently do nothing.", "key shift-enter", "type The earlier run may never have crashed. It reached Main Menu reached /frontend/boot and sat there with the hook thread parked, which looks exactly like a hang from outside but is the game waiting on a shader cache that never finishes compiling.", "key shift-enter", "type So: first prove whether it crashes at all. Run it unpatched with the fixed debugger and log every first-chance exception with its module and offset.", "key enter", "wait 4000", "click user-more#0", "wait 300", "within user-text* user-msg#0", "count user-text* 1"]
+how = { macos = "Cut by height with every line wrapped; GPUI's line clamp left the paragraphs past its lines unwrapped and its cached layout kept the message cut once opened.", windows = "The same code and the same patch to GPUI's wrapped-line cache.", linux = "The same." }
+note = "0.4.67: \"Show less\" over the same cut text, the last paragraphs each one line off the bubble's edge, on any thread (reported on a thread that ran on a paired PC)."
+code = ["crates/trek-app/src/thread_view.rs", "crates/trek-app/src/ide/ai/transcript.rs", "vendor/gpui-pre/src/text_system/line_layout.rs"]
+tests = ["crates/trek-app/tests/machines.rs"]
 
 [[feature]]
 id = "machine-sub-agents"

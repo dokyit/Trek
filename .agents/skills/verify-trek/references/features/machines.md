@@ -43,7 +43,9 @@ $T screenshot machines-thread
 
 What's attached here (the + menu, a drop, a paste, a screenshot or photo, and files of this computer typed as `@/path` or `@~/path`) goes to B ahead of the message, in a new thread's first message and in a follow-up alike (B on Trek 0.4.61 or later, feature `machine_files`). Send leaves the draft as it is while they go: each tile or thumbnail fills along its foot (`attachment-sending#<n>`, `attachment-file-sending#<n>`), `machine-upload` under the strip says "Sending 2 files to <B> · 1.2 MB of 2.6 MB", and `machine-upload-cancel` stops them (so do taking a file off and moving to another thread). Once all are in, the message goes: B's copy of each file mentioned in place of this computer's path, each picture attached there as an image. B keeps them in its data folder's `uploads/` as `<this computer's name> <date> at <time> <name>`, at most 2 GB a file. Here the transcript shows this computer's own files again (the file chip, a video that plays, the picture).
 
-What can't go says why in a toast and leaves the draft: B on an older Trek ("<B> needs Trek 0.4.61 or later to receive files…"; pictures alone still go to it inline, as before), a folder ("Folders can't go to <B> yet…"), a file over 2 GB, a file gone, B offline, or what B refused (no room, say) as "Couldn't send <file> to <B>: …".
+A folder goes as one zip of its files (0.4.68: what git ignores and `.git` stay behind; "Packing a folder to send to <B>…" while it's made), named `<folder> folder.zip`.
+
+What can't go says why in a toast and leaves the draft: B on an older Trek ("<B> needs Trek 0.4.61 or later to receive files…"; pictures alone still go to it inline, as before), a file or folder over 2 GB, a folder with nothing to send, a file gone, B offline, or what B refused (no room, say) as "Couldn't send <file> to <B>: …".
 
 With the isolated app as its own machine B, in one go:
 
@@ -84,9 +86,58 @@ $T control pair-self leave
 
 A B before 0.4.64 sends no `activity` (an opened row lists no calls) and no `continued` (no onward arrow for a sub-agent woken again); a B before `sub_agent_view` sends no links (rows read from the call alone, no Stop for the agent's own).
 
+### Everything else from here (0.4.68)
+
+What a thread of this computer offers, a thread on B offers too, with B doing the work: the
+message's **Edit and send again** (`edit-user#<n>`), **Rewind to here** (`rewind-user#<n>`, its
+confirmation `confirm-card` listing the files B would put back, `restore-files`), **Fork**
+(`fork-user#<n>`, `fork-turn#<n>`), the turn footer's Undo and Retry, the thread menu's
+**Snooze**, **Wake now** and **Delete…** (B words the confirmation), and a **secret** B's agent
+asks for (its card here, `secret-value`; B on Trek 0.4.68 or later, feature `secret_answer`).
+A **folder** attached here goes as one zip (`<folder> folder.zip` in B's `uploads/`). A long
+thread reads its start from B in pages after it opens. The model menu lists B's agents and
+models, and the access menu shows B's own Full access lock ("Locked on <B>…"). B's threads that
+start waiting on you, finish unread or fail raise this computer's banner and sound.
+
+Until 0.4.67 each of the first seven said "Do that in Trek on <B>", a folder said "Folders can't
+go to <B> yet", and a secret was a notice ("Needs GITHUB_TOKEN. Enter it on <B>.").
+
+```sh
+$T open no-project
+$T control pair-self
+$T control wait 3000
+$T control machine-draft
+$T control type "hello there"
+$T control key enter
+$T control wait 4000
+$T control hover "user-msg#0" // click "rewind-user#0"   # one batch (`//`): the message's actions show only while the pointer is over it. confirm-card: what B says it would put back
+$T control click "confirm-go"                  # B rewinds; "hello there" is back in the composer
+$T control key enter                            # sent again
+$T control wait 4000
+$T control secret-demo                          # B's agent asks for GITHUB_TOKEN (pair-self: B is this app)
+$T control wait 1500
+$T control click secret-value                   # the card here (secret-value, secret-save, secret-decline)
+$T control type not-a-real-secret
+$T control click secret-save                    # it goes to B, which saves it for the thread
+$T control attach "$PWD/docs"                   # a folder, as a drop
+$T control type "what's in here?"
+$T control key enter                            # "Packing a folder to send to <B>…", then it goes
+$T control wait 5000
+$T control file "uploads/*docs folder.zip"      # B's copy
+$T control pair-self leave
+```
+
+With the app paired with itself the same thread is in the sidebar twice (its own, and as B's
+under Devices), and each of B's alerts comes twice (this app is both computers).
+
+**Show more** on a long message of yours (`user-more#<n>`, the text `user-text#<n>`): closed, ten
+lines, every one wrapped; open, the whole message, wrapped. `type` a paragraph, `key shift-enter`,
+another, six times, `key enter`, then `click "user-more#0"`. (0.4.67: "Show less" over the same cut
+text, the paragraphs past the tenth line each one line running off the bubble; local threads too.)
+
 ## Code
 
-`crates/trek-app/src/machines.rs` (registry, `machines.json`, the client per machine, mapping B's rows and items to `Thread`/`Item`/`PendingPermission`, the actions), `machines/clone.rs` (origin URL, ignored files, uploads), `machines/files.rs` (what goes with a message, why it can't, the message shaped for B, B's copies shown as the files here), `machines/sheets.rs` (Add a machine…, Add to another machine…), `machines/sub_agents.rs` (steering B's sub-agents and background commands; the rows are `SubAgentRow::of_machine` in `thread_view.rs`, the list `Workspace::machine_sub_agents` in `workspace/sub_agents.rs`), `composer/machine_chip.rs`, `composer/machine_upload.rs` (the attachments on their way, progress, Cancel), the Machines group in `settings_view/mobile.rs`, the machine groups in `sidebar.rs`, the `machines::is_remote` guards in `workspace.rs`. Client: `crates/trek-remote/src/client.rs` (`Client::upload_file`); host side: `remote.rs`, `remote/machines.rs`, `remote/uploads.rs`. Design: `docs/MULTI-MACHINE.md`; wire: `docs/MOBILE.md` (`uploads`, `machine_files`). Tests: `crates/trek-app/tests/machines.rs` (`cargo test -p trek-app --test machines`), `machines/files.rs`'s own, `crates/trek-remote/tests/client.rs` (`a_file_goes_up_in_pieces_and_comes_out_whole`), `crates/trek-app/tests/remote.rs` (`another_machines_files_…`); B's sub-agents and background work: `tests/machines.rs` (`a_thread_on_another_machine_shows_its_agents_sub_agents_at_work_as_it_does_at_home`, `trek_s_own_sub_agent_on_another_machine_opens_here_with_its_own_and_stops_from_here`, `background_work_of_a_thread_on_another_machine_shows_reads_and_stops_from_here`) and `crates/trek-remote/tests/protocol.rs` (`a_sub_agent_link_carries_its_steps_and_where_it_went_and_older_links_still_read`).
+`crates/trek-app/src/machines.rs` (registry, `machines.json`, the client per machine, mapping B's rows and items to `Thread`/`Item`/`PendingPermission`, the actions), `machines/clone.rs` (origin URL, ignored files, uploads), `machines/files.rs` (what goes with a message, why it can't, the message shaped for B, B's copies shown as the files here), `machines/sheets.rs` (Add a machine…, Add to another machine…), `machines/turns.rs` (rewind, undo, retry, edit, fork, snooze, delete: `turn_action`, `turn_preview`, `thread_action`), `machines/earlier.rs` (the start of a long thread, in pages), `machines/prefs.rs` (B's agents, models and Full access lock for the composer), `machines/sub_agents.rs` (steering B's sub-agents and background commands; the rows are `SubAgentRow::of_machine` in `thread_view.rs`, the list `Workspace::machine_sub_agents` in `workspace/sub_agents.rs`), `composer/machine_chip.rs`, `composer/machine_upload.rs` (the attachments on their way, progress, Cancel), the Machines group in `settings_view/mobile.rs`, the machine groups in `sidebar.rs`, the `machines::is_remote` guards in `workspace.rs`. Client: `crates/trek-remote/src/client.rs` (`Client::upload_file`); host side: `remote.rs`, `remote/machines.rs`, `remote/uploads.rs`. Design: `docs/MULTI-MACHINE.md`; wire: `docs/MOBILE.md` (`uploads`, `machine_files`). Tests: `crates/trek-app/tests/machines.rs` (`cargo test -p trek-app --test machines`), `machines/files.rs`'s own, `crates/trek-remote/tests/client.rs` (`a_file_goes_up_in_pieces_and_comes_out_whole`), `crates/trek-app/tests/remote.rs` (`another_machines_files_…`); B's sub-agents and background work: `tests/machines.rs` (`a_thread_on_another_machine_shows_its_agents_sub_agents_at_work_as_it_does_at_home`, `trek_s_own_sub_agent_on_another_machine_opens_here_with_its_own_and_stops_from_here`, `background_work_of_a_thread_on_another_machine_shows_reads_and_stops_from_here`) and `crates/trek-remote/tests/protocol.rs` (`a_sub_agent_link_carries_its_steps_and_where_it_went_and_older_links_still_read`).
 
 ## Verify
 

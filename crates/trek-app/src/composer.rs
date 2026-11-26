@@ -777,6 +777,44 @@ impl Composer {
             None => self.take_written(cx),
         };
         let ws = self.workspace.read(cx);
+        // A message of a thread on another machine: the machine says which files sending it
+        // again would put back there (`turn_preview`), and puts them back when it has them.
+        if crate::machines::is_remote(thread) {
+            let preview = ws.machine_turn_preview(thread, &item, trek_remote::TurnAction::Rewind);
+            let check = preview.map(|preview| {
+                cx.spawn(async move |this, cx| {
+                    let said = preview.await;
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(e) = this.editing.as_mut() {
+                            match said.files {
+                                Ok(changes) => e.files = EditFiles::Changes(changes),
+                                Err(why) => {
+                                    e.restore = None;
+                                    e.why_not = why;
+                                    e.files = EditFiles::Changes(vec![]);
+                                }
+                            }
+                            cx.notify();
+                        }
+                    });
+                })
+            });
+            self.editing = Some(Editing {
+                thread: thread.to_string(),
+                item,
+                restore: check.is_some().then_some(true),
+                why_not: "Its machine isn't connected.".into(),
+                files: EditFiles::Checking,
+                draft,
+                _check: check,
+            });
+            self.put_back(text, images.to_vec(), Some(text.len()), window, cx);
+            self.pickers.trigger = None;
+            self.sync_overlay(cx);
+            self.focus(window, cx);
+            cx.notify();
+            return;
+        }
         let checkpoint = ws.rewind_files(thread, &item);
         let why_not = ws
             .no_checkpoint(thread, &item)

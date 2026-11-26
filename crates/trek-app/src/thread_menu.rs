@@ -442,6 +442,23 @@ pub fn state_items(
 /// sub-agents says they go with it.
 pub fn delete(ws: &WeakEntity<Workspace>, f: &Facts) -> PopupMenuItem {
     let (ws, id, title) = (ws.clone(), f.id.clone(), f.title.clone());
+    // On another machine: it words the confirmation (it knows what goes with the thread), and
+    // deletes once that's agreed to here.
+    if f.remote {
+        return entry("thread-delete", "Delete…", None)
+            .icon(crate::assets::Lucide::Trash)
+            .on_click(move |_, window, cx| {
+                if let Some(ws) = ws.upgrade() {
+                    crate::machines::turns::confirm_delete(
+                        ws,
+                        id.clone(),
+                        title.clone(),
+                        window,
+                        cx,
+                    );
+                }
+            });
+    }
     if f.in_worktree {
         return entry("thread-delete", "Delete…", None)
             .icon(crate::assets::Lucide::Trash)

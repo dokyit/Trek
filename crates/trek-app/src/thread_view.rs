@@ -454,6 +454,10 @@ pub struct ThreadView {
     current: Option<String>,
     revision: u64,
     count: usize,
+    /// The item the first row showed when the rows were last counted: rows that have come in
+    /// front of it since (the earlier part of a long thread on another machine, read in pages)
+    /// are added to the scroller at the front, so what's on screen stays where it is.
+    first_item: Option<String>,
     /// Markdown documents by item id. Built when a row is first drawn, so opening a long thread
     /// doesn't parse all of it; kept by what they weigh (`MD_BUDGET`).
     md: Documents,
@@ -550,6 +554,9 @@ struct Confirm {
     files: Files,
     /// Also put the files back.
     restore: bool,
+    /// On another machine: whether its agent carries on from a recap, as the machine says once
+    /// asked (`None`: a thread of this computer, worked out here).
+    recap: Option<bool>,
     _check: Option<Task<()>>,
 }
 
@@ -612,6 +619,7 @@ struct Stashed {
     expanded: HashSet<String>,
     expanded_gen: u64,
     count: usize,
+    first_item: Option<String>,
     revision: u64,
     end: Option<usize>,
     scroller: Entity<MessageScrollerState>,
@@ -769,6 +777,7 @@ impl ThreadView {
             current: None,
             revision: 0,
             count: 0,
+            first_item: None,
             md: Documents::new(MD_BUDGET, MD_CAP),
             draws: 0,
             expanded: HashSet::new(),
@@ -832,6 +841,7 @@ impl ThreadView {
                 expanded: std::mem::take(&mut self.expanded),
                 expanded_gen: self.expanded_gen,
                 count: self.count,
+                first_item: self.first_item.take(),
                 revision: self.revision,
                 end: self.end,
                 scroller: self.scroller.clone(),
@@ -894,6 +904,7 @@ impl ThreadView {
         self.expanded = s.expanded;
         self.expanded_gen = s.expanded_gen;
         self.count = s.count;
+        self.first_item = s.first_item;
         self.revision = s.revision;
         self.end = s.end;
         self.scroller = s.scroller;
@@ -1158,6 +1169,27 @@ impl ThreadView {
         if quiet && new_count == old {
             return;
         }
+        // How many rows came in front of the one that was first: a transcript only grows there
+        // when the earlier part of a thread on another machine is read in.
+        let (first_item, front) = {
+            let rows = self.rows(cx);
+            let ws = self.workspace.read(cx);
+            let live = self.current.as_ref().and_then(|id| ws.live.get(id));
+            let first = live
+                .zip(rows.rows.first())
+                .and_then(|(l, r)| l.items.id_at(r.item()))
+                .map(str::to_string);
+            let front = match (&self.first_item, live) {
+                (Some(was), Some(l)) if !switched && first.as_ref() != Some(was) => l
+                    .items
+                    .position(was)
+                    .and_then(|ix| rows.row_of(ix))
+                    .unwrap_or(0),
+                _ => 0,
+            };
+            (first, front.min(new_count.saturating_sub(old)))
+        };
+        self.first_item = first_item;
         self.count = new_count;
         self.scroller.update(cx, |s, cx| {
             if switched {
@@ -1171,7 +1203,12 @@ impl ThreadView {
                     s.reset(new_count, cx);
                 }
             } else if new_count > old {
-                let _ = s.append(new_count - old, cx);
+                if front > 0 {
+                    let _ = s.prepend(front, cx);
+                }
+                if new_count - old > front {
+                    let _ = s.append(new_count - old - front, cx);
+                }
             }
             // Streaming only ever changes the tail; remeasure the last couple of rows (a few
             // more where rows went: what's left at the end may have regrouped).
@@ -2573,7 +2610,14 @@ impl ThreadView {
                     .into_iter()
                     .filter(|f| !videos.contains(f))
                     .collect();
-                let text = SharedString::from(words.to_string());
+                // Line ends as Windows writes them (a paste on a PC, a thread that runs on one)
+                // are one break each: GPUI splits lines at `\n` alone, so a `\r` left in would be
+                // shaped as part of its line.
+                let text = if words.contains('\r') {
+                    SharedString::from(words.replace("\r\n", "\n").replace('\r', "\n"))
+                } else {
+                    SharedString::from(words.to_string())
+                };
                 // A Trek theme may set the user's words as a line, flush with the answers, after
                 // a mark of its own, rather than in a bubble.
                 let look = crate::themes::look(cx);
@@ -2817,6 +2861,8 @@ impl ThreadView {
                                                     })
                                                     .child(
                                                         div()
+                                                            .id(("user-text", ix))
+                                                            .test_support()
                                                             .flex_1()
                                                             .min_w_0()
                                                             // Cut by height, not by a line
@@ -2836,6 +2882,7 @@ impl ThreadView {
                                             el.child(
                                                 div()
                                                     .id(("user-more", ix))
+                                                    .test_support()
                                                     .text_size(to_rems(text::META))
                                                     .text_color(theme.muted_foreground)
                                                     .cursor_pointer()
@@ -4232,6 +4279,45 @@ impl ThreadView {
             _ => ws.turn_start_item(&thread, &anchor),
         };
         let Some(message) = message else { return };
+        // On another machine: it says what restoring would put back there (`turn_preview`).
+        if crate::machines::is_remote(&thread) {
+            let action = match ask {
+                Ask::Rewind => trek_remote::TurnAction::Rewind,
+                Ask::Undo => trek_remote::TurnAction::Undo,
+                Ask::Retry(_) => trek_remote::TurnAction::Retry,
+            };
+            let preview = ws.machine_turn_preview(&thread, &anchor, action);
+            let check = preview.map(|preview| {
+                cx.spawn(async move |this, cx| {
+                    let said = preview.await;
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(c) = this.confirm.as_mut() {
+                            c.recap = Some(said.recap);
+                            c.restore = said.files.is_ok();
+                            c.files = match said.files {
+                                Ok(changes) => Files::Changes(changes),
+                                Err(why) => Files::Unavailable(why),
+                            };
+                            cx.notify();
+                        }
+                    });
+                })
+            });
+            self.confirm = Some(Confirm {
+                ask,
+                anchor,
+                message,
+                files: match &check {
+                    Some(_) => Files::Checking,
+                    None => Files::Unavailable("Its machine isn't connected.".into()),
+                },
+                restore: false,
+                recap: Some(false),
+                _check: check,
+            });
+            cx.notify();
+            return;
+        }
         // What restoring puts back: the files the turns taken back changed, and no others.
         let checkpoint = ws.rewind_files(&thread, &message);
         let files = match &checkpoint {
@@ -4266,6 +4352,7 @@ impl ThreadView {
             message,
             files,
             restore,
+            recap: None,
             _check: check,
         });
         cx.notify();
@@ -4291,6 +4378,17 @@ impl ThreadView {
         let restore = c.restore && !nothing;
         let scope = self.scope.clone();
         self.workspace.update(cx, |ws, cx| {
+            // On another machine: it does it, and the message comes back here once it has.
+            if crate::machines::is_remote(&thread) {
+                match c.ask {
+                    Ask::Rewind => {
+                        ws.machine_take_back(&thread, &c.message, false, restore, scope, cx)
+                    }
+                    Ask::Undo => ws.machine_take_back(&thread, &c.anchor, true, restore, scope, cx),
+                    Ask::Retry(model) => ws.machine_retry(&thread, &c.anchor, model, restore, cx),
+                }
+                return;
+            }
             let back = match c.ask {
                 Ask::Rewind => ws.rewind(&thread, &c.message, restore, cx),
                 Ask::Undo => ws.undo_turn(&thread, &c.anchor, restore, cx),
@@ -4322,8 +4420,9 @@ impl ThreadView {
             return div().into_any_element();
         };
         let agent = thread.agent.display_name();
-        let recap =
-            ws.rewind_plan(&thread.id, &c.message) == Some(trek_core::rewind::Reopen::Recap);
+        let recap = c.recap.unwrap_or_else(|| {
+            ws.rewind_plan(&thread.id, &c.message) == Some(trek_core::rewind::Reopen::Recap)
+        });
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let (title, action) = match &c.ask {
@@ -5823,9 +5922,8 @@ impl Render for ThreadView {
                 .is_some_and(crate::system::lately::worktree_missing),
             thread,
             text_size: px(ws.settings.appearance.transcript_font_size()),
-            line: window.pixel_snap(
-                px(ws.settings.appearance.transcript_font_size()) * MESSAGE_LINE,
-            ),
+            line: window
+                .pixel_snap(px(ws.settings.appearance.transcript_font_size()) * MESSAGE_LINE),
             column: ws.column(),
             cwd: ws.cwd_in(&self.scope),
             folder: t.and_then(|t| ws.thread_project_tint(t, cx)),
