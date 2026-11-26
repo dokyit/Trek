@@ -46,6 +46,7 @@ unclaimed = [
 "crates/trek-app/src/lsp_client.rs" = 12
 "crates/trek-app/src/machines.rs" = 1
 "crates/trek-app/src/machines/clone.rs" = 3
+"crates/trek-app/src/machines/files.rs" = 1
 "crates/trek-app/src/main.rs" = 1
 "crates/trek-app/src/md.rs" = 10
 "crates/trek-app/src/notes.rs" = 1
