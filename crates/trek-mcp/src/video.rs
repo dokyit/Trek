@@ -1263,9 +1263,11 @@ fn fetch_with_ytdlp(url: &str, site: &str, dir: &Path, fetch: bool) -> Result<Pa
     // yt-dlp joins the picture and the sound with ffmpeg, which it finds on PATH: not the copy
     // Trek downloaded, so it's told where it is.
     let ffmpeg = find("ffmpeg");
-    // A name on this computer or its network is refused before yt-dlp looks it up again (it
-    // can't be held to the address checked, as curl is, but a name that plainly points home is
-    // stopped).
+    // A name on this computer or its network is refused before yt-dlp looks it up again. What's
+    // left, knowingly: only the sites in `SITES` come here, and their extractors fetch from the
+    // sites' own CDN hosts (googlevideo, twimg, vimeocdn…) and follow their redirects, so yt-dlp
+    // can't be held to the address checked, as curl is, and has no switch that limits where it
+    // goes; it'd take one of those sites (or the DNS answering for them) to send it home.
     public_addr(url)?;
     let mut args = vec![
         // Its own config files (`--exec`, a proxy) aren't the agent's to bring in.
