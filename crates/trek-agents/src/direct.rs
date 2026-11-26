@@ -10245,12 +10245,14 @@ print(`line 2: ${text}; lines: ${stdout.trim()}; exit ${exit_code}`);
             "cat ../../.ssh/*",
             "cat ../../.*",
             "grep -r token ~/.config/*",
-            "cat /Users/*/.ssh/id_rsa",
             "head ~other/.ssh/*",
         ] {
             assert!(is_safe_command(command), "{command}: fine as a line");
             assert!(!is_safe_here(command, &cwd), "{command}");
         }
+        // Every user's folder, from the one that holds them (`/Users`, `/home`).
+        let users = home.parent().unwrap().display().to_string();
+        assert!(!is_safe_here(&format!("cat {users}/*/.ssh/id_rsa"), &cwd));
         // A folder that holds a private place is one: a search from it goes in.
         assert!(private_path(&home.join(".config")));
         assert!(private_path(&home.join("Library")));
