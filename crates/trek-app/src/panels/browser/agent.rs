@@ -2,7 +2,8 @@
 //! `trek-mcp browser` tools reach Trek over its local channel; the workspace hands each call to
 //! the main window's Browser (`RightPanel::browser_call`), which runs them here one at a time.
 //!
-//! Each call runs the page side (`agent.js`) through the view's script evaluation and waits for
+//! Each call runs the page side (`agent.js`) in a script world of Trek's own (`isolated.rs`: the
+//! page can't stand in for it, or change what it sees of the page) and waits for
 //! what it set going (a load, a new tab). An element the agent acts on is outlined in the page
 //! for a moment, and a strip over the page says an agent is at work, with Stop: the user takes
 //! the browser back, and that turn's calls fail saying so (its next turn may use it again).
@@ -581,7 +582,37 @@ impl Run<'_> {
         }
     }
 
-    /// Run `js` in the tab in front and read its answer.
+    /// Run one of Trek's commands (`agent.js`) in the tab in front, in a script world of Trek's
+    /// own where the page can't reach it (`isolated`), and read its answer.
+    async fn run_command(&mut self, command: &str, args: &[Value]) -> Result<Value, String> {
+        self.check()?;
+        let (tx, rx) = async_channel::bounded::<String>(1);
+        let (ours, pages) = (
+            core::script(command, args, true),
+            core::script(command, args, false),
+        );
+        self.this
+            .update(self.cx, |p, cx| -> Result<(), String> {
+                let tab = p.active_tab().ok_or(NO_TAB)?;
+                super::isolated::eval(
+                    tab.view.read(cx).raw(),
+                    &ours,
+                    &pages,
+                    Box::new(move |s| {
+                        let _ = tx.try_send(s);
+                    }),
+                )
+                .map_err(|e| format!("The page can't run scripts: {e}"))
+            })
+            .map_err(gone)??;
+        match self.recv(rx, EVAL_WAIT).await {
+            Some(raw) => core::answer(&raw),
+            None => Err("The page didn't answer in time: it may be busy, or still loading.".into()),
+        }
+    }
+
+    /// Run `js` in the tab in front, in the page's own world (the agent's own script, which is
+    /// there for the page's variables), and read its answer.
     async fn run_js(&mut self, js: String) -> Result<Value, String> {
         self.check()?;
         let (tx, rx) = async_channel::bounded::<String>(1);
@@ -607,13 +638,13 @@ impl Run<'_> {
     async fn page_js(&mut self, command: &str, args: &[Value]) -> Result<Value, String> {
         // A page that's loading may not run it: give the load a moment first.
         self.settle(Duration::from_secs(10), false).await?;
-        let first = self.run_js(core::script(command, args)).await;
+        let first = self.run_command(command, args).await;
         match first {
             // Mid-navigation the script can land in the page that's going: once more, in the new one.
             Err(e) if e.contains("didn't run") => {
                 self.sleep(Duration::from_millis(400)).await;
                 self.settle(Duration::from_secs(10), false).await?;
-                self.run_js(core::script(command, args)).await
+                self.run_command(command, args).await
             }
             other => other,
         }
@@ -911,13 +942,25 @@ impl Run<'_> {
         self.approve("browser_click", &self.call.params.clone(), Some(&probe))
             .await?;
         let (before, tabs) = (self.page()?, self.tab_ids()?);
-        let v = self.page_js("click", &[json!(r)]).await?;
+        let v = self
+            .page_js("click", &[json!(r), core::guard(&probe)])
+            .await?;
         let after = self.aftermath(&before, &tabs).await?;
         let note = v["note"]
             .as_str()
             .map(|n| format!(" {n}"))
             .unwrap_or_default();
         Self::text(format!("{}.{note}{after}", did(&v)))
+    }
+
+    /// A click on `r` that's part of another tool's work: probed, asked about if it's the user's
+    /// to allow, and held to what was probed, as `browser_click` itself is.
+    async fn checked_click(&mut self, r: &str) -> Result<Value, String> {
+        let probe = self.page_js("probe", &[json!(r), Value::Null]).await?;
+        self.approve("browser_click", &json!({ "ref": r }), Some(&probe))
+            .await?;
+        self.page_js("click", &[json!(r), core::guard(&probe)])
+            .await
     }
 
     async fn type_text(
@@ -935,8 +978,14 @@ impl Run<'_> {
             .await?;
         self.approve("browser_type", &self.call.params.clone(), Some(&probe))
             .await?;
+        // What was just checked (and asked about, if it needed asking) is what's done: the
+        // typing and the Enter after it each read the field again as they act.
+        let guard = core::guard(&probe);
         let v = self
-            .page_js("type", &[json!(r), json!(text), json!(clear)])
+            .page_js(
+                "type",
+                &[json!(r), json!(text), json!(clear), guard.clone()],
+            )
             .await?;
         let mut out = format!(
             "{}; it now reads {}.",
@@ -946,7 +995,7 @@ impl Run<'_> {
         if submit {
             let (before, tabs) = (self.page()?, self.tab_ids()?);
             let key = core::parse_key("Enter")?;
-            let pressed = self.page_js("press", &[key, json!(r)]).await?;
+            let pressed = self.page_js("press", &[key, json!(r), guard]).await?;
             out.push_str(&format!(" {}.", did(&pressed)));
             out.push_str(&self.aftermath(&before, &tabs).await?);
         }
@@ -957,15 +1006,18 @@ impl Run<'_> {
         let key = core::parse_key(key)?;
         // Enter can submit a form, and a key that types is typing: a password spelled out a key
         // at a time is still one typed into a password field.
+        // (Space is a key that types, and the one that clicks a button.)
+        let mut guard = Value::Null;
         if key["key"] == "Enter" || core::types_a_character(&key) {
             let probe = self
                 .page_js("probe", &[json!(r), key["key"].clone()])
                 .await?;
             self.approve("browser_press", &self.call.params.clone(), Some(&probe))
                 .await?;
+            guard = core::guard(&probe);
         }
         let (before, tabs) = (self.page()?, self.tab_ids()?);
-        let v = self.page_js("press", &[key, json!(r)]).await?;
+        let v = self.page_js("press", &[key, json!(r), guard]).await?;
         let after = self.aftermath(&before, &tabs).await?;
         Self::text(format!("{}.{after}", did(&v)))
     }
@@ -981,7 +1033,10 @@ impl Run<'_> {
         // A list of the page's own: open it, then click the option once it's there.
         let what = v["describe"].as_str().unwrap_or("it").to_string();
         let (before, tabs) = (self.page()?, self.tab_ids()?);
-        self.page_js("click", &[json!(r)]).await?;
+        // A list of the page's own is opened and chosen from by clicks, and a click is asked
+        // about like any other: what the page calls a drop-down may be a button that sends a
+        // form away.
+        self.checked_click(r).await?;
         let started = Instant::now();
         let option_ref = loop {
             let found = self.page_js("option", &[json!(option)]).await?;
@@ -995,7 +1050,7 @@ impl Run<'_> {
             }
             self.sleep(Duration::from_millis(150)).await;
         };
-        let clicked = self.page_js("click", &[json!(option_ref)]).await?;
+        let clicked = self.checked_click(&option_ref).await?;
         let after = self.aftermath(&before, &tabs).await?;
         Self::text(format!(
             "Opened {what} and {}.{after}",
@@ -1099,7 +1154,7 @@ impl Run<'_> {
         }
         let begun = Instant::now();
         loop {
-            let v = self.run_js(core::script("take", &[json!(id)])).await?;
+            let v = self.run_js(core::take_script(&id)).await?;
             if let Some(value) = v["value"].as_str() {
                 let value = if value.len() > 100_000 {
                     format!("{}… (cut at 100,000 characters)", clip_at(value, 100_000))

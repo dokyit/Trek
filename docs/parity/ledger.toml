@@ -814,7 +814,7 @@ windows = "yes"
 linux = "partial"
 live = ["route project:{project}", "tools terminal", "wait 1500", "count terminal 1"]
 how = { macos = "A PTY and WebKit.", windows = "ConPTY and WebView2 (artifacts InPrivate).", linux = "A PTY and WebKitGTK, its views in X11 child windows of Trek's; a card's page stands on the card's colour." }
-note = "On Windows a live inline artifact's clipping window ignores round_bottom, so its square bottom corners cover the card's rounded ones, and every web-view failure there says the WebView2 runtime is needed, dropping the real reason the Mac shows (artifact/native.rs, artifact/mod.rs). Linux: a card's page can't show through (no see-through X11 child windows), and a card covered by a menu isn't swapped for a picture of its page (no snapshot is taken)."
+note = "On Windows a live inline artifact's clipping window ignores round_bottom, so its square bottom corners cover the card's rounded ones, and every web-view failure there says the WebView2 runtime is needed, dropping the real reason the Mac shows (artifact/native.rs, artifact/mod.rs). Linux: a card's page can't show through (no see-through X11 child windows), and a card covered by a menu isn't swapped for a picture of its page (no snapshot is taken). A page's link opens in the browser only on the user's own click, which each platform sees its own way: on the Mac every mouse button and key AppKit hands the app is noted before it's dispatched, on Linux GTK's signals on the view, on Windows (where the page's input never reaches the app) WebView2's own word on each request, IsUserInitiated. What a page's policy has no directive for is closed per engine: WebRTC and link preconnect by WebKit's feature switches on the Mac, on Linux WebRTC by WebKitGTK's setting and preconnect by its feature switches, which need WebKitGTK 2.42 (an older one leaves preconnect to the page), and on Windows by the Connection-Allowlist header, which WebView2 152 and later enforce (an older runtime leaves preconnect, and WebRTC from a frame the page writes itself, to the page)."
 code = ["crates/trek-app/src/panels/terminal.rs", "crates/trek-app/src/artifact/native.rs", "crates/trek-app/src/artifact/mod.rs", "crates/trek-app/src/linux_gtk.rs"]
 tests = ["crates/trek-app/tests/ide.rs", "crates/trek-app/tests/terminal.rs", "crates/trek-app/tests/artifacts.rs"]
 
@@ -1750,8 +1750,8 @@ macos = "yes"
 windows = "yes"
 linux = "yes"
 live = ["route project:{project}", "tools browser", "wait 600", "browser go https://example.com", "wait 3000", "browser state", "count browser-url 1", "count browser-back 1"]
-how = { macos = "WebKit's view, through wry: a screenshot is WebKit's snapshot of the page, and a key's Mod is Command.", windows = "WebView2's, through wry: a screenshot is WebView2's CapturePreview (PNG), and a key's Mod is Control. Without the WebView2 runtime each call says it's needed." }
-code = ["crates/trek-app/src/panels/browser/agent.rs", "crates/trek-app/src/panels/browser/agent_core.rs", "crates/trek-app/src/workspace/browser_use.rs"]
+how = { macos = "WebKit's view, through wry: a screenshot is WebKit's snapshot of the page, and a key's Mod is Command. Trek's script runs in a WKContentWorld of its own, out of the page's reach.", windows = "WebView2's, through wry: a screenshot is WebView2's CapturePreview (PNG), and a key's Mod is Control. Without the WebView2 runtime each call says it's needed. Trek's script runs in a DevTools isolated world (Page.createIsolatedWorld); if the protocol refuses, in the page's own world, using nothing it finds on window.", linux = "WebKitGTK's, through wry. Trek's script runs in a script world of its own, by name." }
+code = ["crates/trek-app/src/panels/browser/agent.rs", "crates/trek-app/src/panels/browser/agent_core.rs", "crates/trek-app/src/panels/browser/isolated.rs", "crates/trek-app/src/workspace/browser_use.rs"]
 tests = ["crates/trek-mcp/src/browser.rs"]
 
 [[feature]]

@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 // Browser use: agents drive this tool's page (`trek-mcp browser`).
 mod agent;
 mod agent_core;
+mod isolated;
 pub use agent::{AgentCall, AgentCallSlot};
 // What pages ask of the user, and what wry leaves out of WebKit's delegates and WebView2's events
 // (popups, dialogs, permissions, links for other apps, why a load failed).
