@@ -788,9 +788,13 @@ impl Run<'_> {
                     .active_tab()
                     .is_some_and(|t| t.page.is_start() && !t.page.can_back);
                 let new = new_tab && !blank || p.tabs.is_empty();
+                // An agent's page isn't kept between launches until the user has seen it.
                 if new {
-                    Some(p.new_tab(&target, window, cx))
+                    let id = p.new_tab(&target, window, cx);
+                    p.agent_touched(id);
+                    Some(id)
                 } else {
+                    p.agent_touched(p.active);
                     p.editing = false;
                     p.navigate(target.clone(), cx);
                     None

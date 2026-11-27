@@ -531,9 +531,26 @@ impl RightPanel {
         }
     }
 
+    /// Close the Browser tool's tab, as its close button does (the shots harness's `browser
+    /// reopen`).
+    #[cfg(feature = "shots")]
+    pub fn close_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self
+            .tabs
+            .iter()
+            .find(|t| t.tool == PanelTool::Browser)
+            .map(|t| t.id)
+        {
+            self.close(id, window, cx);
+        }
+    }
+
     fn close(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         match self.tabs.iter().find(|t| t.id == id).map(|t| &t.view) {
-            Some(View::Browser(b)) => b.update(cx, |b, cx| b.set_visible(false, cx)),
+            Some(View::Browser(b)) => b.update(cx, |b, cx| {
+                b.set_visible(false, cx);
+                b.set_shown(false, cx);
+            }),
             Some(View::Simulator(s)) => s.update(cx, |s, cx| s.release(window, cx)),
             #[cfg(any(target_os = "macos", windows))]
             Some(View::Phone(p)) => p.update(cx, |p, cx| p.release(window, cx)),
@@ -586,7 +603,13 @@ impl RightPanel {
                 View::Browser(b) => {
                     // Hidden while the launcher menu is open, or it would cover the menu.
                     let show = open && active == Some(t.id) && !menu_open;
-                    b.update(cx, |b, cx| b.set_visible(show, cx));
+                    // Whether it's the tool in front of the open panel, Settings or a menu over
+                    // it or not: kept, so the next launch opens it.
+                    let shown = self.open && active == Some(t.id);
+                    b.update(cx, |b, cx| {
+                        b.set_visible(show, cx);
+                        b.set_shown(shown, cx);
+                    });
                 }
                 View::Simulator(s) => {
                     let show = open && active == Some(t.id);

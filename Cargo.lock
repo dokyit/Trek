@@ -9765,6 +9765,7 @@ name = "trek-core"
 version = "0.4.69"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "directories",
  "flate2",
@@ -9773,6 +9774,7 @@ dependencies = [
  "keyring",
  "libc",
  "minisign-verify",
+ "plist",
  "regex",
  "reqwest",
  "rusqlite",

@@ -145,10 +145,14 @@ pub fn request(ws: &Workspace) -> Request {
     };
     // A Mac's data folder also holds the passkeys its Browser keeps (`trek_passkeys::Store`):
     // deleted here, their Secure Enclave keys can't be used again.
+    // And the Browser's kept tabs (`trek_core::browser_tabs`), and on Linux its cookies and site
+    // data (`browser::webview_data_dir`).
     let data = if cfg!(target_os = "macos") {
-        "Threads and their transcripts, settings, notes, pictures, uploads from phones, pairings, the Browser's passkeys, plugins and themes, and what Trek downloaded (its Node.js, agents, the browser's extensions)"
+        "Threads and their transcripts, settings, notes, pictures, uploads from phones, pairings, the Browser's passkeys and kept tabs, plugins and themes, and what Trek downloaded (its Node.js, agents, the browser's extensions)"
+    } else if cfg!(target_os = "linux") {
+        "Threads and their transcripts, settings, notes, pictures, uploads from phones, pairings, the Browser's kept tabs, cookies and site data, plugins and themes, and what Trek downloaded (its Node.js, agents, the browser's extensions)"
     } else {
-        "Threads and their transcripts, settings, notes, pictures, uploads from phones, pairings, plugins and themes, and what Trek downloaded (its Node.js, agents, the browser's extensions)"
+        "Threads and their transcripts, settings, notes, pictures, uploads from phones, pairings, the Browser's kept tabs, plugins and themes, and what Trek downloaded (its Node.js, agents, the browser's extensions)"
     };
     let mut roots = vec![root(paths::data_dir(), data)];
     roots.push(root(
