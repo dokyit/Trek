@@ -193,6 +193,9 @@ gtk = "0.18"
 # The Browser's page dialogs to Trek's bar (WebKitGTK's `script-dialog`, kept and answered later):
 # the version and API level wry builds on.
 webkit2gtk = { version = "2.0", features = ["v2_40"] }
+# Browser use: the answer of Trek's script in its own script world (`browser/isolated.rs`), a
+# JavaScriptCore value. The version webkit2gtk hands it over as.
+javascriptcore = { package = "javascriptcore-rs", version = "1.1" }
 # The capture build's `shot`: the window's pixels from the X server (GPUI's Linux renderer has no
 # offscreen render of a frame). The version GPUI's X11 platform talks to the server with.
 x11rb = { version = "0.13", features = ["allow-unsafe-code"] }

@@ -26,6 +26,10 @@
 //! |                              | table and a node diagram, and a 3D desk with a monitor clamp  |
 //! |                              | (inline WebGL: drag, scroll, preset views); both offline. With |
 //! |                              | `stream`, slowly, so the "Building…" card can be watched      |
+//! | `mock:outbound` [`popups`]   | a page that tries every way of reaching the network (to ports |
+//! |                              | 47700 up on this machine), loads a library from cdnjs and one |
+//! |                              | from jsdelivr, and has links to click; then a video from the  |
+//! |                              | web. With `popups` it also asks for windows with no click     |
 //! | `mock:page`                  | prose, a live page (`trek-html`: tabs, a cube to drag round,  |
 //! |                              | a sortable table; nothing from the web), then enough prose    |
 //! |                              | after it to scroll the page half out of view                  |
@@ -55,7 +59,9 @@
 //! | `mock:browser` [`approvals`] | fills in a test site's form in Trek's Browser through the      |
 //! |                              | session's `trek-browser` tools (for real), checking each step |
 //! |                              | and ending with a tally; `approvals` also types a password and|
-//! |                              | runs a script (asked below full access); a URL opens that     |
+//! |                              | runs a script (asked below full access); `hostile` signs in   |
+//! |                              | on a page that lies about its fields (Trek must still ask);   |
+//! |                              | a URL opens that                                              |
 //! | `mock:video`                 | makes a 6-second test clip with ffmpeg in Trek's data folder, |
 //! |                              | watches it with Trek's `watch_video` (for real, through the   |
 //! |                              | session's `trek-video` server) and links the clip in its answer|
@@ -295,6 +301,11 @@ enum Script {
     Interactive {
         stream: bool,
     },
+    /// An answer whose page tries every way out of its sandbox, and a video from the web
+    /// (`outbound`); `popups`: it also asks for windows with no click.
+    Outbound {
+        popups: bool,
+    },
     /// An answer with a live page in it (`PAGE`); `stream`: slowly.
     Page {
         stream: bool,
@@ -473,6 +484,9 @@ impl Script {
                 "interactive" if w.starts_with("mock:") => Script::Interactive {
                     stream: words.get(i + 1).is_some_and(|w| w == "stream"),
                 },
+                "outbound" if w.starts_with("mock:") => Script::Outbound {
+                    popups: words.get(i + 1).is_some_and(|w| w == "popups"),
+                },
                 "page" if w.starts_with("mock:") => Script::Page {
                     stream: words.get(i + 1).is_some_and(|w| w == "stream"),
                 },
@@ -650,6 +664,7 @@ pub fn title(request: &str) -> String {
         | Script::VisualizationStream(_)
         | Script::VisualizationInvalid => "Compare release health dashboards",
         Script::Interactive { .. } => "Plan the artifact rollout",
+        Script::Outbound { .. } => "Check what a page can reach",
         Script::Page { .. } => "Check the monitor arm fits",
         Script::Explore(_) => "Animate the title as it appears",
         Script::History(_) => "Harden the request parser",
@@ -1364,6 +1379,7 @@ impl Session {
                 )
                 .await?
             }
+            Script::Outbound { popups } => self.say_in_pieces(&outbound(popups), 600, 14).await?,
             Script::Page { stream: false } => self.say(PAGE).await?,
             // Slow enough to watch (and capture) the placeholder count up before the page shows.
             Script::Page { stream: true } => self.say_at(PAGE, 12).await?,
@@ -4031,6 +4047,20 @@ pub const INTERACTIVE: &str = concat!(
     "```\n\nThe clamp needs about 4 cm of clear edge; the desk top here is 4 cm thick, so it fits with the screw fully open."
 );
 
+/// `mock:outbound`: a page that tries every way a page has of reaching the network (each to a
+/// port of its own on this machine, 47700 up, over https, with a made-up secret in the address),
+/// loads one library from a host that needs no asking and one from a host that does, and offers
+/// links and a `window.open` button to click; then a video from the web on a line of its own
+/// (port 47759). A listener on those ports says what got out; with `popups` the page also asks
+/// for windows as it loads, with no click.
+pub fn outbound(popups: bool) -> String {
+    format!(
+        "Here's the page that tries every way out, then a clip from the web.\n\n```trek-html\n{}```\n\n[A clip from the web](https://127.0.0.1:47759/clip.mp4?secret=hunter2)\n\nThe table says what the page's policy stopped.",
+        include_str!("mock_artifacts/outbound.html")
+            .replace("__POPUPS__", if popups { "true" } else { "false" })
+    )
+}
+
 /// A visualization block that closes but can't be drawn: `color` isn't a field of a bar chart.
 pub const VIZ_INVALID: &str = r#"Here are the build times, though this block won't draw:
 
@@ -4473,6 +4503,14 @@ mod tests {
         assert_eq!(
             Script::parse("mock:interactive stream", false),
             Script::Interactive { stream: true }
+        );
+        assert_eq!(
+            Script::parse("mock:outbound", false),
+            Script::Outbound { popups: false }
+        );
+        assert_eq!(
+            Script::parse("mock:outbound popups", false),
+            Script::Outbound { popups: true }
         );
         assert_eq!(
             Script::parse("show a visualization", false),

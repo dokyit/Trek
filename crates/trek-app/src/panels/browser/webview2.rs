@@ -34,7 +34,8 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_SCRIPT_DIALOG_KIND_CONFIRM, COREWEBVIEW2_SCRIPT_DIALOG_KIND_PROMPT,
     COREWEBVIEW2_WEB_ERROR_STATUS, ICoreWebView2, ICoreWebView2_18, ICoreWebView2Deferral,
     ICoreWebView2LaunchingExternalUriSchemeEventHandler,
-    ICoreWebView2NavigationCompletedEventHandler, ICoreWebView2NavigationStartingEventHandler,
+    ICoreWebView2NavigationCompletedEventHandler, ICoreWebView2NavigationStartingEventArgs,
+    ICoreWebView2NavigationStartingEventArgs2, ICoreWebView2NavigationStartingEventHandler,
     ICoreWebView2PermissionRequestedEventArgs, ICoreWebView2PermissionRequestedEventArgs3,
     ICoreWebView2PermissionRequestedEventHandler, ICoreWebView2ProcessFailedEventHandler,
     ICoreWebView2ScriptDialogOpeningEventArgs, ICoreWebView2ScriptDialogOpeningEventHandler,
@@ -236,7 +237,8 @@ pub fn hook(wv: &wry::WebView, tab: u64, tx: &async_channel::Sender<Msg>) {
         if let Ok(webview) = webview.cast::<ICoreWebView2_18>() {
             let _ = webview.add_LaunchingExternalUriScheme(&apps(tab, tx.clone()), &mut token);
         }
-        let _ = webview.add_NavigationStarting(&no_app(tab, tx.clone()), &mut token);
+        let _ =
+            webview.add_NavigationStarting(&no_app(tab, webview.clone(), tx.clone()), &mut token);
         // A failed load gets Trek's page saying why, and a page whose process ended is reloaded
         // (then explained, if it ends again), as WebKit's do: the panel does both (`Msg`).
         let _ = webview.add_NavigationCompleted(&failed_loads(tab, tx.clone()), &mut token);
@@ -428,7 +430,11 @@ fn apps(
 /// an address no app on this PC opens, a link or a redirect: WebView2 would drop it without a word
 /// (it raises `LaunchingExternalUriScheme` only for a scheme an app took), so the bar says so, as
 /// on the Mac.
-fn no_app(tab: u64, tx: async_channel::Sender<Msg>) -> ICoreWebView2NavigationStartingEventHandler {
+fn no_app(
+    tab: u64,
+    webview: ICoreWebView2,
+    tx: async_channel::Sender<Msg>,
+) -> ICoreWebView2NavigationStartingEventHandler {
     NavigationStartingEventHandler::create(Box::new(move |_, args| {
         let Some(args) = args else {
             return Ok(());
@@ -438,9 +444,42 @@ fn no_app(tab: u64, tx: async_channel::Sender<Msg>) -> ICoreWebView2NavigationSt
         if !view_loads(&url) && app_for(&url).is_none() {
             unsafe { args.SetCancel(true)? };
             let _ = tx.try_send(Msg::External { tab, url });
+            return Ok(());
+        }
+        // While an agent's action that wasn't approved as a submission runs in this tab, a form
+        // POST to another site is refused: `agent.js` checks the element again before it acts,
+        // but the page's own handlers can still move the form in between. WebView2 doesn't say
+        // a navigation came from a form, so only a request with a body is caught here; a GET
+        // from one can't be told apart from a link.
+        if super::form_guarded(tab) && posts(&args) && foreign_to_page(&webview, &url) {
+            unsafe { args.SetCancel(true)? };
+            let _ = tx.try_send(Msg::SubmitBlocked { tab, url });
         }
         Ok(())
     }))
+}
+
+/// Whether navigation `args` carries a request body (a form's POST).
+fn posts(args: &ICoreWebView2NavigationStartingEventArgs) -> bool {
+    let Ok(args) = args.cast::<ICoreWebView2NavigationStartingEventArgs2>() else {
+        return false;
+    };
+    let Ok(headers) = (unsafe { args.RequestHeaders() }) else {
+        return false;
+    };
+    ["Content-Length", "Transfer-Encoding"].iter().any(|name| {
+        let mut yes = BOOL::default();
+        unsafe { headers.Contains(&HSTRING::from(*name), &mut yes) }.is_ok() && yes.as_bool()
+    })
+}
+
+/// Whether `url` is on a site other than the page `webview` shows.
+fn foreign_to_page(webview: &ICoreWebView2, url: &str) -> bool {
+    let current = text(|p| unsafe { webview.Source(p) });
+    match (super::origin_of(url), super::origin_of(&current)) {
+        (Some(a), Some(b)) => !a.eq_ignore_ascii_case(b),
+        _ => false,
+    }
 }
 
 /// A popup's view on its way from the panel to wry's thread, which hands it back to WebView2 on

@@ -146,8 +146,10 @@ Apart from PostHog, and apart from the agents' and model providers' own servers 
 | `huggingface.co` | The Windows dictation model, on the first click of the mic. |
 | `clients2.google.com`, `edge.microsoft.com` | A browser extension's download, when the user installs one. |
 | `www.google.com` | The built-in Browser's start page asks for six sites' icons (`/s2/favicons`) when it opens; its address bar searches Google for text that isn't an address. |
-| `cdn.jsdelivr.net` | Before 0.4.64, study question cards loaded KaTeX from it every time one was drawn; since then it is bundled (`crates/trek-assets/assets/katex`, served by the card's own origin at `/_trek/katex/`) and the card asks no host. A `trek-html` page an agent writes may still load from any CDN by design. |
-| Any `https` host | A note's remote images (fetched by the Mac, and by the iPhone itself); a `trek-html` artifact's own scripts, styles and fonts, which its card names. |
+| `cdn.jsdelivr.net` | Before 0.4.64, study question cards loaded KaTeX from it every time one was drawn; since then it is bundled (`crates/trek-assets/assets/katex`, served by the card's own origin at `/_trek/katex/`) and the card asks no host. |
+| `cdnjs.cloudflare.com`, `fonts.googleapis.com`, `fonts.gstatic.com`, `tiles.openfreemap.org`, `unpkg.com` (the map card's pinned Leaflet and MapLibre files only) | What a `trek-html` page an agent writes may load without asking (`trek_core::artifact::net::OPEN_SOURCES`): hosts where nobody but the operator can see what was asked for. |
+| A host you allowed on a page's card | Anything else a `trek-html` page tries to load is stopped, and its card asks: Allow once, Always allow (kept under Settings › General › Sites pages may load from) or Don't allow. A video an answer links from the web loads when you click Load video. A link in a page opens in your browser only when you click it. |
+| Any `https` host | A note's remote images (fetched by the Mac, and by the iPhone itself). |
 | `ntfy.sh` or the user's own server | Phone notifications, off by default. A note says the kind of news and carries a `trek://` link; it names the thread and project only when the `push_names` setting is on (off by default). ntfy reads whatever is sent through it. |
 | The browser's push service (`fcm.googleapis.com`, `web.push.apple.com`, `updates.push.services.mozilla.com`) | Web Push to the web remote, when the user turns its notifications on. Encrypted. |
 

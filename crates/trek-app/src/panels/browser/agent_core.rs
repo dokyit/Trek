@@ -6,28 +6,47 @@
 use serde_json::{Value, json};
 use trek_core::HandHolding;
 
-/// The page side (installed once per document as `window.__trekAgent`).
+/// Trek's commands in a page (`agent.js`): one expression, a function of whether the script
+/// world it runs in is Trek's own, that returns the commands.
 pub const AGENT_JS: &str = include_str!("agent.js");
 
-/// The longest outline handed back, in characters: past it the agent is told to narrow it.
-const OUTLINE_MAX: usize = 120_000;
+/// What holds the answer of an agent's own script, in the page's world (`eval.js`).
+pub const EVAL_JS: &str = include_str!("eval.js");
 
-/// A script that runs `command` of the page's agent with `args` and evaluates to its answer as
-/// JSON text (a string, so any answer survives the web view's own conversion).
-pub fn script(command: &str, args: &[Value]) -> String {
+/// A script that runs `command` of Trek's commands with `args` and evaluates to its answer as
+/// JSON text (a string, so any answer survives the web view's own conversion). `isolated`: it's
+/// for a script world of Trek's own (`isolated::eval`), where the commands are kept from one
+/// call to the next and nothing of the page's is in reach; otherwise for the page's world,
+/// where the script uses nothing it finds there.
+pub fn script(command: &str, args: &[Value], isolated: bool) -> String {
     let args = args
         .iter()
         .map(Value::to_string)
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "{AGENT_JS}\n;JSON.stringify((() => {{ try {{ return window.__trekAgent.{command}({args}); }} catch (e) {{ return {{ error: String((e && e.message) || e) }}; }} }})())"
+        "JSON.stringify(((A) => {{ try {{ return A.{command}({args}); }} catch (e) {{ return {{ error: String((e && e.message) || e) }}; }} }})(({AGENT_JS})({isolated})))"
     )
 }
 
-/// A script that starts the agent's own `js` in the page, held under `id` until it settles
-/// (`take`). `expression`: `js` is an expression whose value is the answer; else statements that
-/// `return` it. An `await` works either way.
+/// What an action is held to (`agent.js`, `changed`): what `probe` said of its element when
+/// Trek decided whether to ask the user. The action re-reads the element as it acts, and does
+/// nothing if it has since become a password field, a download, or a form bound elsewhere.
+pub fn guard(probe: &Value) -> Value {
+    json!({
+        "password": probe["password"].as_bool() == Some(true),
+        "action": probe["submits"]["action"].as_str(),
+        "download": probe["download"].as_str(),
+        // The page the probe ran on: what was approved doesn't carry to another site that
+        // reuses the same refs (`agent.js`, `changed`).
+        "page": probe["page"].as_str(),
+    })
+}
+
+/// A script that starts the agent's own `js` in the page (its own world: the script is there to
+/// read the page's variables), held under `id` until it settles (`take_script`). `expression`:
+/// `js` is an expression whose value is the answer; else statements that `return` it. An
+/// `await` works either way.
 pub fn eval_script(id: &str, js: &str, expression: bool) -> String {
     let body = if expression {
         format!("(async () => (\n{js}\n))()")
@@ -35,10 +54,18 @@ pub fn eval_script(id: &str, js: &str, expression: bool) -> String {
         format!("(async () => {{\n{js}\n}})()")
     };
     format!(
-        "{AGENT_JS}\n;JSON.stringify(window.__trekAgent.hold({}, {body}))",
+        "JSON.stringify(({EVAL_JS}).hold({}, {body}))",
         Value::from(id)
     )
 }
+
+/// A script that takes what the script held under `id` settled to, if it has.
+pub fn take_script(id: &str) -> String {
+    format!("JSON.stringify(({EVAL_JS}).take({}))", Value::from(id))
+}
+
+/// The longest outline handed back, in characters: past it the agent is told to narrow it.
+const OUTLINE_MAX: usize = 120_000;
 
 /// What a script from `script` evaluated to, as the web view hands it over (JSON of a JSON
 /// string): the answer, or the error the page gave. An empty answer is a page that didn't run it
@@ -334,6 +361,9 @@ pub enum Sensitive {
     /// time, whatever the thread's access.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Passkey,
+    /// An action in a tab whose safety probe ran in the page's own world (Windows' fallback when
+    /// its isolated world couldn't be made): the probe can't be trusted, so every action asks.
+    PageWorld,
 }
 
 /// One action to ask about: what it is, and what the approval card says (after "<Agent> wants
@@ -372,7 +402,7 @@ pub fn same_page(asked: (u64, &str), now: (u64, &str)) -> bool {
 /// a password, a script or a file of the computer's; Supervised and Auto-accept edits ask before
 /// all of them.
 pub fn needs_asking(kind: &Sensitive, access: HandHolding) -> bool {
-    if *kind == Sensitive::Passkey {
+    if matches!(kind, Sensitive::Passkey | Sensitive::PageWorld) {
         return true;
     }
     match access {
@@ -395,6 +425,31 @@ pub fn types_a_character(key: &Value) -> bool {
         && !held("ctrl")
         && !held("alt")
         && !held("meta")
+}
+
+/// The card for an action in a tab whose safety probe ran in the page's own world: every action
+/// asks, and the card says the page can't be checked.
+pub fn page_world_ask(tool: &str, probe: Option<&Value>) -> Ask {
+    let page = probe.and_then(|p| p["page"].as_str()).unwrap_or_default();
+    let host = super::host_of(page).unwrap_or_else(|| "the page".into());
+    let what = probe
+        .and_then(|p| p["describe"].as_str())
+        .unwrap_or("the element")
+        .to_string();
+    let verb = match tool {
+        "browser_type" => "type into",
+        "browser_press" => "press a key at",
+        _ => "click",
+    };
+    Ask {
+        kind: Sensitive::PageWorld,
+        title: format!("{verb} {what} on {host}"),
+        detail: format!(
+            "Trek couldn't check this page in its own script world (the isolated world failed to start), so it can't be trusted to say what {what} does. The agent wants to {verb} it anyway."
+        ),
+        site: site_of(page),
+        hidden: 0,
+    }
 }
 
 /// The card for a passkey a page asked Trek's authenticator for while an agent drives the
@@ -613,11 +668,15 @@ mod tests {
         let s = script(
             "type",
             &[json!("e3"), json!("O'Brien \"x\"\n"), json!(true)],
+            true,
         );
-        assert!(s.starts_with(AGENT_JS));
-        assert!(s.ends_with(
-            "window.__trekAgent.type(\"e3\", \"O'Brien \\\"x\\\"\\n\", true); } catch (e) { return { error: String((e && e.message) || e) }; } })())"
+        assert!(s.starts_with(
+            "JSON.stringify(((A) => { try { return A.type(\"e3\", \"O'Brien \\\"x\\\"\\n\", true); } catch (e) {"
         ));
+        assert!(s.contains(AGENT_JS) && s.ends_with(")(true)))"));
+        assert!(script("state", &[], false).ends_with(")(false)))"));
+        // Nothing it calls is looked up on `window`, where a page could have put its own.
+        assert!(!s.contains("window.__trekAgent"));
         // The web view hands back JSON text of the JSON string.
         let raw =
             serde_json::to_string(&json!({"did": "Clicked button \"Go\""}).to_string()).unwrap();
@@ -627,10 +686,168 @@ mod tests {
         assert_eq!(answer(&err).unwrap_err(), "No element with ref e9");
         assert!(answer("").unwrap_err().contains("didn't run"));
         let e = eval_script("x1", "document.title", true);
-        assert!(
-            e.contains("window.__trekAgent.hold(\"x1\", (async () => (\ndocument.title\n))())")
-        );
+        assert!(e.starts_with("JSON.stringify((") && e.contains(EVAL_JS));
+        assert!(e.ends_with(").hold(\"x1\", (async () => (\ndocument.title\n))()))"));
         assert!(eval_script("x2", "return 1", false).contains("(async () => {\nreturn 1\n})()"));
+        assert!(take_script("x1").ends_with(").take(\"x1\"))"));
+        // The agent's own script is the page's business; Trek's commands aren't in it.
+        assert!(!e.contains(AGENT_JS));
+    }
+
+    /// Runs Trek's commands against a small page in node (`fixtures/probe_page.js`: a sign-in
+    /// form that posts to another site, with a password field, a button with a child, a label
+    /// for the button, a button outside the form, a text field drawn as dots, a download link).
+    /// `page`: the page's own script, run first; `isolated`: whether the commands are told the
+    /// world is Trek's own; `steps`: what to evaluate, with `call(command, ...args)` running
+    /// one command as Trek sends it (a script of its own each time). `None` without node.
+    fn in_a_page(page: &str, isolated: bool, steps: &str) -> Option<Value> {
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("node")
+            .args(["-e", include_str!("fixtures/probe_page.js")])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .ok()?;
+        let input = json!([AGENT_JS, page, isolated, steps]).to_string();
+        child.stdin.take()?.write_all(input.as_bytes()).ok()?;
+        let output = child.wait_with_output().ok()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).ok()
+    }
+
+    /// One probe's answer in `in_a_page`'s steps: `probe("e1")`, `probe("e2", "Enter")`.
+    const PROBE: &str = "const probe = (ref, key) => JSON.parse(call('probe', ref, key === undefined ? null : key));";
+
+    #[test]
+    fn the_probe_reads_what_the_browser_will_act_on() {
+        let steps = format!(
+            "{PROBE} ({{ pw: probe('e1'), user: probe('e2'), go: probe('e3'), child: probe('e4'), label: probe('e5'), outside: probe('e6'), dots: probe('e7'), search: probe('e8'), file: probe('e9'), enter_field: probe('e2', 'Enter'), enter_button: probe('e3', 'Enter'), enter_search: probe('e8', 'Enter'), space_button: probe('e3', ' ') }})"
+        );
+        let Some(v) = in_a_page("", true, &steps) else {
+            return; // no node here (CI on Windows): the checks on the script's text still run
+        };
+        let away = "https://collect.example.net/steal";
+        assert_eq!(v["pw"]["password"], true);
+        assert_eq!(v["pw"]["describe"], "textbox \"Password\"");
+        assert_eq!(v["user"]["password"], false);
+        assert!(v["user"]["submits"].is_null(), "typing sends nothing");
+        // A click on the button, on what's inside it, and on a label for it all send the form.
+        for which in ["go", "child", "label"] {
+            assert_eq!(v[which]["submits"]["action"], away, "{which}");
+        }
+        // A button outside the form that names it, with an address of its own.
+        assert_eq!(
+            v["outside"]["submits"]["action"],
+            "https://shop.example.com/local"
+        );
+        // A text field drawn as dots is a password field in all but name.
+        assert_eq!(v["dots"]["password"], true);
+        assert_eq!(v["search"]["password"], false);
+        assert_eq!(v["file"]["download"], "https://shop.example.com/report.pdf");
+        // Enter in a field sends its form (by the form's first submit button), and so does
+        // Enter or Space on the button; a field in no form sends nothing.
+        for which in ["enter_field", "enter_button", "space_button"] {
+            assert_eq!(v[which]["submits"]["action"], away, "{which}");
+        }
+        assert!(v["enter_search"]["submits"].is_null());
+        // And what Trek asks follows from it.
+        let ask = ask_for("browser_click", &json!({}), Some(&v["child"])).unwrap();
+        assert_eq!(ask.kind, Sensitive::ForeignSubmit);
+        assert_eq!(
+            ask.title,
+            "Send a form from shop.example.com to collect.example.net"
+        );
+        let ask = ask_for("browser_type", &json!({"text": "1234"}), Some(&v["dots"])).unwrap();
+        assert_eq!(ask.kind, Sensitive::Password);
+        let ask = ask_for(
+            "browser_press",
+            &json!({"key": "Enter"}),
+            Some(&v["enter_button"]),
+        );
+        assert_eq!(ask.unwrap().kind, Sensitive::ForeignSubmit);
+    }
+
+    /// The hole this closes: the commands lived at `window.__trekAgent`, and a script found one
+    /// there already (same name, same version) used it. A page that put its own there, or
+    /// swapped `probe` on Trek's, answered Trek's question about itself.
+    #[test]
+    fn a_page_cannot_stand_in_for_treks_commands() {
+        // A page's own commands, under every name and version there has been, saying no field
+        // is a password field and no click sends anything.
+        let page = "const lie = () => ({ describe: 'textbox \"Search\"', password: false, page: location.href, disabled: false }); \
+            for (const version of [1, 2, 3]) window.__trekAgent = { version, probe: lie, snapshot: () => ({ nodes: [] }) }; \
+            window.__lies = 0;";
+        let steps = format!("{PROBE} [probe('e1'), probe('e3')]");
+        // In the page's own world (no world of Trek's could be had), what's on `window` isn't used.
+        let Some(v) = in_a_page(page, false, &steps) else {
+            return;
+        };
+        assert_eq!(v[0]["password"], true, "{v}");
+        assert_eq!(
+            v[1]["submits"]["action"],
+            "https://collect.example.net/steal"
+        );
+        // Nor is it replaced: the page keeps its own object, and Trek's is nowhere it can reach.
+        let steps = format!(
+            "{PROBE} probe('e1'); [window.__trekAgent.version, typeof window.__trekAgent.click, Object.getOwnPropertyNames(window).filter((n) => /^__trek/.test(n))]"
+        );
+        let v = in_a_page(page, false, &steps).unwrap();
+        assert_eq!(v, json!([3, "undefined", ["__trekAgent"]]));
+        // In a world of Trek's own the commands are kept from call to call (refs and all) as an
+        // own property of that world's global. A page's element named like it shows up on
+        // `window` by name in every world, and is no such property: it isn't taken for them.
+        let named = "window.__proto__ = { __trekAgent: { version: 2, probe: () => ({ describe: 'x', password: false, page: '' }) } };";
+        let steps = format!(
+            "{PROBE} const a = probe('e1'); const kept = Object.getOwnPropertyDescriptor(window, '__trekAgent'); [a.password, !!kept && typeof kept.value.click, probe('e1').password]"
+        );
+        let v = in_a_page(named, true, &steps).unwrap();
+        assert_eq!(v, json!([true, "function", true]));
+    }
+
+    /// The probe is taken, the user is asked (or isn't), and only then does the agent act: a
+    /// page has that long to turn a harmless element into the one that needed asking about.
+    #[test]
+    fn an_action_goes_ahead_only_as_what_was_checked() {
+        // After the probe, the page makes the plain field a password field, binds the form's
+        // button elsewhere and makes a link a download.
+        let steps = format!(
+            "{PROBE} const g = (p) => ({{ password: !!p.password, action: (p.submits && p.submits.action) || null, download: p.download || null }}); \
+             const u = g(probe('e2')), o = g(probe('e6')); \
+             window.user.attrs.type = 'password'; window.outside.attrs.formaction = 'https://collect.example.net/later'; \
+             [JSON.parse(call('type', 'e2', 'hunter2', true, u)), JSON.parse(call('click', 'e6', o)), JSON.parse(call('press', {{ key: 'a' }}, 'e2', u)), window.user.value]"
+        );
+        let Some(v) = in_a_page(
+            "window.user = user; window.outside = outside;",
+            true,
+            &steps,
+        ) else {
+            return;
+        };
+        for (i, what) in [(0, "textbox"), (1, "button \"Save\""), (2, "textbox")] {
+            let e = v[i]["error"].as_str().unwrap_or_default();
+            assert!(
+                e.contains(what) && e.contains("changed what") && e.contains("nothing was done"),
+                "{i}: {}",
+                v[i]
+            );
+        }
+        assert_eq!(v[3], "", "nothing was typed");
+        // What Rust hands the action is the probe's own answer, the page it ran on included (an
+        // approval doesn't carry to another site that reuses the same refs).
+        let probe = json!({"password": true, "submits": {"action": "https://a.example/x", "method": "post"}, "page": "https://a.example/form"});
+        assert_eq!(
+            guard(&probe),
+            json!({"password": true, "action": "https://a.example/x", "download": null, "page": "https://a.example/form"})
+        );
+        assert_eq!(
+            guard(&json!({"describe": "link"})),
+            json!({"password": false, "action": null, "download": null, "page": null})
+        );
     }
 
     #[test]

@@ -22,6 +22,53 @@ use trek_core::settings::{
 };
 use trek_core::{AgentId, Effort, HandHolding};
 
+impl SettingsView {
+    /// The sites the user allowed every page an agent writes ("Always allow" on a page's card,
+    /// "Always from this site" on a video), each with a button that forgets it. Nothing while
+    /// there are none.
+    fn artifact_sites(&self, s: &Settings, cx: &App) -> Option<AnyElement> {
+        let hosts = trek_core::artifact::net::clean_hosts(&s.general.artifact_hosts);
+        if hosts.is_empty() {
+            return None;
+        }
+        let forget = self.setter::<String>(|s, host| {
+            s.general
+                .artifact_hosts
+                .retain(|h| !h.eq_ignore_ascii_case(&host))
+        });
+        let list = v_flex()
+            .mt(px(4.))
+            .gap(px(6.))
+            .children(hosts.into_iter().enumerate().map(|(i, host)| {
+                let (forget, gone) = (forget.clone(), host.clone());
+                h_flex()
+                    .gap(px(10.))
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(text::BODY))
+                            .child(host),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("artifact-site-remove-{i}")))
+                            .small()
+                            .outline()
+                            .label("Remove")
+                            .on_click(move |_, window, cx| forget(gone.clone(), window, cx)),
+                    )
+            }));
+        Some(Self::row_with(
+            "Sites pages may load from",
+            "You chose Always allow for these on a page's card. Every page an agent writes may load from them without asking.",
+            Some(list.into_any_element()),
+            div(),
+            cx,
+        ))
+    }
+}
+
 /// A compact dropdown button that shows the current choice.
 fn picker<T: Clone + PartialEq + 'static>(
     id: impl Into<ElementId>,
@@ -371,7 +418,7 @@ impl SettingsView {
                     ),
                     Self::row(
                         "Interactive artifacts",
-                        "Agents may answer with live HTML (a 3D model, a simulation, a tabbed report), run in a sandboxed web view in the answer that can load scripts from the web over https. Off, agents aren't told and such blocks show as code. Sessions that start from now on follow it.",
+                        "Agents may answer with live HTML (a 3D model, a simulation, a tabbed report), run in a sandboxed web view in the answer. A page loads libraries from cdnjs and Google Fonts; before it loads from any other site, its card asks you. Off, agents aren't told and such blocks show as code. Sessions that start from now on follow it.",
                         self.switch(
                             "interactive-artifacts",
                             s.general.interactive_artifacts,
@@ -379,7 +426,10 @@ impl SettingsView {
                         ),
                         cx,
                     ),
-                ],
+                ]
+                .into_iter()
+                .chain(self.artifact_sites(s, cx))
+                .collect(),
                 cx,
             ),
             Self::heading("Composer", cx),

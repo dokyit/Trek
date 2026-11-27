@@ -1,12 +1,33 @@
-// Browser use: what Trek runs in a page for an agent (see agent.rs). Installed once per
-// document as `window.__trekAgent`; each tool call then runs one of its commands and gets JSON
-// back. Elements the agent can act on get a stable ref (`data-trek-ref="e12"`), kept while the
-// element stays on the page. Events are dispatched as a person's would arrive: pointer and mouse
-// events around a click, key events around typing, and text inserted through the editing
-// commands, so frameworks that track input values (React, Vue) see the change.
-(() => {
-  const VERSION = 1;
-  if (window.__trekAgent && window.__trekAgent.version === VERSION) return;
+// Browser use: what Trek runs in a page for an agent (see agent.rs). Each tool call runs one of
+// its commands and gets JSON back. Elements the agent can act on get a stable ref
+// (`data-trek-ref="e12"`), kept while the element stays on the page. Events are dispatched as a
+// person's would arrive: pointer and mouse events around a click, key events around typing, and
+// text inserted through the editing commands, so frameworks that track input values (React, Vue)
+// see the change.
+//
+// The page is not to be trusted with any of this: what `probe` says decides whether the user is
+// asked before a password is typed or a form leaves the site. What the probe buys is that the
+// page can't lie about what a field or form is; it can't keep the page from reading what was
+// typed into a plain text field (an `input` listener and a `fetch` do that), which no page-side
+// script can. So the script runs in a script
+// world of Trek's own (agent.rs: WebKit's content world, a DevTools isolated world on WebView2),
+// which shares the page's document and nothing else: the page can't reach this script's objects,
+// and what the page does to its own `JSON`, `Element.prototype` and the rest isn't seen here.
+// The file is one expression, a function of `isolated` that returns the commands:
+//
+// - `isolated` (the world is Trek's own): the commands are made once per document and kept as an
+//   own property of that world's global, which nothing of the page's can be (a page's `<div id>`
+//   shows up on `window` by name, but never as an own property).
+// - not `isolated` (no such world could be had, and this is the page's): nothing found on
+//   `window` is used, since the page may have put it there. The commands are made afresh each
+//   call, and refs come from the elements' own attributes.
+((isolated) => {
+  const VERSION = 2;
+  const KEY = '__trekAgent';
+  if (isolated) {
+    const kept = Object.getOwnPropertyDescriptor(globalThis, KEY);
+    if (kept && kept.value && kept.value.version === VERSION) return kept.value;
+  }
 
   const INTERACTIVE = new Set(['link', 'button', 'textbox', 'searchbox', 'checkbox', 'radio', 'combobox', 'listbox', 'option', 'slider', 'spinbutton', 'switch', 'tab', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'treeitem', 'gridcell']);
   // Roles that keep their place in the outline (the rest flatten into their parent).
@@ -19,7 +40,7 @@
   const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'META', 'LINK', 'HEAD', 'TITLE', 'BASE']);
   const TEXT_TYPES = new Set(['text', 'email', 'password', 'search', 'tel', 'url', 'number', '', 'date', 'datetime-local', 'month', 'time', 'week']);
 
-  const A = { version: VERSION, n: 0, refs: new Map(), results: {}, flashTimer: 0 };
+  const A = { version: VERSION, n: 0, refs: new Map(), flashTimer: 0 };
 
   const clip = (s, n) => {
     s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
@@ -178,6 +199,16 @@
       if (!other || other === el || !other.isConnected) {
         A.refs.set(r, new WeakRef(el));
         return r;
+      }
+    }
+    if (!A.counted) {
+      // Refs given before these commands were made (or by a page playing along): start past them.
+      A.counted = true;
+      for (const root of roots()) {
+        for (const had of root.querySelectorAll('[data-trek-ref]')) {
+          const m = /^e(\d{1,9})$/.exec(had.getAttribute('data-trek-ref') || '');
+          if (m) A.n = Math.max(A.n, Number(m[1]));
+        }
       }
     }
     r = 'e' + (++A.n);
@@ -491,16 +522,30 @@
     };
   };
 
-  // What an action on `ref` would do, before it's done: for Trek's approvals.
+  // What an action on `ref` would do, before it's done: for Trek's approvals. `key`: the key
+  // about to be pressed there ('' or null: a click, or typing).
+  //
+  // It asks the elements themselves, through this world's own DOM (see the top of the file), and
+  // reads what the browser will act on rather than what the markup says: the field's type as the
+  // browser has it, the element a click on `ref` really activates (the button a clicked label or
+  // a child of a button stands for), the form that element belongs to wherever it sits, and the
+  // address the browser would send it to. What it can't see: what the page's own scripts do when
+  // the click or the key arrives (a handler that sends the form's fields somewhere itself).
   A.probe = (ref, key) => {
     const el = ref ? find(ref) : deepActive();
     if (!el) return ref ? missing(ref) : { describe: 'the page', password: false, page: location.href };
     const t = tag(el);
-    const type = (el.getAttribute('type') || '').toLowerCase();
     const auto = (el.getAttribute('autocomplete') || '').toLowerCase();
+    let masked = false;
+    if (t === 'INPUT' || t === 'TEXTAREA') {
+      // A text field drawn as dots is a password field in everything but name.
+      const st = styleOf(el);
+      const security = st ? (st.webkitTextSecurity || st.getPropertyValue('-webkit-text-security') || '') : '';
+      masked = !!security && security !== 'none';
+    }
     const out = {
       describe: describe(el),
-      password: t === 'INPUT' && (type === 'password' || auto.includes('password')),
+      password: (t === 'INPUT' && (el.type === 'password' || auto.includes('password'))) || masked,
       page: location.href,
       disabled: !!(el.disabled || el.getAttribute('aria-disabled') === 'true'),
     };
@@ -509,19 +554,52 @@
       out.href = link.href;
       if (link.hasAttribute('download')) out.download = link.href;
     }
-    // Does acting on it submit a form, and where to?
-    const form = el.form || el.closest('form');
+    // Does acting on it submit a form, and where to? A click lands on whatever holds the
+    // element: the button around it, or the control its label is for.
+    let actor = el.closest('button, input, select, textarea, label') || el;
+    if (tag(actor) === 'LABEL') actor = actor.control || actor;
+    const at = tag(actor);
+    const type = at === 'INPUT' || at === 'BUTTON' ? String(actor.type || '').toLowerCase() : '';
+    const form = actor.form || actor.closest('form');
+    const submitter = (at === 'BUTTON' && type === 'submit') || (at === 'INPUT' && (type === 'submit' || type === 'image'));
     let submits = false;
     if (form) {
-      if (key === 'Enter') submits = t === 'INPUT' && TEXT_TYPES.has(type);
-      else if (t === 'BUTTON') submits = (type || 'submit') === 'submit';
-      else if (t === 'INPUT') submits = type === 'submit' || type === 'image';
+      // Enter in a text field submits its form; Enter or Space on a submit button clicks it.
+      if (key === 'Enter') submits = submitter || (at === 'INPUT' && TEXT_TYPES.has(type));
+      else submits = submitter;
     }
     if (submits) {
-      const action = (t !== 'FORM' && el.getAttribute('formaction')) ? el.formAction : form.action;
+      // Enter in a field goes by the form's default button, with that button's own address.
+      let by = submitter ? actor : null;
+      if (!by) {
+        for (const b of form.elements) {
+          const bt = tag(b), ty = String(b.type || '').toLowerCase();
+          if ((bt === 'BUTTON' && ty === 'submit') || (bt === 'INPUT' && (ty === 'submit' || ty === 'image'))) { by = b; break; }
+        }
+      }
+      const action = by && by.hasAttribute('formaction') ? by.formAction : form.action;
       out.submits = { action: action || location.href, method: (form.method || 'get').toLowerCase() };
     }
     return out;
+  };
+
+  // What Trek asked the user about (or found nothing to ask about) may no longer be what the
+  // element does: the page had time to change it while Trek decided, and may have been waiting
+  // to. `guard` is what `probe` answered then ({password, action, download}); the action goes
+  // ahead only if a probe taken now, in the same breath as the action, asks for nothing more.
+  const changed = (ref, key, guard) => {
+    if (!guard) return null;
+    const now = A.probe(ref, key);
+    if (!now || now.error) return null;
+    const action = (now.submits && now.submits.action) || null;
+    // What was approved was on the page's site: the same ref on another site (a navigation
+    // between the probe and the action) isn't what the user said yes to.
+    const origin = (u) => { try { return new URL(u, location.href).origin; } catch (_) { return ''; } };
+    const worse = (now.password && !guard.password)
+      || (guard.page && origin(now.page) !== origin(guard.page))
+      || (action && action !== (guard.action || null))
+      || (now.download && now.download !== (guard.download || null));
+    return worse ? { error: 'The page changed what ' + now.describe + ' does while Trek was checking it, so nothing was done. Take a new browser_snapshot and try again.' } : null;
   };
 
   // ---- acting ------------------------------------------------------------------------------
@@ -563,9 +641,11 @@
     return { did: 'Hovered over ' + describe(el) };
   };
 
-  A.click = (ref) => {
+  A.click = (ref, guard) => {
     let el = find(ref);
     if (!el) return missing(ref);
+    const moved = changed(ref, null, guard);
+    if (moved) return moved;
     if (tag(el) === 'OPTION' && el.parentElement) return A.select(refOf(el.closest('select') || el.parentElement), el.value);
     const what = describe(el);
     if (el.disabled || el.getAttribute('aria-disabled') === 'true') return { error: what + ' is disabled: nothing happens when it\'s clicked.' };
@@ -582,6 +662,11 @@
     }
     mouse(el, 'pointerup', x, y);
     mouse(el, 'mouseup', x, y);
+    // The page's own handlers ran with the events above and may have changed what the element
+    // does (a `pointerdown` that repoints its form): checked again in the same breath as the
+    // click, which is what `guard` was taken for.
+    const moved2 = changed(ref, null, guard);
+    if (moved2) return moved2;
     // The click itself, with the element's own default action (a link, a checkbox, submit).
     el.click();
     const out = { did: 'Clicked ' + what };
@@ -701,9 +786,11 @@
     }
   };
 
-  A.type = (ref, text, clear) => {
+  A.type = (ref, text, clear, guard) => {
     const el = find(ref);
     if (!el) return missing(ref);
+    const moved = changed(ref, '', guard);
+    if (moved) return moved;
     if (tag(el) === 'SELECT') return { error: describe(el) + ' is a drop-down: choose with browser_select.' };
     const kind = editableOf(el);
     if (!kind) return { error: describe(el) + ' doesn\'t take text. Type into a text field, a text area or an editable area.' };
@@ -788,26 +875,38 @@
     return best;
   };
 
-  A.press = (key, ref) => {
+  A.press = (key, ref, guard) => {
     // `key` arrives parsed by Trek: {key, code, keyCode, ctrl, shift, alt, meta, label}.
     let el = ref ? find(ref) : deepActive();
     if (ref && !el) return missing(ref);
+    const moved = changed(ref, key.key, guard);
+    if (moved) return moved;
     if (!el || el === document.documentElement) el = document.body;
     if (ref) { reveal(el); try { el.focus({ preventScroll: true }); } catch (_) {} }
     if (el !== document.body) flash(el, key.label || key.key);
     const kind = editableOf(el);
     const go = keyEvent(el, 'keydown', key);
+    // The page's keydown handlers ran and may have changed what the key's default action does
+    // (a form's address, a field's type): checked again before it happens.
+    const moved2 = changed(ref, key.key, guard);
+    if (moved2) return moved2;
     let did = '';
     const plain = !key.ctrl && !key.meta && !key.alt;
     if (go) {
       const k = key.key;
       if (k.length === 1 && plain) {
         keyEvent(el, 'keypress', key);
+        // The page's keypress handlers ran too: the same check once more, in the same breath
+        // as what the key's default action does.
+        const moved3 = changed(ref, key.key, guard);
+        if (moved3) return moved3;
         if (kind) insert(el, k, kind);
         else if (k === ' ' && el.matches && el.matches('button, summary, [role=button], input[type=checkbox], input[type=radio], [role=checkbox], [role=switch]')) { el.click(); did = ' (it clicked ' + describe(el) + ')'; }
         else if (k === ' ') scrollPage(innerHeight * 0.85);
       } else if (k === 'Enter' && plain) {
         keyEvent(el, 'keypress', key);
+        const moved4 = changed(ref, key.key, guard);
+        if (moved4) return moved4;
         if (tag(el) === 'TEXTAREA' || kind === 'rich') {
           try { el.ownerDocument.execCommand(tag(el) === 'TEXTAREA' ? 'insertLineBreak' : 'insertParagraph', false); } catch (_) {}
         } else if (kind === 'field') {
@@ -936,48 +1035,8 @@
     return { met: gone ? !found : found };
   };
 
-  // ---- scripts the agent runs (browser_eval) ----------------------------------------------
-
-  const safe = (v) => {
-    const seen = new WeakSet();
-    const out = JSON.stringify(v, (k, x) => {
-      if (typeof x === 'bigint') return x.toString() + 'n';
-      if (typeof x === 'function') return '[function ' + (x.name || 'anonymous') + ']';
-      if (typeof x === 'symbol') return x.toString();
-      if (x === undefined) return null;
-      if (x && typeof x === 'object') {
-        if (isEl(x)) return '[element ' + describe(x) + ']';
-        if (x.nodeType) return '[node ' + x.nodeName + ']';
-        if (x === window) return '[window]';
-        if (seen.has(x)) return '[circular]';
-        seen.add(x);
-        if (x instanceof Map) return Object.fromEntries(x);
-        if (x instanceof Set) return Array.from(x);
-        if (x instanceof Error) return { error: x.message, stack: String(x.stack || '').slice(0, 1000) };
-      }
-      return x;
-    });
-    return out === undefined ? 'undefined' : out;
-  };
-
-  A.hold = (id, promise) => {
-    A.results[id] = null;
-    Promise.resolve(promise).then(
-      (v) => { A.results[id] = { value: safe(v) }; },
-      (e) => { A.results[id] = { error: String((e && e.message) || e) }; },
-    );
-    return { started: id };
-  };
-
-  A.take = (id) => {
-    const r = A.results[id];
-    if (r) delete A.results[id];
-    return r ? r : { waiting: id in A.results };
-  };
-
-  try {
-    Object.defineProperty(window, '__trekAgent', { value: A, configurable: true, enumerable: false, writable: true });
-  } catch (_) {
-    window.__trekAgent = A;
+  if (isolated) {
+    try { Object.defineProperty(globalThis, KEY, { value: A, configurable: true, enumerable: false, writable: false }); } catch (_) {}
   }
-})();
+  return A;
+})
