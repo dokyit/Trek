@@ -450,11 +450,34 @@ impl Session {
                 .browser_tool("browser_open", &url, json!({"url": url}))
                 .await?;
             let snap = self.browser_tool("browser_snapshot", "", json!({})).await?;
+            // `wait=<words>` (underscores for spaces): stay on the page until it says so, as an
+            // agent waits out a sign-in. The turn stays open meanwhile, so what the page asks
+            // the user for (a passkey's approval card) can be answered.
+            let waited = match args
+                .split_whitespace()
+                .find_map(|w| w.strip_prefix("wait="))
+            {
+                Some(words) => {
+                    let text = words.replace('_', " ");
+                    let r = self
+                        .browser_tool(
+                            "browser_wait",
+                            &text,
+                            json!({"text": text, "timeout_ms": 60_000}),
+                        )
+                        .await?;
+                    match r {
+                        Ok(v) => format!(" Then: {}", text_of(&v)),
+                        Err(e) => format!(" Then it never said {text:?}: {e}"),
+                    }
+                }
+                None => String::new(),
+            };
             return match (opened, snap) {
                 (Ok(_), Ok(s)) => {
                     let lines = text_of(&s).lines().count();
                     self.say(&format!(
-                        "I opened {url} in Trek's browser and read it: {lines} lines of outline."
+                        "I opened {url} in Trek's browser and read it: {lines} lines of outline.{waited}"
                     ))
                     .await
                 }
