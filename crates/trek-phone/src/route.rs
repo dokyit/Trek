@@ -63,8 +63,11 @@ pub struct Facts {
     /// usbmuxd sees the phone over Wi-Fi only (no cable): no picture comes over the cable, and
     /// the driver's is the one there is.
     pub wifi: bool,
-    /// Over Wi-Fi, whether the phone needs its passcode now (CoreDevice's lock state), which the
-    /// cable's black picture tells otherwise; `None` before it's known.
+    /// Whether the phone needs its passcode now (CoreDevice's lock state, asked while Trek Driver
+    /// is on offer); `None` before it's known, and then the cable's picture has to tell: black
+    /// or none is taken for locked. That picture alone gets it wrong both ways (an app with a
+    /// black screen isn't a locked phone, and a lit Lock Screen is one), so once CoreDevice has
+    /// said, its word counts.
     pub passcode: Option<bool>,
     /// Installing Trek Driver from the tool, where that stands.
     pub setup: Setup,
@@ -236,15 +239,26 @@ impl Facts {
                 && (0. ..USB_QUIET).contains(&s.frame_age))
     }
 
-    /// Whether the iPhone is known to be locked: the cable gives no picture at all (an unlocked
-    /// screen sends one as soon as capture starts), or its last one is black. Over Wi-Fi: it needs
-    /// its passcode, as CoreDevice says.
+    /// Whether the iPhone is known to be locked: it needs its passcode, as CoreDevice says. Over
+    /// Wi-Fi that's all there is. On the cable, until CoreDevice has said, the picture tells:
+    /// none at all (an unlocked screen sends one as soon as capture starts) or a black one. Both
+    /// of the picture's mistakes were seen on a real iPhone: an app with a black screen read as
+    /// locked (taps then went to iPhone Mirroring, which can't connect to a phone in use, so it
+    /// couldn't be tapped at all), and the lit Lock Screen of a phone that had locked itself
+    /// read as unlocked ("Ready · USB", with taps landing on the Lock Screen).
     pub fn locked(&self) -> bool {
         if self.wifi {
             return self.passcode == Some(true);
         }
+        self.passcode.unwrap_or_else(|| self.cable_dark())
+    }
+
+    /// The cable's own picture is none or black while nothing else is the picture: what a locked
+    /// phone looks like, before CoreDevice has said whether it is one.
+    pub fn cable_dark(&self) -> bool {
         let s = &self.status;
-        !self.driver_frames
+        !self.wifi
+            && !self.driver_frames
             && !self.live_frames
             && !s.screen.is_empty()
             && (s.frames == 0 || s.dark)
@@ -1421,10 +1435,62 @@ mod tests {
     }
 
     #[test]
-    fn the_cable_wins_when_both_are_there() {
-        // Plugged in again: usbmuxd lists the cable first, so the facts aren't Wi-Fi's.
+    fn a_black_screen_on_the_cable_isnt_a_locked_phone_when_it_needs_no_passcode() {
+        // An app with a black screen (seen on a real iPhone: CarPlay's settings): the cable's
+        // picture is as dark as a locked phone's.
+        let mut dark = usb_live();
+        dark.dark = true;
+        let mut f = with_driver(dark, Avail::Ready);
+        f.mirror = Some(Mirror::PhoneInUse);
+        f.mirroring_known = true;
+        f.wants_taps = true;
+        assert!(f.cable_dark());
+        // Before CoreDevice has said: taken for locked, as ever.
+        assert!(f.locked());
+        assert_eq!(f.strip().route, Route::Mirroring);
+        // It needs no passcode: unlocked, and the driver keeps the taps.
+        f.passcode = Some(false);
+        assert!(!f.locked());
+        let strip = f.strip();
+        assert_eq!(strip.route, Route::Driver);
+        assert_eq!(strip.taps.word, "Ready · USB");
+        assert_ne!(strip.screen.word, "Locked");
+        assert_eq!(strip.action, None);
+        // It does: locked.
+        f.passcode = Some(true);
+        assert!(f.locked());
+        assert_eq!(f.strip().screen.word, "Locked");
+    }
+
+    #[test]
+    fn a_lit_lock_screen_on_the_cable_is_a_locked_phone() {
+        // The phone locked itself while the driver ran: the driver's picture (or the cable's) is
+        // the Lock Screen, wallpaper and all, nothing dark about it.
         let mut f = with_driver(usb_live(), Avail::Ready);
-        f.passcode = Some(true); // a stale Wi-Fi reading doesn't count on the cable
+        f.mirror = Some(Mirror::Closed);
+        f.wants_taps = true;
+        assert!(!f.cable_dark());
+        assert_eq!(f.strip().taps.word, "Ready · USB");
+        f.passcode = Some(true);
+        assert!(f.locked());
+        let strip = f.strip();
+        assert_eq!(strip.route, Route::Mirroring);
+        assert_ne!(strip.taps.word, "Ready · USB");
+        // With the driver's own frames as the picture too.
+        f.driver_frames = true;
+        assert!(f.locked());
+        assert_eq!(f.strip().route, Route::Mirroring);
+        // Unlocked again: back to the driver.
+        f.passcode = Some(false);
+        assert_eq!(f.strip().route, Route::Driver);
+    }
+
+    #[test]
+    fn the_cable_wins_when_both_are_there() {
+        // Plugged in again: usbmuxd lists the cable first, so the facts aren't Wi-Fi's (the
+        // tool forgets what CoreDevice said over Wi-Fi when the link changes, and asks again).
+        let mut f = with_driver(usb_live(), Avail::Ready);
+        f.passcode = None;
         assert!(!f.locked());
         let strip = f.strip();
         assert_eq!(strip.route, Route::Driver);

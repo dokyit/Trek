@@ -248,7 +248,54 @@ fn a_video_an_answer_links_or_a_message_attaches_plays_in_place() {
             ["Launch", "The test clip"],
             "a file and a web video the answer links"
         );
-        assert_eq!(log.borrow().made, 3);
+        // The video from the web has its card and no view: nothing is asked of its site (the
+        // address is the agent's, and could carry anything) until the user asks for the video.
+        assert_eq!(log.borrow().made, 2);
+        let load = load_button(&trek, cx).expect("a Load video button");
+        trek.click(cx, load);
+        for _ in 0..3 {
+            trek.render(cx);
+        }
+        assert_eq!(log.borrow().made, 3, "asked for, it plays");
+        assert!(load_button(&trek, cx).is_none());
+    });
+}
+
+/// The "Load video" button of a video from the web that's waiting to be asked for.
+fn load_button(trek: &Trek, cx: &mut TestAppContext) -> Option<gpui_kit::SharedString> {
+    trek.window(cx, |window, _| {
+        gpui_kit::base::test_support::snapshots(window)
+            .into_iter()
+            .filter(|s| s.visible())
+            .find_map(|s| match s.path().last()? {
+                ElementId::Name(n) if n.starts_with("artifact-load-video-") => Some(n.clone()),
+                _ => None,
+            })
+    })
+}
+
+#[test]
+fn a_video_from_a_site_the_user_always_allows_plays_without_asking() {
+    run(async |cx| {
+        let log = fake_web(true).unwrap();
+        let trek = open_with(cx, |s| {
+            s.general.artifact_hosts = vec!["cdn.example.com".into()]
+        });
+        let answer = "From the web:\n\n[Launch](https://cdn.example.com/launch.webm)\n\nAnd one more:\n\n[Other](https://cdn.example.com.evil.example.org/x.webm)";
+        thread_of(
+            &trek,
+            cx,
+            vec![
+                user("Show me"),
+                Item::Assistant {
+                    text: answer.into(),
+                },
+            ],
+        )
+        .await;
+        // The allowed site's video has its view; the look-alike's waits.
+        assert_eq!(log.borrow().made, 1);
+        assert!(load_button(&trek, cx).is_some());
     });
 }
 

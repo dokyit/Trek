@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 // Browser use: agents drive this tool's page (`trek-mcp browser`).
 mod agent;
 mod agent_core;
+mod isolated;
 pub use agent::{AgentCall, AgentCallSlot};
 // What pages ask of the user, and what wry leaves out of WebKit's delegates and WebView2's events
 // (popups, dialogs, permissions, links for other apps, why a load failed).
@@ -781,6 +782,12 @@ enum Msg {
         tab: u64,
         url: String,
     },
+    /// The navigation policy refused a form submission to another site while an agent's
+    /// unapproved action ran in `tab` (`agent.rs` reports it to the agent).
+    SubmitBlocked {
+        tab: u64,
+        url: String,
+    },
     /// Loading `url` failed before anything of it showed: WebKit's error.
     LoadFailed {
         tab: u64,
@@ -860,6 +867,32 @@ struct Tab {
     sheet: Option<(f64, f64)>,
     /// When the page's process last ended: once it's reloaded, twice in a minute it's an error.
     crashed: Option<Instant>,
+    /// The agent's safety probe for this tab last ran in the page's own world (Windows' fallback
+    /// when its isolated world couldn't be made): it can't be trusted, so every agent action
+    /// here asks (`agent.rs`).
+    untrusted_probe: bool,
+}
+
+/// Tabs where an agent's action that the user didn't approve as a form submission is under way:
+/// the page's navigation policy refuses a form submission to another site meanwhile, since the
+/// page's own handlers can still move the form after `agent.js` checked it.
+static FORM_GUARDS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<u64>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+/// Whether tab `id`'s navigation policy should refuse a form submission to another site now.
+fn form_guarded(id: u64) -> bool {
+    FORM_GUARDS.lock().is_ok_and(|g| g.contains(&id))
+}
+
+/// Raise (`on`) or lower the form-submission guard on tab `id`.
+fn form_guard(id: u64, on: bool) {
+    if let Ok(mut g) = FORM_GUARDS.lock() {
+        if on {
+            g.insert(id);
+        } else {
+            g.remove(&id);
+        }
+    }
 }
 
 /// The window a native web view is made in, by its raw handle: what a task can carry there in
@@ -1113,6 +1146,57 @@ fn open_in_safari(url: &str) {
 
 /// Where an isolated run saves a download wry named `name` (`file (2).txt`: numbered against
 /// another folder): `dir`, under the name the page gave, numbered against `dir` alone.
+/// Files a double-click runs, or follows elsewhere, with no installer or warning of its own in the
+/// way: launchers and links on every desktop. Installers (`.exe`, `.msi`, `.pkg`, `.dmg`) aren't
+/// here: one the user chose to download is the point, and the system checks those as it opens
+/// them.
+const RUNS_WHEN_OPENED: [&str; 12] = [
+    ".desktop",
+    ".lnk",
+    ".url",
+    ".scf",
+    ".command",
+    ".tool",
+    ".webloc",
+    ".inetloc",
+    ".terminal",
+    ".appref-ms",
+    ".application",
+    ".library-ms",
+];
+
+/// What Windows runs when opened as well: scripts for its own hosts (cmd, Windows Script Host,
+/// HTML applications), screen savers and old program shortcuts. Elsewhere these are ordinary files
+/// (a `.js` file is source).
+const RUNS_WHEN_OPENED_ON_WINDOWS: [&str; 14] = [
+    ".bat", ".cmd", ".ps1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".hta", ".scr", ".pif",
+    ".cpl", ".jar",
+];
+
+/// Where a download the page names `suggested` is kept, in `dir`: its last part only, with no
+/// leading dots (not a hidden file, not `..`), a file the desktop would run when opened
+/// (`.desktop`, `.lnk`, `.url`…) kept as `name.download`, and numbered past a file already there.
+fn download_destination(dir: &Path, suggested: &Path) -> PathBuf {
+    let name = suggested
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .trim_start_matches(['.', ' '])
+        .trim_end();
+    let name = if name.is_empty() { "download" } else { name };
+    let lower = name.to_ascii_lowercase();
+    let runs = RUNS_WHEN_OPENED.iter().any(|e| lower.ends_with(e))
+        || (cfg!(windows)
+            && RUNS_WHEN_OPENED_ON_WINDOWS
+                .iter()
+                .any(|e| lower.ends_with(e)));
+    if runs {
+        isolated_download(dir, &format!("{name}.download"))
+    } else {
+        isolated_download(dir, name)
+    }
+}
+
 fn isolated_download(dir: &Path, name: &str) -> PathBuf {
     let (stem, ext) = match name.rfind('.') {
         Some(dot) if dot > 0 => (&name[..dot], &name[dot..]),
@@ -1136,6 +1220,45 @@ fn isolated_download(dir: &Path, name: &str) -> PathBuf {
 #[cfg(test)]
 mod isolated_download_tests {
     use super::isolated_download;
+
+    #[test]
+    fn a_download_is_a_name_in_downloads() {
+        use super::download_destination;
+        let dir = std::env::temp_dir().join(format!("trek-dl-dest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let at = |s: &str| download_destination(&dir, std::path::Path::new(s));
+        assert_eq!(
+            at("/home/u/.config/autostart/x.desktop"),
+            dir.join("x.desktop.download")
+        );
+        assert_eq!(at("/home/u/Downloads/../.bashrc"), dir.join("bashrc"));
+        assert_eq!(at("/home/u/Downloads/.."), dir.join("download"));
+        assert_eq!(
+            at("C:/Users/u/Downloads/Report.LNK"),
+            dir.join("Report.LNK.download")
+        );
+        assert_eq!(at("report.pdf"), dir.join("report.pdf"));
+        assert_eq!(
+            at("Invoice.application"),
+            dir.join("Invoice.application.download")
+        );
+        assert_eq!(
+            at("setup.exe"),
+            dir.join("setup.exe"),
+            "an installer the user chose"
+        );
+        if cfg!(windows) {
+            assert_eq!(at("run.BAT"), dir.join("run.BAT.download"));
+            assert_eq!(at("x.vbs"), dir.join("x.vbs.download"));
+            assert_eq!(at("app.js"), dir.join("app.js.download"));
+        } else {
+            assert_eq!(at("app.js"), dir.join("app.js"), "source, off Windows");
+        }
+        std::fs::write(dir.join("report.pdf"), "").unwrap();
+        assert_eq!(at("/elsewhere/report.pdf"), dir.join("report (1).pdf"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn an_isolated_download_is_numbered_against_its_own_folder() {
@@ -1840,13 +1963,20 @@ impl BrowserPanel {
                         // its own data folder: the user's Downloads isn't its to write in. The
                         // name is numbered against that folder, not the one wry looked in (on
                         // Linux it numbers against Downloads, else the working folder).
-                        if trek_core::paths::isolated()
-                            && let Some(name) = path.file_name().and_then(|n| n.to_str())
-                        {
-                            let dir = trek_core::paths::data_dir().join("downloads");
-                            let _ = std::fs::create_dir_all(&dir);
-                            *path = isolated_download(&dir, name);
-                        }
+                        // Otherwise it goes to Downloads, under a name only: WebKitGTK's path is
+                        // Downloads with the page's suggested name pushed on, and a name that is a
+                        // whole path (`/home/u/.config/autostart/x.desktop`) or climbs out
+                        // replaces it.
+                        let dir = if trek_core::paths::isolated() {
+                            Some(trek_core::paths::data_dir().join("downloads"))
+                        } else if cfg!(target_os = "linux") {
+                            Some(trek_core::paths::home().join("Downloads"))
+                        } else {
+                            path.parent().map(Path::to_path_buf)
+                        };
+                        let Some(dir) = dir else { return false };
+                        let _ = std::fs::create_dir_all(&dir);
+                        *path = download_destination(&dir, path);
                         let _ = t5.try_send(Msg::Download {
                             tab: id,
                             url,
@@ -2102,6 +2232,7 @@ impl BrowserPanel {
             opener: popup.map(|(opener, _)| opener),
             sheet: popup.and_then(|(_, size)| size),
             crashed: None,
+            untrusted_probe: false,
         });
         #[cfg(target_os = "macos")]
         if self.workspace.read(cx).settings.browser.block_trackers
@@ -2440,6 +2571,14 @@ impl BrowserPanel {
                         kind,
                     });
                 }
+            }
+            Msg::SubmitBlocked { tab: id, url } => {
+                // A form submission to another site was refused while an agent's action ran:
+                // its next answer says so (`Driver::blocked`).
+                tracing::debug!("browser: tab {id}'s form to {} was refused", for_log(&url));
+                self.agent
+                    .blocked
+                    .push(host_of(&url).unwrap_or_else(|| url.clone()));
             }
             Msg::LoadFailed {
                 tab: id,

@@ -4,14 +4,29 @@
 //! phone.
 //!
 //! ```sh
-//! cargo run -p trek-phone --example devices
+//! cargo run -p trek-phone --example devices [-- --app <name>]
 //! ```
+//!
+//! `--app`: which app on the first phone that name opens (as `phone_open_app` finds it), and how
+//! many apps it was picked from.
 
 fn main() {
     #[cfg(any(target_os = "macos", windows))]
     {
         use trek_phone::device;
         println!("{:?}", device::probe());
+        let mut args = std::env::args().skip(1);
+        if args.next().as_deref() == Some("--app") {
+            let name = args.next().unwrap_or_default();
+            match device::all_apps(None) {
+                Ok(apps) => println!(
+                    "\"{name}\" opens {} (of {} apps)",
+                    trek_phone::driver::find_app(&apps, &name).unwrap_or("nothing".into()),
+                    apps.len()
+                ),
+                Err(e) => eprintln!("{e}"),
+            }
+        }
         match device::list() {
             Ok(phones) if phones.is_empty() => println!("no iPhone"),
             Ok(phones) => {

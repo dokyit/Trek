@@ -1482,7 +1482,7 @@ fn parity_requests_and_replies() {
         r#"{"type":"background_output","re":"5","thread_id":"t","task_id":"b1"}"#,
         r#"{"type":"icon","re":"7","agent":"acp:mistral-vibe","hash":"0f3a","png":"iVBORw0K","template":true}"#,
         r#"{"type":"ack","re":"2","text":"and open a PR"}"#,
-        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines","note_files","card_actions","update_phone","media","limit_actions","context_card","turn_preview","consult","resume_interrupted","uploads","side_chat","sub_agent_view","failed_checks","rules","continue_on_account","compact_offer","switch_preview","diff_viewed","machine_files"]}"#,
+        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines","note_files","card_actions","update_phone","media","limit_actions","context_card","turn_preview","consult","resume_interrupted","uploads","side_chat","sub_agent_view","failed_checks","rules","continue_on_account","compact_offer","switch_preview","diff_viewed","machine_files","secret_answer"]}"#,
         r#"{"type":"usage","re":"9","providers":[{"agent":{"key":"codex","name":"Codex","logo":"codex"},"plan":"ChatGPT Pro","limits":[],
             "resets":[{"id":"rc-1","title":"Full reset (Weekly + 5 hr)","expires_at":1791030000000}]},
             {"agent":{"key":"acp:devin","name":"Devin"},"limits":[],"no_limits":true,"as_of":1791020000000,"today":"Today in Trek: 12K tokens"}],"picked":true}"#,
@@ -2525,4 +2525,52 @@ fn files_marked_viewed_come_with_the_folder_s_status() {
     let old: GitStatus = serde_json::from_value(json!({"is_repo":true,"files":[]})).unwrap();
     assert!(old.viewed.is_empty());
     assert!(feature::ALL.contains(&feature::DIFF_VIEWED));
+}
+
+/// A secret given from another computer (feature `secret_answer`, Trek 0.4.68), as
+/// docs/MOBILE.md shows it: the row names the request, the answer carries the value (or none, to
+/// decline), and the value prints nowhere. Older ends read each other's messages as before.
+#[test]
+fn a_secret_is_asked_for_on_the_row_and_answered_without_being_printed() {
+    let t = row_with(
+        r#","needs":{"kind":"question","text":"Needs GITHUB_TOKEN. Enter it on this Mac."},"secret":{"request_id":"trek-secret-ask-3","name":"GITHUB_TOKEN","why":"To open the pull request."}"#,
+    );
+    let ask = t.secret.clone().expect("the request");
+    assert_eq!(
+        (ask.request_id.as_str(), ask.name.as_str(), ask.why.as_str()),
+        (
+            "trek-secret-ask-3",
+            "GITHUB_TOKEN",
+            "To open the pull request."
+        )
+    );
+    // A row without one says nothing of it (what a 0.4.67 machine sends, and what it's sent).
+    assert_eq!(row_with("").secret, None);
+    let plain = serde_json::to_value(row_with("")).unwrap();
+    assert!(plain.get("secret").is_none());
+
+    let give = client_round_trip(
+        r#"{"type":"answer","id":"21","thread_id":"t","request_id":"trek-secret-ask-3","response":{"kind":"secret","value":"not-a-real-secret"}}"#,
+    );
+    let ClientMessage::Answer(req) = give.msg else {
+        panic!()
+    };
+    let AnswerResponse::Secret { value: Some(value) } = &req.response else {
+        panic!("{:?}", req.response)
+    };
+    assert_eq!(value.reveal(), "not-a-real-secret");
+    let printed = format!("{req:?}");
+    assert!(
+        !printed.contains("not-a-real-secret") && printed.contains("SecretValue(…)"),
+        "{printed}"
+    );
+    let decline = client_round_trip(
+        r#"{"type":"answer","id":"22","thread_id":"t","request_id":"trek-secret-ask-3","response":{"kind":"secret"}}"#,
+    );
+    let ClientMessage::Answer(req) = decline.msg else {
+        panic!()
+    };
+    assert_eq!(req.response, AnswerResponse::Secret { value: None });
+    assert!(feature::ALL.contains(&feature::SECRET_ANSWER));
+    assert_eq!(FROM_HERE_SINCE, "0.4.68");
 }

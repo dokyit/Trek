@@ -65,6 +65,8 @@ final class HostLink: Identifiable, Equatable {
 
     private var nextRequest = 1
     private var replies: [String: (ServerMessage) -> Void] = [:]
+    /// Runs `work` after `delay`: the wait for a reply (`ReplyTimeout`). A test runs time by hand.
+    @ObservationIgnored var after: (_ delay: TimeInterval, _ work: @escaping @MainActor () -> Void) -> Void = { Timeline().after($0, $1) }
 
     init(paired: PairedMac, backend: Backend) {
         self.paired = paired
@@ -97,7 +99,22 @@ final class HostLink: Identifiable, Equatable {
         nextRequest += 1
         if let then { replies[id] = then }
         // Not connected: nothing went, and whoever waits for the answer hears so now.
-        if backend.send(message, id: id) != true { reply(id, .error(re: id, code: .unknown, message: AppModel.notConnected)) }
+        guard backend.send(message, id: id) else {
+            reply(id, .error(re: id, code: .notSent, message: AppModel.notConnected))
+            return id
+        }
+        // It went. Whoever waits for the answer doesn't wait for ever: one that hasn't come in
+        // time (a host call stuck on the Mac) fails it. An answer that comes later still finds no
+        // one waiting; a transcript's is applied all the same (`AppModel.handle`).
+        if then != nil, let wait = ReplyTimeout.seconds(for: message) {
+            // Its words now: the timer must not hold the message (a piece of a file) while it waits.
+            let words = ReplyTimeout.words(for: message, machine: name)
+            after(wait) { [weak self] in
+                guard let self, self.replies[id] != nil else { return }
+                protocolLog.error("No answer to request \(id, privacy: .public) after \(Int(wait)) s")
+                self.reply(id, .error(re: id, code: .timedOut, message: words))
+            }
+        }
         return id
     }
 
@@ -120,7 +137,7 @@ final class HostLink: Identifiable, Equatable {
     func failPending(_ why: String = "The connection dropped. Check that it went through before trying again.") {
         let waiting = replies
         replies.removeAll()
-        for (id, f) in waiting { f(.error(re: id, code: .unknown, message: why)) }
+        for (id, f) in waiting { f(.error(re: id, code: .dropped, message: why)) }
     }
 
     /// The connection in words: what it's doing while connecting, connected or offline, else

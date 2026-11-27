@@ -6,6 +6,8 @@
 
 mod audio;
 
+pub use audio::{AudioState, AudioStats};
+
 use super::{Ask, Media, Session, StartedMedia, WORKERS};
 use core_foundation::base::TCFType as _;
 use core_media::format_description::TCMFormatDescription as _;
@@ -43,6 +45,27 @@ pub struct Live {
     frames: Receiver<LiveFrame>,
     udid: String,
     generation: u64,
+    audio: Arc<audio::Meter>,
+}
+
+/// How a live view is asked for ([`super::live_with`]).
+#[derive(Debug)]
+pub struct LiveOptions {
+    /// Play the phone's sound on this Mac (the default). Without it the phone's audio packets
+    /// are discarded as they arrive.
+    pub audio: bool,
+    /// Each decoded frame of sound as well (16-bit little-endian stereo, 48 kHz, 10 ms a frame),
+    /// for a recording to look at or listen to later. Dropped, nothing more is sent.
+    pub pcm: Option<Sender<Vec<u8>>>,
+}
+
+impl Default for LiveOptions {
+    fn default() -> Self {
+        LiveOptions {
+            audio: true,
+            pcm: None,
+        }
+    }
 }
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -59,6 +82,12 @@ impl Live {
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => LiveEvent::Timeout,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => LiveEvent::Ended,
         }
+    }
+
+    /// What the stream's sound has done so far: whether it plays (and if not, why), what the
+    /// phone negotiated, and packets, decoded frames, drops and level counted.
+    pub fn audio(&self) -> AudioStats {
+        self.audio.stats()
     }
 }
 
@@ -79,7 +108,11 @@ impl Drop for Live {
 /// Start the media stream for `session` and the receive loop that feeds `Live`'s frames; the
 /// session keeps the client (and the stop signal) so touches ride the same stream and `LiveStop`
 /// can end it.
-pub(super) async fn start(udid: &str, session: &mut Option<Session>) -> Result<Live, String> {
+pub(super) async fn start(
+    udid: &str,
+    session: &mut Option<Session>,
+    options: LiveOptions,
+) -> Result<Live, String> {
     let s = super::open(udid, session).await?;
     if s.media.is_some() {
         return Err("The iPhone's screen is already live.".into());
@@ -89,7 +122,15 @@ pub(super) async fn start(udid: &str, session: &mut Option<Session>) -> Result<L
     let (cancel, stopped) = tokio::sync::oneshot::channel();
     let our_ssrc = uuid::Uuid::new_v4().as_u128() as u32;
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
-    let receiver = tokio::spawn(receive_loop(started, frames, stopped, our_ssrc));
+    let meter = Arc::new(audio::Meter::with_tap(options.pcm));
+    let receiver = tokio::spawn(receive_loop(
+        started,
+        frames,
+        stopped,
+        our_ssrc,
+        options.audio,
+        meter.clone(),
+    ));
     s.media = Some(Media {
         cancel: Some(cancel),
         receiver,
@@ -99,6 +140,7 @@ pub(super) async fn start(udid: &str, session: &mut Option<Session>) -> Result<L
         frames: rx,
         udid: udid.to_string(),
         generation,
+        audio: meter,
     })
 }
 
@@ -146,6 +188,8 @@ async fn receive_loop(
     frames: Sender<LiveFrame>,
     mut stop: tokio::sync::oneshot::Receiver<()>,
     our_ssrc: u32,
+    play: bool,
+    meter: Arc<audio::Meter>,
 ) {
     let StartedMedia {
         mut client,
@@ -154,7 +198,30 @@ async fn receive_loop(
         audio_config,
     } = started_media;
     let mut stream = Stream::new(frames, our_ssrc);
-    let mut audio = audio_config.and_then(audio::AudioStream::new);
+    meter.negotiated(audio_config.as_ref());
+    let mut audio = match (play, audio_config) {
+        (false, _) => {
+            meter.set(AudioState::Off, None);
+            None
+        }
+        (true, None) => {
+            meter.set(
+                AudioState::Unplayable,
+                Some("the phone's answer named no audio stream"),
+            );
+            None
+        }
+        (true, Some(config)) => match audio::AudioStream::new(config, meter.clone()) {
+            Ok(stream) => {
+                meter.set(AudioState::Playing, None);
+                Some(stream)
+            }
+            Err(why) => {
+                meter.set(AudioState::Unplayable, Some(why));
+                None
+            }
+        },
+    };
     // The socket lives only as long as something plays what arrives on it. Bound with nobody
     // reading, it would queue the phone's hundred packets a second, without limit, for as long
     // as the live view is open; dropped, it's unbound and they're discarded on arrival.
@@ -179,6 +246,7 @@ async fn receive_loop(
             dg = recv_audio(audio_socket.as_ref()), if audio_socket.is_some() => match dg {
                 Ok(dg) => Input::Audio(dg),
                 Err(_) => {
+                    meter.set(AudioState::Stopped, Some("the audio socket closed"));
                     audio = None;
                     audio_socket = None;
                     continue;
@@ -188,10 +256,8 @@ async fn receive_loop(
         };
         let dg = match input {
             Input::Audio(dg) => {
-                if audio
-                    .as_mut()
-                    .is_some_and(|playback| playback.push(&dg.data).is_err())
-                {
+                if let Some(Err(why)) = audio.as_mut().map(|playback| playback.push(&dg.data)) {
+                    meter.set(AudioState::Stopped, Some(why));
                     audio = None;
                     audio_socket = None;
                 }

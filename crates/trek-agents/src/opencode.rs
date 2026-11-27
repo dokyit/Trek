@@ -108,24 +108,36 @@ fn set_in(section: &Value) -> BTreeSet<&'static str> {
 }
 
 impl UserRules {
-    fn add_config(&mut self, c: &Value) {
-        self.global.extend(set_in(c));
+    /// `c`'s rules, when it's the user's own (`theirs`). A project's config (`opencode.json` in a
+    /// repository, its `.opencode/` agents) came with the code: its agents are named, but what it
+    /// allows doesn't stand in for Trek's asking, or a cloned repository with a single
+    /// `"bash": {"git push*": "deny"}` would have every other command run unasked.
+    fn add_config_from(&mut self, c: &Value, theirs: bool) {
+        if theirs {
+            self.global.extend(set_in(c));
+        }
         for (name, agent) in ["agent", "agents", "mode"]
             .iter()
             .filter_map(|k| c[*k].as_object())
             .flatten()
         {
-            self.agents
-                .entry(name.clone())
-                .or_default()
-                .extend(set_in(agent));
+            let rules = self.agents.entry(name.clone()).or_default();
+            if theirs {
+                rules.extend(set_in(agent));
+            }
             self.custom.insert(name.clone());
         }
     }
 
-    /// A Markdown agent, named by its path unless its front matter says otherwise. Any
-    /// permission or tools in its front matter count as the user's.
+    #[cfg(test)]
     fn add_agent_file(&mut self, name: &str, text: &str) {
+        self.add_agent_file_from(name, text, true);
+    }
+
+    /// A Markdown agent, named by its path unless its front matter says otherwise. Any
+    /// permission or tools in its front matter count as the user's when it's theirs (not from a
+    /// project's folder: see `add_config_from`).
+    fn add_agent_file_from(&mut self, name: &str, text: &str, theirs: bool) {
         let mut lines = text.lines();
         let front: Vec<&str> = match lines.next().map(str::trim) {
             Some("---") => lines.take_while(|l| l.trim() != "---").collect(),
@@ -137,11 +149,13 @@ impl UserRules {
             .map(|n| n.trim().trim_matches(['"', '\'']).to_string())
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| name.to_string());
-        if front.iter().any(|l| {
-            ["permission:", "permissions:", "tools:"]
-                .iter()
-                .any(|k| l.starts_with(k))
-        }) {
+        if theirs
+            && front.iter().any(|l| {
+                ["permission:", "permissions:", "tools:"]
+                    .iter()
+                    .any(|k| l.starts_with(k))
+            })
+        {
             self.agents.entry(name.clone()).or_default().extend(GATED);
         }
         self.custom.insert(name);
@@ -149,9 +163,14 @@ impl UserRules {
 
     /// A config file OpenCode would read; one Trek can't parse counts as setting everything.
     fn add_config_text(&mut self, text: &str) {
+        self.add_config_text_from(text, true);
+    }
+
+    /// `add_config_text`, from a project's file when not `theirs` (see `add_config_from`).
+    fn add_config_text_from(&mut self, text: &str, theirs: bool) {
         match parse_jsonc(text) {
-            Some(c) => self.add_config(&c),
-            None if text.contains("permission") || text.contains("tools") => {
+            Some(c) => self.add_config_from(&c, theirs),
+            None if theirs && (text.contains("permission") || text.contains("tools")) => {
                 self.global.extend(GATED)
             }
             None => {}
@@ -303,6 +322,31 @@ fn config_sources(
     (files, dirs)
 }
 
+/// The config `config_sources` finds in the project around `cwd` (its root down to `cwd`): the
+/// files and `.opencode` folders that came with the code. The home folder's are the user's.
+fn project_sources(cwd: &Path) -> Vec<PathBuf> {
+    let home = trek_core::paths::home();
+    let mut out = vec![];
+    for dir in cwd.ancestors() {
+        if dir != home {
+            out.extend(
+                ["opencode.json", "opencode.jsonc", ".opencode"]
+                    .iter()
+                    .map(|f| dir.join(f)),
+            );
+            out.extend(
+                ["opencode.json", "opencode.jsonc"]
+                    .iter()
+                    .map(|f| dir.join(".opencode").join(f)),
+            );
+        }
+        if dir.join(".git").exists() {
+            break;
+        }
+    }
+    out
+}
+
 /// The folder an administrator's config goes in: `%ProgramData%\opencode` on Windows,
 /// `/Library/Application Support/opencode` on macOS. The global config and the data folder are
 /// `~/.config/opencode` and `~/.local/share/opencode` on Windows too: OpenCode finds them from the
@@ -351,14 +395,16 @@ fn agent_files(dir: &Path) -> Vec<(String, String)> {
 fn user_rules(cwd: &Path, env: &dyn Fn(&str) -> Option<String>) -> UserRules {
     let mut rules = UserRules::default();
     let (files, dirs) = config_sources(cwd, env);
+    let project = project_sources(cwd);
     for f in files {
         if let Ok(text) = std::fs::read_to_string(&f) {
-            rules.add_config_text(&text);
+            rules.add_config_text_from(&text, !project.contains(&f));
         }
     }
     for dir in dirs {
+        let theirs = !project.contains(&dir);
         for (name, text) in agent_files(&dir) {
-            rules.add_agent_file(&name, &text);
+            rules.add_agent_file_from(&name, &text, theirs);
         }
     }
     if let Some(text) = env("OPENCODE_PERMISSION") {
@@ -1069,8 +1115,23 @@ mod tests {
         .unwrap();
         let none = |_: &str| None;
         let r = user_rules(&sub, &none);
-        assert!(r.global.contains("bash"));
-        assert_eq!(r.agents.get("general"), Some(&BTreeSet::from(GATED)));
+        // Read, but a project's config came with its code: what it allows or denies doesn't
+        // stand in for Trek's asking.
+        assert!(!r.global.contains("bash"));
+        assert!(r.agents.get("general").is_none_or(|a| a.is_empty()));
+        assert!(r.custom.contains("general"));
+        let asks = ask_rules(&r).unwrap();
+        assert_eq!(asks["agent"]["build"]["permission"]["bash"], "ask");
+        assert_eq!(asks["agent"]["general"]["permission"]["edit"], "ask");
+        // One deny pattern in a cloned repository used to switch asking off for every other
+        // command.
+        std::fs::write(
+            root.join("opencode.jsonc"),
+            r#"{"permission":{"bash":{"git push*":"deny"}}}"#,
+        )
+        .unwrap();
+        let asks = ask_rules(&user_rules(&sub, &none)).unwrap();
+        assert_eq!(asks["agent"]["build"]["permission"]["bash"], "ask");
         let (files, _) = config_sources(&sub, &none);
         assert!(files.contains(&root.join("app/opencode.json")));
         assert!(

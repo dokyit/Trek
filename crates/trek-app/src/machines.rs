@@ -13,9 +13,12 @@
 //! Nothing of theirs is ever written to the local store; the machine owns the thread.
 
 pub mod clone;
+pub mod earlier;
 pub mod files;
+pub mod prefs;
 pub mod sheets;
 pub mod sub_agents;
+pub mod turns;
 
 use crate::workspace::{PendingPermission, Route, Scope, Workspace, WorkspaceEvent};
 use gpui_kit::{Context, Task};
@@ -339,13 +342,51 @@ fn waits(r: &tr::ThreadSummary) -> bool {
             .unwrap_or_else(|| !r.sub_agents.is_empty())
 }
 
+/// What a machine's row moving from `was` to `now` calls the user for, as a thread of this
+/// computer does when its turn ends or a card goes up: it waits on them now (and didn't, or for
+/// something else), its turn failed, or it finished and hasn't been looked at. `None` for a row
+/// first heard of (a snapshot's worth of old news isn't news) and for one that's just changed.
+pub fn row_alert(
+    was: Option<&tr::ThreadSummary>,
+    now: &tr::ThreadSummary,
+) -> Option<crate::workspace::attention::Why> {
+    use crate::workspace::attention::Why;
+    let was = was?;
+    let asks = |r: &tr::ThreadSummary| {
+        r.needs
+            .as_ref()
+            .filter(|n| {
+                matches!(
+                    n.kind,
+                    tr::NeedsKind::Approval | tr::NeedsKind::Question | tr::NeedsKind::Plan
+                )
+            })
+            .map(|n| n.text.clone())
+    };
+    if let Some(text) = asks(now) {
+        return (asks(was).as_deref() != Some(text.as_str())).then_some(Why::Waiting(Some(text)));
+    }
+    if was.run_state != tr::RunState::Working {
+        return None;
+    }
+    match now.run_state {
+        tr::RunState::Failed => Some(Why::Failed(None)),
+        tr::RunState::Idle if now.unseen && now.needs.is_none() && !waits(now) => {
+            Some(Why::Finished)
+        }
+        _ => None,
+    }
+}
+
 /// A transcript open here: B's items as last sent, in order.
 #[derive(Default)]
 struct Followed {
     items: Vec<tr::Item>,
     loaded: bool,
-    /// Earlier items stayed on the machine.
+    /// Earlier items stayed on the machine: read a page at a time once it's open (`earlier`).
     more: bool,
+    /// The page before what's here, on its way.
+    paging: Option<Task<()>>,
     /// The thread being opened on its machine's connection (`follow_machine_thread`). It goes
     /// with this: what a connection since replaced (the machine paired again) or closed (the
     /// machine forgotten) answers isn't said of a thread open on another, or on none.
@@ -368,6 +409,9 @@ pub struct Machine {
     /// Its projects and agents, as its last snapshot listed them.
     pub projects: Vec<tr::ProjectSummary>,
     pub agents: Vec<tr::AgentOption>,
+    /// It lets threads run with Full access (unlocked in its own Permissions settings). Only it
+    /// can change that: the lock is there so nothing reaching it over a network can lift it.
+    pub full_access: bool,
     /// Its thread rows, as it sent them.
     rows: Vec<tr::ThreadSummary>,
     /// The rows as Trek's threads, under local ids (`local_id`).
@@ -538,7 +582,15 @@ impl Machines {
 
     /// What machine thread `id`'s row says it waits for, while the machine can be reached.
     pub fn needs_text(&self, id: &str) -> Option<&str> {
-        let text = self.reachable_row(id)?.needs.as_ref()?.text.as_str();
+        let row = self.reachable_row(id)?;
+        // A secret that can be given from here reads as one asked for here does (its name), not
+        // as the machine's "Enter it on <the machine>".
+        if let Some(ask) = &row.secret
+            && self.serves(id, tr::feature::SECRET_ANSWER)
+        {
+            return Some(ask.name.as_str());
+        }
+        let text = row.needs.as_ref()?.text.as_str();
         (!text.is_empty()).then_some(text)
     }
 
@@ -1034,6 +1086,78 @@ pub fn background_of(
         .collect()
 }
 
+/// Whether a transcript sent again (`new`) is another conversation than the one held (`old`)
+/// under the same item ids. A machine's ids are positions (`i200`), so after a rewind there
+/// `i200` may be another message: an id both hold that names another kind of item or other
+/// words of the user's, or an item held that lies past where the new one ends. A transcript
+/// sent again as it was (a reconnect), or longer, or starting later (its earlier part is read
+/// in pages), is the same one.
+pub(crate) fn rewritten(old: &[tr::Item], new: &[tr::Item]) -> bool {
+    let place = |id: &str| id.strip_prefix('i').and_then(|n| n.parse::<u64>().ok());
+    let now: HashMap<&str, &tr::Item> = new.iter().map(|i| (i.id.as_str(), i)).collect();
+    let Some(end) = new.iter().filter_map(|i| place(&i.id)).max() else {
+        // Nothing left of it: whatever was held is gone.
+        return old.iter().any(|i| place(&i.id).is_some());
+    };
+    old.iter().any(|was| match now.get(was.id.as_str()) {
+        Some(is) => match (&was.body, &is.body) {
+            (tr::ItemBody::User { text: a, .. }, tr::ItemBody::User { text: b, .. }) => a != b,
+            (a, b) => std::mem::discriminant(a) != std::mem::discriminant(b),
+        },
+        None => place(&was.id).is_some_and(|n| n > end),
+    })
+}
+
+/// The words a machine's notice about a secret's request starts and goes on with (`remote.rs`
+/// `secret_elsewhere`: "Needs GITHUB_TOKEN. Enter it on this PC.").
+fn secret_notice(text: &str) -> bool {
+    text.starts_with("Needs ") && text.contains(". Enter it on ")
+}
+
+/// A machine's thread waits for a secret (`row.secret`): its card goes with the cards waiting
+/// here, in place of the machine's notice that says to enter it there. A machine that can't take
+/// one from here (`serves` false: a Trek before `secret_answer`) keeps its notice, which then
+/// says which Trek it needs.
+fn secret_card(mapped: &mut Mapped, row: Option<&tr::ThreadSummary>, serves: bool, name: &str) {
+    // A request that's closed ("Asked for GITHUB_TOKEN on this PC.", the machine's words for
+    // devices that couldn't answer it): the notice that follows says what became of it.
+    if serves {
+        mapped.rows.retain(|(id, item)| {
+            !(id.starts_with('r')
+                && matches!(item, Item::Notice { text } if text.starts_with("Asked for ")))
+        });
+    }
+    let ask = row.and_then(|r| r.secret.as_ref()).filter(|_| serves);
+    let Some(ask) = ask else {
+        if !serves {
+            for (_, item) in &mut mapped.rows {
+                if let Item::Notice { text } = item
+                    && secret_notice(text)
+                {
+                    text.push_str(&format!(
+                        " {name} needs Trek {} or later to take it from here.",
+                        tr::FROM_HERE_SINCE
+                    ));
+                }
+            }
+        }
+        return;
+    };
+    let notice = format!("r{}", ask.request_id);
+    mapped.rows.retain(|(id, _)| *id != notice);
+    mapped.requests.push(PendingPermission {
+        request_id: ask.request_id.clone(),
+        title: format!("Secret: {}", ask.name),
+        detail: String::new(),
+        prompt: Some(trek_agents::Prompt::Secret {
+            name: ask.name.clone(),
+            why: ask.why.clone(),
+        }),
+        after_turn: false,
+        call: None,
+    });
+}
+
 /// Put `item` in `items`: in its place when its id is there, else at the end.
 fn upsert(items: &mut Vec<tr::Item>, item: tr::Item) {
     match items.iter_mut().find(|i| i.id == item.id) {
@@ -1349,6 +1473,7 @@ impl Workspace {
             info: None,
             projects: vec![],
             agents: vec![],
+            full_access: false,
             rows: vec![],
             threads: vec![],
             followed: HashMap::new(),
@@ -1481,6 +1606,13 @@ impl Workspace {
             return;
         };
         let mut touched: Vec<String> = vec![];
+        // What to tell the user of: (thread, the alert's words).
+        let mut alerts: Vec<(String, String)> = vec![];
+        let listed = matches!(msg, tr::ServerMessage::Thread { .. });
+        // Transcripts sent again whose items aren't the ones their ids named (`rewritten`).
+        let mut replaced: Vec<String> = vec![];
+        // Transcripts that came without their start: it's read next.
+        let mut earlier: Vec<String> = vec![];
         match msg {
             tr::ServerMessage::Snapshot(s) => {
                 // Its sub-agents' threads come unlisted (they show under their parent only,
@@ -1494,10 +1626,18 @@ impl Workspace {
                 }
                 m.projects = s.projects;
                 m.agents = s.agents;
+                m.full_access = s.full_access;
                 touched.extend(m.followed.keys().cloned());
             }
             tr::ServerMessage::Thread { thread } | tr::ServerMessage::Unlisted { thread } => {
                 touched.push(thread.id.clone());
+                let was = m.rows.iter().find(|r| r.id == thread.id);
+                // A thread of its own list that now waits on the user, finished or failed calls
+                // for them here as one of this computer's does (a sub-agent's row doesn't: its
+                // parent's says so).
+                if listed && let Some(why) = row_alert(was, &thread) {
+                    alerts.push((thread.id.clone(), why.alert(&thread.title)));
+                }
                 match m.rows.iter_mut().find(|r| r.id == thread.id) {
                     Some(row) => *row = thread,
                     None => m.rows.push(thread),
@@ -1516,14 +1656,25 @@ impl Workspace {
             } => {
                 let f = m.followed.entry(thread_id.clone()).or_default();
                 if reset {
+                    // Its item ids are positions: if what they name changed (a rewind there,
+                    // then other messages), nothing kept here by id stands any more.
+                    if rewritten(&f.items, &items) {
+                        replaced.push(thread_id.clone());
+                    }
                     f.items = items;
                     f.more = more;
+                    // A page asked for before this transcript came is of the one it replaced:
+                    // let go of, and asked for again from where this one starts.
+                    f.paging = None;
                 } else {
                     for item in items {
                         upsert(&mut f.items, item);
                     }
                 }
                 f.loaded = true;
+                if f.more {
+                    earlier.push(thread_id.clone());
+                }
                 touched.push(thread_id);
             }
             tr::ServerMessage::Item { thread_id, item } => {
@@ -1534,7 +1685,18 @@ impl Workspace {
             }
             tr::ServerMessage::TranscriptReset { thread_id } => {
                 if m.followed.remove(&thread_id).is_some() {
-                    self.follow_machine_thread(&local_id(host, &thread_id), cx);
+                    let local = local_id(host, &thread_id);
+                    // Rewound or rewritten there: what's open or asked here by item id (a long
+                    // message shown whole, a confirmation) is of items that may be others now.
+                    if let Some(live) = self.live.get_mut(&local) {
+                        live.replaced += 1;
+                        live.revision += 1;
+                    }
+                    cx.emit(WorkspaceEvent::Transcript {
+                        id: local.clone(),
+                        appended: false,
+                    });
+                    self.follow_machine_thread(&local, cx);
                 }
                 return;
             }
@@ -1556,8 +1718,23 @@ impl Workspace {
         }
         m.refresh_threads();
         self.threads_gen += 1;
+        for tid in replaced {
+            if let Some(live) = self.live.get_mut(&local_id(host, &tid)) {
+                live.replaced += 1;
+            }
+        }
         for tid in touched {
             self.machine_live(host, &tid, cx);
+        }
+        for tid in earlier {
+            self.machine_read_earlier(host, &tid, cx);
+        }
+        for (tid, message) in alerts {
+            cx.emit(WorkspaceEvent::Attention {
+                message,
+                thread: local_id(host, &tid),
+                button: None,
+            });
         }
         cx.notify();
     }
@@ -1582,6 +1759,14 @@ impl Workspace {
         if offline {
             settle_running_tools(&mut mapped.rows);
         }
+        // A secret its agent asked for: the card here takes it (the machine saves it), or says
+        // which Trek the machine needs before it can.
+        secret_card(
+            &mut mapped,
+            row.filter(|_| !offline),
+            m.entry.paired.serves(tr::feature::SECRET_ANSWER),
+            &m.entry.name,
+        );
         let loaded = f.loaded;
         // What its agent runs in the background, as the strip above its composer lists it there.
         let background: Vec<tr::BackgroundTask> = row
@@ -1747,11 +1932,10 @@ impl Workspace {
         let msg = msg(tid.to_string());
         cx.spawn(async move |this, cx| {
             if let Err(e) = client.request(msg).await {
-                let _ = this.update(cx, |_, cx| {
-                    cx.emit(WorkspaceEvent::Failure {
-                        message: format!("Couldn't {what} on {name}: {e}"),
-                    })
-                });
+                // In the machine's own words; one too old for the request is said to need a
+                // newer Trek, never to be gone to.
+                let message = turns::refused(&e, &name, what, None);
+                let _ = this.update(cx, |_, cx| cx.emit(WorkspaceEvent::Failure { message }));
             }
         })
         .detach();
@@ -1781,6 +1965,8 @@ impl Workspace {
             trek_core::settings::FollowUp::Steer => tr::SendMode::Steer,
             trek_core::settings::FollowUp::Queue => tr::SendMode::Queue,
         });
+        // As written here, for the composer to have back if the machine doesn't take it.
+        let back = (text.clone(), images.clone());
         // Files and pictures sent ahead (`files`): named by their copies there.
         let host = split_id(id).map_or_else(String::new, |(host, _)| host.to_string());
         let (text, files, inline) = self.machine_shaped(&host, &text, &images);
@@ -1794,21 +1980,47 @@ impl Workspace {
                 undo: None,
             });
         }
-        self.machine_request(
-            id,
-            "send the message",
-            move |thread_id| {
-                tr::ClientMessage::Send(tr::SendRequest {
-                    thread_id,
-                    text,
-                    mode,
-                    images,
-                    consult: None,
-                    files,
-                })
-            },
-            cx,
-        );
+        let Some((_, tid)) = split_id(id) else {
+            return;
+        };
+        let Some((client, name)) = self.machine_client(&host) else {
+            return;
+        };
+        let req = tr::ClientMessage::Send(tr::SendRequest {
+            thread_id: tid.to_string(),
+            text,
+            mode,
+            images,
+            consult: None,
+            files,
+        });
+        cx.spawn(async move |this, cx| {
+            let reply = client.request(req).await;
+            let _ = this.update(cx, |ws, cx| match reply {
+                // `/new` or `/clear`: the machine asks whoever sent it to open a new thread, as
+                // it asks a phone. It opens here, set to start on that machine (0.4.67 dropped
+                // the answer: the command did nothing).
+                Ok(tr::ServerMessage::Ack { open: Some(_), .. }) => {
+                    ws.navigate(Route::Draft { project: None }, cx);
+                    ws.set_draft_machine(None, Some(host), cx);
+                }
+                Ok(_) => {}
+                // Refused, or the link dropped: the composer let go of the message as it was
+                // sent, so its words and pictures go back there rather than be lost (an edited
+                // message most of all: its thread has already been rewound for it).
+                Err(e) => {
+                    cx.emit(WorkspaceEvent::Failure {
+                        message: turns::refused(&e, &name, "send the message", None),
+                    });
+                    let (text, images) = back;
+                    cx.emit(WorkspaceEvent::InsertIntoComposer(text));
+                    for image in images {
+                        cx.emit(WorkspaceEvent::AttachImage(image));
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     pub fn machine_interrupt(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -1874,8 +2086,8 @@ impl Workspace {
             Some(trek_agents::Prompt::Questions(_)) => {
                 tr::AnswerResponse::Questions { answers: vec![] }
             }
-            // A machine shows a secret's request as a note, never as a card to answer from here.
-            Some(trek_agents::Prompt::Secret { .. }) => return,
+            // Declined: the machine tells its agent to carry on without it.
+            Some(trek_agents::Prompt::Secret { .. }) => tr::AnswerResponse::Secret { value: None },
             None => tr::AnswerResponse::Approval {
                 decision: match decision {
                     trek_agents::Decision::Allow => tr::Decision::Allow,
@@ -2467,20 +2679,6 @@ impl Workspace {
         .detach();
     }
 
-    /// What can't be done to a thread on another machine yet (rewind, fork, retry, delete,
-    /// snooze): said in a toast. True when `id` is such a thread.
-    pub fn machine_refuses(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
-        let Some((host, _)) = split_id(id) else {
-            return false;
-        };
-        let name = self
-            .machines
-            .get(host)
-            .map_or_else(|| "the other machine".to_string(), |m| m.entry.name.clone());
-        cx.emit(WorkspaceEvent::Toast { message: format!("Do that in Trek on {name}. From here, its threads can be followed, sent to, stopped, answered, pinned, settled and archived."), undo: None });
-        true
-    }
-
     /// The machine's home folder, as it said (`machine_info`).
     pub fn machine_home(&self, host: &str) -> Option<String> {
         self.machines
@@ -2612,6 +2810,70 @@ mod tests {
             not_sent(&["a".into(), "b".into()], "Studio"),
             "2 pictures couldn't be sent to Studio."
         );
+    }
+
+    /// A machine's item ids are positions, so a transcript sent again is another conversation
+    /// under the same ids when an id names another kind of item or other words of the user's, or
+    /// when what was held runs past its end (a rewind). Sent again as it was, longer, or from a
+    /// later start (its earlier part comes in pages), it's the same one.
+    #[test]
+    fn a_transcript_sent_again_is_told_from_one_rewritten_under_the_same_ids() {
+        let user = |ix: usize, text: &str| tr::Item {
+            id: format!("i{ix}"),
+            seq: 0,
+            at: None,
+            body: tr::ItemBody::User {
+                text: text.into(),
+                images: 0,
+                aside: false,
+                videos: vec![],
+                image_paths: vec![],
+            },
+        };
+        let answer = |ix: usize, text: &str| tr::Item {
+            id: format!("i{ix}"),
+            seq: 0,
+            at: None,
+            body: tr::ItemBody::Assistant {
+                text: text.into(),
+                streaming: false,
+            },
+        };
+        let held = vec![
+            user(0, "first"),
+            answer(1, "one"),
+            user(2, "second"),
+            answer(3, "two"),
+        ];
+        assert!(!rewritten(&held, &held), "as it was (a reconnect)");
+        let mut longer = held.clone();
+        longer[3] = answer(3, "two, and more of it");
+        longer.push(user(4, "third"));
+        assert!(
+            !rewritten(&held, &longer),
+            "an answer that grew, a message more"
+        );
+        assert!(
+            !rewritten(&held, &longer[2..]),
+            "its last items alone: the rest comes in pages"
+        );
+        assert!(
+            rewritten(&held, &held[..2]),
+            "rewound: what was held runs past its end"
+        );
+        let edited = vec![
+            user(0, "first"),
+            answer(1, "one"),
+            user(2, "second, edited"),
+        ];
+        assert!(rewritten(&held, &edited), "other words under the same id");
+        let other = vec![user(0, "first"), user(1, "another message")];
+        assert!(
+            rewritten(&held, &other),
+            "another kind of item under the same id"
+        );
+        assert!(rewritten(&held, &[]), "nothing left of it");
+        assert!(!rewritten(&[], &held), "nothing was held");
     }
 
     #[test]

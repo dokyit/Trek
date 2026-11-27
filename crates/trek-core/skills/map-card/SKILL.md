@@ -63,8 +63,8 @@ reads without it.
   eight places in places mode and forty in stays mode (at most eight picks), routes of at most 60
   points each.
 - The map is Leaflet from unpkg with OpenFreeMap's vector tiles drawn by MapLibre in the card's
-  own colours; where WebGL is missing it falls back to OpenStreetMap's tiles, tinted. All over
-  https. Keep the attribution.
+  own colours; where WebGL is missing it falls back to CARTO's raster basemap tiles, tinted.
+  All over https. Keep the attribution.
 - The card styles itself with Trek's `--trek-*` variables, so it fits Night and Paper; the map's
   own palette starts as Night in a dark theme and Vivid in a light one.
 - Its corners, flat resting card and opaque floating fills come from Trek's shape variables
@@ -273,7 +273,7 @@ const WORDS = [["wifi", /wi-?fi|internet/i], ["plug", /outlet|plug|socket|power/
 const tagIcon = (t) => ICON[(typeof t === "object" && t.icon) || ((WORDS.find(([, re]) => re.test(t.label || t)) || ["pin"])[0])] || ICON.pin;
 
 // The map: Leaflet, with OpenFreeMap's vector tiles drawn by MapLibre in the palette's colours,
-// or OpenStreetMap's raster tiles under a CSS filter where WebGL isn't there.
+// or CARTO's raster basemap tiles under a CSS filter where WebGL isn't there.
 const map = L.map("map", { zoomControl: false, attributionControl: false, scrollWheelZoom: false, dragging: !L.Browser.mobile, tap: true, zoomSnap: 0.25, fadeAnimation: false });
 map.setView([DATA.origin.lat, DATA.origin.lng], 15);
 const credit = L.control.attribution({ position: stays ? "topright" : "topleft", prefix: false }).addTo(map);
@@ -302,7 +302,7 @@ const ATTR = stays ? "OpenFreeMap © OpenMapTiles © OpenStreetMap" : "© OpenFr
 if (gl) {
   vector = L.maplibreGL({ style: style(PALETTES[0].map), interactive: false, attributionControl: { customAttribution: ATTR } }).addTo(map);
 } else {
-  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap contributors" }).addTo(map);
+  L.tileLayer("https://basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap contributors © CARTO" }).addTo(map);
 }
 if (stays) {
   const ctl = document.createElement("div");

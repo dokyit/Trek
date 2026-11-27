@@ -1682,6 +1682,8 @@ impl Render for AiTranscript {
         let muted = theme.muted_foreground;
         let ember = palette::ember(cx);
         let ui = px(text::BODY);
+        // A line of a message of the user's, as the window draws it.
+        let user_line = window.pixel_snap(ui * 1.45);
         let mut rows: Vec<AnyElement> = vec![];
         if earlier > 0 {
             rows.push(
@@ -1826,7 +1828,9 @@ impl Render for AiTranscript {
                                 .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme.foreground).child(if aside { "You (aside)" } else { "You" }))
                                 .children(at.map(|at| div().text_size(px(text::META)).text_color(muted.opacity(0.7)).child(crate::time::clock(at)))),
                         )
-                        .child(div().text_size(ui).line_height(relative(1.45)).text_color(theme.foreground).when(long && !open, |el| el.line_clamp(8)).child(text))
+                        // Cut by height, as the thread view cuts a long message (a line clamp left the
+                        // paragraphs past its lines on show, unwrapped).
+                        .child(div().text_size(ui).line_height(relative(1.45)).text_color(theme.foreground).when(long && !open, |el| el.max_h(user_line * 8.).overflow_hidden()).child(text))
                         .when(long, |el| {
                             el.child(
                                 div()

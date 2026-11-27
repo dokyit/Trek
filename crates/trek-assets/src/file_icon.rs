@@ -107,6 +107,10 @@ pub fn tint_in(color: Hsla, dark: bool) -> Tint {
     }
 }
 
+/// A chip's corner radius on the Mac, as a share of its text size. Windows' chips have 4 px
+/// corners, apart from the ones in a thread's tool rows, which are drawn the Mac's way everywhere.
+pub const CHIP_CORNER: f32 = 0.42;
+
 /// A file's name in a chip of its type's colour, with its badge: what tool rows, live rows and
 /// path chips show for a file. `label` is what's written (a name, or a path); `path` picks the
 /// type.
@@ -129,7 +133,11 @@ pub fn chip(
         .h(size * 1.62)
         .px(size * 0.42)
         .gap(size * 0.34)
-        .rounded(if cfg!(windows) { px(4.) } else { size * 0.42 })
+        .rounded(if cfg!(windows) {
+            px(4.)
+        } else {
+            size * CHIP_CORNER
+        })
         .border_1()
         .border_color(t.edge)
         .bg(t.fill)

@@ -1147,7 +1147,11 @@ async fn editor_snap(
 /// a click in it does; on a Mac, `lose-keys` leaves them with the window itself, as AppKit does
 /// when a view that had them goes, and `press-trek` presses GPUI's own view where the composer is,
 /// as AppKit delivers a click, and `type-native` hands the window a key (`a`) as AppKit does,
-/// without bringing Trek to the front.
+/// without bringing Trek to the front. `click-page <x> <y>` (a Mac) clicks at that point of the
+/// first live card's page (CSS px from its top left) as AppKit delivers a click, so it's the
+/// user's own to the page and to Trek alike. `artifacts.json` also has `opened` (the links that
+/// would have opened in the browser: a capture run opens none) and `asking` (the hosts cards ask
+/// about).
 async fn artifacts(
     ws: &Entity<Workspace>,
     dir: &Path,
@@ -1177,9 +1181,22 @@ async fn artifacts(
                 .timer(Duration::from_millis(300))
                 .await;
         }
+        click if click.starts_with("click-page") => {
+            let mut at = click.split_whitespace().skip(1).map(|n| n.parse::<f64>());
+            let (Some(Ok(x)), Some(Ok(y))) = (at.next(), at.next()) else {
+                anyhow::bail!("artifacts click-page <x> <y>: the point in the page, in CSS px")
+            };
+            main.update(cx, |_, window, cx| {
+                crate::artifact::click_page(window, x, y, cx)
+            })??;
+            // The page hears it, asks for its link, and Trek decides.
+            cx.background_executor()
+                .timer(Duration::from_millis(700))
+                .await;
+        }
         other => {
             anyhow::bail!(
-                "artifacts: {other:?}? (artifacts [take-keys|lose-keys|press-trek|type-native])"
+                "artifacts: {other:?}? (artifacts [take-keys|lose-keys|press-trek|type-native|click-page <x> <y>])"
             )
         }
     }
@@ -1208,7 +1225,8 @@ async fn artifacts(
             .flatten()
             .and_then(|r| r.read(cx).view().clone().downcast::<crate::root::TrekWindow>().ok())
             .map(|t| t.read(cx).composer.read(cx).text(cx));
-        serde_json::json!({ "window": rect(window.bounds()), "scale": window.scale_factor(), "artifacts": cards, "views_made": crate::artifact::views_made(cx), "keys": crate::artifact::keys_holder(window), "composer": composer })
+        let (opened, asking) = crate::artifact::outbound(cx);
+        serde_json::json!({ "window": rect(window.bounds()), "scale": window.scale_factor(), "artifacts": cards, "views_made": crate::artifact::views_made(cx), "keys": crate::artifact::keys_holder(window), "composer": composer, "opened": opened, "asking": asking })
     })?;
     std::fs::write(
         dir.join("artifacts.json"),
@@ -2483,6 +2501,39 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
             ws.set_draft_machine(project.as_deref(), host, cx);
             Ok(())
         })?;
+        cx.refresh_windows();
+        return Ok(());
+    }
+    // A real iPhone pairs with this isolated Trek: the phone server on the local network at the
+    // port given (never the owner's 7420), a pairing code offered, and what to type on the phone
+    // written to `pair-device.txt` in the shot folder (address, code, short fingerprint, and the
+    // link). The phone lists it as "Trek test (isolated)", one more machine beside the owner's;
+    // its threads are this run's mock ones. `pair-device <port>`.
+    if verb == "pair-device" {
+        let port: u16 = arg
+            .parse()
+            .map_err(|_| anyhow::anyhow!("pair-device: a port, e.g. 7437"))?;
+        let offer = ws.update(cx, |ws, cx| -> anyhow::Result<trek_remote::PairingOffer> {
+            ws.start_device_remote(port, cx)?;
+            ws.offer_pairing(cx);
+            ws.remote
+                .as_ref()
+                .and_then(|r| r.offer.clone())
+                .ok_or_else(|| anyhow::anyhow!("pair-device: no pairing code"))
+        })?;
+        let link = crate::machines::PairLink::parse(&offer.url).map_err(anyhow::Error::msg)?;
+        if let Some(dir) = std::env::var_os("TREK_SHOT_DIR") {
+            std::fs::write(
+                Path::new(&dir).join("pair-device.txt"),
+                format!(
+                    "address {}\ncode {}\nfingerprint {}\nlink {}\n",
+                    link.routes.first().cloned().unwrap_or_default(),
+                    offer.code,
+                    offer.fingerprint.clone().unwrap_or_default(),
+                    offer.url,
+                ),
+            )?;
+        }
         cx.refresh_windows();
         return Ok(());
     }
@@ -4265,7 +4316,11 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                 );
                 crate::plugins::open_panel(plugin, panel.trim(), &ws, cx);
             }
-            "on" => crate::plugins::set_on(rest, true, &ws, cx),
+            // As the user allowing what it asks, read out.
+            "on" => match crate::plugins::Shown::now(rest, cx) {
+                Some(shown) => crate::plugins::allow_shown(rest, &shown, &ws, cx),
+                None => crate::plugins::set_on(rest, true, &ws, cx),
+            },
             "off" => crate::plugins::set_on(rest, false, &ws, cx),
             "reread" => crate::plugins::reread(&ws, cx),
             "running" => anyhow::ensure!(
@@ -5234,6 +5289,12 @@ fn secret_demo(ws: &Entity<Workspace>, cx: &mut App) -> anyhow::Result<()> {
         let Route::Thread(id) = ws.route.clone() else {
             anyhow::bail!("secret-demo: no thread on screen");
         };
+        // A thread on the machine `pair-self` made: that machine is this app, so its agent asks
+        // in the thread's own copy here, and the card on screen is the other computer's.
+        let id = match crate::machines::split_id(&id) {
+            Some((_, theirs)) => theirs.to_string(),
+            None => id,
+        };
         let (reply, _nobody) = async_channel::bounded(1);
         ws.ask_for_secret(
             &id,
@@ -5450,7 +5511,17 @@ fn pointer(window: &mut Window, verb: &str, id: &str, cx: &mut App) -> anyhow::R
     );
     POINTER_SCRIPTED.store(true, Ordering::Relaxed);
     window.render_frame(cx);
-    let id = element_id(id);
+    // `tool-group#*`: the first element on screen whose id starts so, for a row whose index
+    // depends on what came before it in the thread.
+    let id = match id.strip_suffix('*') {
+        Some(prefix) => gpui_kit::base::test_support::snapshots(window)
+            .into_iter()
+            .filter(|s| s.visible())
+            .filter_map(|s| s.path().last().cloned())
+            .find(|last| id_text(last).starts_with(prefix))
+            .ok_or_else(|| anyhow::anyhow!("{verb}: nothing on screen starts with {prefix}"))?,
+        None => element_id(id),
+    };
     let found: Vec<_> = gpui_kit::base::test_support::snapshots(window)
         .into_iter()
         .filter(|s| s.path().last() == Some(&id))

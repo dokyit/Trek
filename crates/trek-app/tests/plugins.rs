@@ -17,6 +17,14 @@ use trek_core::plugins::{Slot, Surface};
 /// Line weight, shadows and the theme are the process's: these tests take turns.
 static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// The user allowing plugin `id` in Settings: what it asks for, as the card reads it out.
+fn allow(id: &str, ws: &gpui_kit::Entity<trek_app::workspace::Workspace>, cx: &mut gpui_kit::App) {
+    match trek_app::plugins::Shown::now(id, cx) {
+        Some(shown) => trek_app::plugins::allow_shown(id, &shown, ws, cx),
+        None => trek_app::plugins::set_on(id, true, ws, cx),
+    }
+}
+
 fn start(cx: &mut TestAppContext) -> common::Trek {
     let trek = open(cx);
     cx.update(|cx| {
@@ -121,7 +129,7 @@ fn a_plugin_that_asks_waits_and_a_replacement_gives_way_when_its_plugin_stops() 
             assert!(trek_app::plugins::slot(Slot::Status, cx).is_empty());
         });
         // The user turns it on in Settings (allowing what it asks): its pill has its place.
-        cx.update(|cx| trek_app::plugins::set_on("now-playing", true, &trek.ws, cx));
+        cx.update(|cx| allow("now-playing", &trek.ws, cx));
         cx.update(|cx| {
             assert!(trek_app::plugins::running("now-playing", cx));
             assert_eq!(trek_app::plugins::slot(Slot::Status, cx).len(), 1);
@@ -207,7 +215,7 @@ fn a_grant_written_into_the_file_is_ignored_and_an_edited_plugin_asks_again() {
 
         // The user allows it in Settings: it runs, and the seal Trek wrote is good at the next
         // read of the folder.
-        cx.update(|cx| trek_app::plugins::set_on("now-playing", true, &trek.ws, cx));
+        cx.update(|cx| allow("now-playing", &trek.ws, cx));
         assert!(running(cx));
         let kept = std::fs::read_to_string(dir.join(trek_core::plugins::STATE_FILE)).unwrap();
         assert!(kept.contains("seal = "), "{kept}");
@@ -288,7 +296,7 @@ fn a_page_s_view_lives_while_its_open_and_gives_the_keys_back_before_it_goes() {
         assert_eq!(why, "Trailhead is off.");
         assert!(trek.visible(cx, "plugin-page-settings"));
         // Stopped by Trek, it says why.
-        cx.update(|cx| trek_app::plugins::set_on("trailhead", true, &trek.ws, cx));
+        cx.update(|cx| allow("trailhead", &trek.ws, cx));
         trek.render(cx);
         assert!(has_view(cx));
         cx.update(|cx| {
@@ -338,7 +346,7 @@ fn the_switch_asks_before_it_allows_what_a_plugin_asks_for() {
         assert!(!trek.window(cx, |window, cx| window.has_active_dialog(cx)));
 
         // Allowed once, its switch is at once too.
-        cx.update(|cx| trek_app::plugins::set_on("now-playing", true, &ws, cx));
+        cx.update(|cx| allow("now-playing", &ws, cx));
         trek.window(cx, |window, cx| {
             trek_app::plugins::switch("now-playing", false, &ws, window, cx)
         });
@@ -362,7 +370,7 @@ fn a_plugin_too_big_to_seal_says_so_and_waits() {
             std::fs::write(dir.join(format!("ui/{i}.json")), "{}").unwrap();
         }
         cx.update(|cx| trek_app::plugins::reread(&trek.ws, cx));
-        cx.update(|cx| trek_app::plugins::set_on("big", true, &trek.ws, cx));
+        cx.update(|cx| allow("big", &trek.ws, cx));
         cx.update(|cx| {
             assert!(!trek_app::plugins::running("big", cx));
             let p = cx.global::<trek_app::plugins::Plugins>();
@@ -391,7 +399,7 @@ fn an_allowed_plugin_s_logic_edited_since_doesn_t_run_before_it_asks_again() {
         let main = |v: u32| format!("trek.command(\"go\", () => trek.state.set({{ v: {v} }}));\n");
         std::fs::write(dir.join("main.js"), main(1)).unwrap();
         cx.update(|cx| trek_app::plugins::reread(&trek.ws, cx));
-        cx.update(|cx| trek_app::plugins::set_on("nosy", true, &trek.ws, cx));
+        cx.update(|cx| allow("nosy", &trek.ws, cx));
         let ws = trek.ws.clone();
         let go = |cx: &mut TestAppContext| {
             trek.window(cx, |window, cx| {
@@ -943,7 +951,7 @@ fn a_folder_an_agent_writes_is_picked_up_listed_announced_and_switches_live() {
             listed("pip", cx),
             "off is still listed, for turning on again"
         );
-        cx.update(|cx| trek_app::plugins::set_on("pip", true, &trek.ws, cx));
+        cx.update(|cx| allow("pip", &trek.ws, cx));
         assert_eq!(
             cx.update(|cx| trek_app::plugins::slot(Slot::SidebarFoot, cx).len()),
             1
@@ -1017,7 +1025,7 @@ fn a_plugin_that_asks_for_permissions_is_announced_and_waits_for_the_user() {
             "{told:?}"
         );
         // The user's Allow in Trek is what runs it.
-        cx.update(|cx| trek_app::plugins::set_on("pip", true, &trek.ws, cx));
+        cx.update(|cx| allow("pip", &trek.ws, cx));
         assert!(cx.update(|cx| trek_app::plugins::running("pip", cx)));
     });
 }
@@ -1088,7 +1096,7 @@ fn a_plugins_look_is_off_when_another_look_is_chosen_and_comes_back_when_it_is_t
             trek.visible(cx, "plugin-look-dusk"),
             "its look is shown as off"
         );
-        cx.update(|cx| trek_app::plugins::set_on("dusk", true, &trek.ws, cx));
+        cx.update(|cx| allow("dusk", &trek.ws, cx));
         assert!(running(cx));
         assert_eq!(shown(cx), "dusk");
         assert_eq!(chosen(cx), "dusk");
@@ -1100,7 +1108,7 @@ fn a_plugins_look_is_off_when_another_look_is_chosen_and_comes_back_when_it_is_t
         assert!(!running(cx));
 
         // Delete: the folder goes, and Trek's own stays.
-        cx.update(|cx| trek_app::plugins::set_on("dusk", true, &trek.ws, cx));
+        cx.update(|cx| allow("dusk", &trek.ws, cx));
         assert_eq!(shown(cx), "dusk");
         cx.update(|cx| trek_app::plugins::remove("dusk", &trek.ws, cx))
             .unwrap();
@@ -1137,7 +1145,7 @@ fn a_plugins_look_keeps_its_settings_and_its_switch_when_the_frames_come_late() 
         assert!(listed("dusk", cx));
 
         // Turned on: its look comes up, and the settings keep it.
-        cx.update(|cx| trek_app::plugins::set_on("dusk", true, &trek.ws, cx));
+        cx.update(|cx| allow("dusk", &trek.ws, cx));
         late(cx);
         assert_eq!(shown(cx), "dusk");
         assert_eq!(chosen(cx), "dusk", "the settings name the look on screen");
@@ -1155,7 +1163,7 @@ fn a_plugins_look_keeps_its_settings_and_its_switch_when_the_frames_come_late() 
         assert_eq!(state_on_disk().choice("dusk").look.as_deref(), Some("dusk"));
 
         // Back on, then another look before its switch's middle: off again, nothing half on.
-        cx.update(|cx| trek_app::plugins::set_on("dusk", true, &trek.ws, cx));
+        cx.update(|cx| allow("dusk", &trek.ws, cx));
         assert!(running(cx));
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(50));

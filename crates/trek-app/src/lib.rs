@@ -76,7 +76,6 @@ pub mod tabs;
 pub mod terminal_dock;
 pub mod test_display;
 pub mod themes;
-pub mod thinking_timeline;
 pub mod thread_menu;
 pub mod thread_view;
 pub mod thread_window;
