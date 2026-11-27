@@ -503,9 +503,16 @@ impl DailyFile {
 /// and whatever has the shape of a key or token (`sk-…`, `ghp_…`, `API_KEY=…`, a login in a web
 /// address). Paths, emails and web addresses stay: the file is local, and they make it useful.
 fn scrub_log_line(text: &str) -> std::borrow::Cow<'_, str> {
+    scrub_log_line_with(text, &trek_core::session_secrets::try_known())
+}
+
+/// `scrub_log_line`, with `secrets` as the values given this run.
+fn scrub_log_line_with<'a>(
+    text: &'a str,
+    secrets: &[(String, String)],
+) -> std::borrow::Cow<'a, str> {
     use std::borrow::Cow;
-    let secrets = trek_core::session_secrets::try_known();
-    let mut out = trek_core::session_secrets::scrub(text, &secrets);
+    let mut out = trek_core::session_secrets::scrub(text, secrets);
     // Its patterns are compiled once; a line costs a few microseconds (`redact_secrets` takes
     // out private keys too).
     let shaped = trek_core::scrub::redact_secrets(&out);
@@ -955,18 +962,28 @@ pub mod tests {
 
     /// The shape pass runs on every line written: it has to stay far below what writing the
     /// line costs. Prints what a line took (`--nocapture`).
+    ///
+    /// Without the run's secrets: they're the whole process's, and under `cargo test` other tests
+    /// here add theirs (the contention test a thousand), which made this time a thousand
+    /// substring searches a line rather than the shape pass. And the fastest of many batches, so
+    /// a batch the system took the processor from (a shared runner, other tests' threads) isn't
+    /// what's measured.
     #[test]
     fn scrubbing_a_log_line_is_cheap() {
         let line = "2026-01-02T03:04:05Z INFO trek_app::workspace::orchestrate: session started thread=\"0b7e\" agent=claude-code model=opus cwd=/Users/me/code/app servers=5 elapsed=12ms\n";
-        let _ = scrub_log_line(line);
-        let n = 20_000;
-        let start = std::time::Instant::now();
-        for _ in 0..n {
-            std::hint::black_box(scrub_log_line(std::hint::black_box(line)));
+        let _ = scrub_log_line_with(line, &[]);
+        let per_batch: u32 = 200;
+        let mut fastest = std::time::Duration::MAX;
+        for _ in 0..50 {
+            let start = std::time::Instant::now();
+            for _ in 0..per_batch {
+                std::hint::black_box(scrub_log_line_with(std::hint::black_box(line), &[]));
+            }
+            fastest = fastest.min(start.elapsed());
         }
-        let each = start.elapsed() / n;
+        let each = fastest / per_batch;
         println!("scrub_log_line: {each:?} a line");
-        // Generous (a debug build on a busy machine): a regression to milliseconds is the worry.
+        // Generous (a debug build): a regression to milliseconds is the worry.
         assert!(each < std::time::Duration::from_micros(500), "{each:?}");
     }
 }
