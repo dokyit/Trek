@@ -904,6 +904,13 @@ pub struct Browser {
     /// an app like Trek) instead of answering them with Trek's own authenticator, which keeps
     /// passkeys on this computer. Off (the authenticator answers) unless the user turns it off.
     pub passkeys_off: bool,
+    /// Turn off Trek's own ad blocker (macOS: uBlock Origin's default lists through Brave's
+    /// engine, with its scriptlets and element hiding). Off (blocking) unless the user turns it
+    /// off; sites in `ad_allow` are let through either way.
+    pub blocker_off: bool,
+    /// The user's own filters (the element picker's `site##selector` lines, and any they add),
+    /// read by Trek's ad blocker with uBlock Origin's lists.
+    pub my_filters: Vec<String>,
 }
 
 /// The built-in terminal panel.

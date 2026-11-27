@@ -1107,6 +1107,11 @@ impl ExtensionsPage {
 
     /// What the page offers about ads, once it has listed what's installed.
     fn ad_offer(&self) -> Option<catalog::AdOffer> {
+        // Trek's own blocker is on (macOS): ads are blocked already.
+        #[cfg(target_os = "macos")]
+        if super::browser_adblock::page::ready() {
+            return self.loaded.then_some(catalog::AdOffer::Blocking);
+        }
         self.loaded
             .then(|| catalog::ad_offer(self.items.iter().map(|e| (e.id.as_str(), e.enabled))))
     }

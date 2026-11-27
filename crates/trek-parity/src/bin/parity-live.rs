@@ -471,7 +471,8 @@ fn send(
 }
 
 /// How long `steps` may take by their own waits: a `wait`'s milliseconds, or the cap of what it
-/// waits for (the app's own default where a step gives none: 30 s for `shown`, 60 s otherwise).
+/// waits for (the app's own default where a step gives none: 30 s for `shown` and `file`, 60 s
+/// otherwise).
 fn waits(steps: &[String]) -> Duration {
     let ms = |w: Option<&str>| w.and_then(|v| v.parse::<u64>().ok());
     steps
@@ -482,7 +483,7 @@ fn waits(steps: &[String]) -> Duration {
                 return 0;
             }
             match words.next() {
-                Some("shown") => ms(words.nth(1)).unwrap_or(30_000),
+                Some("shown" | "file") => ms(words.nth(1)).unwrap_or(30_000),
                 Some(what) => ms(Some(what)).or(ms(words.next())).unwrap_or(60_000),
                 None => 0,
             }
@@ -581,13 +582,15 @@ mod tests {
             "wait permission",
             "wait shown ide-problem#0 120000",
             "wait shown sim-devices",
+            "wait file tools/ffprobe 180000",
+            "wait file tools/yt-dlp",
             "count x 1",
         ]
         .map(String::from)
         .to_vec();
         assert_eq!(
             waits(&steps),
-            Duration::from_millis(1_500 + 30_000 + 60_000 + 120_000 + 30_000)
+            Duration::from_millis(1_500 + 30_000 + 60_000 + 120_000 + 30_000 + 180_000 + 30_000)
         );
     }
 }

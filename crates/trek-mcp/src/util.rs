@@ -1,7 +1,7 @@
 //! Process, file and image helpers shared by the tool families.
-// Windows' and Linux's computer use need only the numbers and the image size (and Linux's, where
+// Windows' and Linux's computer use need only the numbers and the image size (Linux's also where
 // a program is on PATH); the process and file helpers serve the macOS tools (`screencapture`,
-// `sips`, `open`, `simctl`).
+// `sips`, `open`, `simctl`) and, on every platform, the video watcher (running ffmpeg, finding it).
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use std::io::{Read, Write};
