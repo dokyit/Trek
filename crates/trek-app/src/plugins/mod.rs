@@ -411,6 +411,16 @@ fn apply_scan(
     } else {
         at_work(ws, cx)
     };
+    // Noted over the file as it is now, not the copy the scan read off this thread: an agent
+    // turns the plugin it just wrote on at once (`trek plugin enable`), which can land between
+    // that read and this write. Writing the older copy back turned the plugin off again, and
+    // the fingerprint taken after the write hid that anything had changed, so it stayed off.
+    if fresh
+        .iter()
+        .any(|pl| state.choice(&pl.manifest.id).added.is_none())
+    {
+        state = checked_state(&dir, &scan);
+    }
     let mut noted = false;
     for pl in &fresh {
         let added = core::Added {
