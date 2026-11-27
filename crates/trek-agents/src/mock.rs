@@ -3362,7 +3362,10 @@ impl Session {
     /// session's own `trek-video` server, as an agent would call it, and linked in the answer so
     /// it plays inline.
     async fn watch_video(&mut self) -> Step {
+        // Said in the log as well as the answer: a live check that counts what the clip makes
+        // (its card, a video's poster) otherwise fails with nothing in trek.log to say why.
         let Some(ffmpeg) = trek_core::detect::which("ffmpeg") else {
+            tracing::warn!("mock:video: ffmpeg isn't on the PATH, so there's no test clip");
             return self.say("`mock:video` makes its clip with ffmpeg, which isn't installed (`brew install ffmpeg`).").await;
         };
         let clip = trek_core::paths::data_dir()
@@ -3371,6 +3374,7 @@ impl Session {
         if !clip.is_file() {
             let made = make_clip(&ffmpeg, &clip).await;
             if let Err(e) = made {
+                tracing::warn!("mock:video: ffmpeg couldn't make the test clip: {e}");
                 return self.say(&format!("Couldn't make the test clip: {e}")).await;
             }
         }
