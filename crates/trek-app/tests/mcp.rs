@@ -24,10 +24,11 @@ fn a_pasted_config_adds_its_servers_checks_them_and_edits_keep_their_tokens() {
         trek.update(cx, |ws, cx| {
             ws.navigate(Route::Settings(SettingsPage::Tools), cx)
         });
-        // Tall enough for the servers without scrolling.
+        // Tall enough for the servers without scrolling (the page above them grew by the Mac's
+        // Passkeys section).
         cx.simulate_window_resize(
             trek.window,
-            gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(3800.)),
+            gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(4400.)),
         );
         trek.render(cx);
         // Nothing listens at this address: the remote server's check says so.
@@ -197,7 +198,7 @@ fn a_command_line_with_its_token_in_front_is_one_server() {
         // Tall enough for the servers without scrolling.
         cx.simulate_window_resize(
             trek.window,
-            gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(3800.)),
+            gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(4400.)),
         );
         trek.render(cx);
         trek.click(cx, "mcp-command");
@@ -250,7 +251,7 @@ fn a_token_an_earlier_copy_saved_is_named_as_locked_and_sent_once_allowed() {
         });
         cx.simulate_window_resize(
             trek.window,
-            gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(3800.)),
+            gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(4400.)),
         );
         trek.render(cx);
         trek.render(cx);

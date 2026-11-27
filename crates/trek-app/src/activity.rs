@@ -204,7 +204,7 @@ pub fn op(title: &str, detail: &str, cwd: Option<&Path>) -> Op {
     if let Some(label) = trek_ipc::browser::label(title).or_else(|| trek_ipc::phone::label(title)) {
         return Op {
             verb: label.to_string(),
-            text: first_line(detail),
+            text: said(detail),
             file: None,
         };
     }
@@ -238,7 +238,7 @@ pub fn op(title: &str, detail: &str, cwd: Option<&Path>) -> Op {
                 path(detail),
                 Some(path(detail)).filter(|p| !p.is_empty()),
             ),
-            _ => (tool_name(title), first_line(detail), None),
+            _ => (tool_name(title), said(detail), None),
         },
     };
     Op { verb, text, file }
@@ -250,6 +250,69 @@ fn tool_name(title: &str) -> String {
         Some(rest) => rest.replace("__", " "),
         None => title.to_string(),
     }
+}
+
+/// Whether `title` is one of Trek's own tools whose row says what it did in words (`op`'s
+/// labels): its text is then all there is to show, even when that's nothing (a phone's row
+/// must not fall back to the call's raw arguments).
+pub fn labelled(title: &str) -> bool {
+    orch::tool_label(title).is_some()
+        || orch::spawn_failed_label(title).is_some()
+        || trek_ipc::browser::label(title).is_some()
+        || trek_ipc::phone::label(title).is_some()
+}
+
+/// A tool call's arguments as someone would say them, when they came as a JSON object (an MCP
+/// tool's do): `{"name":"Trek"}` is `Trek`, `{"x":120,"y":308}` is `120, 308`, a swipe is
+/// `184, 620 → 184, 300`, `{}` is nothing, and anything else is `key value, key value`. A row
+/// read "Tapped on the iPhone {"ref":"e71"}" before. Anything that isn't a JSON object stays as
+/// it is (its first line).
+fn said(detail: &str) -> String {
+    use serde_json::Value;
+    let Ok(Value::Object(args)) = serde_json::from_str::<Value>(detail.trim()) else {
+        return first_line(detail);
+    };
+    let word = |v: &Value| match v {
+        Value::String(s) => first_line(s),
+        Value::Null => String::new(),
+        Value::Number(n) => n
+            .as_f64()
+            .filter(|f| f.fract() != 0.0)
+            .map_or_else(|| n.to_string(), |f| format!("{f:.1}")),
+        other => other.to_string(),
+    };
+    let point = |x: &str, y: &str| match (args.get(x), args.get(y)) {
+        (Some(x @ Value::Number(_)), Some(y @ Value::Number(_))) => {
+            Some(format!("{}, {}", word(x), word(y)))
+        }
+        _ => None,
+    };
+    let mut parts = Vec::new();
+    let mut placed: Vec<&str> = Vec::new();
+    if let (Some(from), Some(to)) = (point("x1", "y1"), point("x2", "y2")) {
+        parts.push(format!("{from} → {to}"));
+        placed.extend(["x1", "y1", "x2", "y2"]);
+    } else if let Some(at) = point("x", "y") {
+        parts.push(at);
+        placed.extend(["x", "y"]);
+    }
+    let rest: Vec<(&String, &Value)> = args
+        .iter()
+        .filter(|(key, value)| {
+            !placed.contains(&key.as_str()) && !value.is_null() && **value != Value::Bool(false)
+        })
+        .collect();
+    // One thing said: its value alone ("Trek"); several: each with its name.
+    let alone = rest.len() == 1 && parts.is_empty();
+    for (key, value) in rest {
+        parts.push(match value {
+            Value::Bool(true) => key.replace('_', " "),
+            value if alone => word(value),
+            value => format!("{} {}", key.replace('_', " "), word(value)),
+        });
+    }
+    parts.retain(|part| !part.is_empty());
+    parts.join(", ")
 }
 
 /// The first line, with "…" when there's more.
@@ -612,11 +675,72 @@ pub fn lines_label(added: u32, removed: u32) -> (Option<String>, Option<String>)
 #[cfg(test)]
 mod tests {
     use super::{
-        Place, ToolKind, Trail, command_phrase, headline, lines_label, op, phrase, placement,
-        summarize, tool_kind, trail,
+        Place, ToolKind, Trail, command_phrase, headline, labelled, lines_label, op, phrase,
+        placement, summarize, tool_kind, trail,
     };
     use std::path::Path;
     use trek_core::store::{Item, ToolStatus};
+    #[test]
+    fn a_tools_json_arguments_are_said_in_words() {
+        let phone = |tool: &str, args: &str| {
+            let op = op(&format!("mcp__trek-phone__{tool}"), args, None);
+            format!("{} {}", op.verb, op.text).trim_end().to_string()
+        };
+        assert_eq!(
+            phone("phone_tap", r#"{"ref":"e71"}"#),
+            "Tapped on the iPhone e71"
+        );
+        assert_eq!(
+            phone("phone_tap", r#"{"x":120,"y":308}"#),
+            "Tapped on the iPhone 120, 308"
+        );
+        assert_eq!(
+            phone("phone_tap", r#"{"x":120.5,"y":308,"hold_ms":700}"#),
+            "Tapped on the iPhone 120.5, 308, hold ms 700"
+        );
+        assert_eq!(
+            phone(
+                "phone_swipe",
+                r#"{"x1":184,"y1":620,"x2":184,"y2":300,"duration_ms":400}"#
+            ),
+            "Swiped on the iPhone 184, 620 → 184, 300, duration ms 400"
+        );
+        assert_eq!(
+            phone("phone_open_app", r#"{"name":"Trek"}"#),
+            "Opened an app on the iPhone Trek"
+        );
+        assert_eq!(phone("phone_screenshot", "{}"), "Looked at the iPhone");
+        assert_eq!(
+            phone(
+                "phone_elements",
+                r#"{"interactive_only":true,"max":40,"filter":null}"#
+            ),
+            "Read the iPhone's screen interactive only, max 40"
+        );
+        assert_eq!(
+            phone("phone_type", r#"{"text":"live audio","submit":false}"#),
+            "Typed on the iPhone live audio"
+        );
+        // Another server's tool, and arguments that aren't a JSON object, as before.
+        let other = op(
+            "mcp__github__get_issue",
+            r#"{"number":12,"repo":"trek"}"#,
+            None,
+        );
+        assert_eq!(
+            (other.verb.as_str(), other.text.as_str()),
+            ("github get_issue", "number 12, repo trek")
+        );
+        assert_eq!(
+            op("mcp__notes__add", "buy milk\nand bread", None).text,
+            "buy milk …"
+        );
+        assert_eq!(op("mcp__x__y", "[1,2]", None).text, "[1,2]");
+        // Trek's own rows say it all: a phone must not be sent their raw arguments instead.
+        assert!(labelled("mcp__trek-phone__phone_screenshot"));
+        assert!(!labelled("mcp__github__get_issue"));
+        assert!(!labelled("Bash"));
+    }
 
     #[test]
     fn kinds_follow_every_agents_titles() {

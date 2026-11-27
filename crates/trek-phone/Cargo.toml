@@ -75,3 +75,7 @@ coredevice = [
 [[example]]
 name = "pc_screen"
 required-features = ["coredevice"]
+
+[[example]]
+name = "live"
+required-features = ["coredevice"]
