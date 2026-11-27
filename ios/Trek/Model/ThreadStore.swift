@@ -421,11 +421,20 @@ final class ThreadStore {
 
     /// Where a new item with `id` goes among the loaded ones: after the last one the Mac orders
     /// at or before it (`order`). Nil for ids it doesn't order (requests), which go at the end.
+    ///
+    /// An item that follows every one the Mac orders goes at the end, after any request rows
+    /// there: they stand where they were answered. It used to go before them, so an answered
+    /// request's row ("Allowed · cargo test") slid down under every turn that came after it and
+    /// stayed the transcript's last line (seen on an iPhone).
     private func place(for id: String) -> Int? {
         guard let key = Self.order(id) else { return nil }
         var i = items.count - 1
+        var laterOrdered = false
         while i >= 0 {
-            if let k = Self.order(items[i].id), k <= key { return i + 1 }
+            if let k = Self.order(items[i].id) {
+                if k <= key { return laterOrdered ? i + 1 : nil }
+                laterOrdered = true
+            }
             i -= 1
         }
         return nil
