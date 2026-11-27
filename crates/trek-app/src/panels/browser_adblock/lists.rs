@@ -119,6 +119,30 @@ pub fn stale(base: &Path, list: &List) -> bool {
     age.is_none_or(|age| age > Duration::from_secs(list.every_hours * 3600))
 }
 
+/// What a list may be at most (the largest, the malware list, is about 13 MB).
+pub const MAX_LIST: usize = 32 << 20;
+
+/// Read `response`'s body, at most `max` bytes: a body that runs past it is refused as it
+/// arrives (it is never held whole).
+pub async fn read_capped(mut response: reqwest::Response, max: usize) -> Result<Vec<u8>, String> {
+    if response.content_length().is_some_and(|n| n > max as u64) {
+        return Err(format!("it is larger than {} MB", max >> 20));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        if !fits(body.len(), chunk.len(), max) {
+            return Err(format!("it is larger than {} MB", max >> 20));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// Whether `more` bytes fit after `have` within `max`.
+pub fn fits(have: usize, more: usize, max: usize) -> bool {
+    have.checked_add(more).is_some_and(|n| n <= max)
+}
+
 /// Fetch the lists in `base` that are missing or stale (all of them: `force`); the ids fetched,
 /// and why any failed. A list that can't be fetched keeps its last copy.
 pub async fn refresh(base: &Path, force: bool) -> (Vec<&'static str>, Vec<String>) {
@@ -142,7 +166,8 @@ pub async fn refresh(base: &Path, force: bool) -> (Vec<&'static str>, Vec<String
                 .await
                 .and_then(|r| r.error_for_status())
                 .map_err(|e| e.to_string())?;
-            r.text().await.map_err(|e| e.to_string())
+            let bytes = read_capped(r, MAX_LIST).await?;
+            String::from_utf8(bytes).map_err(|_| "not text".to_string())
         }
         .await;
         match got {
@@ -300,6 +325,13 @@ mod tests {
     fn only_what_applies_is_kept() {
         let list = "a\n!#if env_safari\nb\n!#if env_mobile\nc\n!#else\nd\n!#endif\n!#else\ne\n!#endif\n!#if cap_html_filtering\nf##^script\n!#endif\n!#include other.txt\ng\n";
         assert_eq!(preprocess(list), "a\nb\nd\ng\n");
+    }
+
+    #[test]
+    fn a_body_past_its_cap_is_refused_as_it_arrives() {
+        assert!(fits(0, MAX_LIST, MAX_LIST));
+        assert!(!fits(MAX_LIST, 1, MAX_LIST));
+        assert!(!fits(usize::MAX, 1, MAX_LIST));
     }
 
     #[test]

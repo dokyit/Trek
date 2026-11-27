@@ -417,17 +417,27 @@ define_class!(
                 });
                 return;
             }
-            // Trek's ad blocker readies the page it goes to (its lists, its scripts), before the
-            // document exists.
-            if own_page {
-                crate::panels::browser_adblock::page::navigating(v.tab, webview, &url);
-            }
+            // Trek's ad blocker readies the page the tab goes to (its lists, its scripts) once
+            // the navigation is allowed (wry's policy, below, answers first), before the document
+            // exists: one that's cancelled, or turns into a download, leaves the page as it was.
+            let decide: RcBlock<dyn Fn(isize)> = if own_page {
+                let inner = decide.copy();
+                let (tab, view, to) = (v.tab, webview.retain(), url.clone());
+                RcBlock::new(move |policy: isize| {
+                    if policy == POLICY_ALLOW {
+                        crate::panels::browser_adblock::page::navigating(tab, &view, &to);
+                    }
+                    inner.call((policy,));
+                })
+            } else {
+                decide.copy()
+            };
             unsafe {
                 let _: () = msg_send![
                     &*v.inner,
                     webView: webview,
                     decidePolicyForNavigationAction: action,
-                    decisionHandler: decide
+                    decisionHandler: &*decide
                 ];
             }
         }

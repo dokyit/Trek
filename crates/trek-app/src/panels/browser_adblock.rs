@@ -865,7 +865,7 @@ async fn build_blocker(
     refresh: bool,
     this: &WeakEntity<AdBlocker>,
     cx: &mut AsyncApp,
-) -> Result<(std::sync::Arc<adblock::Engine>, Vec<webkit::List>, Built), String> {
+) -> Result<(std::sync::Arc<engine::Pages>, Vec<webkit::List>, Built), String> {
     let say = |cx: &mut AsyncApp, what: &'static str| {
         let _ = this.update(cx, |this, cx| {
             this.blocker.busy = Some(what);
@@ -878,17 +878,8 @@ async fn build_blocker(
         let base = base.clone();
         trek_core::runtime().spawn(async move {
             let (fetched, failed) = lists::refresh(&base, refresh).await;
-            let release =
-                if refresh || scriptlets::stale(&base) || scriptlets::current(&base).is_none() {
-                    match scriptlets::fetch(&base).await {
-                        Ok(f) => Ok(f),
-                        // Offline: the last release is fine.
-                        Err(e) => scriptlets::current(&base).ok_or(e),
-                    }
-                } else {
-                    scriptlets::current(&base)
-                        .ok_or_else(|| "No uBlock Origin release.".to_string())
-                };
+            // The pinned release (fetched once, checked against its hash).
+            let release = scriptlets::fetch(&base).await;
             let _ = tx.send((fetched, failed, release)).await;
         });
     }
@@ -899,35 +890,47 @@ async fn build_blocker(
     // Scriptlets: read from the release once (WebKit evaluates its modules), then kept.
     say(cx, "Reading uBlock Origin's scriptlets…");
     let mut resources = vec![];
+    let mut isolated = std::collections::HashSet::new();
     let mut release_name = String::new();
     if let Ok(release) = &release {
-        release_name = release
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let cache = release.join("trek-scriptlets.json");
+        release_name = scriptlets::UBO_VERSION.to_string();
+        // Kept by the release and by how Trek reads it (`bundle`): a Trek that reads it another
+        // way reads it again.
+        let cache = release.join(scriptlets::cache_name());
         let json = match std::fs::read_to_string(&cache) {
             Ok(json) => Ok(json),
-            Err(_) => match scriptlets::bundle(release) {
-                Ok(script) => {
-                    let answer = cx
-                        .update(|_| page::evaluate(script))
-                        .recv()
-                        .await
-                        .map_err(|_| "WebKit didn't answer.".to_string())
-                        .and_then(|a| a);
-                    if let Ok(json) = &answer {
-                        let _ = std::fs::write(&cache, json);
+            Err(_) => {
+                // Read and put together off the main thread; only WebKit's evaluation is on it.
+                let bundled = cx
+                    .background_spawn({
+                        let release = release.clone();
+                        async move { scriptlets::bundle(&release) }
+                    })
+                    .await;
+                match bundled {
+                    Ok(script) => {
+                        let answer = cx
+                            .update(|_| page::evaluate(script))
+                            .recv()
+                            .await
+                            .map_err(|_| "WebKit didn't answer.".to_string())
+                            .and_then(|a| a);
+                        if let Ok(json) = &answer {
+                            let _ = std::fs::write(&cache, json);
+                        }
+                        answer
                     }
-                    answer
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
-            },
+            }
         };
         match json.and_then(|j| {
             serde_json::from_str::<Vec<scriptlets::Scriptlet>>(&j).map_err(|e| e.to_string())
         }) {
-            Ok(list) => resources = scriptlets::resources(&list),
+            Ok(list) => {
+                isolated = scriptlets::isolated_functions(&list);
+                resources = scriptlets::resources(&list);
+            }
             Err(e) => tracing::warn!("adblock: uBlock Origin's scriptlets: {e}"),
         }
         resources.extend(scriptlets::redirect_resources(release));
@@ -949,7 +952,10 @@ async fn build_blocker(
                 let key = engine::key(&sources, &user);
                 let (json, mut stats) = engine::content_rules(&sources, &user);
                 let started = std::time::Instant::now();
-                let engine = engine::engine(&sources, &user, resources);
+                let engine = engine::Pages {
+                    engine: engine::engine(&sources, &user, resources),
+                    isolated,
+                };
                 stats.engine_took = started.elapsed();
                 Ok((std::sync::Arc::new(engine), json, stats, key))
             }

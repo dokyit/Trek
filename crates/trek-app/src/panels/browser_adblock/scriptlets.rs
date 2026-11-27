@@ -19,43 +19,45 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Duration;
 
-/// Where the releases are listed.
-const RELEASES: &str = "https://api.github.com/repos/gorhill/uBlock/releases/latest";
-/// How often the release is looked for again.
-pub const EVERY_HOURS: u64 = 7 * 24;
+/// The uBlock Origin release Trek reads, pinned with its package's SHA-256, as Trek pins the
+/// media tools it downloads (`trek_core::media_tools`): the scriptlets run in every page, so only
+/// these exact bytes are taken. A package that doesn't match is refused.
+///
+/// To move to a newer release (with a Trek release): run
+/// `script/adblock/ubo-pin.sh <version>`, which downloads that release's Chromium package,
+/// checks it against the digest GitHub publishes for it, and prints the three lines below; read
+/// what changed in its `js/resources` and `web_accessible_resources`, then replace them.
+pub const UBO_VERSION: &str = "1.77.2";
+pub const UBO_URL: &str =
+    "https://github.com/gorhill/uBlock/releases/download/1.77.2/uBlock0_1.77.2.chromium.zip";
+pub const UBO_SHA256: &str = "636cfa6c640b29ab7251b765225d6c0f580bd9fe830d1319005ea7093cf4303c";
+
+/// What a download may be at most (the package is 6 MB), and what it may unpack to.
+pub const MAX_PACKAGE: usize = 32 << 20;
+pub const MAX_UNPACKED: u64 = 96 << 20;
 
 pub fn dir(base: &Path) -> PathBuf {
     base.join("ubo")
 }
 
-/// The release unpacked last (its folder), if any.
+/// The file in an unpacked release that says which package it came from: written only after
+/// the package matched the pin.
+const VERIFIED: &str = ".trek-sha256";
+
+/// The pinned release, unpacked from the pinned package, if it's there.
 pub fn current(base: &Path) -> Option<PathBuf> {
-    let version = std::fs::read_to_string(dir(base).join("current")).ok()?;
-    let folder = dir(base).join(version.trim());
-    folder
-        .join("js/resources/scriptlets.js")
-        .is_file()
+    let folder = dir(base).join(UBO_VERSION);
+    let verified = std::fs::read_to_string(folder.join(VERIFIED)).ok()?;
+    (verified.trim() == UBO_SHA256 && folder.join("js/resources/scriptlets.js").is_file())
         .then_some(folder)
 }
 
-pub fn stale(base: &Path) -> bool {
-    let age = std::fs::metadata(dir(base).join("current"))
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.elapsed().ok());
-    age.is_none_or(|a| a > Duration::from_secs(EVERY_HOURS * 3600))
-}
-
-#[derive(Deserialize)]
-struct Release {
-    tag_name: String,
-    assets: Vec<Asset>,
-}
-
-#[derive(Deserialize)]
-struct Asset {
-    name: String,
-    browser_download_url: String,
+/// Whether `bytes` are the pinned package.
+pub fn is_pinned(bytes: &[u8], sha256: &str) -> bool {
+    use sha2::Digest as _;
+    let hash = sha2::Sha256::digest(bytes);
+    let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+    hex.eq_ignore_ascii_case(sha256)
 }
 
 /// Whether a file of the release is one Trek keeps: the scriptlets' modules (and what they
@@ -65,66 +67,44 @@ fn kept(path: &str) -> bool {
         || path.starts_with("web_accessible_resources/")
 }
 
-/// Download uBlock Origin's latest release (its Chromium package) and unpack what Trek reads
-/// into `<base>/ubo/<version>`; the folder. Nothing is fetched when that version is there.
+/// The pinned uBlock Origin release (its Chromium package), unpacked into
+/// `<base>/ubo/<version>`; the folder. Nothing is fetched when it's there.
 pub async fn fetch(base: &Path) -> Result<PathBuf, String> {
+    if let Some(folder) = current(base) {
+        return Ok(folder);
+    }
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
         .user_agent("Trek")
         .build()
         .map_err(|e| e.to_string())?;
-    let release: Release = client
-        .get(RELEASES)
+    let response = client
+        .get(UBO_URL)
         .send()
         .await
         .and_then(|r| r.error_for_status())
-        .map_err(|e| format!("GitHub didn't list uBlock Origin's releases ({e})."))?
-        .json()
+        .map_err(|e| format!("uBlock Origin's package didn't download ({e})."))?;
+    let bytes = super::lists::read_capped(response, MAX_PACKAGE)
         .await
-        .map_err(|e| e.to_string())?;
-    let version: String = release
-        .tag_name
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
-        .collect();
-    if version.is_empty() {
-        return Err("The release has no version.".into());
+        .map_err(|e| format!("uBlock Origin's package: {e}"))?;
+    if !is_pinned(&bytes, UBO_SHA256) {
+        return Err(format!(
+            "uBlock Origin's package isn't the one Trek pins ({UBO_VERSION}): refused."
+        ));
     }
-    let folder = dir(base).join(&version);
-    if folder.join("js/resources/scriptlets.js").is_file() {
-        let _ = std::fs::write(dir(base).join("current"), &version);
-        return Ok(folder);
-    }
-    let asset = release
-        .assets
-        .iter()
-        .find(|a| a.name.ends_with(".chromium.zip"))
-        .ok_or("The release has no Chromium package.")?;
-    if !asset
-        .browser_download_url
-        .starts_with("https://github.com/")
-    {
-        return Err("The package isn't on GitHub.".into());
-    }
-    let bytes = client
-        .get(&asset.browser_download_url)
-        .send()
-        .await
-        .and_then(|r| r.error_for_status())
-        .map_err(|e| format!("uBlock Origin's package didn't download ({e})."))?
-        .bytes()
-        .await
-        .map_err(|e| e.to_string())?;
-    if bytes.len() > 32 << 20 {
-        return Err("uBlock Origin's package is too large.".into());
-    }
-    let staging = dir(base).join(format!("{version}.partial"));
+    let folder = dir(base).join(UBO_VERSION);
+    let staging = dir(base).join(format!("{UBO_VERSION}.partial"));
     let _ = std::fs::remove_dir_all(&staging);
-    unpack(&bytes, &staging)?;
+    let unpacked = unpack(&bytes, &staging, MAX_UNPACKED).and_then(|()| {
+        std::fs::write(staging.join(VERIFIED), UBO_SHA256).map_err(|e| e.to_string())
+    });
+    if let Err(e) = unpacked {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(e);
+    }
     let _ = std::fs::remove_dir_all(&folder);
     std::fs::rename(&staging, &folder).map_err(|e| e.to_string())?;
-    let _ = std::fs::write(dir(base).join("current"), &version);
-    // Older releases go.
+    // Other releases go.
     if let Ok(entries) = std::fs::read_dir(dir(base)) {
         for e in entries.flatten() {
             let p = e.path();
@@ -137,12 +117,14 @@ pub async fn fetch(base: &Path) -> Result<PathBuf, String> {
 }
 
 /// Unpack the files Trek keeps from the package's zip (`bytes`) into `to` (its top folder, the
-/// extension's own, taken off; nothing outside `to`).
-fn unpack(bytes: &[u8], to: &Path) -> Result<(), String> {
+/// extension's own, taken off; nothing outside `to`), `max` bytes at most in all.
+fn unpack(bytes: &[u8], to: &Path, max: u64) -> Result<(), String> {
+    use std::io::Read as _;
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let mut any = false;
+    let mut total: u64 = 0;
     for i in 0..zip.len() {
-        let mut file = zip.by_index(i).map_err(|e| e.to_string())?;
+        let file = zip.by_index(i).map_err(|e| e.to_string())?;
         if file.is_dir() {
             continue;
         }
@@ -163,8 +145,16 @@ fn unpack(bytes: &[u8], to: &Path) -> Result<(), String> {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
+        // Counted as it's written (a zip's stated sizes are the zip's word only).
+        let mut limited = file.take(max.saturating_sub(total) + 1);
         let mut out = std::fs::File::create(&dest).map_err(|e| e.to_string())?;
-        std::io::copy(&mut file, &mut out).map_err(|e| e.to_string())?;
+        total += std::io::copy(&mut limited, &mut out).map_err(|e| e.to_string())?;
+        if total > max {
+            return Err(format!(
+                "uBlock Origin's package unpacks to more than {} MB.",
+                max >> 20
+            ));
+        }
         any = true;
     }
     if !any || !to.join("js/resources/scriptlets.js").is_file() {
@@ -374,6 +364,35 @@ pub fn resources(scriptlets: &[Scriptlet]) -> Vec<adblock::resources::Resource> 
         .collect()
 }
 
+/// The names of the functions of the scriptlets uBlock Origin runs in an isolated world: the
+/// calls `engine::split_worlds` keeps out of the page's.
+pub fn isolated_functions(scriptlets: &[Scriptlet]) -> HashSet<String> {
+    scriptlets
+        .iter()
+        .filter(|s| s.world.eq_ignore_ascii_case("ISOLATED") && !s.name.ends_with(".fn"))
+        .filter_map(|s| {
+            let rest = s.source.trim_start().strip_prefix("function")?;
+            let name: String = rest
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+                .collect();
+            (!name.is_empty()).then_some(name)
+        })
+        .collect()
+}
+
+/// The file the read scriptlets are kept in, beside the release: named for how this Trek reads
+/// a release (a hash of this file's code), so a Trek that reads it another way reads it again.
+pub fn cache_name() -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in include_str!("scriptlets.rs").bytes() {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("trek-scriptlets-{hash:016x}.json")
+}
+
 /// The redirect resources (`noop.js`, `1x1.gif`, `googletagservices_gpt.js`…) of release
 /// `release`, from its `web_accessible_resources` and the list of their names and aliases.
 pub fn redirect_resources(release: &Path) -> Vec<adblock::resources::Resource> {
@@ -427,6 +446,71 @@ mod tests {
         assert!(kept("js/resources/set-constant.js"));
         assert!(kept("web_accessible_resources/noop.js"));
         assert!(!kept("_locales/en/messages.json"));
+    }
+
+    #[test]
+    fn a_package_that_isn_t_the_pinned_one_is_refused() {
+        assert!(is_pinned(
+            b"",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ));
+        assert!(!is_pinned(b"not uBlock Origin", UBO_SHA256));
+        assert!(!is_pinned(b"", UBO_SHA256));
+        // The pin names one release, at GitHub.
+        assert!(UBO_URL.starts_with("https://github.com/gorhill/uBlock/releases/download/"));
+        assert!(UBO_URL.contains(&format!("/{UBO_VERSION}/")));
+        assert_eq!(UBO_SHA256.len(), 64);
+    }
+
+    #[test]
+    fn unpacking_is_capped() {
+        use std::io::Write as _;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut z = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default();
+            z.start_file("uBlock0.chromium/js/resources/scriptlets.js", opts)
+                .unwrap();
+            z.write_all(&vec![b'a'; 4096]).unwrap();
+            z.start_file("uBlock0.chromium/js/resources/big.js", opts)
+                .unwrap();
+            z.write_all(&vec![b'b'; 64 * 1024]).unwrap();
+            z.finish().unwrap();
+        }
+        let bytes = buf.into_inner();
+        let dir = std::env::temp_dir().join(format!("trek-ubo-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            unpack(&bytes, &dir, 16 * 1024)
+                .unwrap_err()
+                .contains("more than")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        unpack(&bytes, &dir, 1 << 20).unwrap();
+        assert!(dir.join("js/resources/big.js").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_cache_follows_trek_s_reading_and_isolated_ones_are_named() {
+        assert!(cache_name().starts_with("trek-scriptlets-"));
+        let s = |name: &str, world: &str, src: &str| Scriptlet {
+            name: name.into(),
+            aliases: vec![],
+            dependencies: vec![],
+            requires_trust: false,
+            world: world.into(),
+            source: src.into(),
+        };
+        let names = isolated_functions(&[
+            s("remove-class.js", "ISOLATED", "function removeClass(a) {}"),
+            s("set-constant.js", "MAIN", "function setConstant(a) {}"),
+            s("helper.fn", "ISOLATED", "function helper() {}"),
+        ]);
+        assert_eq!(
+            names.into_iter().collect::<Vec<_>>(),
+            vec!["removeClass".to_string()]
+        );
     }
 
     #[test]

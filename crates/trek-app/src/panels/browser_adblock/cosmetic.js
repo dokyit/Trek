@@ -246,7 +246,7 @@
     const parts = [];
     for (let e = el; e && e.nodeType === 1 && e !== document.documentElement; e = e.parentElement) {
       if (e.id && !/\d{3,}/.test(e.id)) { parts.unshift(`#${esc(e.id)}`); break; }
-      let part = e.localName;
+      let part = esc(e.localName);
       const classes = [...e.classList].filter((c) => !/\d{3,}/.test(c)).slice(0, 3);
       if (classes.length) part += classes.map((c) => `.${esc(c)}`).join('');
       const parent = e.parentElement;

@@ -192,6 +192,13 @@ pub fn engine(
     engine
 }
 
+/// The engine for pages, with the names of the scriptlet functions uBlock Origin runs in an
+/// isolated world (its `world: 'ISOLATED'`), which Trek runs in its own world, not the page's.
+pub struct Pages {
+    pub engine: Engine,
+    pub isolated: std::collections::HashSet<String>,
+}
+
 /// What a page on `url` gets: the site's selectors to hide, its procedural filters, the
 /// exceptions for generic hiding, whether generic hiding is off, and the scriptlets' code.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -201,6 +208,66 @@ pub struct Page {
     pub exceptions: Vec<String>,
     pub generichide: bool,
     pub script: String,
+}
+
+/// `page`, with the scriptlets split by the world each runs in: the page's own, and Trek's
+/// isolated one (`isolated_script`).
+pub fn page_split(pages: &Pages, url: &str) -> (Page, String) {
+    let mut p = page(&pages.engine, url);
+    let (main, isolated) = split_worlds(&p.script, &pages.isolated);
+    p.script = main;
+    (p, isolated)
+}
+
+/// Split the engine's script (its dependencies' sources, then one `try { name(args) } catch`
+/// call per scriptlet, as the `adblock` crate puts them together) into the part for the page's
+/// world and the part for an isolated world: each call goes where its scriptlet runs, after the
+/// dependencies (both parts get them: only the calls run anything).
+pub fn split_worlds(
+    script: &str,
+    isolated: &std::collections::HashSet<String>,
+) -> (String, String) {
+    const OPEN: &str = "try {\n";
+    const CLOSE: &str = "\n} catch ( e ) { }\n";
+    let mut rest = script;
+    let mut calls: Vec<&str> = vec![];
+    // The calls are at the end, each a whole block of its own: taken off from the end.
+    while rest.ends_with(CLOSE) {
+        let body_end = rest.len() - CLOSE.len();
+        let Some(open) = rest[..body_end].rfind(OPEN) else {
+            break;
+        };
+        let call = &rest[open + OPEN.len()..body_end];
+        // One line, a function's name and its arguments.
+        if call.contains('\n') || !call.ends_with(')') {
+            break;
+        }
+        calls.push(&rest[open..]);
+        rest = &rest[..open];
+    }
+    if calls.is_empty() {
+        return (script.to_string(), String::new());
+    }
+    calls.reverse();
+    let name_of = |block: &str| -> String {
+        block[OPEN.len()..]
+            .split('(')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    let (iso, main): (Vec<&str>, Vec<&str>) = calls
+        .into_iter()
+        .partition(|b| isolated.contains(&name_of(b)));
+    let part = |blocks: Vec<&str>| {
+        if blocks.is_empty() {
+            String::new()
+        } else {
+            format!("{rest}{}", blocks.concat())
+        }
+    };
+    (part(main), part(iso))
 }
 
 pub fn page(engine: &Engine, url: &str) -> Page {
@@ -386,6 +453,29 @@ mod tests {
         assert!(p.hide.contains(&".promo".to_string()), "{p:?}");
         assert_eq!(p.procedural.len(), 1, "{p:?}");
         assert!(p.script.contains("setFlag(\"ads\", \"0\")"), "{}", p.script);
+    }
+
+    #[test]
+    fn isolated_scriptlets_are_kept_out_of_the_page_s_world() {
+        let script = "function dep() { try {\nx()\n} catch ( e ) { }\n }\nfunction a() {}\nfunction b() {}\n\
+                      try {\na(\"1\")\n} catch ( e ) { }\ntry {\nb(\"2\")\n} catch ( e ) { }\n";
+        let isolated: std::collections::HashSet<String> = ["b".to_string()].into();
+        let (main, iso) = split_worlds(script, &isolated);
+        assert!(
+            main.contains("a(\"1\")") && !main.contains("b(\"2\")"),
+            "{main}"
+        );
+        assert!(
+            iso.contains("b(\"2\")") && !iso.contains("a(\"1\")"),
+            "{iso}"
+        );
+        // The dependencies (one with a block like a call inside it) go with both.
+        assert!(main.starts_with("function dep()") && iso.starts_with("function dep()"));
+        let (all, none) = split_worlds(script, &Default::default());
+        assert_eq!(all, script);
+        assert_eq!(none, "");
+        let (only_main, _) = split_worlds("no calls here", &isolated);
+        assert_eq!(only_main, "no calls here");
     }
 
     #[test]

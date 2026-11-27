@@ -14,7 +14,6 @@
 //! Everything here is the main thread's.
 
 use super::engine;
-use adblock::Engine;
 use block2::{Block, RcBlock};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
@@ -42,7 +41,7 @@ struct State {
     on: bool,
     /// Sites let through (`site_of`).
     allowed: Vec<String>,
-    engine: Option<Arc<Engine>>,
+    engine: Option<Arc<engine::Pages>>,
     lists: Vec<Retained<WKContentRuleList>>,
     /// Each tab's view, and whether the lists are on it now.
     views: HashMap<u64, (Retained<WKWebView>, bool)>,
@@ -65,7 +64,7 @@ pub fn ready() -> bool {
 }
 
 /// The engine, for the driver and Settings' numbers.
-pub fn engine() -> Option<Arc<Engine>> {
+pub fn engine() -> Option<Arc<engine::Pages>> {
     with(|s| s.engine.clone())
 }
 
@@ -75,7 +74,7 @@ pub fn engine() -> Option<Arc<Engine>> {
 pub fn set(
     on: bool,
     allowed: Vec<String>,
-    engine: Option<Arc<Engine>>,
+    engine: Option<Arc<engine::Pages>>,
     lists: Vec<Retained<WKContentRuleList>>,
 ) {
     let (old, views) = with(|s| {
@@ -203,7 +202,7 @@ pub fn navigating(tab: u64, view: &WKWebView, url: &str) {
     let (on, engine) = with(|s| (blocks(s, url), s.engine.clone()));
     let started = std::time::Instant::now();
     let page = match (on, engine) {
-        (true, Some(engine)) => Some(engine::page(&engine, url)),
+        (true, Some(pages)) => Some(engine::page_split(&pages, url)),
         _ => None,
     };
     let lookup = started.elapsed();
@@ -223,7 +222,7 @@ pub fn navigating(tab: u64, view: &WKWebView, url: &str) {
             controller.addUserScript(s);
         }
     }
-    let Some(page) = page else {
+    let Some((page, isolated_scriptlets)) = page else {
         with(|s| s.last.remove(&tab));
         return;
     };
@@ -253,6 +252,12 @@ pub fn navigating(tab: u64, view: &WKWebView, url: &str) {
             ));
         }
         let world = WKContentWorld::worldWithName(&NSString::from_str(WORLD), mtm);
+        // uBlock Origin's isolated-world scriptlets: in Trek's world, where the page can't see
+        // or change them.
+        let isolated = engine::wrap_script(&isolated_scriptlets);
+        if !isolated.is_empty() {
+            controller.addUserScript(&script(isolated, &world, true));
+        }
         controller.addUserScript(&script(
             format!("{MARK}\nglobalThis.__trekAdblock = {data};\n{COSMETIC_JS}"),
             &world,
@@ -268,6 +273,7 @@ pub fn navigating(tab: u64, view: &WKWebView, url: &str) {
                 "procedural": page.procedural.len(),
                 "generichide": page.generichide,
                 "scriptlets_bytes": scriptlets.len(),
+                "isolated_bytes": isolated_scriptlets.len(),
                 // What the engine took for this page, and setting its scripts.
                 "lookup_us": lookup.as_micros(),
                 "total_us": started.elapsed().as_micros(),
@@ -302,7 +308,7 @@ fn answer(body: &str) -> Value {
                 return json!([]);
             };
             json!(engine::generic(
-                &engine,
+                &engine.engine,
                 &strings("classes"),
                 &strings("ids"),
                 &strings("exceptions"),
