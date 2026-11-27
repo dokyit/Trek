@@ -590,3 +590,5 @@ mod tests {
         }
     }
 }
+
+// Probe: a one-line change to measure CI (not for merge).
