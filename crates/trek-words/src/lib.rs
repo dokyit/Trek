@@ -93,7 +93,8 @@ pub struct Words {
 
     /// Settings › Tools › Video watcher: what it does, and what its transcripts take. Without
     /// whisper, a Mac transcribes with its own speech recognition, and Windows with Trek's own
-    /// speech model, once dictation has downloaded it.
+    /// speech model, once dictation has downloaded it; Linux has neither, so it says a transcript
+    /// needs whisper.
     pub video_watcher_note: &'static str,
 
     /// The local model servers Trek finds, as a list in a sentence. MLX runs on Apple silicon
@@ -290,7 +291,7 @@ const LINUX: Words = Words {
 
     build_name: "Linux",
 
-    video_watcher_note: "Agents can watch a video file or link: they get its frames and a transcript of its audio, and you get a player with the frames they saw. YouTube and X links use yt-dlp, with ffmpeg; on Linux install both with your package manager. Transcripts use whisper when it's installed. Applies to new sessions.",
+    video_watcher_note: "Agents can watch a video file or link: they get its frames and a transcript of its audio, and you get a player with the frames they saw. YouTube and X links use yt-dlp; Trek downloads ffmpeg and yt-dlp the first time they are needed if they are not installed. Transcripts need whisper installed (pipx install openai-whisper): without it agents get the frames alone. Applies to new sessions.",
 
     local_servers: "Ollama, LM Studio and llama.cpp",
 
@@ -738,6 +739,37 @@ mod tests {
         for (field, text) in strings(&w) {
             assert!(!text.is_empty(), "`{field}` is blank");
         }
+    }
+
+    /// The video watcher downloads its tools on every platform; what differs is who writes a
+    /// transcript when whisper isn't installed, and each says its own.
+    #[test]
+    fn the_video_watcher_says_what_its_transcripts_take_on_each_platform() {
+        for os in [Os::Mac, Os::Windows, Os::Linux] {
+            let note = for_os(os).video_watcher_note;
+            assert!(
+                note.contains("Trek downloads ffmpeg and yt-dlp the first time they are needed"),
+                "{os:?}: {note}"
+            );
+            assert!(note.ends_with("Applies to new sessions."), "{os:?}: {note}");
+        }
+        assert!(
+            for_os(Os::Mac)
+                .video_watcher_note
+                .contains("else the Mac's speech recognition")
+        );
+        assert!(
+            for_os(Os::Windows)
+                .video_watcher_note
+                .contains("else Trek's own speech model")
+        );
+        let linux = for_os(Os::Linux).video_watcher_note;
+        assert!(
+            linux.contains("Transcripts need whisper installed")
+                && linux.contains("without it agents get the frames alone"),
+            "{linux}"
+        );
+        assert!(!linux.contains("package manager"), "{linux}");
     }
 
     /// What no visible string may spell out: each has a field in the table, so a hard-coded one is

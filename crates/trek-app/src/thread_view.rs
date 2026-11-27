@@ -5584,6 +5584,8 @@ impl Render for ThreadView {
             .child(room)
             .child(
                 div()
+                    .id("transcript-scroll")
+                    .test_support()
                     .relative()
                     .flex_1()
                     .min_h_0()

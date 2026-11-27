@@ -545,8 +545,12 @@ jobs:
           bash -n script/bundle-linux.sh script/release-linux.sh
           for f in script/linux/*.sh script/linux/AppRun; do sh -n "$f"; done
 
+      # ffmpeg too: trek-mcp's video tests watch a clip they make with it (and pass as skipped
+      # without it), so the video watcher is run on Linux by a test, not only compiled.
       - name: System packages
-        run: sudo sh script/linux/packages.sh --with-packaging
+        run: |
+          sudo sh script/linux/packages.sh --with-packaging
+          sudo apt-get install -y --no-install-recommends ffmpeg
 
       # The manifest merge the Linux release runs (and the whole chain of them, dry and real), and
       # the web remote's plain code, as on the others.

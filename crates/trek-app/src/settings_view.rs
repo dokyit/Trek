@@ -468,8 +468,9 @@ pub(super) struct ToolsProbe {
     axe: bool,
     ffmpeg: bool,
     ytdlp: bool,
-    /// Homebrew (winget on Windows) is here: what a failed download falls back to.
-    package_manager: bool,
+    /// The package manager that's here (Homebrew, winget, a Linux distribution's own): what a
+    /// failed download falls back to.
+    package_manager: Option<trek_core::media_tools::PackageManager>,
     mcp_bundled: bool,
     agent_mcp: Vec<(&'static str, Vec<String>)>,
     plugins: Vec<String>,
@@ -499,7 +500,7 @@ impl ToolsProbe {
             axe: crate::integrations::axe_path().is_some(),
             ffmpeg: crate::integrations::ffmpeg_installed(),
             ytdlp: crate::integrations::ytdlp_installed(),
-            package_manager: crate::integrations::package_manager_installed(),
+            package_manager: crate::integrations::package_manager(),
             mcp_bundled: crate::workspace::trek_mcp_binary().is_some(),
             agent_mcp,
             plugins,
@@ -2184,13 +2185,14 @@ impl SettingsView {
     }
 
     /// A row of Settings › Tools › Video for a tool the watcher needs: its words, and whether
-    /// it's installed (`probe`: that, and whether Homebrew or winget is here), or the button that
-    /// has Trek download it (no Homebrew or winget needed), with how far it's got or why it
-    /// couldn't, and the package manager as the other way where it's here.
+    /// it's installed (`probe`: that, and the package manager that's here: Homebrew, winget, a
+    /// Linux distribution's own), or the button that has Trek download it (no package manager
+    /// needed), with how far it's got or why it couldn't, and the package manager as the other way
+    /// where it's here.
     fn media_tool_row(
         &self,
         tool: trek_core::media_tools::Tool,
-        probe: Option<(bool, bool)>,
+        probe: Option<(bool, Option<trek_core::media_tools::PackageManager>)>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         use trek_core::media_tools::Tool;
@@ -2218,6 +2220,11 @@ impl SettingsView {
                 "is given such a link",
             ),
         };
+        // The package manager's line for it: the one this computer has, or the one a Mac or a
+        // Windows PC is given; none on a Linux whose package manager Trek doesn't know.
+        let manager = probe.and_then(|(_, manager)| manager);
+        let package_line =
+            trek_core::media_tools::install_line(tool, std::env::consts::OS, manager);
         let description = match &plan {
             Some(plan) => format!(
                 "{what} Trek downloads {name} ({}) the first time an agent {when}, or now with the button.",
@@ -2225,10 +2232,7 @@ impl SettingsView {
             ),
             None => format!(
                 "{what} Trek has no download of {name} for this computer: install it with {}.",
-                match tool {
-                    Tool::Ffmpeg => crate::integrations::FFMPEG_INSTALL,
-                    Tool::YtDlp => crate::integrations::YTDLP_INSTALL,
-                }
+                package_line.unwrap_or(crate::words::words().package_manager)
             ),
         };
         let (amber, quiet) = (palette::amber(cx), cx.theme().muted_foreground);
@@ -2242,10 +2246,6 @@ impl SettingsView {
                 .child(text)
                 .into_any_element()
         };
-        let package_line = match tool {
-            Tool::Ffmpeg => crate::integrations::FFMPEG_INSTALL,
-            Tool::YtDlp => crate::integrations::YTDLP_INSTALL,
-        };
         let download = |label: &'static str, cx: &mut Context<Self>| {
             Button::new(SharedString::from(format!("install-{name}")))
                 .small()
@@ -2257,10 +2257,10 @@ impl SettingsView {
                     if trek_core::media_tools::plan(tool).is_some() {
                         this.workspace
                             .update(cx, |ws, cx| ws.install_media_tool(tool, cx));
-                    } else {
+                    } else if let Some(line) = package_line {
                         this.workspace.update(cx, |_, cx| {
                             cx.emit(WorkspaceEvent::RunInTerminal {
-                                command: package_line.into(),
+                                command: line.into(),
                                 cwd: None,
                             })
                         });
@@ -2277,22 +2277,19 @@ impl SettingsView {
                 Spinner::new().small().into_any_element(),
             ),
             (Some(crate::workspace::MediaSetup::Failed { error, .. }), probe) => {
-                let manager = probe.is_some_and(|(_, manager)| manager);
+                let manager = probe.and_then(|(_, manager)| manager);
                 let mut controls = h_flex().gap(px(6.)).child(download("Try again", cx));
-                if manager {
+                if let Some(manager) = manager {
+                    let line = manager.install_line(tool);
                     controls = controls.child(
                         Button::new(SharedString::from(format!("install-{name}-manager")))
                             .small()
                             .outline()
-                            .label(if crate::words::is_windows() {
-                                "Use winget"
-                            } else {
-                                "Use Homebrew"
-                            })
+                            .label(format!("Use {}", manager.name))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.workspace.update(cx, |_, cx| {
                                     cx.emit(WorkspaceEvent::RunInTerminal {
-                                        command: package_line.into(),
+                                        command: line.into(),
                                         cwd: None,
                                     })
                                 })
@@ -2318,6 +2315,11 @@ impl SettingsView {
                     .into_any_element(),
             ),
             (None, Some((true, _))) => (None, Self::status_dot(palette::emerald(cx), "Installed")),
+            // Nothing a button could do: no download for this computer, and no package manager
+            // Trek knows a line for (a Linux on a rare processor and distribution).
+            (None, Some((false, _))) if plan.is_none() && package_line.is_none() => {
+                (None, Self::status_dot(amber, "Not installed"))
+            }
             (None, Some((false, _))) => (
                 None,
                 download(
@@ -2560,33 +2562,30 @@ impl SettingsView {
                 cx,
             ));
         }
-        // Linux: the video watcher (`trek-mcp video`) runs on macOS and Windows only.
-        if !linux {
-            out.push(Self::heading("Video", cx));
-            let ffmpeg_row = self.media_tool_row(
-                trek_core::media_tools::Tool::Ffmpeg,
-                probe.as_ref().map(|p| (p.ffmpeg, p.package_manager)),
-                cx,
-            );
-            let ytdlp_row = self.media_tool_row(
-                trek_core::media_tools::Tool::YtDlp,
-                probe.as_ref().map(|p| (p.ytdlp, p.package_manager)),
-                cx,
-            );
-            out.push(ui::group(
-                vec![
-                    Self::row(
-                        "Video watcher",
-                        crate::words::words().video_watcher_note,
-                        self.switch("video-tools", s.tools.video, |s, v| s.tools.video = v),
-                        cx,
-                    ),
-                    ffmpeg_row,
-                    ytdlp_row,
-                ],
-                cx,
-            ));
-        }
+        out.push(Self::heading("Video", cx));
+        let ffmpeg_row = self.media_tool_row(
+            trek_core::media_tools::Tool::Ffmpeg,
+            probe.as_ref().map(|p| (p.ffmpeg, p.package_manager)),
+            cx,
+        );
+        let ytdlp_row = self.media_tool_row(
+            trek_core::media_tools::Tool::YtDlp,
+            probe.as_ref().map(|p| (p.ytdlp, p.package_manager)),
+            cx,
+        );
+        out.push(ui::group(
+            vec![
+                Self::row(
+                    "Video watcher",
+                    crate::words::words().video_watcher_note,
+                    self.switch("video-tools", s.tools.video, |s, v| s.tools.video = v),
+                    cx,
+                ),
+                ffmpeg_row,
+                ytdlp_row,
+            ],
+            cx,
+        ));
         out.push(Self::heading("Sub-agents", cx));
         out.push(ui::group(
             vec![

@@ -275,7 +275,8 @@ Trek drives each vendor's own CLI, so your subscriptions work as they do in the 
 - Trek runs as an X11 window, in a Wayland session through Xwayland, so the desktop frames it and the Browser can work; `TREK_WAYLAND=1` opts into native Wayland, without them.
 - A tray icon where the desktop shows them (Ubuntu does; GNOME elsewhere needs the AppIndicator extension). No menu bar: the palette (Ctrl+K), Settings and context menus have every command.
 - Keys are kept in your desktop's keyring (GNOME Keyring or KWallet).
-- Not on Linux: dictation, snapshots, computer use, the iOS Simulator and iPhone tools, the Browser's ad blocker and extensions, and the video watcher.
+- Not on Linux: dictation, snapshots, computer use, the iOS Simulator and iPhone tools, and the Browser's ad blocker and extensions.
+- Agents can watch videos on Linux as elsewhere; a transcript of the audio needs `whisper` installed (`pipx install openai-whisper`).
 - Every feature, platform by platform: [docs/PARITY.md](docs/PARITY.md).
 
 </details>
