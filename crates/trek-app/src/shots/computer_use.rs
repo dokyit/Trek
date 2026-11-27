@@ -367,10 +367,20 @@ pub fn type_text(arg: &str) -> Result<()> {
 }
 
 /// `computer press <target> [action]`: the element's own action by ref (no pointer or key).
+/// The action is the last word only when it's one the tool knows — a target may hold spaces
+/// (`"Check me"`).
 pub fn press(arg: &str) -> Result<()> {
-    let (target, action) = match arg.split_once(' ') {
-        Some((t, a)) => (t.trim(), Some(a.trim())),
-        None => (arg.trim(), None),
+    const ACTIONS: [&str; 6] = [
+        "press",
+        "show_menu",
+        "increment",
+        "decrement",
+        "confirm",
+        "cancel",
+    ];
+    let (target, action) = match arg.rsplit_once(' ') {
+        Some((t, a)) if ACTIONS.contains(&a.trim()) => (t.trim(), Some(a.trim())),
+        _ => (arg.trim(), None),
     };
     let r = resolve(target)?;
     let mut args = json!({"ref": r});
