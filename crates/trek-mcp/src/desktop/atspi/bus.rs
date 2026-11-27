@@ -48,15 +48,29 @@ const KNOWN_MAX: usize = 20_000;
 /// Said when an element of Trek's own app is asked for or acted on.
 const OWN: &str = "That's one of Trek's own windows: agents don't operate Trek itself, so its elements aren't read or acted on.";
 
-/// `/proc`'s word on `pid`: its command name and its parent's id.
+/// `/proc`'s word on `pid`: its executable's name and its parent's id — the executable's own
+/// where it can be read (a script's is its interpreter's), the command name otherwise.
 fn proc(pid: u32) -> Option<(String, u32)> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let (_, rest) = stat.rsplit_once(')')?;
     let mut fields = rest.split_whitespace();
     let _state = fields.next()?;
     let ppid: u32 = fields.next()?.parse().ok()?;
-    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
-    Some((comm.trim().to_string(), ppid))
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .and_then(|path| {
+            path.file_name().map(|name| {
+                name.to_string_lossy()
+                    .trim_end_matches(" (deleted)")
+                    .to_string()
+            })
+        });
+    let comm = || {
+        std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .ok()
+            .map(|comm| comm.trim().to_string())
+    };
+    Some((exe.or_else(comm)?, ppid))
 }
 
 /// Whether `pid` has GTK3 mapped (`/proc/pid/maps`): its AT-SPI bridge is the one that aborts

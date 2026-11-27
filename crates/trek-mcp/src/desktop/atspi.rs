@@ -818,27 +818,37 @@ impl<T: Tree> Scan<'_, T> {
     }
 }
 
-/// Whether `pid` is one of Trek's own processes: its name is `trek`, or it's a descendant of a
-/// `trek` that no `trek-mcp` stands between (Trek's web content processes are on the
-/// accessibility bus under pids of their own). What `trek-mcp` itself starts — the apps
-/// `open_app` launches — is a descendant of `trek` too, but through `trek-mcp`, and those are
-/// exactly the windows an agent is to work in. `proc` reads a process's name and its parent's
-/// id — `/proc` in `bus`; the tests hand it a table. Computer use never reads or acts on Trek.
+/// Whether an executable's name is one of WebKitGTK's web content processes'
+/// (`WebKitWebProcess`, `WebKitNetworkProcess`, `WebKitGPUProcess`).
+fn webkit(exe: &str) -> bool {
+    exe.as_bytes()
+        .get(..6)
+        .is_some_and(|p| p.eq_ignore_ascii_case(b"webkit"))
+}
+
+/// Whether `pid` is one of Trek's own processes, by executable: Trek's own binary (`trek`), or a
+/// WebKit web content process under it — Trek's Browser and artifacts are WebKitGTK, whose web
+/// processes register on the accessibility bus under pids of their own. Nothing else counts,
+/// however it was started: the apps `open_app` launches descend from `trek` too, and a check's
+/// fixture can be a child of the app itself, and neither is Trek's window. `proc` reads a
+/// process's executable name and its parent's id — `/proc` in `bus`; the tests hand it a table.
+/// Computer use never reads or acts on Trek.
 pub fn is_trek(pid: u32, proc: &dyn Fn(u32) -> Option<(String, u32)>) -> bool {
     let mut pid = pid;
     // An ancestor chain can't be longer than this; a cycle ends it too.
     for _ in 0..64 {
-        let Some((name, ppid)) = proc(pid) else {
+        let Some((exe, ppid)) = proc(pid) else {
             return false;
         };
-        let name = name.trim();
-        if name.eq_ignore_ascii_case("trek-mcp") {
+        let exe = exe.trim();
+        if exe.eq_ignore_ascii_case("trek-mcp") {
             return false;
         }
-        if name.eq_ignore_ascii_case("trek") {
+        if exe.eq_ignore_ascii_case("trek") {
             return true;
         }
-        if ppid == 0 || ppid == pid {
+        // Only a web process may still be Trek's by ancestry; any other program is its own.
+        if !webkit(exe) || ppid == 0 || ppid == pid {
             return false;
         }
         pid = ppid;
@@ -1421,37 +1431,59 @@ mod tests {
     }
 
     #[test]
-    fn trek_and_what_it_started_are_treks_but_not_what_trek_mcp_started() {
-        // (name, ppid) by pid: Trek 100, its web process 101, trek-mcp 102, the app it opened
-        // 103 (and that app's own child 104), a user's app 105.
+    fn trek_and_its_web_processes_are_treks_but_no_other_descendant_is() {
+        // (exe, ppid) by pid: Trek 100, its web process 101 (and one under that 108),
+        // trek-mcp 102, the app it opened 103 — with a web process of its own 111 — a check's
+        // fixture, a child of the app itself 105, another app's web process 106 under firefox
+        // 107, and a web process under trek-mcp 109.
         let table: &[(&str, u32, u32)] = &[
             ("trek", 100, 1),
             ("WebKitWebProcess", 101, 100),
+            ("WebKitWebProcess", 108, 101),
             ("trek-mcp", 102, 100),
             ("gedit", 103, 102),
-            ("gedit-worker", 104, 103),
-            ("firefox", 105, 1),
+            ("firefox", 107, 1),
+            ("WebKitNetworkProcess", 106, 107),
+            ("python3.10", 105, 100),
+            ("WebKitWebProcess", 109, 102),
+            ("epiphany", 110, 102),
+            ("WebKitWebProcess", 111, 110),
         ];
         let proc = |pid: u32| {
             table
                 .iter()
                 .find(|(_, p, _)| *p == pid)
-                .map(|(name, _, ppid)| (name.to_string(), *ppid))
+                .map(|(exe, _, ppid)| (exe.to_string(), *ppid))
         };
         assert!(is_trek(100, &proc), "Trek itself");
-        assert!(is_trek(101, &proc), "its web content process");
+        assert!(
+            is_trek(101, &proc) && is_trek(108, &proc),
+            "its web processes"
+        );
         assert!(
             !is_trek(102, &proc),
             "trek-mcp is Trek's, but has no elements to guard"
         );
         assert!(
-            !is_trek(103, &proc) && !is_trek(104, &proc),
-            "what open_app started is the agent's to drive"
+            !is_trek(103, &proc) && !is_trek(111, &proc),
+            "what open_app started is the agent's to drive, web views included"
         );
-        assert!(!is_trek(105, &proc), "and so is any other app");
+        assert!(
+            !is_trek(105, &proc),
+            "a fixture that's a child of the app is still its own program"
+        );
+        assert!(
+            !is_trek(106, &proc) && !is_trek(107, &proc),
+            "another app's web process isn't Trek's"
+        );
+        assert!(
+            !is_trek(109, &proc),
+            "a web process under trek-mcp isn't Trek's either"
+        );
+        assert!(!is_trek(110, &proc));
         assert!(!is_trek(999, &proc), "a pid /proc doesn't have");
         // A cycle ends the walk rather than looping.
-        let looped = |_: u32| Some(("x".to_string(), 7));
+        let looped = |_: u32| Some(("WebKitWebProcess".to_string(), 3));
         assert!(!is_trek(3, &looped));
     }
 }
