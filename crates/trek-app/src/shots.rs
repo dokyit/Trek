@@ -1286,6 +1286,36 @@ async fn browser(
     let panel = panel
         .ok_or_else(|| anyhow::anyhow!("browser: the Browser tool isn't open (tools browser)"))?;
     match cmd {
+        "new-tab" | "tab-at" | "only" => main.update(cx, |_, window, cx| {
+            panel.update(cx, |p, cx| p.shots_in_window(cmd, rest, window, cx))
+        })?,
+        // `browser reopen`: close the Browser tool and open it again, as a relaunch brings it
+        // back: its tabs kept on the way out (`browser_tabs`), put back by the new one.
+        "reopen" => {
+            let right = main.update(cx, |root, _, cx| {
+                root.downcast::<gpui_kit::component::Root>()
+                    .ok()
+                    .map(|r| r.read(cx).view().clone())
+                    .and_then(|v| v.downcast::<crate::root::TrekWindow>().ok())
+                    .map(|trek| trek.read(cx).right_panel.clone())
+            })?;
+            let right = right.ok_or_else(|| anyhow::anyhow!("browser reopen: no Trek window"))?;
+            main.update(cx, |_, window, cx| {
+                right.update(cx, |p, cx| p.close_browser(window, cx))
+            })?;
+            drop(panel);
+            // The closed Browser lets go of its views, and keeps its tabs as it goes.
+            cx.background_executor()
+                .timer(Duration::from_millis(800))
+                .await;
+            main.update(cx, |_, window, cx| {
+                right.update(cx, |p, cx| {
+                    p.open_tool(crate::workspace::PanelTool::Browser, window, cx)
+                })
+            })?;
+            cx.update(|cx| cx.refresh_windows());
+            Ok(())
+        }
         "state" => {
             // A beat for the last command's layout to reach the native view.
             cx.background_executor()
@@ -1399,7 +1429,30 @@ async fn browser(
                         "browser expect: Trek's page doesn't say {part:?} ({url}: why {})",
                         state["why"]
                     ),
-                    _ => anyhow::bail!("browser expect: {want}? (crashed, failed, loaded, why)"),
+                    // The strip's tabs, made or kept and waiting; those waiting for their view.
+                    ("tabs", n) => anyhow::ensure!(
+                        state["strip"].as_array().map(Vec::len) == n.parse().ok(),
+                        "browser expect: not {n} tabs ({})",
+                        state["strip"]
+                    ),
+                    ("waiting", n) => anyhow::ensure!(
+                        state["waiting"].as_array().map(Vec::len) == n.parse().ok(),
+                        "browser expect: not {n} tabs waiting ({})",
+                        state["waiting"]
+                    ),
+                    // The tab in front shows an address with that in it.
+                    ("front", part) => anyhow::ensure!(
+                        url.contains(part),
+                        "browser expect: the tab in front isn't on {part:?} ({url})"
+                    ),
+                    // Back goes somewhere: the tab's history came back with it.
+                    ("back", _) => anyhow::ensure!(
+                        state["can_back"] == true,
+                        "browser expect: Back goes nowhere ({url})"
+                    ),
+                    _ => anyhow::bail!(
+                        "browser expect: {want}? (crashed, failed, loaded, why, tabs, waiting, front, back)"
+                    ),
                 }
             }
             Ok(())

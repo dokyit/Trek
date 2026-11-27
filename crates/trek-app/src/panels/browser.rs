@@ -2286,10 +2286,10 @@ impl BrowserPanel {
             if !is_popup {
                 // A kept tab's history, its page in front loading with it; one WebKit can't take
                 // leaves the view empty, and the address loads instead.
-                if let Some(state) = history.as_deref() {
-                    webkit::restore_history(&built, state);
-                }
-                if built.url().map_or(true, |u| u.is_empty()) {
+                let restored = history
+                    .as_deref()
+                    .is_some_and(|state| webkit::restore_history(&built, state));
+                if !restored {
                     let _ = built.load_url(&to_view(url));
                 }
             }
@@ -4403,7 +4403,7 @@ impl BrowserPanel {
         let keeping = keeps_tabs(self.workspace.read(cx));
         let keep_row = ui::menu_row("browser-keep-tabs", false, cx)
             .test_support()
-            .child(Icon::new(Lucide::ArchiveRestore).small().text_color(muted))
+            .child(Icon::new(Lucide::RotateCcwClock).small().text_color(muted))
             .child(div().flex_1().child("Keep tabs between launches"))
             .when(keeping, |el| {
                 el.child(
@@ -5038,6 +5038,41 @@ impl BrowserPanel {
     ) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
         use wry::WebViewExtMacOS as _;
         self.active_tab().map(|t| t.view.read(cx).raw().ns_window())
+    }
+
+    /// What the harness does that needs the window: `new-tab <url>` opens a tab as the strip's +
+    /// and the address bar do; `tab-at <n>` brings the n-th tab of the strip (from 0, kept tabs
+    /// waiting included) to the front as a click on it does; `only` closes every tab but the one
+    /// in front, as their close buttons do.
+    pub fn shots_in_window(
+        &mut self,
+        cmd: &str,
+        arg: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        match cmd {
+            "new-tab" => {
+                self.new_tab(&normalize(arg), window, cx);
+            }
+            "tab-at" => {
+                let n: usize = arg.trim().parse()?;
+                let id = *self
+                    .strip_ids()
+                    .get(n)
+                    .ok_or_else(|| anyhow::anyhow!("browser tab-at: no tab {n}"))?;
+                self.show_tab(id, window, cx);
+            }
+            "only" => {
+                for id in self.strip_ids() {
+                    if id != self.active {
+                        self.close_tab(id, window, cx);
+                    }
+                }
+            }
+            _ => anyhow::bail!("browser: {cmd}?"),
+        }
+        Ok(())
     }
 
     /// The active tab's view (the extensions driver's: WebView2's calls go through one).

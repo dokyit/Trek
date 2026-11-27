@@ -531,6 +531,20 @@ impl RightPanel {
         }
     }
 
+    /// Close the Browser tool's tab, as its close button does (the shots harness's `browser
+    /// reopen`).
+    #[cfg(feature = "shots")]
+    pub fn close_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self
+            .tabs
+            .iter()
+            .find(|t| t.tool == PanelTool::Browser)
+            .map(|t| t.id)
+        {
+            self.close(id, window, cx);
+        }
+    }
+
     fn close(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         match self.tabs.iter().find(|t| t.id == id).map(|t| &t.view) {
             Some(View::Browser(b)) => b.update(cx, |b, cx| {

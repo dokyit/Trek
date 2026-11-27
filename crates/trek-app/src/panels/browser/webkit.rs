@@ -556,12 +556,17 @@ pub fn history(wv: &wry::WebView) -> Option<Vec<u8>> {
 }
 
 /// Put a kept back and forward list into a view that hasn't loaded anything: WebKit loads its
-/// page in front, and Back and Forward go where they went.
-pub fn restore_history(wv: &wry::WebView, state: &[u8]) {
+/// page in front, and Back and Forward go where they went. Whether it took: WebKit leaves the
+/// view without an address when it can't read the state, and the caller loads one instead.
+pub fn restore_history(wv: &wry::WebView, state: &[u8]) -> bool {
     let data = objc2_foundation::NSData::with_bytes(state);
-    // SAFETY: main thread; the view is new and live, and WebKit checks the state it's given (one
-    // it can't read leaves the view as it was, and the caller loads the address instead).
-    unsafe { wv.webview().setInteractionState(Some(&data)) };
+    let view = wv.webview();
+    // SAFETY: main thread; the view is new and live, and WebKit checks the state it's given.
+    // (wry's own `url()` unwraps the address, which a view that loaded nothing hasn't got.)
+    unsafe {
+        view.setInteractionState(Some(&data));
+        view.URL().is_some()
+    }
 }
 
 /// The app that opens `url` on this Mac, by its name.
