@@ -15,10 +15,11 @@
 //! A link or window the page asks for is reported with its address (`Event::Wants`) and never
 //! followed here. Whether the user clicked for it is for the app to see, not for the page to say:
 //!
-//! - macOS: every mouse button and key AppKit hands the app is noted before it's dispatched (a
+//! - macOS: every mouse button AppKit hands the app is noted before it's dispatched (a
 //!   local event monitor: `platform::Clip::clicked` says when one last went to this view). A
-//!   page's script can't make one.
-//! - Linux: GTK's own button and key signals on the web view's widget, likewise.
+//!   page's script can't make one. Keys don't count: the page's own script could spend a "click"
+//!   on an address the key had nothing to do with.
+//! - Linux: GTK's own button signals on the web view's widget, likewise.
 //! - Windows: the page's view takes its input in WebView2's own processes, where the app sees
 //!   none of it. WebView2 says of each new window and each navigation whether a user gesture
 //!   started it (`IsUserInitiated`): that is what's reported (`Event::Wants`'s `engine`).
@@ -400,35 +401,34 @@ mod platform {
         static PRESSED: std::cell::Cell<Option<Press>> = const { std::cell::Cell::new(None) };
     }
 
-    /// NSEventType: left, right and other buttons going down and up, and a key going down.
+    /// NSEventType: left, right and other buttons going down and up. Keys aren't here: a key
+    /// the user presses in the page isn't a click on anything (the page's own script can spend
+    /// a "click" the gate counts on an address the key had nothing to do with), so only a mouse
+    /// button opens a link (`Clip::clicked`).
     const LEFT_DOWN: usize = 1;
     const LEFT_UP: usize = 2;
     const RIGHT_DOWN: usize = 3;
     const RIGHT_UP: usize = 4;
-    const KEY_DOWN: usize = 10;
     const OTHER_DOWN: usize = 25;
     const OTHER_UP: usize = 26;
 
-    /// Note every button and key AppKit hands the app, before it's dispatched (once, for the
+    /// Note every mouse button AppKit hands the app, before it's dispatched (once, for the
     /// app's life): what `Clip::clicked` answers from. These are the system's events; nothing a
     /// page runs can make one, or reach this.
     fn watch_presses() {
         if WATCHING.replace(true) {
             return;
         }
-        let mask: u64 = [
-            LEFT_DOWN, LEFT_UP, RIGHT_DOWN, RIGHT_UP, KEY_DOWN, OTHER_DOWN, OTHER_UP,
-        ]
-        .iter()
-        .fold(0, |m, t| m | (1u64 << t));
+        let mask: u64 = [LEFT_DOWN, LEFT_UP, RIGHT_DOWN, RIGHT_UP, OTHER_DOWN, OTHER_UP]
+            .iter()
+            .fold(0, |m, t| m | (1u64 << t));
         let note = block2::RcBlock::new(
             |event: NonNull<objc2_app_kit::NSEvent>| -> *mut objc2_app_kit::NSEvent {
                 // SAFETY: AppKit's own event, valid for the call.
                 let e = unsafe { event.as_ref() };
-                let key = e.r#type().0 == KEY_DOWN;
                 PRESSED.set(Some(Press {
                     window: e.windowNumber(),
-                    at: (!key).then(|| e.locationInWindow()),
+                    at: Some(e.locationInWindow()),
                     when: std::time::Instant::now(),
                 }));
                 event.as_ptr()
@@ -510,25 +510,20 @@ mod platform {
             }
         }
 
-        /// When the user last pressed a mouse button over this view, or a key while a view in it
-        /// had the keys, as AppKit handed it to the app (`watch_presses`). `None`: the last
-        /// press went elsewhere, or there was none.
+        /// When the user last pressed a mouse button over this view, as AppKit handed it to the
+        /// app (`watch_presses`). `None`: the last press went elsewhere, or there was none.
         pub fn clicked(&self) -> Option<std::time::Instant> {
             let press = PRESSED.get()?;
             let window = self.host.window()?;
             if window.windowNumber() != press.window || self.view.isHidden() {
                 return None;
             }
-            let ours = match press.at {
-                Some(at) => {
-                    let frame = self.view.convertRect_toView(self.view.bounds(), None);
-                    at.x >= frame.origin.x
-                        && at.x <= frame.origin.x + frame.size.width
-                        && at.y >= frame.origin.y
-                        && at.y <= frame.origin.y + frame.size.height
-                }
-                None => self.holds_keys(&window),
-            };
+            let at = press.at?;
+            let frame = self.view.convertRect_toView(self.view.bounds(), None);
+            let ours = at.x >= frame.origin.x
+                && at.x <= frame.origin.x + frame.size.width
+                && at.y >= frame.origin.y
+                && at.y <= frame.origin.y + frame.size.height;
             ours.then_some(press.when)
         }
 
@@ -704,12 +699,17 @@ mod platform {
     /// What a page's view does without that no policy directive stops in WebKit, by WebKit's own
     /// name for each switch: WebRTC (a peer connection reaches whatever server it's given), and
     /// `<link rel="preconnect">` and its kin (a connection, and a DNS lookup, to any host named).
+    /// DNS prefetching too: WebKit dropped the privacy-invasive kinds itself, and the
+    /// `<link rel="dns-prefetch">` switch (`LinkDNSPrefetchEnabled`, gone again in WebKit's
+    /// 2026 releases, where the feature is simply on) is named under both names it had.
     const OFF: &[&str] = &[
         "PeerConnectionEnabled",
         "LinkPreconnect",
         "LinkPreconnectEarlyHintsEnabled",
         "LinkPrefetchEnabled",
         "SpeculationRulesPrefetchEnabled",
+        "LinkDNSPrefetchEnabled",
+        "DNSPrefetchingEnabled",
     ];
 
     /// Turn `OFF` off in this view (its preferences are its own: the Browser's pages keep
@@ -1275,8 +1275,9 @@ mod platform {
         off
     }
 
-    /// Note when GTK hands the page's view a mouse button or a key: the system's own events,
-    /// which nothing a page runs can make.
+    /// Note when GTK hands the page's view a mouse button: the system's own events, which
+    /// nothing a page runs can make. Keys aren't clicks (as on the Mac): the page's own script
+    /// could spend one on an address the key had nothing to do with.
     pub fn watch_clicks(
         web: &wry::WebView,
     ) -> std::rc::Rc<std::cell::Cell<Option<std::time::Instant>>> {
@@ -1284,17 +1285,13 @@ mod platform {
         use wry::WebViewExtUnix as _;
         let clicked = std::rc::Rc::new(std::cell::Cell::new(None));
         let view = web.webview();
-        let (down, up, key) = (clicked.clone(), clicked.clone(), clicked.clone());
+        let (down, up) = (clicked.clone(), clicked.clone());
         view.connect_button_press_event(move |_, _| {
             down.set(Some(std::time::Instant::now()));
             gtk::glib::Propagation::Proceed
         });
         view.connect_button_release_event(move |_, _| {
             up.set(Some(std::time::Instant::now()));
-            gtk::glib::Propagation::Proceed
-        });
-        view.connect_key_press_event(move |_, _| {
-            key.set(Some(std::time::Instant::now()));
             gtk::glib::Propagation::Proceed
         });
         clicked

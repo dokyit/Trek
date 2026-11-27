@@ -584,14 +584,21 @@ enum Answer {
     No,
 }
 
-/// The user answered the card of document `hash` about the hosts it shows.
-fn answer_ask(hash: u64, answer: Answer, cx: &mut App) {
+/// The user answered the card of document `hash` about `hosts` — the hosts its strip drew, not
+/// whatever the queue holds now: the page may have had more stopped while the click was on its
+/// way, and those were never shown.
+fn answer_ask(hash: u64, answer: Answer, hosts: Vec<String>, cx: &mut App) {
     let registry = cx.default_global::<Registry>();
-    let hosts = registry
-        .asks
-        .entry(hash)
-        .or_default()
-        .answer(answer != Answer::No);
+    let asks = registry.asks.entry(hash).or_default();
+    // The strip's list changed under the click (a redraw is on its way): a click this soon
+    // after may be for hosts the user hasn't read. Ignore it.
+    if asks
+        .changed()
+        .is_some_and(|at| at.elapsed() < Duration::from_millis(300))
+    {
+        return;
+    }
+    let hosts = asks.answer_shown(answer != Answer::No, &hosts);
     match answer {
         Answer::No => {}
         Answer::Once => registry.once.entry(hash).or_default().extend(hosts),
@@ -684,12 +691,14 @@ fn ask_strip(doc: &Doc, key: usize, look: &Look, cx: &App) -> Option<AnyElement>
         .filter(|h| !h.is_empty())?;
     let hash = doc.hash;
     let button = |name: &str, label: &'static str, primary: bool, answer: Answer| {
+        // The answer is for the hosts this strip drew, however the queue moves before the click.
+        let drawn = hosts.clone();
         ask_button(
             SharedString::from(format!("artifact-{name}-{key}")),
             label,
             primary,
             look,
-            move |_, cx| answer_ask(hash, answer, cx),
+            move |_, cx| answer_ask(hash, answer, drawn.clone(), cx),
         )
     };
     Some(
@@ -712,10 +721,20 @@ fn ask_strip(doc: &Doc, key: usize, look: &Look, cx: &App) -> Option<AnyElement>
                     .text_size(px(text::LABEL))
                     .line_height(relative(1.45))
                     .text_color(look.fg)
-                    .child(format!(
-                        "This page wants to load from {}.",
-                        core::net::host_list(&hosts)
-                    )),
+                    .child({
+                        let mut text = format!(
+                            "This page wants to load from {}.",
+                            core::net::host_list(&hosts)
+                        );
+                        // A host that publishes what was asked of it can be read back later:
+                        // the path a page asks for can spell out what it knows.
+                        if hosts.iter().any(|h| core::net::leak_host(h)) {
+                            text.push_str(
+                                " Anyone can see which files a page asks this host for.",
+                            );
+                        }
+                        text
+                    }),
             )
             .child(
                 h_flex()
@@ -729,6 +748,64 @@ fn ask_strip(doc: &Doc, key: usize, look: &Look, cx: &App) -> Option<AnyElement>
                         Answer::Always,
                     ))
                     .child(button("deny", "Don't allow", false, Answer::No)),
+            )
+            .into_any_element(),
+    )
+}
+
+/// The card's confirm for a link its page wants opened in the user's browser where no page may
+/// load from and the user hasn't allowed the host: "Open evil.example?" Open / Cancel. Trek
+/// draws it, outside the page, so nothing in the page can word or cover it; the host is shown
+/// as written (punycode stays punycode). `None` when no link waits.
+fn link_ask_strip(doc: &Doc, key: usize, look: &Look, cx: &App) -> Option<AnyElement> {
+    let (_url, host) = cx
+        .try_global::<Registry>()
+        .and_then(|r| r.link_asks.get(&doc.hash).cloned())?;
+    let hash = doc.hash;
+    let button = |name: &str, label: &'static str, primary: bool, open: bool| {
+        ask_button(
+            SharedString::from(format!("artifact-link-{name}-{key}")),
+            label,
+            primary,
+            look,
+            move |_, cx| {
+                let pending = cx.default_global::<Registry>().link_asks.remove(&hash);
+                if open && let Some((url, _)) = pending {
+                    cx.open_url(&url);
+                }
+                crate::visualization::relayout(cx);
+                cx.refresh_windows();
+            },
+        )
+    };
+    Some(
+        h_flex()
+            .id(("artifact-link-ask", key))
+            .test_support()
+            .w_full()
+            .flex_wrap()
+            .gap_x(px(10.))
+            .gap_y(px(6.))
+            .px_4()
+            .py(px(8.))
+            .border_t_1()
+            .border_color(look.hairline)
+            .bg(look.fg.opacity(0.03))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(180.))
+                    .text_size(px(text::LABEL))
+                    .line_height(relative(1.45))
+                    .text_color(look.fg)
+                    .child(format!("Open {host}?")),
+            )
+            .child(
+                h_flex()
+                    .flex_none()
+                    .gap(px(6.))
+                    .child(button("open", "Open", true, true))
+                    .child(button("cancel", "Cancel", false, false)),
             )
             .into_any_element(),
     )
@@ -911,6 +988,7 @@ fn card(doc: &Arc<Doc>, key: usize, window: &mut Window, cx: &mut App) -> AnyEle
         body.into_any_element()
     };
     let ask = ask_strip(doc, key, &look, cx);
+    let link = link_ask_strip(doc, key, &look, cx);
     shell(
         SharedString::from(format!("trek-artifact-{key}")),
         &look,
@@ -935,6 +1013,7 @@ fn card(doc: &Arc<Doc>, key: usize, window: &mut Window, cx: &mut App) -> AnyEle
         &look,
     ))
     .children(ask)
+    .children(link)
     .child(body)
     .into_any_element()
 }
@@ -1046,6 +1125,7 @@ fn expand_artifact(doc: &Arc<Doc>, window: &mut Window, cx: &mut App) {
         // What the page asks about is asked here too: the card in the answer is under the
         // dialog.
         let ask = ask_strip(&doc, usize::MAX, &look, cx);
+        let link = link_ask_strip(&doc, usize::MAX, &look, cx);
         dialog
             .w(w)
             .margin_top(px(56.))
@@ -1056,6 +1136,7 @@ fn expand_artifact(doc: &Arc<Doc>, window: &mut Window, cx: &mut App) {
                     .child(title.clone()),
             )
             .when_some(ask, |dialog, ask| dialog.child(ask))
+            .when_some(link, |dialog, link| dialog.child(link))
             .child(
                 div()
                     .id("artifact-expanded")
@@ -1232,6 +1313,9 @@ pub struct ArtifactState {
     had_focus: Option<FocusHandle>,
     /// Opens the page's links on the user's own clicks alone (`core::net::LinkGate`).
     links: core::net::LinkGate,
+    /// When the engine last vouched for a user gesture (Windows): the gesture's first instant,
+    /// kept so every request it makes spends the same click.
+    engine_gesture: Option<Instant>,
     /// The page's `trek.send` calls, one a second at most (`core::SendGate`).
     sends: core::SendGate,
     height_changes: u32,
@@ -1296,6 +1380,7 @@ impl ArtifactState {
             has_keys: false,
             had_focus: None,
             links: core::net::LinkGate::default(),
+            engine_gesture: None,
             sends: core::SendGate::default(),
             height_changes: 0,
             pending_seek: None,
@@ -1867,7 +1952,17 @@ impl ArtifactState {
         };
         let now = Instant::now();
         let clicked = match engine {
-            Some(true) => Some(now),
+            // The engine's word stays "a gesture" for all of it: its first instant is kept, so
+            // every address it asks for spends the same click and opens one (`LinkGate`).
+            Some(true) => match self.engine_gesture {
+                Some(at) if now.saturating_duration_since(at) <= core::net::LINK_GESTURE => {
+                    Some(at)
+                }
+                _ => {
+                    self.engine_gesture = Some(now);
+                    Some(now)
+                }
+            },
             Some(false) => None,
             None => self.surface.as_ref().and_then(|s| s.clicked()),
         };
@@ -1880,6 +1975,22 @@ impl ArtifactState {
         if std::env::var_os("TREK_SHOT_DIR").is_some() {
             cx.default_global::<Registry>().opened.push(url);
             return;
+        }
+        // A real click is still only a click: the page's own script can spend it on an address
+        // the click wasn't on (`a.click()` in a `pointerdown` handler). So a web address to a
+        // host no page may load from and the user hasn't allowed opens only on the card's own
+        // confirm, drawn by Trek outside the page (`link_ask_strip`).
+        if let Some(host) = core::net::link_host(&url) {
+            let allowed = core::net::open_host(&host)
+                || self.hosts.iter().any(|h| h.eq_ignore_ascii_case(&host));
+            if !allowed {
+                cx.default_global::<Registry>()
+                    .link_asks
+                    .insert(self.doc.hash, (url, host));
+                cx.notify();
+                crate::visualization::relayout(cx);
+                return;
+            }
         }
         cx.open_url(&url);
     }
@@ -2300,6 +2411,9 @@ struct Registry {
     asks: HashMap<u64, core::net::Asks>,
     /// The hosts the user allowed a document's page once: until Trek quits.
     once: HashMap<u64, Vec<String>>,
+    /// A link a document's page wants opened in the user's browser, waiting on the card's own
+    /// confirm (`link_ask`): (the address, its host as written).
+    link_asks: HashMap<u64, (String, String)>,
     /// The videos from the web the user said may load, by document: until Trek quits.
     loaded: std::collections::HashSet<u64>,
     /// The capture build: the links that would have opened in the user's browser, in order.
@@ -2322,6 +2436,7 @@ impl Default for Registry {
             kept: HashMap::new(),
             asks: HashMap::new(),
             once: HashMap::new(),
+            link_asks: HashMap::new(),
             loaded: std::collections::HashSet::new(),
             #[cfg(feature = "shots")]
             opened: Vec::new(),

@@ -1734,22 +1734,26 @@ process.stdout.write(JSON.stringify({ sent, out: out === undefined ? null : out 
     /// as they open is in `net::OPEN_SOURCES`, so a recipe followed to the letter asks nothing.
     #[test]
     fn the_card_recipes_load_only_from_open_sources() {
+        // Every https address a card recipe gives its page must be a source every page may load
+        // (`net::allowed`) — not only the ones in script and stylesheet tags. The exceptions
+        // are link targets: addresses the card hands the user's browser on a click, which the
+        // link gate and the card's own confirm guard, not the page's policy.
+        const LINK_TARGETS: &[&str] = &["github.com"];
         let mut loads = 0;
         for name in crate::skills::CARD_RECIPES {
             let (_, md) = crate::skills::SHIPPED
                 .iter()
                 .find(|(n, _)| *n == name)
                 .expect("shipped");
-            for line in md.lines().map(str::trim) {
-                let tag = line.starts_with("<script src=")
-                    || line.starts_with("<link rel=\"stylesheet\"");
+            for line in md.lines() {
                 for (at, _) in line.match_indices("\"https://") {
                     let url = line[at + 1..].split('"').next().unwrap_or_default();
-                    // What a `<script>` or stylesheet names, and the map's tiles and glyphs.
-                    if tag || url.contains("openfreemap") {
-                        loads += 1;
-                        assert!(net::allowed(url, &[]), "{name}: {url}");
+                    let host = net::link_host(url).unwrap_or_default();
+                    if LINK_TARGETS.contains(&host.as_str()) {
+                        continue;
                     }
+                    loads += 1;
+                    assert!(net::allowed(url, &[]), "{name}: {url}");
                 }
             }
         }

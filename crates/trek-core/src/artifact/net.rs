@@ -39,6 +39,10 @@ pub const OPEN_SOURCES: &[&str] = &[
     "https://fonts.gstatic.com/",
     // The map card's vector tiles and glyphs.
     "https://tiles.openfreemap.org/",
+    // The map card's raster fallback (no WebGL): CARTO's free basemaps. Like the vector tiles,
+    // they're a basemap Trek's own card draws; CARTO doesn't publish what was asked for, as
+    // OpenStreetMap's tile server does.
+    "https://basemaps.cartocdn.com/rastertiles/",
     // The library files the map card pins: exact versions of widely used packages.
     "https://unpkg.com/leaflet@1.9.4/dist/",
     "https://unpkg.com/maplibre-gl@5.24.0/dist/",
@@ -130,6 +134,19 @@ pub fn host_of(url: &str) -> Option<String> {
     askable_host(&parts(url)?.0)
 }
 
+/// The host of a web address the page wants opened in the user's browser (`http:` or `https:`),
+/// lower case, as written — punycode stays punycode, so a look-alike reads as what it is. `None`
+/// for another scheme (a `mailto:` has no host to name) or an address with no authority.
+pub fn link_host(url: &str) -> Option<String> {
+    let url = url.trim();
+    let rest = ["https://", "http://"]
+        .iter()
+        .find_map(|s| url.to_ascii_lowercase().starts_with(s).then(|| &url[s.len()..]))?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit('@').next()?.split(':').next()?;
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
 /// Whether the policy made from `hosts` (`page_csp`) lets a page load `url`: it's under one of
 /// `OPEN_SOURCES`, or on one of `hosts` exactly. A host is matched whole: `cdnjs.cloudflare.com`
 /// allows neither `cdnjs.cloudflare.com.evil.example` nor `xcdnjs.cloudflare.com`. The engine
@@ -164,6 +181,22 @@ pub fn open_host(host: &str) -> bool {
         .iter()
         .filter_map(|s| parts(s))
         .any(|(open, _)| open.eq_ignore_ascii_case(host))
+}
+
+/// Hosts that aren't open but that the module's notes name as leak channels: whoever runs them
+/// can read back which files a page asked for (jsDelivr's per-file counts, npm's per-version
+/// counts through unpkg and esm.sh, OpenStreetMap's tile logs). The ask strip warns about them;
+/// "Always allow" stays available — the user may know why they're asking.
+pub const LEAK_HOSTS: &[&str] = &[
+    "cdn.jsdelivr.net",
+    "unpkg.com",
+    "esm.sh",
+    "tile.openstreetmap.org",
+];
+
+/// Whether `host` is a leak channel (`LEAK_HOSTS`).
+pub fn leak_host(host: &str) -> bool {
+    LEAK_HOSTS.iter().any(|h| h.eq_ignore_ascii_case(host))
 }
 
 /// `hosts` as a user's list is kept: each a public site (`askable_host`), once, `MAX_HOSTS` at
@@ -237,6 +270,9 @@ pub struct Asks {
     pending: Vec<String>,
     /// Refused for this page: not asked about again.
     refused: Vec<String>,
+    /// When the hosts the card shows last changed: a click on the strip this soon after is on a
+    /// list the user may not have read yet, and is ignored.
+    changed: Option<Instant>,
 }
 
 impl Asks {
@@ -258,6 +294,10 @@ impl Asks {
             return false;
         }
         self.pending.push(host);
+        // The strip may name one more host now: what it draws changed.
+        if self.pending.len() <= Self::SHOWN {
+            self.changed = Some(Instant::now());
+        }
         true
     }
 
@@ -266,23 +306,47 @@ impl Asks {
         &self.pending[..self.pending.len().min(Self::SHOWN)]
     }
 
+    /// When the hosts the card shows last changed (`None`: never asked about anything).
+    pub fn changed(&self) -> Option<Instant> {
+        self.changed
+    }
+
     /// The user answered for the hosts shown: they stop waiting, and are returned (to allow) or
     /// kept as refused.
     pub fn answer(&mut self, allow: bool) -> Vec<String> {
-        let n = self.pending.len().min(Self::SHOWN);
-        let hosts: Vec<String> = self.pending.drain(..n).collect();
+        let shown = self.shown().to_vec();
+        self.answer_shown(allow, &shown)
+    }
+
+    /// The user answered for exactly `shown` — the hosts the strip drew, which may be fewer than
+    /// `shown()` now (the page kept trying hosts while the click was on its way). Each is
+    /// answered only if it's still waiting; the rest of the queue is left alone.
+    pub fn answer_shown(&mut self, allow: bool, shown: &[String]) -> Vec<String> {
+        let mut answered = Vec::new();
+        self.pending.retain(|h| {
+            let hit = shown.iter().any(|s| s.eq_ignore_ascii_case(h));
+            if hit {
+                answered.push(h.clone());
+            }
+            !hit
+        });
+        self.changed = Some(Instant::now());
         if allow {
-            hosts
+            answered
         } else {
-            self.refused.extend(hosts);
+            self.refused.extend(answered);
             Vec::new()
         }
     }
 
     /// Hosts allowed elsewhere meanwhile (another card's "Always allow") need no answer here.
     pub fn settle(&mut self, hosts: &[String]) {
+        let before = self.pending.len();
         self.pending
             .retain(|p| !hosts.iter().any(|h| h.eq_ignore_ascii_case(p)));
+        if self.pending.len() != before {
+            self.changed = Some(Instant::now());
+        }
     }
 }
 
@@ -618,6 +682,21 @@ mod tests {
         assert!(asks.answer(false).is_empty());
         assert!(asks.shown().is_empty());
         assert!(!asks.stopped("https://c.example.org/again", &always));
+        // An answer is for exactly the hosts the strip drew, however the queue moved: a host
+        // stopped after the draw isn't approved, and one settled meanwhile stays answered for.
+        {
+            let mut asks = Asks::default();
+            for host in ["a.example.org", "b.example.org", "c.example.org"] {
+                assert!(asks.stopped(&format!("https://{host}/x"), &always));
+            }
+            let drawn = asks.shown().to_vec();
+            assert!(asks.stopped("https://late.example.org/x", &always));
+            assert_eq!(asks.answer_shown(true, &drawn), drawn);
+            assert_eq!(asks.shown(), ["late.example.org"]);
+            // A host the strip never drew can't be refused through it either.
+            assert!(asks.answer_shown(false, &drawn).is_empty());
+            assert_eq!(asks.shown(), ["late.example.org"]);
+        }
         // Allowed from another card meanwhile: nothing left to ask here.
         assert!(asks.stopped("https://d.example.org/x", &always));
         asks.settle(&hosts(&["D.example.org"]));
@@ -661,5 +740,40 @@ mod tests {
         assert_eq!(LINK_GESTURE, ms(1000));
         assert!(open_host("cdnjs.cloudflare.com") && open_host("UNPKG.com"));
         assert!(!open_host("cdn.jsdelivr.net") && !open_host("cloudflare.com"));
+    }
+
+    #[test]
+    fn a_link_host_is_the_address_as_written() {
+        assert_eq!(
+            link_host("https://Evil.Example.com:443/a?b#c").as_deref(),
+            Some("evil.example.com")
+        );
+        assert_eq!(
+            link_host("http://xn--mnchen-3ya.de/x").as_deref(),
+            Some("xn--mnchen-3ya.de")
+        );
+        assert_eq!(link_host("https://user@a.b.c.d:8443/x").as_deref(), Some("a.b.c.d"));
+        for none in ["mailto:a@b.c", "javascript:alert(1)", "https://", "about:blank"] {
+            assert_eq!(link_host(none), None, "{none}");
+        }
+        // The leak channels the ask strip warns about.
+        for host in [
+            "cdn.jsdelivr.net",
+            "unpkg.com",
+            "esm.sh",
+            "tile.openstreetmap.org",
+        ] {
+            assert!(leak_host(host), "{host}");
+        }
+        assert!(!leak_host("tiles.openfreemap.org") && !leak_host("basemaps.cartocdn.com"));
+        // The raster fallback the map card draws is an open source.
+        assert!(allowed(
+            "https://basemaps.cartocdn.com/rastertiles/light_all/10/400/200.png",
+            &[]
+        ));
+        assert!(!allowed(
+            "https://basemaps.cartocdn.com/other/10/400/200.png",
+            &[]
+        ));
     }
 }
