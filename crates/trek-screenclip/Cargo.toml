@@ -14,5 +14,13 @@ anyhow.workspace = true
 gpui-kit.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "tiff", "bmp", "ico", "pnm", "jpeg", "gif", "webp"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Snapshots on a Linux desktop (`desktop`): the portal's Screenshot, through the crate and the
+# version GPUI reaches the portal's settings with; the screen from the X server, with the one
+# GPUI's X11 windows talk to it through; and the X11 window behind one of Trek's, to bring it back.
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "screenshot"] }
+x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
+raw-window-handle = "0.6.2"
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

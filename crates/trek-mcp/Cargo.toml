@@ -13,6 +13,9 @@ path = "src/main.rs"
 serde_json.workspace = true
 trek-ipc.workspace = true
 base64 = "0.22"
+# `trek-mcp video` on every platform: where ffmpeg and yt-dlp are downloaded from when they
+# aren't installed (`trek_core::media_tools`). Also the updaters below (`mac-update`, `win-update`).
+trek-core.workspace = true
 
 [dev-dependencies]
 # The orchestrate tests talk to a listener like Trek's (a socket, or a pipe on Windows).
@@ -20,7 +23,8 @@ trek-ipc = { workspace = true, features = ["server"] }
 tokio.workspace = true
 trek-test-fixtures.workspace = true
 
-# Computer use runs on macOS and Windows, the iOS Simulator on macOS; `orchestrate` runs everywhere.
+# Computer use runs on macOS and Windows, the iOS Simulator on macOS; `orchestrate`, `browser` and
+# `video` run everywhere.
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = { version = "0.24", features = ["highsierra", "elcapitan"] }
 # `proc_pidpath` and `dlsym`, to tell whether the host app's bundle was replaced under it.

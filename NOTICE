@@ -83,3 +83,10 @@ Third-party materials bundled in this repository:
   docs/assets/icons/platforms draw Simple Icons glyphs (CC0 1.0) and a plain four-pane
   window; the marks they show
   (Rust, Swift, SQLite, Apple, Windows) belong to their owners.
+* The Browser's ad blocker on macOS (crates/trek-app/src/panels/browser_adblock) is built with
+  Brave's adblock crate (adblock-rust, github.com/brave/adblock-rust), MPL-2.0, used unmodified
+  as a dependency from crates.io, where its source is. The filter lists it reads (uBlock Origin's
+  filters, EasyList, EasyPrivacy, Peter Lowe's list, the Online Malicious URL Blocklist) and
+  uBlock Origin's scriptlets and redirect resources (Raymond Hill and contributors, GPLv3) are not
+  part of Trek: Trek downloads them from where their authors publish them into the user's data
+  folder, and runs the scriptlets unchanged in pages, as the lists ask.

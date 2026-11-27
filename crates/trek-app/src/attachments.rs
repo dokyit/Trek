@@ -1354,8 +1354,10 @@ fn make_poster(video: &Path, png: &Path) -> Result<()> {
     made
 }
 
-/// Linux: a frame a second in, by ffmpeg where it's installed (Linux has no thumbnailer every
-/// desktop shares), as big as the Mac's. Without ffmpeg the tile has no poster.
+/// Linux: a frame a second in, by ffmpeg (Linux has no thumbnailer every desktop shares), as big
+/// as the Mac's: the ffmpeg on the PATH, or the one Trek downloaded for the video watcher, whose
+/// folder (`media_tools::dir`) is on the PATH `detect::which` looks along. With no ffmpeg at all
+/// the tile has no poster.
 #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
 fn make_poster(video: &Path, png: &Path) -> Result<()> {
     if png.is_file() {
@@ -1368,29 +1370,29 @@ fn make_poster(video: &Path, png: &Path) -> Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let work = png.with_extension("making.png");
-    let made = std::process::Command::new(ffmpeg)
-        .args(["-nostdin", "-loglevel", "error", "-y", "-ss", "1", "-i"])
-        .arg(video)
-        .args([
-            "-frames:v",
-            "1",
-            "-vf",
-            "scale='min(256,iw)':'min(256,ih)':force_original_aspect_ratio=decrease",
-        ])
-        .arg(&work)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    match made {
-        Ok(status) if status.success() && work.is_file() => {
-            std::fs::rename(&work, png).map_err(anyhow::Error::from)
+    // A second in, past a fade from black. A clip shorter than that has no frame there (ffmpeg
+    // ends well and writes nothing): its first frame then.
+    for at in ["1", "0"] {
+        let made = std::process::Command::new(&ffmpeg)
+            .args(["-nostdin", "-loglevel", "error", "-y", "-ss", at, "-i"])
+            .arg(video)
+            .args([
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale='min(256,iw)':'min(256,ih)':force_original_aspect_ratio=decrease",
+            ])
+            .arg(&work)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if made.is_ok_and(|status| status.success()) && work.is_file() {
+            return std::fs::rename(&work, png).map_err(anyhow::Error::from);
         }
-        _ => {
-            let _ = std::fs::remove_file(&work);
-            bail!("ffmpeg made no frame of {}", video.display())
-        }
+        let _ = std::fs::remove_file(&work);
     }
+    bail!("ffmpeg made no frame of {}", video.display())
 }
 
 #[cfg(any(

@@ -364,10 +364,6 @@ fn the_settings_scroll_container_can_be_found_by_the_driver() {
 fn the_video_tools_say_what_trek_downloads_and_how_far_it_has_got() {
     use trek_app::workspace::MediaSetup;
     use trek_core::media_tools::{Progress, Tool};
-    // Linux has no video watcher (`trek-mcp video` isn't built there), so nothing to download.
-    if trek_app::words::is_linux() {
-        return;
-    }
     run(async |cx| {
         let trek = open(cx);
         trek.update(cx, |ws, cx| {

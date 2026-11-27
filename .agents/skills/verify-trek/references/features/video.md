@@ -14,7 +14,7 @@ The player is the card a note's video plays in (`artifact::video_card`: the engi
 
 Local files are served by the card at `/media` (in pieces, for seeking) under the video policy (`media-src 'self'`, no scripts); a web video plays from its own address under `REMOTE_VIDEO_CSP` (`media-src https:`, nothing else). With Settings › General › Interactive artifacts off, an answer's video is a plain link line and no player shows.
 
-Settings › Tools › Video: the "Video watcher" switch (on by default; new sessions) and whether ffmpeg and yt-dlp are installed, each with an Install button that has Trek download its own (a pinned, SHA-256-checked build in Trek's data folder, with progress; no Homebrew or winget); the first `watch_video` does the same by itself when ffmpeg is missing. With Homebrew or winget here, a failed download offers it instead.
+Settings › Tools › Video: the "Video watcher" switch (on by default; new sessions) and whether ffmpeg and yt-dlp are installed, each with an Install button that has Trek download its own (a pinned, SHA-256-checked build in Trek's data folder, with progress; no Homebrew or winget, and on Linux no `sudo`); the first `watch_video` does the same by itself when ffmpeg is missing. With a package manager here (Homebrew, winget, or on Linux apt, dnf, pacman or zypper), a failed download offers it instead. The capture build downloads for real with `media-demo install ffmpeg|yt-dlp` (into the run's data folder; `wait file tools/ffprobe 180000` waits for it), and shows a failed one with `media-demo failed ffmpeg|yt-dlp`. On Linux a transcript needs the `whisper` command: without it the call's answer says so and the frames come alone.
 
 ## Reach it as a user
 
