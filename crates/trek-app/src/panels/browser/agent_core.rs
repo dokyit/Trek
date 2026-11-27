@@ -37,6 +37,9 @@ pub fn guard(probe: &Value) -> Value {
         "password": probe["password"].as_bool() == Some(true),
         "action": probe["submits"]["action"].as_str(),
         "download": probe["download"].as_str(),
+        // The page the probe ran on: what was approved doesn't carry to another site that
+        // reuses the same refs (`agent.js`, `changed`).
+        "page": probe["page"].as_str(),
     })
 }
 
@@ -355,6 +358,9 @@ pub enum Sensitive {
     /// time, whatever the thread's access.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Passkey,
+    /// An action in a tab whose safety probe ran in the page's own world (Windows' fallback when
+    /// its isolated world couldn't be made): the probe can't be trusted, so every action asks.
+    PageWorld,
 }
 
 /// One action to ask about: what it is, and what the approval card says (after "<Agent> wants
@@ -392,7 +398,7 @@ pub fn same_page(asked: (u64, &str), now: (u64, &str)) -> bool {
 /// access asks nothing; Auto lets a form go to another site and a download start, but asks before
 /// a password or a script; Supervised and Auto-accept edits ask before all four.
 pub fn needs_asking(kind: &Sensitive, access: HandHolding) -> bool {
-    if *kind == Sensitive::Passkey {
+    if matches!(kind, Sensitive::Passkey | Sensitive::PageWorld) {
         return true;
     }
     match access {
@@ -412,6 +418,31 @@ pub fn types_a_character(key: &Value) -> bool {
         && !held("ctrl")
         && !held("alt")
         && !held("meta")
+}
+
+/// The card for an action in a tab whose safety probe ran in the page's own world: every action
+/// asks, and the card says the page can't be checked.
+pub fn page_world_ask(tool: &str, probe: Option<&Value>) -> Ask {
+    let page = probe.and_then(|p| p["page"].as_str()).unwrap_or_default();
+    let host = super::host_of(page).unwrap_or_else(|| "the page".into());
+    let what = probe
+        .and_then(|p| p["describe"].as_str())
+        .unwrap_or("the element")
+        .to_string();
+    let verb = match tool {
+        "browser_type" => "type into",
+        "browser_press" => "press a key at",
+        _ => "click",
+    };
+    Ask {
+        kind: Sensitive::PageWorld,
+        title: format!("{verb} {what} on {host}"),
+        detail: format!(
+            "Trek couldn't check this page in its own script world (the isolated world failed to start), so it can't be trusted to say what {what} does. The agent wants to {verb} it anyway."
+        ),
+        site: site_of(page),
+        hidden: 0,
+    }
 }
 
 /// The card for a passkey a page asked Trek's authenticator for while an agent drives the
@@ -786,15 +817,16 @@ mod tests {
             );
         }
         assert_eq!(v[3], "", "nothing was typed");
-        // What Rust hands the action is the probe's own answer.
-        let probe = json!({"password": true, "submits": {"action": "https://a.example/x", "method": "post"}});
+        // What Rust hands the action is the probe's own answer, the page it ran on included (an
+        // approval doesn't carry to another site that reuses the same refs).
+        let probe = json!({"password": true, "submits": {"action": "https://a.example/x", "method": "post"}, "page": "https://a.example/form"});
         assert_eq!(
             guard(&probe),
-            json!({"password": true, "action": "https://a.example/x", "download": null})
+            json!({"password": true, "action": "https://a.example/x", "download": null, "page": "https://a.example/form"})
         );
         assert_eq!(
             guard(&json!({"describe": "link"})),
-            json!({"password": false, "action": null, "download": null})
+            json!({"password": false, "action": null, "download": null, "page": null})
         );
     }
 

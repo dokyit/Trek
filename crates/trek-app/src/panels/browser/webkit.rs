@@ -152,6 +152,18 @@ fn view_loads(url: &str, mtm: MainThreadMarker) -> bool {
         })
 }
 
+/// Whether `url` is a form submission to a site other than the page `webview` shows.
+fn foreign_to_page(webview: &WKWebView, url: &str) -> bool {
+    let current = unsafe { webview.URL() }
+        .and_then(|u| u.absoluteString())
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    match (super::origin_of(url), super::origin_of(&current)) {
+        (Some(a), Some(b)) => !a.eq_ignore_ascii_case(b),
+        _ => false,
+    }
+}
+
 pub struct Ivars {
     tab: u64,
     tx: async_channel::Sender<Msg>,
@@ -384,6 +396,24 @@ define_class!(
                     url,
                     domain: "WebKitErrorDomain".into(),
                     code: 103,
+                });
+                return;
+            }
+            // While an agent's action that wasn't approved as a submission runs in this tab, a
+            // form submission to another site is refused: `agent.js` checks the element again
+            // before it acts, but the page's own handlers can still move the form in between.
+            if super::form_guarded(v.tab)
+                && matches!(
+                    unsafe { action.navigationType() },
+                    objc2_web_kit::WKNavigationType::FormSubmitted
+                        | objc2_web_kit::WKNavigationType::FormResubmitted
+                )
+                && foreign_to_page(webview, &url)
+            {
+                decide.call((POLICY_CANCEL,));
+                let _ = v.tx.try_send(Msg::SubmitBlocked {
+                    tab: v.tab,
+                    url,
                 });
                 return;
             }

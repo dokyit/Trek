@@ -140,6 +140,8 @@ pub(super) struct Driver {
     refocus: Option<FocusHandle>,
     /// Page dialogs Trek answered during the call under way (`dismissed`), for its answer.
     dialogs: Vec<String>,
+    /// Form submissions to another site the navigation policy refused during a call (`Msg::SubmitBlocked`).
+    pub(super) blocked: Vec<String>,
 }
 
 impl Driver {
@@ -229,6 +231,7 @@ impl BrowserPanel {
                     cx,
                     call: &call,
                     stops,
+                    submit_ok: false,
                 }
                 .go()
                 .await;
@@ -428,6 +431,21 @@ struct Run<'a> {
     call: &'a AgentCall,
     /// `Driver::stops` when it started: Stop since means the user took over.
     stops: u64,
+    /// The user allowed this action as a form submission to another site: the tab's
+    /// form-submission guard (`super::form_guard`) stays down for it.
+    submit_ok: bool,
+}
+
+/// Lowers a tab's form-submission guard on drop, so a `?` in the guarded section can't leave it
+/// up for the next navigation.
+struct GuardDown(Option<u64>);
+
+impl Drop for GuardDown {
+    fn drop(&mut self) {
+        if let Some(id) = self.0 {
+            super::form_guard(id, false);
+        }
+    }
 }
 
 fn gone<E>(_: E) -> String {
@@ -612,6 +630,10 @@ impl Run<'_> {
             core::script(command, args, true),
             core::script(command, args, false),
         );
+        // When the isolated world couldn't be made the probe ran in the page's own (Windows'
+        // fallback): the tab is marked so every action there asks (`approve`).
+        let fell = std::rc::Rc::new(std::cell::Cell::new(false));
+        let fell_mark = fell.clone();
         self.this
             .update(self.cx, |p, cx| -> Result<(), String> {
                 let tab = p.active_tab().ok_or(NO_TAB)?;
@@ -619,6 +641,7 @@ impl Run<'_> {
                     tab.view.read(cx).raw(),
                     &ours,
                     &pages,
+                    Some(fell_mark),
                     Box::new(move |s| {
                         let _ = tx.try_send(s);
                     }),
@@ -626,10 +649,20 @@ impl Run<'_> {
                 .map_err(|e| format!("The page can't run scripts: {e}"))
             })
             .map_err(gone)??;
-        match self.recv(rx, EVAL_WAIT).await {
+        let out = match self.recv(rx, EVAL_WAIT).await {
             Some(raw) => core::answer(&raw),
             None => Err("The page didn't answer in time: it may be busy, or still loading.".into()),
+        };
+        // The page-side script ran (it answered, or is still on its way): on Windows' fallback
+        // it ran in the page's own world, so the tab's probe can't be trusted from now on.
+        if fell.get() {
+            let _ = self.this.update(self.cx, |p, _| {
+                if let Some(t) = p.tab_mut(p.active) {
+                    t.untrusted_probe = true;
+                }
+            });
         }
+        out
     }
 
     /// Run `js` in the tab in front, in the page's own world (the agent's own script, which is
@@ -712,8 +745,14 @@ impl Run<'_> {
         let now = self.page()?;
         let dialogs = self
             .this
-            .update(self.cx, |p, _| std::mem::take(&mut p.agent.dialogs))
+            .update(self.cx, |p, _| {
+                (
+                    std::mem::take(&mut p.agent.dialogs),
+                    std::mem::take(&mut p.agent.blocked),
+                )
+            })
             .map_err(gone)?;
+        let (dialogs, blocked) = dialogs;
         let mut out = if let Some(id) = opened {
             format!(
                 " It opened tab {id}, now in front: {} ({}).",
@@ -729,6 +768,11 @@ impl Run<'_> {
         for d in dialogs {
             out.push(' ');
             out.push_str(&d);
+        }
+        for b in blocked {
+            out.push_str(&format!(
+                " The page tried to submit a form to {b}; Trek refused it: it wasn't approved as a submission."
+            ));
         }
         Ok(out)
     }
@@ -886,10 +930,37 @@ impl Run<'_> {
         args: &Value,
         probe: Option<&Value>,
     ) -> Result<(), String> {
-        let Some(ask) = core::ask_for(tool, args, probe) else {
+        self.submit_ok = false;
+        // A tab whose probe ran in the page's own world can't be trusted to say what an element
+        // does: every click, type and press there asks, whatever the access level, and the card
+        // says why.
+        let untrusted = matches!(tool, "browser_click" | "browser_type" | "browser_press")
+            && self
+                .this
+                .update(self.cx, |p, _| {
+                    p.active_tab().is_some_and(|t| t.untrusted_probe)
+                })
+                .unwrap_or(false);
+        let mut ask = core::ask_for(tool, args, probe);
+        if untrusted {
+            ask = Some(match ask {
+                Some(mut a) => {
+                    a.detail = format!(
+                        "Trek's check of this page ran in the page's own world, so it can't be trusted to say what {} does.\n\n{}",
+                        probe
+                            .and_then(|p| p["describe"].as_str())
+                            .unwrap_or("it"),
+                        a.detail
+                    );
+                    a
+                }
+                None => core::page_world_ask(tool, probe),
+            });
+        }
+        let Some(ask) = ask else {
             return Ok(());
         };
-        if !core::needs_asking(&ask.kind, self.call.access) {
+        if !untrusted && !core::needs_asking(&ask.kind, self.call.access) {
             return Ok(());
         }
         let thread = self.call.thread.clone();
@@ -902,14 +973,16 @@ impl Run<'_> {
                 }
                 cx.notify();
                 (
-                    p.agent
-                        .allowed
-                        .contains(&(thread.clone(), ask.kind.clone(), ask.site.clone())),
+                    !untrusted
+                        && p.agent
+                            .allowed
+                            .contains(&(thread.clone(), ask.kind.clone(), ask.site.clone())),
                     p.workspace.clone(),
                 )
             })
             .map_err(gone)?;
         if allowed {
+            self.submit_ok = ask.kind == core::Sensitive::ForeignSubmit;
             return Ok(());
         }
         if ask.hidden > 0 {
@@ -943,8 +1016,12 @@ impl Run<'_> {
             self.sleep(Duration::from_millis(200)).await;
         };
         match decision {
-            Decision::Allow => Ok(()),
+            Decision::Allow => {
+                self.submit_ok = ask.kind == core::Sensitive::ForeignSubmit;
+                Ok(())
+            }
             Decision::AllowForSession => {
+                self.submit_ok = ask.kind == core::Sensitive::ForeignSubmit;
                 let key = (thread, ask.kind.clone(), ask.site.clone());
                 let _ = self
                     .this
@@ -958,11 +1035,32 @@ impl Run<'_> {
         }
     }
 
+    /// Raise the active tab's form-submission guard for the action under way, unless the user
+    /// approved it as a submission or this access level lets submissions go without asking.
+    /// Returns it as a `GuardDown`, which lowers it when dropped.
+    fn guard_forms(&mut self) -> GuardDown {
+        let id = if !self.submit_ok
+            && core::needs_asking(&core::Sensitive::ForeignSubmit, self.call.access)
+        {
+            self.this
+                .update(self.cx, |p, _| p.active_tab().map(|t| t.id))
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        if let Some(id) = id {
+            super::form_guard(id, true);
+        }
+        GuardDown(id)
+    }
+
     async fn click(&mut self, r: &str) -> Result<Value, String> {
         let probe = self.page_js("probe", &[json!(r), Value::Null]).await?;
         self.approve("browser_click", &self.call.params.clone(), Some(&probe))
             .await?;
         let (before, tabs) = (self.page()?, self.tab_ids()?);
+        let _guard = self.guard_forms();
         let v = self
             .page_js("click", &[json!(r), core::guard(&probe)])
             .await?;
@@ -980,6 +1078,7 @@ impl Run<'_> {
         let probe = self.page_js("probe", &[json!(r), Value::Null]).await?;
         self.approve("browser_click", &json!({ "ref": r }), Some(&probe))
             .await?;
+        let _guard = self.guard_forms();
         self.page_js("click", &[json!(r), core::guard(&probe)])
             .await
     }
@@ -1002,6 +1101,7 @@ impl Run<'_> {
         // What was just checked (and asked about, if it needed asking) is what's done: the
         // typing and the Enter after it each read the field again as they act.
         let guard = core::guard(&probe);
+        let _guard = self.guard_forms();
         let v = self
             .page_js(
                 "type",
@@ -1038,6 +1138,7 @@ impl Run<'_> {
             guard = core::guard(&probe);
         }
         let (before, tabs) = (self.page()?, self.tab_ids()?);
+        let _guard = self.guard_forms();
         let v = self.page_js("press", &[key, json!(r), guard]).await?;
         let after = self.aftermath(&before, &tabs).await?;
         Self::text(format!("{}.{after}", did(&v)))

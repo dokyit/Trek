@@ -782,6 +782,12 @@ enum Msg {
         tab: u64,
         url: String,
     },
+    /// The navigation policy refused a form submission to another site while an agent's
+    /// unapproved action ran in `tab` (`agent.rs` reports it to the agent).
+    SubmitBlocked {
+        tab: u64,
+        url: String,
+    },
     /// Loading `url` failed before anything of it showed: WebKit's error.
     LoadFailed {
         tab: u64,
@@ -861,6 +867,33 @@ struct Tab {
     sheet: Option<(f64, f64)>,
     /// When the page's process last ended: once it's reloaded, twice in a minute it's an error.
     crashed: Option<Instant>,
+    /// The agent's safety probe for this tab last ran in the page's own world (Windows' fallback
+    /// when its isolated world couldn't be made): it can't be trusted, so every agent action
+    /// here asks (`agent.rs`).
+    untrusted_probe: bool,
+}
+
+/// Tabs where an agent's action that the user didn't approve as a form submission is under way:
+/// the page's navigation policy refuses a form submission to another site meanwhile, since the
+/// page's own handlers can still move the form after `agent.js` checked it.
+static FORM_GUARDS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<u64>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+/// Whether tab `id`'s navigation policy should refuse a form submission to another site now.
+fn form_guarded(id: u64) -> bool {
+    FORM_GUARDS.lock().is_ok_and(|g| g.contains(&id))
+}
+
+/// Raise (`on`) or lower the form-submission guard on tab `id`.
+fn form_guard(id: u64, on: bool) {
+    if let Ok(mut g) = FORM_GUARDS.lock() {
+        if on {
+            g.insert(id);
+        } else {
+            g.remove(&id);
+        }
+    }
 }
 
 /// The window a native web view is made in, by its raw handle: what a task can carry there in
@@ -2103,6 +2136,7 @@ impl BrowserPanel {
             opener: popup.map(|(opener, _)| opener),
             sheet: popup.and_then(|(_, size)| size),
             crashed: None,
+            untrusted_probe: false,
         });
         #[cfg(target_os = "macos")]
         if self.workspace.read(cx).settings.browser.block_trackers
@@ -2441,6 +2475,14 @@ impl BrowserPanel {
                         kind,
                     });
                 }
+            }
+            Msg::SubmitBlocked { tab: id, url } => {
+                // A form submission to another site was refused while an agent's action ran:
+                // its next answer says so (`Driver::blocked`).
+                tracing::debug!("browser: tab {id}'s form to {} was refused", for_log(&url));
+                self.agent
+                    .blocked
+                    .push(host_of(&url).unwrap_or_else(|| url.clone()));
             }
             Msg::LoadFailed {
                 tab: id,

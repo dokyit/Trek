@@ -6,7 +6,10 @@
 // see the change.
 //
 // The page is not to be trusted with any of this: what `probe` says decides whether the user is
-// asked before a password is typed or a form leaves the site. So the script runs in a script
+// asked before a password is typed or a form leaves the site. What the probe buys is that the
+// page can't lie about what a field or form is; it can't keep the page from reading what was
+// typed into a plain text field (an `input` listener and a `fetch` do that), which no page-side
+// script can. So the script runs in a script
 // world of Trek's own (agent.rs: WebKit's content world, a DevTools isolated world on WebView2),
 // which shares the page's document and nothing else: the page can't reach this script's objects,
 // and what the page does to its own `JSON`, `Element.prototype` and the rest isn't seen here.
@@ -589,7 +592,11 @@
     const now = A.probe(ref, key);
     if (!now || now.error) return null;
     const action = (now.submits && now.submits.action) || null;
+    // What was approved was on the page's site: the same ref on another site (a navigation
+    // between the probe and the action) isn't what the user said yes to.
+    const origin = (u) => { try { return new URL(u, location.href).origin; } catch (_) { return ''; } };
     const worse = (now.password && !guard.password)
+      || (guard.page && origin(now.page) !== origin(guard.page))
       || (action && action !== (guard.action || null))
       || (now.download && now.download !== (guard.download || null));
     return worse ? { error: 'The page changed what ' + now.describe + ' does while Trek was checking it, so nothing was done. Take a new browser_snapshot and try again.' } : null;
@@ -655,6 +662,11 @@
     }
     mouse(el, 'pointerup', x, y);
     mouse(el, 'mouseup', x, y);
+    // The page's own handlers ran with the events above and may have changed what the element
+    // does (a `pointerdown` that repoints its form): checked again in the same breath as the
+    // click, which is what `guard` was taken for.
+    const moved2 = changed(ref, null, guard);
+    if (moved2) return moved2;
     // The click itself, with the element's own default action (a link, a checkbox, submit).
     el.click();
     const out = { did: 'Clicked ' + what };
@@ -874,17 +886,27 @@
     if (el !== document.body) flash(el, key.label || key.key);
     const kind = editableOf(el);
     const go = keyEvent(el, 'keydown', key);
+    // The page's keydown handlers ran and may have changed what the key's default action does
+    // (a form's address, a field's type): checked again before it happens.
+    const moved2 = changed(ref, key.key, guard);
+    if (moved2) return moved2;
     let did = '';
     const plain = !key.ctrl && !key.meta && !key.alt;
     if (go) {
       const k = key.key;
       if (k.length === 1 && plain) {
         keyEvent(el, 'keypress', key);
+        // The page's keypress handlers ran too: the same check once more, in the same breath
+        // as what the key's default action does.
+        const moved3 = changed(ref, key.key, guard);
+        if (moved3) return moved3;
         if (kind) insert(el, k, kind);
         else if (k === ' ' && el.matches && el.matches('button, summary, [role=button], input[type=checkbox], input[type=radio], [role=checkbox], [role=switch]')) { el.click(); did = ' (it clicked ' + describe(el) + ')'; }
         else if (k === ' ') scrollPage(innerHeight * 0.85);
       } else if (k === 'Enter' && plain) {
         keyEvent(el, 'keypress', key);
+        const moved4 = changed(ref, key.key, guard);
+        if (moved4) return moved4;
         if (tag(el) === 'TEXTAREA' || kind === 'rich') {
           try { el.ownerDocument.execCommand(tag(el) === 'TEXTAREA' ? 'insertLineBreak' : 'insertParagraph', false); } catch (_) {}
         } else if (kind === 'field') {

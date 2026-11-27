@@ -70,6 +70,47 @@ pub fn hook(built: &wry::WebView, tab: u64, tx: async_channel::Sender<Msg>) {
         }
         true
     });
+    // While an agent's action that wasn't approved as a submission runs in this tab, a form
+    // submission to another site is refused: `agent.js` checks the element again before it acts,
+    // but the page's own handlers can still move the form in between.
+    let guarded = tx.clone();
+    view.connect_decide_policy(move |view, decision, kind| {
+        use webkit2gtk::{
+            NavigationPolicyDecisionExt as _, NavigationType, PolicyDecisionExt as _,
+            PolicyDecisionType, URIRequestExt as _, glib::Cast as _,
+        };
+        if kind != PolicyDecisionType::NavigationAction || !super::form_guarded(tab) {
+            return false;
+        }
+        let Some(action) = decision
+            .downcast_ref::<webkit2gtk::NavigationPolicyDecision>()
+            .and_then(|d| d.navigation_action())
+        else {
+            return false;
+        };
+        if !matches!(
+            action.navigation_type(),
+            NavigationType::FormSubmitted | NavigationType::FormResubmitted
+        ) {
+            return false;
+        }
+        let url = action
+            .request()
+            .and_then(|r| r.uri())
+            .map(|u| u.to_string())
+            .unwrap_or_default();
+        let current = view.uri().map(|u| u.to_string()).unwrap_or_default();
+        let foreign = match (super::origin_of(&url), super::origin_of(&current)) {
+            (Some(a), Some(b)) => !a.eq_ignore_ascii_case(b),
+            _ => false,
+        };
+        if !foreign {
+            return false;
+        }
+        decision.ignore();
+        let _ = guarded.try_send(Msg::SubmitBlocked { tab, url });
+        true
+    });
     let failures = tx.clone();
     view.connect_load_failed(move |_, _, url, error| {
         let (domain, code) = as_webkit_error(error.domain().as_str(), error_code(error));
