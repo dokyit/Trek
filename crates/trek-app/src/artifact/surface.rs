@@ -41,6 +41,18 @@ pub trait Surface {
     /// The card's colour changed (a theme switch): what shows where the page draws nothing, on
     /// Windows (WebView2 can't be see-through over GPUI; WKWebView is).
     fn set_background(&self, rgb: (u8, u8, u8));
+    /// When the user last pressed a mouse button or a key in the page, as the app itself saw it
+    /// (the system's events, not the page's word): what a link the page asks for is opened on
+    /// (`trek_core::artifact::net::LinkGate`). `None`: never, or the platform keeps the page's
+    /// input to itself (Windows, where the engine says of each request whether a gesture
+    /// started it).
+    fn clicked(&self) -> Option<std::time::Instant>;
+    /// The capture build's `artifacts click-page`: a click at (`x`, `y`) of the page, as the
+    /// system delivers one.
+    #[cfg(feature = "shots")]
+    fn click_at(&self, _x: f64, _y: f64) -> Result<(), String> {
+        Err("this view takes no clicks from here".into())
+    }
     /// The page takes the keys, as a click in it does (tests, and the capture build's
     /// `artifacts take-keys`).
     #[cfg(any(test, feature = "test-support", feature = "shots"))]

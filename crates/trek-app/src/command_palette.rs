@@ -444,6 +444,9 @@ pub struct CommandPalette {
     /// Enter came before the results for the current text: confirm once they're in.
     confirm_when_ready: bool,
     scroll: ScrollHandle,
+    /// The desktop's first look at what it can snapshot is out: redraw when it answers, so the
+    /// Settings entries include App Snapshots without waiting for another change.
+    desktop_check: bool,
     /// Where focus was before the palette opened; it goes back there on close.
     restore: Option<FocusHandle>,
     _search: Option<Task<()>>,
@@ -501,6 +504,7 @@ impl CommandPalette {
             epoch: 0,
             confirm_when_ready: false,
             scroll: ScrollHandle::new(),
+            desktop_check: false,
             restore: None,
             _search: None,
             _subscriptions: subscriptions,
@@ -1958,6 +1962,11 @@ impl Render for CommandPalette {
         let leaving = !self.open;
         let theme = cx.theme().clone();
         let entries = self.entries(cx);
+        // The entries were built while the desktop's look was still out: redraw when it lands.
+        if !self.desktop_check && crate::screenclip::desktop::looking() {
+            self.desktop_check = true;
+            crate::screenclip::desktop::refresh_when_known(cx);
+        }
         self.selected = self.selected.min(entries.len().saturating_sub(1));
         let searching = !self.query.trim().is_empty();
         let pending = self.pending();

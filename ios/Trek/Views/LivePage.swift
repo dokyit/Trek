@@ -222,9 +222,13 @@ enum LivePage {
         }
     }
 
-    /// What the page may load and run: the Mac's policy. Scripts, styles, images, fonts and media
-    /// over https (CDNs), inline code; nothing over http or from files, no forms, no plugins.
-    static let csp = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https: blob:; style-src 'unsafe-inline' https:; img-src https: data: blob:; font-src https: data:; media-src https: data: blob:; connect-src https: data: blob:; worker-src blob: https:; child-src blob: data:; frame-src blob: data:; object-src 'none'; form-action 'none'; base-uri 'none'"
+    /// What the page may load and run: the Mac's policy for a page the user has allowed no host
+    /// (`artifact::net::page_csp(&[])`, held to it by `the_phone_serves_pages_under_the_macs_policy`).
+    /// Inline code runs; scripts, styles, images, fonts, media and `fetch` reach only the hosts
+    /// that load without asking on the Mac (cdnjs's library files, Google Fonts, the map card's
+    /// sources). The phone has no card that asks about another host: a page that needs one says
+    /// so, and runs in full on the Mac. Nothing over http or from files, no frames, no forms.
+    static let csp = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob: https://cdnjs.cloudflare.com/ajax/libs/ https://fonts.googleapis.com/ https://fonts.gstatic.com/ https://tiles.openfreemap.org/ https://basemaps.cartocdn.com/rastertiles/ https://unpkg.com/leaflet@1.9.4/dist/ https://unpkg.com/maplibre-gl@5.24.0/dist/ https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/; style-src 'unsafe-inline' https://cdnjs.cloudflare.com/ajax/libs/ https://fonts.googleapis.com/ https://fonts.gstatic.com/ https://tiles.openfreemap.org/ https://basemaps.cartocdn.com/rastertiles/ https://unpkg.com/leaflet@1.9.4/dist/ https://unpkg.com/maplibre-gl@5.24.0/dist/ https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/; img-src data: blob: https://cdnjs.cloudflare.com/ajax/libs/ https://fonts.googleapis.com/ https://fonts.gstatic.com/ https://tiles.openfreemap.org/ https://basemaps.cartocdn.com/rastertiles/ https://unpkg.com/leaflet@1.9.4/dist/ https://unpkg.com/maplibre-gl@5.24.0/dist/ https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/; font-src data: https://cdnjs.cloudflare.com/ajax/libs/ https://fonts.googleapis.com/ https://fonts.gstatic.com/ https://tiles.openfreemap.org/ https://basemaps.cartocdn.com/rastertiles/ https://unpkg.com/leaflet@1.9.4/dist/ https://unpkg.com/maplibre-gl@5.24.0/dist/ https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/; media-src data: blob: https://cdnjs.cloudflare.com/ajax/libs/ https://fonts.googleapis.com/ https://fonts.gstatic.com/ https://tiles.openfreemap.org/ https://basemaps.cartocdn.com/rastertiles/ https://unpkg.com/leaflet@1.9.4/dist/ https://unpkg.com/maplibre-gl@5.24.0/dist/ https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/; connect-src data: blob: https://cdnjs.cloudflare.com/ajax/libs/ https://fonts.googleapis.com/ https://fonts.gstatic.com/ https://tiles.openfreemap.org/ https://basemaps.cartocdn.com/rastertiles/ https://unpkg.com/leaflet@1.9.4/dist/ https://unpkg.com/maplibre-gl@5.24.0/dist/ https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/; worker-src blob:; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'; webrtc 'block'"
 
     /// `text` if a page may send or copy it: not blank, at most `maxActionBytes`, and no control
     /// characters but tab and line breaks (`artifact::action_text`).
@@ -542,9 +546,13 @@ struct LivePageView: UIViewRepresentable {
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction) async -> WKNavigationActionPolicy {
             let scheme = action.request.url?.scheme?.lowercased() ?? ""
             if action.targetFrame?.isMainFrame != false {
-                // Only the page's own document; a link that got past the script goes to Safari.
+                // Only the page's own document; a link that got past the script goes to Safari,
+                // and only on the user's own tap as Trek's script saw it: a script's `a.click()`
+                // asks the same way.
                 if loading && scheme == "about" { return .allow }
-                if action.navigationType == .linkActivated, let url = LivePage.external(action.request.url) {
+                if action.navigationType == .linkActivated,
+                   let touched, Date().timeIntervalSince(touched) < LivePage.gestureWindow,
+                   let url = LivePage.external(action.request.url) {
                     await UIApplication.shared.open(url)
                 }
                 return .cancel
@@ -561,10 +569,13 @@ struct LivePageView: UIViewRepresentable {
             loading = false
         }
 
-        /// `target=_blank` and `window.open`: no new windows; a tapped link goes to Safari.
+        /// `target=_blank` and `window.open`: no new windows; a tapped link goes to Safari, on
+        /// the user's own recent tap alone (as above).
         func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                      for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-            if action.navigationType == .linkActivated, let url = LivePage.external(action.request.url) {
+            if action.navigationType == .linkActivated,
+               let touched, Date().timeIntervalSince(touched) < LivePage.gestureWindow,
+               let url = LivePage.external(action.request.url) {
                 UIApplication.shared.open(url)
             }
             return nil

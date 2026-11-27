@@ -9538,6 +9538,7 @@ dependencies = [
  "if-addrs",
  "ignore",
  "image",
+ "javascriptcore-rs",
  "lb-wry",
  "libc",
  "log",
@@ -9963,9 +9964,12 @@ name = "trek-screenclip"
 version = "0.4.67"
 dependencies = [
  "anyhow",
+ "ashpd",
  "gpui-kit",
  "image",
+ "raw-window-handle",
  "windows 0.62.2",
+ "x11rb",
 ]
 
 [[package]]

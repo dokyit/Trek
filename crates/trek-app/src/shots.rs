@@ -1177,7 +1177,11 @@ async fn editor_snap(
 /// a click in it does; on a Mac, `lose-keys` leaves them with the window itself, as AppKit does
 /// when a view that had them goes, and `press-trek` presses GPUI's own view where the composer is,
 /// as AppKit delivers a click, and `type-native` hands the window a key (`a`) as AppKit does,
-/// without bringing Trek to the front.
+/// without bringing Trek to the front. `click-page <x> <y>` (a Mac) clicks at that point of the
+/// first live card's page (CSS px from its top left) as AppKit delivers a click, so it's the
+/// user's own to the page and to Trek alike. `artifacts.json` also has `opened` (the links that
+/// would have opened in the browser: a capture run opens none) and `asking` (the hosts cards ask
+/// about).
 async fn artifacts(
     ws: &Entity<Workspace>,
     dir: &Path,
@@ -1207,9 +1211,22 @@ async fn artifacts(
                 .timer(Duration::from_millis(300))
                 .await;
         }
+        click if click.starts_with("click-page") => {
+            let mut at = click.split_whitespace().skip(1).map(|n| n.parse::<f64>());
+            let (Some(Ok(x)), Some(Ok(y))) = (at.next(), at.next()) else {
+                anyhow::bail!("artifacts click-page <x> <y>: the point in the page, in CSS px")
+            };
+            main.update(cx, |_, window, cx| {
+                crate::artifact::click_page(window, x, y, cx)
+            })??;
+            // The page hears it, asks for its link, and Trek decides.
+            cx.background_executor()
+                .timer(Duration::from_millis(700))
+                .await;
+        }
         other => {
             anyhow::bail!(
-                "artifacts: {other:?}? (artifacts [take-keys|lose-keys|press-trek|type-native])"
+                "artifacts: {other:?}? (artifacts [take-keys|lose-keys|press-trek|type-native|click-page <x> <y>])"
             )
         }
     }
@@ -1238,7 +1255,8 @@ async fn artifacts(
             .flatten()
             .and_then(|r| r.read(cx).view().clone().downcast::<crate::root::TrekWindow>().ok())
             .map(|t| t.read(cx).composer.read(cx).text(cx));
-        serde_json::json!({ "window": rect(window.bounds()), "scale": window.scale_factor(), "artifacts": cards, "views_made": crate::artifact::views_made(cx), "keys": crate::artifact::keys_holder(window), "composer": composer })
+        let (opened, asking) = crate::artifact::outbound(cx);
+        serde_json::json!({ "window": rect(window.bounds()), "scale": window.scale_factor(), "artifacts": cards, "views_made": crate::artifact::views_made(cx), "keys": crate::artifact::keys_holder(window), "composer": composer, "opened": opened, "asking": asking })
     })?;
     std::fs::write(
         dir.join("artifacts.json"),

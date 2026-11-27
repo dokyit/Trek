@@ -68,8 +68,8 @@ const MAX_PLACES: usize = 512;
 const SETTLE: Duration = Duration::from_millis(700);
 /// A page that keeps changing its height is let be at this many changes.
 const MAX_HEIGHT_CHANGES: u32 = 60;
-/// Links the page sends to the browser: at most one this often.
-const OPEN_EVERY: Duration = Duration::from_secs(1);
+/// A video from the web that hasn't been allowed to load: its card's body is this tall.
+const HELD_HEIGHT: f32 = 96.;
 
 // ---------- the block ----------
 
@@ -94,15 +94,41 @@ pub struct Doc {
 }
 
 impl Doc {
-    /// The policy it's served under.
-    fn csp(&self) -> &'static str {
+    /// The policy it's served under, `hosts` being the sites its page may load from besides
+    /// the open ones (`allowed_hosts`). A video's page is Trek's own and runs nothing.
+    fn csp(&self, hosts: &[String]) -> String {
         if self.media.is_some() {
-            core::VIDEO_CSP
+            core::VIDEO_CSP.to_string()
         } else if self.remote.is_some() {
-            core::REMOTE_VIDEO_CSP
+            core::REMOTE_VIDEO_CSP.to_string()
         } else {
-            core::csp_for(&self.html)
+            core::csp_for(&self.html, hosts)
         }
+    }
+
+    /// The `Connection-Allowlist` header it's served with: everything its page may connect to
+    /// (`core::net::connection_allowlist`). A file's player reaches only its own origin; a
+    /// video from the web goes wherever its one address leads, once the user asked for it.
+    fn connections(&self, hosts: &[String]) -> String {
+        if self.media.is_some() {
+            "(response-origin)".to_string()
+        } else if self.remote.is_some() {
+            String::new()
+        } else {
+            core::net::connection_allowlist(hosts)
+        }
+    }
+
+    /// A video from the web may load: the user said so for this card, or allowed its site for
+    /// good. Until then nothing is asked of the site: the address is the agent's, and may carry
+    /// anything.
+    fn may_load(&self, cx: &App) -> bool {
+        let Some(url) = &self.remote else {
+            return true;
+        };
+        cx.try_global::<Registry>()
+            .is_some_and(|r| r.loaded.contains(&self.hash))
+            || core::net::host_of(url).is_some_and(|host| always_hosts(cx).contains(&host))
     }
 
     /// The player for the video file at `path`, titled `title`; `source` is what named it.
@@ -489,8 +515,10 @@ fn building(
     .into_any_element()
 }
 
-/// What the header says under the title: that it's live, and where it reaches.
-fn summary_of(doc: &Doc) -> String {
+/// What the header says under the title: that it's live, and where it loads from: of the hosts
+/// its document names, the ones it may load from (the open ones, and `allowed`, the user's).
+/// A host it may not load from isn't named here: the card asks about it if the page tries.
+fn summary_of(doc: &Doc, allowed: &[String]) -> String {
     if let Some(file) = &doc.media {
         let kind = file
             .extension()
@@ -512,10 +540,337 @@ fn summary_of(doc: &Doc) -> String {
             None => "Video · from the web".to_string(),
         };
     }
-    match doc.hosts.as_slice() {
-        [] => "Interactive · self-contained, in a sandbox".to_string(),
-        hosts => format!("Interactive · loads from {}", hosts.join(", ")),
+    let loads: Vec<&str> = doc
+        .hosts
+        .iter()
+        .filter(|h| core::net::open_host(h) || allowed.iter().any(|a| a == *h))
+        .map(String::as_str)
+        .collect();
+    match (loads.as_slice(), doc.hosts.is_empty()) {
+        ([], true) => "Interactive · self-contained, in a sandbox".to_string(),
+        ([], false) => "Interactive · in a sandbox".to_string(),
+        (hosts, _) => format!("Interactive · loads from {}", hosts.join(", ")),
     }
+}
+
+// ---------- what a page may reach ----------
+
+/// The sites the user allowed every page ("Always allow"), from Settings.
+fn always_hosts(cx: &App) -> Vec<String> {
+    cx.try_global::<crate::workspace::GlobalWorkspace>()
+        .map(|ws| core::net::clean_hosts(&ws.0.read(cx).settings.general.artifact_hosts))
+        .unwrap_or_default()
+}
+
+/// The sites the page of document `hash` may load from besides the open ones: the user's
+/// "Always allow" list, and what they allowed this page once (until Trek quits).
+fn allowed_hosts(hash: u64, cx: &App) -> Vec<String> {
+    let mut hosts = always_hosts(cx);
+    if let Some(once) = cx.try_global::<Registry>().and_then(|r| r.once.get(&hash)) {
+        for host in once {
+            if !hosts.contains(host) {
+                hosts.push(host.clone());
+            }
+        }
+    }
+    hosts
+}
+
+/// What the user said to a card's question.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Answer {
+    Once,
+    Always,
+    No,
+}
+
+/// The user answered the card of document `hash` about `hosts` — the hosts its strip drew, not
+/// whatever the queue holds now: the page may have had more stopped while the click was on its
+/// way, and those were never shown.
+fn answer_ask(hash: u64, answer: Answer, hosts: Vec<String>, cx: &mut App) {
+    let registry = cx.default_global::<Registry>();
+    let asks = registry.asks.entry(hash).or_default();
+    // The strip's list changed under the click (a redraw is on its way): a click this soon
+    // after may be for hosts the user hasn't read. Ignore it.
+    if asks
+        .changed()
+        .is_some_and(|at| at.elapsed() < Duration::from_millis(300))
+    {
+        return;
+    }
+    let hosts = asks.answer_shown(answer != Answer::No, &hosts);
+    match answer {
+        Answer::No => {}
+        Answer::Once => registry.once.entry(hash).or_default().extend(hosts),
+        Answer::Always => {
+            if let Some(ws) = cx.try_global::<crate::workspace::GlobalWorkspace>() {
+                let ws = ws.0.clone();
+                ws.update(cx, |ws, cx| {
+                    let mut all = ws.settings.general.artifact_hosts.clone();
+                    all.extend(hosts);
+                    ws.settings.general.artifact_hosts = core::net::clean_hosts(&all);
+                    ws.save_settings(cx);
+                    cx.notify();
+                });
+            }
+        }
+    }
+    // The strip goes (or names the next hosts), and each card of the document takes its new
+    // policy as it's next drawn (`sync_doc`).
+    crate::visualization::relayout(cx);
+    cx.refresh_windows();
+}
+
+/// The user said a video from the web may load (`always`: its site, for good).
+fn answer_video(doc: &Doc, always: bool, cx: &mut App) {
+    cx.default_global::<Registry>().loaded.insert(doc.hash);
+    let host = doc.remote.as_deref().and_then(core::net::host_of);
+    if let (true, Some(host), Some(ws)) = (
+        always,
+        host,
+        cx.try_global::<crate::workspace::GlobalWorkspace>(),
+    ) {
+        let ws = ws.0.clone();
+        ws.update(cx, |ws, cx| {
+            let mut all = ws.settings.general.artifact_hosts.clone();
+            all.push(host);
+            ws.settings.general.artifact_hosts = core::net::clean_hosts(&all);
+            ws.save_settings(cx);
+            cx.notify();
+        });
+    }
+    crate::visualization::relayout(cx);
+    cx.refresh_windows();
+}
+
+/// A button in a card's question: a word or two, the first one filled.
+fn ask_button(
+    id: SharedString,
+    label: &'static str,
+    primary: bool,
+    look: &Look,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let (fg, edge) = (look.fg, look.hairline);
+    let fill = if primary {
+        look.fg.opacity(0.09)
+    } else {
+        look.fg.opacity(0.)
+    };
+    let hover = look.fg.opacity(if primary { 0.14 } else { 0.06 });
+    h_flex()
+        .id(id)
+        .test_support()
+        .aria_label(label)
+        .flex_none()
+        .h(px(24.))
+        .px(px(9.))
+        .justify_center()
+        .rounded(px(crate::fluent::control(radius::CONTROL)))
+        .border_1()
+        .border_color(edge)
+        .bg(fill)
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover))
+        .text_size(px(text::LABEL))
+        .text_color(fg)
+        .child(label)
+        .on_click(move |_, window, cx| on_click(window, cx))
+        .into_any_element()
+}
+
+/// The card's question about the hosts its page tried to load from and the policy stopped:
+/// "This page wants to load from cdn.jsdelivr.net." Allow once / Always allow / Don't allow.
+/// Trek draws it, above the page and outside it: nothing in the page can cover or word it.
+/// `None` when there's nothing to ask.
+fn ask_strip(doc: &Doc, key: usize, look: &Look, cx: &App) -> Option<AnyElement> {
+    let hosts = cx
+        .try_global::<Registry>()
+        .and_then(|r| r.asks.get(&doc.hash))
+        .map(|a| a.shown().to_vec())
+        .filter(|h| !h.is_empty())?;
+    let hash = doc.hash;
+    let button = |name: &str, label: &'static str, primary: bool, answer: Answer| {
+        // The answer is for the hosts this strip drew, however the queue moves before the click.
+        let drawn = hosts.clone();
+        ask_button(
+            SharedString::from(format!("artifact-{name}-{key}")),
+            label,
+            primary,
+            look,
+            move |_, cx| answer_ask(hash, answer, drawn.clone(), cx),
+        )
+    };
+    Some(
+        h_flex()
+            .id(("artifact-ask", key))
+            .test_support()
+            .w_full()
+            .flex_wrap()
+            .gap_x(px(10.))
+            .gap_y(px(6.))
+            .px_4()
+            .py(px(8.))
+            .border_t_1()
+            .border_color(look.hairline)
+            .bg(look.fg.opacity(0.03))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(180.))
+                    .text_size(px(text::LABEL))
+                    .line_height(relative(1.45))
+                    .text_color(look.fg)
+                    .child({
+                        let mut text = format!(
+                            "This page wants to load from {}.",
+                            core::net::host_list(&hosts)
+                        );
+                        // A host that publishes what was asked of it can be read back later:
+                        // the path a page asks for can spell out what it knows.
+                        if hosts.iter().any(|h| core::net::leak_host(h)) {
+                            text.push_str(" Anyone can see which files a page asks this host for.");
+                        }
+                        text
+                    }),
+            )
+            .child(
+                h_flex()
+                    .flex_none()
+                    .gap(px(6.))
+                    .child(button("allow-once", "Allow once", true, Answer::Once))
+                    .child(button(
+                        "allow-always",
+                        "Always allow",
+                        false,
+                        Answer::Always,
+                    ))
+                    .child(button("deny", "Don't allow", false, Answer::No)),
+            )
+            .into_any_element(),
+    )
+}
+
+/// The card's confirm for a link its page wants opened in the user's browser where no page may
+/// load from and the user hasn't allowed the host: "Open evil.example?" Open / Cancel. Trek
+/// draws it, outside the page, so nothing in the page can word or cover it; the host is shown
+/// as written (punycode stays punycode). `None` when no link waits.
+fn link_ask_strip(doc: &Doc, key: usize, look: &Look, cx: &App) -> Option<AnyElement> {
+    let (url, host) = cx
+        .try_global::<Registry>()
+        .and_then(|r| r.link_asks.get(&doc.hash).cloned())?;
+    let hash = doc.hash;
+    let button = |name: &str, label: &'static str, primary: bool, open: bool| {
+        // The answer is for the address this strip drew: the page may have asked for another
+        // while the click was on its way, and that one keeps its own confirm.
+        let drawn = url.clone();
+        ask_button(
+            SharedString::from(format!("artifact-link-{name}-{key}")),
+            label,
+            primary,
+            look,
+            move |_, cx| {
+                let registry = cx.default_global::<Registry>();
+                if registry
+                    .link_asks
+                    .get(&hash)
+                    .is_some_and(|(pending, _)| *pending == drawn)
+                {
+                    registry.link_asks.remove(&hash);
+                    if open {
+                        cx.open_url(&drawn);
+                    }
+                }
+                crate::visualization::relayout(cx);
+                cx.refresh_windows();
+            },
+        )
+    };
+    Some(
+        h_flex()
+            .id(("artifact-link-ask", key))
+            .test_support()
+            .w_full()
+            .flex_wrap()
+            .gap_x(px(10.))
+            .gap_y(px(6.))
+            .px_4()
+            .py(px(8.))
+            .border_t_1()
+            .border_color(look.hairline)
+            .bg(look.fg.opacity(0.03))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(180.))
+                    .text_size(px(text::LABEL))
+                    .line_height(relative(1.45))
+                    .text_color(look.fg)
+                    .child(format!("Open {host}?")),
+            )
+            .child(
+                h_flex()
+                    .flex_none()
+                    .gap(px(6.))
+                    .child(button("open", "Open", true, true))
+                    .child(button("cancel", "Cancel", false, false)),
+            )
+            .into_any_element(),
+    )
+}
+
+/// The body of a video from the web that hasn't been allowed to load: where it is, and the
+/// buttons that load it. Nothing has been asked of its site.
+fn held_video(doc: &Arc<Doc>, key: usize, look: &Look) -> AnyElement {
+    let host = doc.remote.as_deref().and_then(core::net::host_of);
+    let place = match (&host, doc.hosts.first()) {
+        (Some(host), _) => host.clone(),
+        (None, Some(named)) => named.clone(),
+        (None, None) => "the web".to_string(),
+    };
+    let (once, always) = (doc.clone(), doc.clone());
+    h_flex()
+        .id(("artifact-held", key))
+        .test_support()
+        .w_full()
+        .h(px(HELD_HEIGHT))
+        .flex_wrap()
+        .items_center()
+        .justify_center()
+        .gap_x(px(12.))
+        .gap_y(px(6.))
+        .px_4()
+        .border_t_1()
+        .border_color(look.hairline)
+        .child(
+            div()
+                .text_size(px(text::LABEL))
+                .text_color(look.muted)
+                .child(format!("This video is on {place}. It loads when you ask.")),
+        )
+        .child(
+            h_flex()
+                .flex_none()
+                .gap(px(6.))
+                .child(ask_button(
+                    SharedString::from(format!("artifact-load-video-{key}")),
+                    "Load video",
+                    true,
+                    look,
+                    move |_, cx| answer_video(&once, false, cx),
+                ))
+                // A site that isn't a public one by name can't be allowed for good.
+                .when(host.is_some(), |el| {
+                    el.child(ask_button(
+                        SharedString::from(format!("artifact-load-always-{key}")),
+                        "Always from this site",
+                        false,
+                        look,
+                        move |_, cx| answer_video(&always, true, cx),
+                    ))
+                }),
+        )
+        .into_any_element()
 }
 
 /// A video in a note, played in place in a card; `None` when interactive artifacts are off (the
@@ -537,9 +892,13 @@ fn card(doc: &Arc<Doc>, key: usize, window: &mut Window, cx: &mut App) -> AnyEle
     );
     let css = theme_css(cx);
     let background = card_rgb(cx);
+    let hosts = allowed_hosts(doc.hash, cx);
+    let summary = summary_of(doc, &hosts);
+    let held = !doc.may_load(cx);
     state.update(cx, |s, cx| {
         s.slot = key;
-        s.sync_doc(doc, css, background, cx)
+        s.held = held;
+        s.sync_doc(doc, css, hosts, background, cx)
     });
     let look = Look::of(cx);
     let s = state.read(cx);
@@ -591,7 +950,8 @@ fn card(doc: &Arc<Doc>, key: usize, window: &mut Window, cx: &mut App) -> AnyEle
                     &look,
                     move |_, cx| cx.open_url(&url),
                 ))
-                .child(expand_button)
+                // Expanded, it would load: not before the user said it may.
+                .when(!held, |bar| bar.child(expand_button))
                 .into_any_element(),
             (None, None) => bar
                 .child(action(
@@ -630,6 +990,13 @@ fn card(doc: &Arc<Doc>, key: usize, window: &mut Window, cx: &mut App) -> AnyEle
         .child(SurfaceElement {
             state: state.clone(),
         });
+    let body = if held {
+        held_video(doc, key, &look)
+    } else {
+        body.into_any_element()
+    };
+    let ask = ask_strip(doc, key, &look, cx);
+    let link = link_ask_strip(doc, key, &look, cx);
     shell(
         SharedString::from(format!("trek-artifact-{key}")),
         &look,
@@ -650,9 +1017,11 @@ fn card(doc: &Arc<Doc>, key: usize, window: &mut Window, cx: &mut App) -> AnyEle
         },
         title_text(title, &look),
         actions,
-        summary_text(summary_of(doc), &look),
+        summary_text(summary, &look),
         &look,
     ))
+    .children(ask)
+    .children(link)
     .child(body)
     .into_any_element()
 }
@@ -738,7 +1107,8 @@ fn expand_artifact(doc: &Arc<Doc>, window: &mut Window, cx: &mut App) {
     let state = cx.new(|cx| ArtifactState::new(doc.clone(), Mode::Expanded, window, cx));
     let css = theme_css(cx);
     let background = card_rgb(cx);
-    state.update(cx, |s, cx| s.sync_doc(doc, css, background, cx));
+    let hosts = allowed_hosts(doc.hash, cx);
+    state.update(cx, |s, cx| s.sync_doc(doc, css, hosts, background, cx));
     let title = doc.title.clone().unwrap_or_else(|| {
         if doc.is_video() {
             "Video"
@@ -756,9 +1126,14 @@ fn expand_artifact(doc: &Arc<Doc>, window: &mut Window, cx: &mut App) {
         let css = theme_css(cx);
         let background = card_rgb(cx);
         let doc = state.read(cx).doc.clone();
-        state.update(cx, |s, cx| s.sync_doc(&doc, css, background, cx));
+        let hosts = allowed_hosts(doc.hash, cx);
+        state.update(cx, |s, cx| s.sync_doc(&doc, css, hosts, background, cx));
         let status = state.read(cx).status();
         let look = Look::of(cx);
+        // What the page asks about is asked here too: the card in the answer is under the
+        // dialog.
+        let ask = ask_strip(&doc, usize::MAX, &look, cx);
+        let link = link_ask_strip(&doc, usize::MAX, &look, cx);
         dialog
             .w(w)
             .margin_top(px(56.))
@@ -768,6 +1143,8 @@ fn expand_artifact(doc: &Arc<Doc>, window: &mut Window, cx: &mut App) {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(title.clone()),
             )
+            .when_some(ask, |dialog, ask| dialog.child(ask))
+            .when_some(link, |dialog, link| dialog.child(link))
             .child(
                 div()
                     .id("artifact-expanded")
@@ -918,8 +1295,14 @@ pub struct ArtifactState {
     /// The theme's stylesheet in the document now.
     css: String,
     background: (u8, u8, u8),
-    /// The document as the view is served it.
+    /// The document as the view is served it, and the policy it's served under: made from
+    /// `hosts`, the sites the user allowed its page.
     served: Rc<RefCell<String>>,
+    policy: Rc<RefCell<String>>,
+    connections: Rc<RefCell<String>>,
+    hosts: Vec<String>,
+    /// A video from the web the user hasn't said may load: it has no view (`Doc::may_load`).
+    held: bool,
     /// The view's secret, which its bootstrap tags messages with.
     nonce: String,
     surface: Option<Box<dyn Surface>>,
@@ -936,7 +1319,11 @@ pub struct ArtifactState {
     /// The page has the keys; what GPUI had focused before it took them.
     has_keys: bool,
     had_focus: Option<FocusHandle>,
-    opened_at: Option<Instant>,
+    /// Opens the page's links on the user's own clicks alone (`core::net::LinkGate`).
+    links: core::net::LinkGate,
+    /// When the engine last vouched for a user gesture (Windows): the gesture's first instant,
+    /// kept so every request it makes spends the same click.
+    engine_gesture: Option<Instant>,
     /// The page's `trek.send` calls, one a second at most (`core::SendGate`).
     sends: core::SendGate,
     height_changes: u32,
@@ -980,6 +1367,10 @@ impl ArtifactState {
         let shot = registry.shots.get(&doc.hash).cloned();
         Self {
             served: Rc::new(RefCell::new(String::new())),
+            policy: Rc::new(RefCell::new(String::new())),
+            connections: Rc::new(RefCell::new(String::new())),
+            hosts: Vec::new(),
+            held: false,
             doc,
             mode,
             css: String::new(),
@@ -996,7 +1387,8 @@ impl ArtifactState {
             focus: cx.focus_handle(),
             has_keys: false,
             had_focus: None,
-            opened_at: None,
+            links: core::net::LinkGate::default(),
+            engine_gesture: None,
             sends: core::SendGate::default(),
             height_changes: 0,
             pending_seek: None,
@@ -1044,17 +1436,21 @@ impl ArtifactState {
         }
     }
 
-    /// Keep the document and its theme as the card has them: a new document (the same place in
-    /// an answer that changed) loads afresh; a theme switch reaches the page in place.
+    /// Keep the document, its theme and the sites it may load from (`hosts`) as the card has
+    /// them: a new document (the same place in an answer that changed) loads afresh, and so
+    /// does one the user just allowed a host (its policy changed); a theme switch reaches the
+    /// page in place.
     fn sync_doc(
         &mut self,
         doc: &Arc<Doc>,
         css: String,
+        hosts: Vec<String>,
         background: (u8, u8, u8),
         cx: &mut Context<Self>,
     ) {
         let new_doc = doc.hash != self.doc.hash;
-        if !new_doc && css == self.css {
+        let new_policy = hosts != self.hosts || self.policy.borrow().is_empty();
+        if !new_doc && !new_policy && css == self.css {
             return;
         }
         if new_doc {
@@ -1066,13 +1462,25 @@ impl ArtifactState {
             self.shot = None;
             self.height_changes = 0;
         }
-        let restyle = !new_doc && !self.css.is_empty();
+        let restyle = !new_doc && !self.css.is_empty() && css != self.css;
+        // The first policy is the one the view is made with: nothing to load again.
+        let reload = new_doc || new_policy && !self.policy.borrow().is_empty();
         self.css = css;
-        *self.served.borrow_mut() = core::document_with(&self.doc.html, &self.css, self.doc.csp());
+        if new_doc || new_policy {
+            *self.policy.borrow_mut() = self.doc.csp(&hosts);
+            *self.connections.borrow_mut() = self.doc.connections(&hosts);
+            self.hosts = hosts;
+            if let Some(asks) = cx.default_global::<Registry>().asks.get_mut(&self.doc.hash) {
+                asks.settle(&self.hosts);
+            }
+        }
+        *self.served.borrow_mut() =
+            core::document_with(&self.doc.html, &self.css, &self.policy.borrow());
         if let Some(surface) = &self.surface {
-            if new_doc {
+            if reload {
                 self.loaded = false;
                 self.video_ready = false;
+                self.height_changes = 0;
                 surface.reload();
             } else if restyle {
                 surface.eval(&core::theme_update_script(&self.css));
@@ -1133,7 +1541,8 @@ impl ArtifactState {
         let spec = native::Spec {
             origin: core::origin(self.doc.hash, cfg!(windows)),
             document: self.served.clone(),
-            csp: self.doc.csp(),
+            csp: self.policy.clone(),
+            connections: self.connections.clone(),
             media: self.doc.media.clone(),
             bootstrap: core::bootstrap_with(&self.nonce, &extras),
             background: self.background,
@@ -1244,7 +1653,7 @@ impl ArtifactState {
                     .detach();
                 }
             }
-            native::Event::Popup(url) => self.open_link(&url, cx),
+            native::Event::Wants { url, engine } => self.open_link(&url, engine, cx),
             native::Event::Message(body) => match core::parse_message(&body, &self.nonce) {
                 Some(core::Message::Height(h)) => self.set_height(h, cx),
                 Some(core::Message::Focus) => {
@@ -1263,7 +1672,7 @@ impl ArtifactState {
                         self.release_keys(window, cx);
                     }
                 }
-                Some(core::Message::Open(url)) => self.open_link(&url, cx),
+                Some(core::Message::Blocked(url)) => self.stopped(&url, cx),
                 Some(core::Message::Wheel(dx, dy)) => self.scroll_around(dx, dy, window, cx),
                 Some(core::Message::Dictate(on)) => self.dictate(on, window, cx),
                 Some(core::Message::VideoAt(t)) => {
@@ -1540,16 +1949,72 @@ impl ArtifactState {
         window.dispatch_event(event.to_platform_input(), cx);
     }
 
-    /// A link from the page, to the user's browser: web or mail only, one a second at most.
-    fn open_link(&mut self, url: &str, cx: &mut Context<Self>) {
+    /// The page asked to go to `url` (a link, a new window, a script sending it away), and
+    /// went nowhere. It opens in the user's browser if it's web or mail and the user clicked
+    /// for it just now, as the app saw it, not as the page says: `engine` is the engine's own
+    /// word on a user gesture (Windows); elsewhere the view says when the user last pressed a
+    /// button or key in it (`Surface::clicked`). One address a click (`core::net::LinkGate`).
+    fn open_link(&mut self, url: &str, engine: Option<bool>, cx: &mut Context<Self>) {
         let Some(url) = core::external(url) else {
             return;
         };
-        if self.opened_at.is_some_and(|at| at.elapsed() < OPEN_EVERY) {
+        let now = Instant::now();
+        let clicked = match engine {
+            // The engine's word stays "a gesture" for all of it: its first instant is kept, so
+            // every address it asks for spends the same click and opens one (`LinkGate`).
+            Some(true) => match self.engine_gesture {
+                Some(at) if now.saturating_duration_since(at) <= core::net::LINK_GESTURE => {
+                    Some(at)
+                }
+                _ => {
+                    self.engine_gesture = Some(now);
+                    Some(now)
+                }
+            },
+            Some(false) => None,
+            None => self.surface.as_ref().and_then(|s| s.clicked()),
+        };
+        if !self.links.allow(now, clicked) {
+            tracing::debug!("artifact: a link no click of the user's asked for wasn't opened");
             return;
         }
-        self.opened_at = Some(Instant::now());
+        // A capture run opens nothing on the user's desktop: it notes what would have opened.
+        #[cfg(feature = "shots")]
+        if std::env::var_os("TREK_SHOT_DIR").is_some() {
+            cx.default_global::<Registry>().opened.push(url);
+            return;
+        }
+        // A real click is still only a click: the page's own script can spend it on an address
+        // the click wasn't on (`a.click()` in a `pointerdown` handler). So a web address to a
+        // host no page may load from and the user hasn't allowed opens only on the card's own
+        // confirm, drawn by Trek outside the page (`link_ask_strip`).
+        if let Some(host) = core::net::link_host(&url) {
+            let allowed = core::net::open_host(&host)
+                || self.hosts.iter().any(|h| h.eq_ignore_ascii_case(&host));
+            if !allowed {
+                cx.default_global::<Registry>()
+                    .link_asks
+                    .insert(self.doc.hash, (url, host));
+                cx.notify();
+                crate::visualization::relayout(cx);
+                return;
+            }
+        }
         cx.open_url(&url);
+    }
+
+    /// The page's policy stopped a load from `url`: the card asks about its host, once.
+    fn stopped(&mut self, url: &str, cx: &mut Context<Self>) {
+        let asked = cx
+            .default_global::<Registry>()
+            .asks
+            .entry(self.doc.hash)
+            .or_default()
+            .stopped(url, &self.hosts);
+        if asked {
+            cx.notify();
+            crate::visualization::relayout(cx);
+        }
     }
 
     fn set_height(&mut self, h: f32, cx: &mut Context<Self>) {
@@ -1682,6 +2147,14 @@ impl ArtifactState {
         if self.has_keys && !self.focus.is_focused(window) {
             self.had_focus = None;
             self.release_keys(window, cx);
+        }
+        // A video the user hasn't said may load has no view: nothing is asked of its site.
+        if self.held {
+            if self.surface.is_some() {
+                self.drop_surface(window, cx);
+            }
+            self.geom = None;
+            return;
         }
         let Some(g) = self.geom.clone() else {
             self.show(None, window, cx);
@@ -1941,6 +2414,19 @@ struct Registry {
     /// What each page asked to be kept (`trek.keep`), by document: handed back to the page when
     /// its view is made again (`Extras::kept`).
     kept: HashMap<u64, String>,
+    /// What each document's page tried to load from and the policy stopped, for its card to
+    /// ask about (`core::net::Asks`); what was refused stays refused while Trek runs.
+    asks: HashMap<u64, core::net::Asks>,
+    /// The hosts the user allowed a document's page once: until Trek quits.
+    once: HashMap<u64, Vec<String>>,
+    /// A link a document's page wants opened in the user's browser, waiting on the card's own
+    /// confirm (`link_ask`): (the address, its host as written).
+    link_asks: HashMap<u64, (String, String)>,
+    /// The videos from the web the user said may load, by document: until Trek quits.
+    loaded: std::collections::HashSet<u64>,
+    /// The capture build: the links that would have opened in the user's browser, in order.
+    #[cfg(feature = "shots")]
+    opened: Vec<String>,
     /// Web views made so far, which the capture build reports (`views_made`): one a frame is a
     /// card made and let go of over and over.
     #[cfg(any(test, feature = "test-support", feature = "shots"))]
@@ -1956,6 +2442,12 @@ impl Default for Registry {
             retired: Vec::new(),
             places: HashMap::new(),
             kept: HashMap::new(),
+            asks: HashMap::new(),
+            once: HashMap::new(),
+            link_asks: HashMap::new(),
+            loaded: std::collections::HashSet::new(),
+            #[cfg(feature = "shots")]
+            opened: Vec::new(),
             #[cfg(any(test, feature = "test-support", feature = "shots"))]
             made: 0,
         }
@@ -2188,6 +2680,7 @@ fn make_surface(spec: native::Spec, window: &mut Window) -> Making {
                     let mut log = log.borrow_mut();
                     log.made += 1;
                     log.bootstraps.push(spec.bootstrap.clone());
+                    log.policies.push(spec.csp.borrow().clone());
                 }
                 Ok(Box::new(FakeSurface {
                     log,
@@ -2237,6 +2730,18 @@ pub struct FakeLog {
     /// Windows they're left with a hidden window, or none.
     pub hidden_with_keys: usize,
     pub gone_with_keys: usize,
+    /// When the user last clicked in a page, as the platform saw it (`click`).
+    pub clicked: Option<Instant>,
+    /// The policy each view was last served under.
+    pub policies: Vec<String>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl FakeLog {
+    /// The user clicks in a page: the platform sees it, as AppKit's monitor does.
+    pub fn click(&mut self) {
+        self.clicked = Some(Instant::now());
+    }
 }
 
 /// Tests on this thread get stand-in views, which log to what this returns (`None`: no views at
@@ -2268,7 +2773,12 @@ impl Surface for FakeSurface {
         self.log.borrow_mut().scripts.push(js.to_string());
     }
     fn reload(&self) {
-        self.log.borrow_mut().reloads += 1;
+        let mut log = self.log.borrow_mut();
+        log.reloads += 1;
+        log.policies.push(self.spec.csp.borrow().clone());
+    }
+    fn clicked(&self) -> Option<Instant> {
+        self.log.borrow().clicked
     }
     fn snapshot(&self) -> Option<async_channel::Receiver<Result<Vec<u8>, String>>> {
         None
@@ -2411,6 +2921,67 @@ pub fn post(window: &mut Window, body: &str, cx: &mut App) {
             }
         });
     }
+}
+
+/// Every test view's page in the window asks to go to `url` (a link, a window, a script's own
+/// idea), as the engine would report it; `engine`: its word on a user gesture, where it gives
+/// one (Windows).
+#[cfg(any(test, feature = "test-support"))]
+pub fn wants(window: &mut Window, url: &str, engine: Option<bool>, cx: &mut App) {
+    let Some(entry) = cx
+        .try_global::<Registry>()
+        .and_then(|r| r.windows.get(&window.window_handle().window_id()))
+    else {
+        return;
+    };
+    let states: Vec<_> = entry.states.iter().filter_map(|s| s.upgrade()).collect();
+    for state in states {
+        state.update(cx, |s, cx| {
+            if s.surface.is_some() {
+                let event = native::Event::Wants {
+                    url: url.to_string(),
+                    engine,
+                };
+                s.on_event(event, window, cx);
+            }
+        });
+    }
+}
+
+/// The capture build's `artifacts click-page x y`: a click of the user's own, as the system
+/// delivers one, at (`x`, `y`) of the first live card's page.
+#[cfg(feature = "shots")]
+pub fn click_page(window: &Window, x: f64, y: f64, cx: &App) -> anyhow::Result<()> {
+    let state = cx
+        .try_global::<Registry>()
+        .and_then(|r| r.windows.get(&window.window_handle().window_id()))
+        .and_then(|entry| {
+            entry
+                .states
+                .iter()
+                .filter_map(|s| s.upgrade())
+                .find(|s| s.read(cx).live && s.read(cx).surface.is_some())
+        })
+        .ok_or_else(|| anyhow::anyhow!("no card's page is on screen"))?;
+    let s = state.read(cx);
+    match &s.surface {
+        Some(surface) => surface.click_at(x, y).map_err(|e| anyhow::anyhow!(e)),
+        None => Ok(()),
+    }
+}
+
+/// The capture build: the links that would have opened in the user's browser (it opens none),
+/// and the hosts each card is asking about.
+#[cfg(feature = "shots")]
+pub fn outbound(cx: &App) -> (Vec<String>, Vec<String>) {
+    cx.try_global::<Registry>()
+        .map(|r| {
+            let mut asking: Vec<String> =
+                r.asks.values().flat_map(|a| a.shown().to_vec()).collect();
+            asking.sort();
+            (r.opened.clone(), asking)
+        })
+        .unwrap_or_default()
 }
 
 /// Tell every test view in the window that its page has loaded, as the engine would.

