@@ -173,21 +173,24 @@ impl Bus {
 
     /// Its own actions, by name.
     fn action_names(&self, el: &El) -> Vec<String> {
-        let all = self
-            .call(el, ACTION, "GetActions", &())
-            .and_then(|reply| out!(reply, Vec<(String, String, String)>));
-        if let Ok(all) = all {
-            return all.into_iter().map(|(name, _, _)| name).collect();
+        // NActions then GetName, never GetActions where it's offered: GTK3's AT-SPI bridge
+        // (at-spi2-core on Ubuntu 22.04) aborts the whole app writing the a(sss) reply — the
+        // check window died mid-reading, its button never read. The names are all a reading
+        // keeps of them; GetActions' descriptions and keybindings go unread anyway.
+        if let Some(n) = self.count(el, ACTION, "NActions") {
+            return (0..n.clamp(0, 32))
+                .map(|i| {
+                    self.call(el, ACTION, "GetName", &i)
+                        .and_then(|reply| out!(reply, String))
+                        .unwrap_or_default()
+                })
+                .collect();
         }
-        // An app without GetActions: each action's name, asked for by its index.
-        let count = self.count(el, ACTION, "NActions").unwrap_or(0).clamp(0, 8);
-        (0..count)
-            .map(|i| {
-                self.call(el, ACTION, "GetName", &i)
-                    .and_then(|reply| out!(reply, String))
-                    .unwrap_or_default()
-            })
-            .collect()
+        // An app without NActions: GetActions is the only way to learn them.
+        self.call(el, ACTION, "GetActions", &())
+            .and_then(|reply| out!(reply, Vec<(String, String, String)>))
+            .map(|all| all.into_iter().map(|(name, _, _)| name).collect())
+            .unwrap_or_default()
     }
 
     fn props(&self, el: &El) -> Result<Props, Fault> {
