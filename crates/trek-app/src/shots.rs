@@ -88,7 +88,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 mod cloud_files;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 mod computer_use;
 #[cfg(any(windows, target_os = "macos"))]
 mod dns_sd;
