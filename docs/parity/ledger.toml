@@ -2036,7 +2036,7 @@ what = "Trek stays light while agents work: the working bar, streamed text and t
 macos = "yes"
 windows = "yes"
 linux = "yes"
-live = ["route project:{project}", "motion on", "pace 1", "send mock:long 10s", "wait 3000", "renders mark", "wait 2000", "renders WorkingBar 5+ ThreadView <=WorkingBar WindowTitle 0- Sidebar 3-", "click stop", "pace 0", "motion system"]
+live = ["housekeeping hold", "route project:{project}", "motion on", "pace 1", "send mock:long 10s", "wait 3000", "renders mark", "wait 2000", "renders WorkingBar 5+ ThreadView <=WorkingBar WindowTitle 0- Sidebar 3-", "click stop", "pace 0", "motion system", "housekeeping on"]
 tests = ["crates/trek-app/tests/render.rs"]
 
 [[feature.promise]]
