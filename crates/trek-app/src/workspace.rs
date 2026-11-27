@@ -3322,10 +3322,7 @@ impl Workspace {
             return;
         }
         self.update_task = Some(want);
-        let mcp = std::env::var_os("TREK_MCP_BIN")
-            .map(PathBuf::from)
-            .filter(|p| p.is_file())
-            .or_else(trek_mcp_binary);
+        let mcp = trek_mcp_binary();
         let task = cx.background_executor().spawn(async move {
             use trek_core::update::closed::task;
             let name = update_task_name();
@@ -12239,12 +12236,15 @@ pub fn update_task_name() -> &'static str {
     }
 }
 
-/// The bundled `trek-mcp` server: `TREK_MCP_BIN` where it's set (CI's capture build isn't beside
-/// the `trek-mcp` it builds), else next to the app binary, else a dev build.
+/// The bundled `trek-mcp` server: next to the app binary, else a dev build. `TREK_MCP_BIN`
+/// where it's set is a capture build's pointer at the `trek-mcp` CI builds apart — honored only
+/// in test and shots builds, since in a release it would let anything that can set Trek's
+/// environment choose the binary every agent session runs as its MCP servers.
 pub fn trek_mcp_binary() -> Option<PathBuf> {
-    if let Some(bin) = std::env::var_os("TREK_MCP_BIN")
-        .map(PathBuf::from)
-        .filter(|p| p.is_file())
+    if cfg!(any(test, feature = "test-support", feature = "shots"))
+        && let Some(bin) = std::env::var_os("TREK_MCP_BIN")
+            .map(PathBuf::from)
+            .filter(|p| p.is_file())
     {
         return Some(bin);
     }
@@ -12425,6 +12425,26 @@ mod tests {
             "unable to access 'https://github.com/a/b.git/': Could not resolve host: github.com"
         );
         assert_eq!(clone_failure(""), "it didn't say why");
+    }
+
+    #[test]
+    fn trek_mcp_bin_is_honored_in_test_builds() {
+        // Test builds are the capture builds' stand-in: TREK_MCP_BIN still names the server.
+        // The env is process-wide, so hold a lock for the few lines it's set.
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK.lock().unwrap();
+        let bin = std::env::temp_dir().join(format!("trek-mcp-bin-test-{}", std::process::id()));
+        std::fs::write(&bin, b"").unwrap();
+        let old = std::env::var_os("TREK_MCP_BIN");
+        // SAFETY: tests run on threads of one process; the lock above keeps this the only
+        // thread touching TREK_MCP_BIN while it's set.
+        unsafe { std::env::set_var("TREK_MCP_BIN", &bin) };
+        assert_eq!(trek_mcp_binary().as_deref(), Some(bin.as_path()));
+        match old {
+            Some(v) => unsafe { std::env::set_var("TREK_MCP_BIN", v) },
+            None => unsafe { std::env::remove_var("TREK_MCP_BIN") },
+        }
+        let _ = std::fs::remove_file(&bin);
     }
 
     fn q(text: &str, secret: bool) -> Question {
