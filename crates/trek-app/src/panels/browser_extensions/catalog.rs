@@ -1,9 +1,12 @@
 //! The Extensions page's starter list: well-known extensions from the Chrome Web Store, each with
 //! how it fares in this Browser. Nothing of them ships with Trek: Install downloads the store's
-//! own package. What's said of each was measured (macOS 27.2, WebKit's WKWebExtension with Trek's
-//! shim for the APIs it lacks, `compat`; the store's packages of November 2026, loaded with every
-//! permission they ask for): an extension's background either runs or stops at the first API
-//! WebKit doesn't have. WebView2 runs what Chromium runs,
+//! own package. What's said of each was seen (macOS 27.2, WebKit's WKWebExtension with Trek's
+//! shim and channel for the APIs it lacks, `compat` and `bridge`; the store's packages of
+//! 27 November 2026, loaded with every permission they ask for): Privacy Badger counted 60
+//! trackers on forbes.com and blocked the ad networks among them; React Developer Tools'
+//! Components panel showed react.dev's component tree (its panels open from the Browser's menu
+//! in a window of Trek's); the password managers and Grammarly ran up to where a real account
+//! is needed, which wasn't used. WebView2 runs what Chromium runs,
 //! but shows no extension's popup, toolbar button or options page: one whose job is done in its
 //! popup (a password manager's vault) can't do it there, and one set up in it keeps its defaults.
 
@@ -52,7 +55,7 @@ pub const STARTERS: &[Entry] = &[
         name: "Grammarly",
         blurb: "Grammar and writing help in text fields.",
         webkit: Fit::Limited(
-            "runs, but does nothing until you sign in to Grammarly (signing in wasn't tried here)",
+            "runs, and its Sign in opens Grammarly's sign-in page in a Browser tab; it does nothing until you sign in (not tried here with a real account)",
         ),
         webview2: Fit::Limited("needs a sign-in through its popup, which WebView2 doesn't show"),
     },
@@ -60,8 +63,8 @@ pub const STARTERS: &[Entry] = &[
         id: "nngceckbapebfimnlniiiahkandclblb",
         name: "Bitwarden",
         blurb: "Password manager.",
-        webkit: Fit::Broken(
-            "needs chrome.notifications: its background stops without it, so its popup never opens the vault",
+        webkit: Fit::Limited(
+            "runs, and its popup signs in as far as the master password (a vault wasn't unlocked here: that needs a real account); unlocking with Touch ID needs Bitwarden's desktop app",
         ),
         webview2: Fit::Broken("its vault opens in its popup, which WebView2 doesn't show"),
     },
@@ -69,7 +72,9 @@ pub const STARTERS: &[Entry] = &[
         id: "aeblfdkhhhdcdjpifhhbdiojplfjncoa",
         name: "1Password",
         blurb: "Password manager.",
-        webkit: Fit::Broken("needs chrome.notifications and native messaging"),
+        webkit: Fit::Limited(
+            "runs and opens its setup page; signing in wasn't tried (it needs a real account), and the 1Password app may refuse Trek: it pairs only with browsers it knows or that are code-signed by Apple",
+        ),
         webview2: Fit::Broken(
             "needs its popup and native messaging to the 1Password app, which WebView2 has neither of",
         ),
@@ -85,16 +90,14 @@ pub const STARTERS: &[Entry] = &[
         id: "pkehgijcmpdhfbdbbnkijodmdjhbjlgp",
         name: "Privacy Badger",
         blurb: "Learns to block invisible trackers.",
-        webkit: Fit::Broken("needs chrome.webRequest's header options, which WebKit doesn't have"),
+        webkit: Fit::Works,
         webview2: Fit::Works,
     },
     Entry {
         id: "fmkadmapgofadopljbjfkapdkoienihi",
         name: "React Developer Tools",
         blurb: "Inspect React components.",
-        webkit: Fit::Limited(
-            "finds React in a page, but its Components and Profiler panels are Chrome DevTools panels, not seen working here",
-        ),
+        webkit: Fit::Works,
         webview2: Fit::Works,
     },
 ];
@@ -214,23 +217,29 @@ mod tests {
         assert_eq!(fit("Vimium"), Fit::Works);
     }
 
-    /// What was seen running under WebKit with Trek's shim (`compat`): the popup and the page
-    /// for Dark Reader, link hints for Vimium; the rest stop where their notes say.
+    /// What was seen running under WebKit with Trek's shim and channel (`compat`, `bridge`):
+    /// the popup and the page for Dark Reader, link hints for Vimium, Privacy Badger's trackers,
+    /// React Developer Tools' panels; the others run up to where a real account is needed.
     #[test]
     fn webkit_verdicts_are_the_measured_ones() {
         let fit = |name: &str| STARTERS.iter().find(|e| e.name == name).unwrap().webkit;
-        for name in ["uBlock Origin Lite", "Dark Reader", "Vimium"] {
+        for name in [
+            "uBlock Origin Lite",
+            "Dark Reader",
+            "Vimium",
+            "Privacy Badger",
+            "React Developer Tools",
+        ] {
             assert_eq!(fit(name), Fit::Works, "{name}");
         }
-        assert!(matches!(fit("Grammarly"), Fit::Limited(why) if why.contains("sign in")));
-        assert!(matches!(fit("React Developer Tools"), Fit::Limited(_)));
-        for name in ["Bitwarden", "1Password"] {
+        for name in ["Grammarly", "Bitwarden", "1Password"] {
             assert!(
-                matches!(fit(name), Fit::Broken(why) if why.contains("chrome.notifications")),
+                matches!(fit(name), Fit::Limited(why) if why.contains("real account")),
                 "{name}"
             );
         }
-        assert!(matches!(fit("Privacy Badger"), Fit::Broken(why) if why.contains("webRequest")));
+        // Nothing in the list stops here any more.
+        assert!(STARTERS.iter().all(|e| !matches!(e.webkit, Fit::Broken(_))));
     }
 
     #[test]

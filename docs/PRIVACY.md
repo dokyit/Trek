@@ -144,7 +144,7 @@ Apart from PostHog, and apart from the agents' and model providers' own servers 
 | `cdn.agentclientprotocol.com` and the binary URLs it names | The registry's list when Add agent opens (cached); a download when an agent is installed from it. |
 | `nodejs.org`, `ffmpeg.martin-riedl.de`, `github.com/GyanD`, GitHub releases for yt-dlp | When the user sets up Node.js, ffmpeg or yt-dlp. yt-dlp then reaches the video's own site when an agent watches a YouTube or X link. |
 | `huggingface.co` | The Windows dictation model, on the first click of the mic. |
-| `clients2.google.com`, `edge.microsoft.com` | A browser extension's download, when the user installs one. |
+| `clients2.google.com`, `edge.microsoft.com`, `clients2.googleusercontent.com` | A browser extension's download, when the user installs one; on a Mac, once a day while extensions installed from the Chrome Web Store are there, the store's update check for them (each one's id and version, as Chrome sends) and a newer version's download. |
 | `www.google.com` | The built-in Browser's start page asks for six sites' icons (`/s2/favicons`) when it opens; its address bar searches Google for text that isn't an address. |
 | `cdn.jsdelivr.net` | Before 0.4.64, study question cards loaded KaTeX from it every time one was drawn; since then it is bundled (`crates/trek-assets/assets/katex`, served by the card's own origin at `/_trek/katex/`) and the card asks no host. |
 | `cdnjs.cloudflare.com`, `fonts.googleapis.com`, `fonts.gstatic.com`, `tiles.openfreemap.org`, `unpkg.com` (the map card's pinned Leaflet and MapLibre files only) | What a `trek-html` page an agent writes may load without asking (`trek_core::artifact::net::OPEN_SOURCES`): hosts where nobody but the operator can see what was asked for. |

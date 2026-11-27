@@ -19,6 +19,9 @@ pub struct Installed {
     pub allowed: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_sites: Vec<String>,
+    /// Native messaging hosts (programs on the Mac) the user let it start, by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_hosts: Vec<String>,
 }
 
 impl Installed {
@@ -64,6 +67,9 @@ pub fn put(all: &mut Vec<Installed>, mut entry: Installed) {
         }
         if entry.allowed_sites.is_empty() {
             entry.allowed_sites = std::mem::take(&mut old.allowed_sites);
+        }
+        if entry.allowed_hosts.is_empty() {
+            entry.allowed_hosts = std::mem::take(&mut old.allowed_hosts);
         }
         *old = entry;
     } else {

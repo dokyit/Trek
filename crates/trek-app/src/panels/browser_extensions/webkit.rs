@@ -10,7 +10,7 @@
 //! extension's id. Everything here is the main thread's: WebKit calls the delegate there, and the
 //! state is a thread local that no WebKit call is made while borrowing (a call can come back in).
 
-use super::{Extension, compat, extensions_dir, manifest, registry};
+use super::{Extension, channel, compat, extensions_dir, manifest, registry, updates};
 use block2::{DynBlock, RcBlock};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
@@ -24,10 +24,10 @@ use objc2_web_kit::{
     WKWebExtension, WKWebExtensionAction, WKWebExtensionContext,
     WKWebExtensionContextPermissionStatus, WKWebExtensionController,
     WKWebExtensionControllerConfiguration, WKWebExtensionControllerDelegate,
-    WKWebExtensionMatchPattern, WKWebExtensionPermission, WKWebExtensionTab,
-    WKWebExtensionTabChangedProperties, WKWebExtensionTabConfiguration, WKWebExtensionWindow,
-    WKWebExtensionWindowConfiguration, WKWebExtensionWindowState, WKWebExtensionWindowType,
-    WKWebView, WKWebViewConfiguration,
+    WKWebExtensionMatchPattern, WKWebExtensionMessagePort, WKWebExtensionPermission,
+    WKWebExtensionTab, WKWebExtensionTabChangedProperties, WKWebExtensionTabConfiguration,
+    WKWebExtensionWindow, WKWebExtensionWindowConfiguration, WKWebExtensionWindowState,
+    WKWebExtensionWindowType, WKWebView, WKWebViewConfiguration,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -70,7 +70,13 @@ struct State {
     unloaded: HashMap<String, Instant>,
     reloads: Vec<registry::Installed>,
     next_prompt: u64,
+    /// `tabs.create` calls waiting for the Browser's new tab, oldest first.
+    new_tabs: Vec<(NewTab, Instant)>,
+    /// Extensions' DevTools windows (`open_devtools`), for the shots driver.
+    devtools: HashMap<String, Retained<WKWebView>>,
 }
+
+type NewTab = RcBlock<dyn Fn(*mut ProtocolObject<dyn WKWebExtensionTab>, *mut NSError)>;
 
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
@@ -85,7 +91,7 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
 }
 
 /// Something the Browser shows changed: draw again.
-fn changed() {
+pub(super) fn changed() {
     GENERATION.set(GENERATION.get() + 1);
     WAKER.with_borrow(|w| {
         if let Some(w) = w {
@@ -137,12 +143,14 @@ pub fn ensure() -> bool {
             } else {
                 WKWebExtensionControllerConfiguration::defaultConfiguration(mtm)
             };
-            // Extensions' own pages and backgrounds name the browser as the Browser's tabs do
-            // (Safari's agent): without it WebKit's bare agent names none, and an extension that
-            // tells browsers apart by it (Bitwarden) finds no browser and stops.
+            // Extensions' own pages and backgrounds name a browser (WebKit's bare agent names
+            // none, and Bitwarden stopped at `this.device`): Chrome, whose packages these are.
+            // Named Safari, an extension takes its Safari paths, which talk to the native code
+            // its own Safari app carries (Bitwarden's background waited on its Swift handler
+            // forever and its popup never opened). The Browser's tabs still say Safari.
             let pages = config.webViewConfiguration();
             pages.setApplicationNameForUserAgent(Some(&NSString::from_str(
-                &crate::panels::browser::safari_application_name(),
+                &extension_application_name(),
             )));
             config.setWebViewConfiguration(Some(&pages));
             let controller = WKWebExtensionController::initWithConfiguration(
@@ -169,6 +177,8 @@ pub fn ensure() -> bool {
                 unloaded: HashMap::new(),
                 reloads: vec![],
                 next_prompt: 1,
+                new_tabs: vec![],
+                devtools: HashMap::new(),
             });
         }
         true
@@ -182,6 +192,16 @@ pub fn ensure() -> bool {
     }
     true
 }
+
+/// What extensions' own pages add to WebKit's agent: a Chrome of the same age as this WebKit
+/// (`Chrome/<n>`), so Chrome packages take their Chrome paths.
+pub fn extension_application_name() -> String {
+    format!("Chrome/{CHROME_MAJOR}.0.0.0 Safari/605.1.15")
+}
+
+/// The Chrome release extensions are told they run in (one current when this was written; an
+/// extension that needs a newer one says so on the Extensions page).
+pub(super) const CHROME_MAJOR: u32 = 142;
 
 fn uuid_bytes(path: &std::path::Path) -> [u8; 16] {
     use sha2::Digest as _;
@@ -339,7 +359,41 @@ fn unload(id: &str) {
         s.unloaded.insert(id.to_string(), Instant::now());
         s.probes.remove(id);
     });
+    channel::unloaded(id);
     changed();
+}
+
+/// Loaded extension `id`'s context.
+pub(super) fn context(id: &str) -> Option<Retained<WKWebExtensionContext>> {
+    with(|s| s.contexts.get(id).cloned()).flatten()
+}
+
+/// Whether the user let extension `id` start native host `host`.
+pub(super) fn host_allowed(id: &str, host: &str) -> bool {
+    registry::load(&extensions_dir())
+        .iter()
+        .any(|e| e.id == id && e.allowed_hosts.iter().any(|h| h == host))
+}
+
+/// Ask the user whether extension `ctx` may start native host `host` (`line`, in words); `done`
+/// hears the answer, and a yes is kept.
+pub(super) fn ask_host(
+    ctx: &WKWebExtensionContext,
+    host: String,
+    line: String,
+    done: Box<dyn FnOnce(bool)>,
+) {
+    ask(
+        ctx,
+        vec![line],
+        vec![],
+        Reply::Host(host, std::cell::Cell::new(Some(done))),
+    );
+}
+
+/// Something to tell the user (in the log: there's no window to toast here).
+pub(super) fn say(text: String) {
+    tracing::info!("browser extensions: {text}");
 }
 
 /// How long WebKit takes to let go of an unloaded extension: one loaded again sooner (turned
@@ -394,6 +448,82 @@ fn load_waiting() {
     }
 }
 
+/// Ask the store for newer versions of what Trek installed from it (when a day has passed, or
+/// now: `force`), and put each in place; a summary of what came of it.
+pub fn check_updates(force: bool) -> async_channel::Receiver<String> {
+    let (tx, rx) = async_channel::bounded(1);
+    let dir = extensions_dir();
+    let mut state = updates::load(&dir);
+    let now = updates::now();
+    if !force && !updates::due(&state, now) {
+        let _ = tx.try_send("Not due.".to_string());
+        return rx;
+    }
+    state.checked = now;
+    updates::save(&dir, &state);
+    // Only what Trek unpacked (a folder of the user's is theirs to update).
+    let installed: Vec<(String, String, PathBuf)> = registry::load(&dir)
+        .into_iter()
+        .filter(|e| e.folder.is_none())
+        .filter_map(|e| {
+            let folder = e.folder_in(&dir);
+            let version = manifest::read(&folder).ok()?.version;
+            Some((e.id, version, folder))
+        })
+        .collect();
+    let incoming = dir.join(".incoming");
+    trek_core::runtime().spawn(async move {
+        let (ready, waiting) = updates::check(installed, incoming).await;
+        channel::on_main(Box::new(move || {
+            let dir = extensions_dir();
+            let mut state = updates::load(&dir);
+            state
+                .waiting
+                .retain(|w| !waiting.iter().any(|n| n.id == w.id));
+            state
+                .waiting
+                .retain(|w| !ready.iter().any(|r| r.id == w.id));
+            state.waiting.extend(waiting.clone());
+            updates::save(&dir, &state);
+            let mut said = vec![];
+            for r in ready {
+                match apply_update(&r) {
+                    Ok(()) => said.push(format!("{} updated to {}", r.id, r.version)),
+                    Err(e) => said.push(format!("{} not updated: {e}", r.id)),
+                }
+            }
+            for w in &waiting {
+                said.push(format!("{} {} waits: it asks for more", w.id, w.version));
+            }
+            let line = if said.is_empty() {
+                "Everything is up to date.".to_string()
+            } else {
+                said.join("; ")
+            };
+            tracing::info!("browser extensions: updates: {line}");
+            changed();
+            let _ = tx.try_send(line);
+        }));
+    });
+    rx
+}
+
+/// Put update `r` in place of the installed extension (what it stored stays: WebKit keeps that
+/// under its id), and run it again if it was on.
+fn apply_update(r: &updates::Ready) -> Result<(), String> {
+    let dir = extensions_dir();
+    let entry = registry::load(&dir)
+        .into_iter()
+        .find(|e| e.id == r.id)
+        .ok_or("It was removed meanwhile.")?;
+    unload(&r.id);
+    registry::replace_dir(&r.folder, &dir.join(&r.id))?;
+    if entry.enabled {
+        load_when_free(entry);
+    }
+    Ok(())
+}
+
 /// What's installed, for the Extensions page.
 pub fn list() -> Vec<Extension> {
     ensure();
@@ -425,6 +555,13 @@ pub fn list() -> Vec<Extension> {
                         problems.push(e);
                     }
                 }
+            }
+            if let Some(w) = updates::load(&dir).waiting.iter().find(|w| w.id == entry.id) {
+                problems.push(format!(
+                    "Version {} is out, and asks for more: {}. Install it again from the store to allow that.",
+                    w.version,
+                    w.asks.join(", ")
+                ));
             }
             Extension {
                 name: if m.name.is_empty() {
@@ -554,6 +691,51 @@ fn remove_data(id: &str) {
     };
 }
 
+/// Running extensions whose manifest names a DevTools page (id, name), in install order.
+pub fn devtools_extensions() -> Vec<(String, String)> {
+    let running: Vec<String> = with(|s| s.contexts.keys().cloned().collect()).unwrap_or_default();
+    registry::load(&extensions_dir())
+        .into_iter()
+        .filter(|e| e.enabled && running.contains(&e.id))
+        .filter_map(|e| {
+            let folder = e.folder_in(&extensions_dir());
+            let text = std::fs::read_to_string(folder.join("manifest.json")).ok()?;
+            let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+            json["devtools_page"].as_str()?;
+            // Trek's page for them is in a folder Trek unpacked (a folder of the user's isn't changed).
+            folder.join(compat::DEVTOOLS_FILE).is_file().then_some(())?;
+            let name = manifest::read(&folder).map(|m| m.name).unwrap_or_default();
+            Some((e.id, name))
+        })
+        .collect()
+}
+
+/// Open extension `id`'s DevTools panels for the tab in front, in a window of their own.
+pub fn open_devtools(id: &str) -> Result<(), String> {
+    let ctx = context(id).ok_or("It isn't running.")?;
+    // SAFETY: main thread, a live context.
+    let url = unsafe {
+        NSURL::URLWithString_relativeToURL(
+            &NSString::from_str(compat::DEVTOOLS_FILE),
+            Some(&ctx.baseURL()),
+        )
+    }
+    .ok_or("No address for its panels.")?;
+    let view = open_page(&ctx, &url).ok_or("No window for its panels.")?;
+    with(|s| s.devtools.insert(id.to_string(), view));
+    Ok(())
+}
+
+/// Run `js` in extension `id`'s DevTools window (the shots driver's `ext-devtools-eval`).
+pub fn devtools_eval(id: &str, js: &str) -> async_channel::Receiver<Result<String, String>> {
+    let Some(page) = with(|s| s.devtools.get(id).cloned()).flatten() else {
+        let (tx, rx) = async_channel::bounded(1);
+        let _ = tx.try_send(Err("Its DevTools panels aren't open.".to_string()));
+        return rx;
+    };
+    eval_in(&page, js)
+}
+
 /// Show extension `id`'s options page, in a window of its own.
 pub fn open_options(id: &str) {
     let Some(ctx) = with(|s| s.contexts.get(id).cloned()).flatten() else {
@@ -567,15 +749,11 @@ pub fn open_options(id: &str) {
 
 /// Open extension page `url` (options, or one it opens as a tab) in a window of its own: such a
 /// page needs its extension's own web view configuration, which a Browser tab hasn't.
-fn open_page(ctx: &WKWebExtensionContext, url: &NSURL) {
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
+pub(super) fn open_page(ctx: &WKWebExtensionContext, url: &NSURL) -> Option<Retained<WKWebView>> {
+    let mtm = MainThreadMarker::new()?;
     // SAFETY: main thread; a new window and view, kept in the state while open.
     unsafe {
-        let Some(config) = ctx.webViewConfiguration() else {
-            return;
-        };
+        let config = ctx.webViewConfiguration()?;
         let name = ctx
             .webExtension()
             .displayName()
@@ -603,6 +781,7 @@ fn open_page(ctx: &WKWebExtensionContext, url: &NSURL) {
             s.pages.retain(|w| w.isVisible());
             s.pages.push(window);
         });
+        Some(view)
     }
 }
 
@@ -841,6 +1020,8 @@ enum Reply {
         Answer<WKWebExtensionMatchPattern>,
         Retained<NSSet<WKWebExtensionMatchPattern>>,
     ),
+    /// A native messaging host to start: its name, and who waits for the answer.
+    Host(String, std::cell::Cell<Option<Box<dyn FnOnce(bool)>>>),
 }
 
 struct Pending {
@@ -865,11 +1046,15 @@ fn ask(ctx: &WKWebExtensionContext, permissions: Vec<String>, hosts: Vec<String>
                 .unwrap_or_default(),
         )
     };
-    let mut asks = manifest::describe(&manifest::Manifest {
-        permissions: permissions.clone(),
-        hosts,
-        ..Default::default()
-    });
+    let mut asks = if matches!(reply, Reply::Host(..)) {
+        vec![]
+    } else {
+        manifest::describe(&manifest::Manifest {
+            permissions: permissions.clone(),
+            hosts,
+            ..Default::default()
+        })
+    };
     if asks.is_empty() {
         asks = permissions;
     }
@@ -903,6 +1088,21 @@ pub fn answer(id: u64, allow: bool) {
     let mut allowed: Vec<String> = vec![];
     let mut sites: Vec<String> = vec![];
     match &pending.reply {
+        Reply::Host(host, done) => {
+            if let Some(done) = done.take() {
+                // Kept first: what it starts may ask WebKit for this extension again.
+                if allow {
+                    registry::update(&extensions_dir(), |all| {
+                        if let Some(e) = all.iter_mut().find(|e| e.id == pending.ext)
+                            && !e.allowed_hosts.contains(host)
+                        {
+                            e.allowed_hosts.push(host.clone());
+                        }
+                    });
+                }
+                done(allow);
+            }
+        }
         Reply::Permissions(done, asked) => {
             let given = if allow { asked.clone() } else { NSSet::new() };
             allowed.extend(given.iter().map(|p| p.to_string()));
@@ -1020,6 +1220,27 @@ pub fn sync_tabs(
         if focus {
             controller.didFocusWindow(Some(ProtocolObject::from_ref(&*window)));
         }
+    }
+    // Hand each new tab to the `tabs.create` that asked for one; one asked for long ago gets none.
+    let (late, waiting) = with(|s| {
+        let (late, fresh): (Vec<_>, Vec<_>) = std::mem::take(&mut s.new_tabs)
+            .into_iter()
+            .partition(|(_, at)| at.elapsed() >= Duration::from_secs(10));
+        s.new_tabs = fresh;
+        let n = opened.len().min(s.new_tabs.len());
+        let waiting: Vec<_> = s.new_tabs.drain(..n).map(|(done, _)| done).collect();
+        (late, waiting)
+    })
+    .unwrap_or_default();
+    for (done, _) in late {
+        done.call((std::ptr::null_mut(), std::ptr::null_mut()));
+    }
+    for (done, tab) in waiting.into_iter().zip(&opened) {
+        let tab: &ProtocolObject<dyn WKWebExtensionTab> = ProtocolObject::from_ref(&**tab);
+        done.call((
+            (tab as *const ProtocolObject<dyn WKWebExtensionTab>).cast_mut(),
+            std::ptr::null_mut(),
+        ));
     }
 }
 
@@ -1382,8 +1603,18 @@ define_class!(
         ) {
             // SAFETY: main thread, a live configuration.
             let url = unsafe { configuration.url() };
+            let page = url
+                .as_deref()
+                .is_some_and(|u| unsafe { controller.extensionContextForURL(u) }.is_some());
+            let tab = url.is_some() && !page && with(|s| s.open_tab.is_some()).unwrap_or(false);
             open_url(controller, url.as_deref());
-            done.call((std::ptr::null_mut(), std::ptr::null_mut()));
+            if tab {
+                // The tab, once the Browser has made it (`sync_tabs`): an extension that opens a
+                // sign-in page waits for that tab's updates by its id.
+                with(|s| s.new_tabs.push((done.copy(), Instant::now())));
+            } else {
+                done.call((std::ptr::null_mut(), std::ptr::null_mut()));
+            }
         }
 
         #[unsafe(method(webExtensionController:openNewWindowUsingConfiguration:forExtensionContext:completionHandler:))]
@@ -1491,6 +1722,29 @@ define_class!(
             _context: &WKWebExtensionContext,
         ) {
             changed();
+        }
+
+        #[unsafe(method(webExtensionController:sendMessage:toApplicationWithIdentifier:forExtensionContext:replyHandler:))]
+        fn send_native_message(
+            &self,
+            _controller: &WKWebExtensionController,
+            message: &objc2::runtime::AnyObject,
+            application: Option<&NSString>,
+            context: &WKWebExtensionContext,
+            reply: &DynBlock<dyn Fn(*mut objc2::runtime::AnyObject, *mut NSError)>,
+        ) {
+            channel::send(context, message, application, reply);
+        }
+
+        #[unsafe(method(webExtensionController:connectUsingMessagePort:forExtensionContext:completionHandler:))]
+        fn connect_native(
+            &self,
+            _controller: &WKWebExtensionController,
+            port: &WKWebExtensionMessagePort,
+            context: &WKWebExtensionContext,
+            done: &DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            channel::connect(context, port, done);
         }
 
         #[unsafe(method(webExtensionController:presentPopupForAction:forExtensionContext:completionHandler:))]

@@ -1461,6 +1461,102 @@ async fn browser(
             std::fs::write(dir.join("browser-popup.txt"), text)?;
             Ok(())
         }
+        // `ext-notifications`: the notifications extensions show now (`chrome.notifications`),
+        // with the sign-in windows open, in `browser-ext-notifications.json`;
+        // `ext-notify click|close <id or name> <notification id> [button]` acts on one as the
+        // user would on its banner.
+        #[cfg(target_os = "macos")]
+        "ext-notifications" => {
+            use crate::panels::browser_extensions::channel;
+            let (all, auth) = cx.update(|_| (channel::notices(), channel::auth_windows()));
+            let list: Vec<serde_json::Value> = all
+                .iter()
+                .map(|n| {
+                    serde_json::json!({
+                        "extension": n.ext, "id": n.id, "title": n.headline(),
+                        "message": n.message, "buttons": n.buttons, "tag": n.tag(),
+                    })
+                })
+                .collect();
+            std::fs::write(
+                dir.join("browser-ext-notifications.json"),
+                serde_json::to_string_pretty(
+                    &serde_json::json!({ "notifications": list, "sign_in_windows": auth }),
+                )?,
+            )?;
+            Ok(())
+        }
+        // `ext-devtools <id or name>`: its DevTools panels for the tab in front (a window of
+        // Trek's); `ext-devtools-eval <id or name> <js>`: `js` in that window's page, the answer
+        // in `browser-ext-devtools.txt`.
+        #[cfg(target_os = "macos")]
+        "ext-devtools" => {
+            use crate::panels::browser_extensions as ext;
+            let id = cx
+                .update(|_| ext::id_for_driver(rest.trim()))
+                .map_err(|e| anyhow::anyhow!("browser ext-devtools: {e}"))?;
+            cx.update(|_| ext::webkit::open_devtools(&id))
+                .map_err(|e| anyhow::anyhow!("browser ext-devtools: {e}"))?;
+            Ok(())
+        }
+        #[cfg(target_os = "macos")]
+        "ext-devtools-eval" => {
+            use crate::panels::browser_extensions as ext;
+            let (spec, js) = rest.split_once(' ').ok_or_else(|| {
+                anyhow::anyhow!("browser ext-devtools-eval needs an extension and a script")
+            })?;
+            let id = cx
+                .update(|_| ext::id_for_driver(spec))
+                .map_err(|e| anyhow::anyhow!("browser ext-devtools-eval: {e}"))?;
+            let text = cx
+                .update(|_| ext::webkit::devtools_eval(&id, js))
+                .recv()
+                .await
+                .map_err(|_| anyhow::anyhow!("browser ext-devtools-eval: the window closed"))?
+                .map_err(|e| anyhow::anyhow!("browser ext-devtools-eval: {e}"))?;
+            std::fs::write(dir.join("browser-ext-devtools.txt"), text)?;
+            Ok(())
+        }
+        // `ext-update`: ask the store for newer versions now; what came of it in
+        // `browser-ext-updates.txt`.
+        #[cfg(target_os = "macos")]
+        "ext-update" => {
+            let line = cx
+                .update(|_| crate::panels::browser_extensions::webkit::check_updates(true))
+                .recv()
+                .await
+                .map_err(|_| anyhow::anyhow!("browser ext-update: no answer"))?;
+            std::fs::write(dir.join("browser-ext-updates.txt"), line)?;
+            Ok(())
+        }
+        #[cfg(target_os = "macos")]
+        "ext-notify" => {
+            use crate::panels::browser_extensions as ext;
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            anyhow::ensure!(
+                parts.len() >= 3,
+                "browser ext-notify needs click|close, an extension and a notification id"
+            );
+            let id = cx
+                .update(|_| ext::id_for_driver(parts[1]))
+                .map_err(|e| anyhow::anyhow!("browser ext-notify: {e}"))?;
+            let tag = ext::bridge::Notice {
+                ext: id.clone(),
+                id: parts[2].to_string(),
+                ..Default::default()
+            }
+            .tag();
+            match parts[0] {
+                "click" => {
+                    let button = parts.get(3).and_then(|b| b.parse::<usize>().ok());
+                    let action = button.map(ext::bridge::button_id);
+                    cx.update(|_| ext::channel::clicked(&tag, action.as_deref()));
+                }
+                "close" => cx.update(|_| ext::channel::closed(&id, parts[2])),
+                other => anyhow::bail!("browser ext-notify: {other}? (click|close)"),
+            }
+            Ok(())
+        }
         // `ext-eval <id or name> <js>`: an expression (a promise is awaited) in a page of the
         // extension's own, where its APIs are (`chrome.declarativeNetRequest`, `runtime`…); the
         // answer as JSON in `browser-ext-eval.txt`.
