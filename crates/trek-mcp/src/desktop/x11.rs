@@ -694,7 +694,9 @@ pub fn entry_dirs(
     data_dirs: Option<&str>,
 ) -> Vec<String> {
     let mut dirs: Vec<String> = vec![];
-    let set = |v: Option<&str>| v.map(str::trim).filter(|v| !v.is_empty());
+    fn set(v: Option<&str>) -> Option<&str> {
+        v.map(str::trim).filter(|v| !v.is_empty())
+    }
     match (set(data_home), set(home)) {
         (Some(data), _) => dirs.push(data.to_string()),
         (None, Some(home)) => dirs.push(format!("{home}/.local/share")),
