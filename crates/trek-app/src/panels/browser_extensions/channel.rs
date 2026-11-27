@@ -71,7 +71,8 @@ struct Port {
     ext: String,
     port: Retained<WKWebExtensionMessagePort>,
     /// A host's input (`None`: the port is Trek's).
-    host: Option<std::sync::Arc<Mutex<std::process::ChildStdin>>>,
+    /// A host's input, written in order by one thread of the port's (`None`: the port is Trek's).
+    host: Option<std::sync::mpsc::Sender<Vec<u8>>>,
     child: Option<std::sync::Arc<Mutex<std::process::Child>>>,
 }
 
@@ -91,6 +92,9 @@ struct State {
     auth: Vec<Retained<AuthWindow>>,
     /// `sendNativeMessage` calls waiting for their host's answer.
     waiting: HashMap<u64, Answer>,
+    /// Each extension's banner rate, and the lines it has written to Trek's log this run.
+    limits: HashMap<String, bridge::RateLimit>,
+    logged: HashMap<String, usize>,
 }
 
 type Answer = Box<dyn FnOnce(Result<Value, String>)>;
@@ -207,7 +211,7 @@ pub fn send(
         let (host, id) = (host.clone(), id.clone());
         move || {
             std::thread::spawn(move || {
-                let result = bridge::one_message(&host, &id, &message);
+                let result = bridge::one_message(&host, &id, &message, bridge::ONE_MESSAGE_WAIT);
                 on_main(Box::new(move || {
                     if let Some(f) = with(|s| s.waiting.remove(&key)) {
                         f(result);
@@ -266,7 +270,21 @@ pub fn connect(
                         input,
                         mut output,
                     } = run;
-                    let input = std::sync::Arc::new(Mutex::new(input));
+                    // One writer for the port: messages reach the host in the order sent.
+                    let (writer, queue) = std::sync::mpsc::channel::<Vec<u8>>();
+                    std::thread::spawn(move || {
+                        let mut input = input;
+                        for bytes in queue {
+                            if input
+                                .write_all(&bytes)
+                                .and_then(|()| input.flush())
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
+                    let input = writer;
                     let child = std::sync::Arc::new(Mutex::new(child));
                     let key = add_port(&id, port.clone(), Some(input), Some(child));
                     listen(&port, key);
@@ -318,13 +336,16 @@ fn when_allowed(
     denied: Box<dyn FnOnce()>,
 ) {
     let id = ext_id(ctx);
-    if webkit::host_allowed(&id, &host.name) {
+    // Kept by the host's name and the program its manifest names now: a manifest rewritten to
+    // start another program is asked about again.
+    let grant = bridge::host_grant(host);
+    if webkit::host_allowed(&id, &grant) {
         allowed();
         return;
     }
     webkit::ask_host(
         ctx,
-        host.name.clone(),
+        grant,
         bridge::ask_line(host),
         Box::new(move |yes| if yes { allowed() } else { denied() }),
     );
@@ -333,7 +354,7 @@ fn when_allowed(
 fn add_port(
     ext: &str,
     port: Retained<WKWebExtensionMessagePort>,
-    host: Option<std::sync::Arc<Mutex<std::process::ChildStdin>>>,
+    host: Option<std::sync::mpsc::Sender<Vec<u8>>>,
     child: Option<std::sync::Arc<Mutex<std::process::Child>>>,
 ) -> u64 {
     let trek = host.is_none();
@@ -376,13 +397,9 @@ fn listen(port: &WKWebExtensionMessagePort, key: u64) {
             // To Trek: a page saying hello (its events start flowing; nothing to answer).
             Some(None) | None => {}
             Some(Some(input)) => {
-                let bytes = bridge::encode(&message);
-                std::thread::spawn(move || {
-                    if let (Ok(bytes), Ok(mut input)) = (bytes, input.lock()) {
-                        let _ = input.write_all(&bytes);
-                        let _ = input.flush();
-                    }
-                });
+                if let Ok(bytes) = bridge::encode(&message) {
+                    let _ = input.send(bytes);
+                }
             }
         }
     });
@@ -460,6 +477,16 @@ fn answer_call(ctx: &WKWebExtensionContext, message: Value, reply: Box<dyn FnOnc
     let id = ext_id(ctx);
     let a = &call.args;
     let text = |k: &str| a[k].as_str().unwrap_or("").to_string();
+    // Only what the extension asked for itself (Trek's channel is open to every extension it
+    // unpacked; the APIs on it are not).
+    if let Some(need) = bridge::required_permission(&call.method)
+        && !webkit::own_permissions(&id).iter().any(|p| p == need)
+    {
+        return reply(bridge::err(format!(
+            "{} needs the “{need}” permission in its manifest for that.",
+            ext_name(ctx)
+        )));
+    }
     match call.method.as_str() {
         "notifications.create" | "notifications.update" => {
             let nid = text("id");
@@ -467,6 +494,29 @@ fn answer_call(ctx: &WKWebExtensionContext, message: Value, reply: Box<dyn FnOnc
             let before = with(|s| s.notices.get(&(id.clone(), nid.clone())).cloned());
             if update && before.is_none() {
                 return reply(bridge::ok(json!(false)));
+            }
+            // Banners are the user's attention: a few at a time, a handful kept, each named for
+            // the extension that posted it.
+            if !update {
+                let (allowed, kept_each, kept) = with(|s| {
+                    let allowed = s
+                        .limits
+                        .entry(id.clone())
+                        .or_default()
+                        .allow(std::time::Instant::now());
+                    let each = s.notices.keys().filter(|(e, _)| e == &id).count();
+                    (allowed, each, s.notices.len())
+                });
+                if !allowed {
+                    return reply(bridge::err(
+                        "Too many notifications at once: this one wasn't shown.",
+                    ));
+                }
+                if kept_each >= bridge::MAX_NOTICES_EACH || kept >= bridge::MAX_NOTICES {
+                    return reply(bridge::err(
+                        "Too many notifications are open: clear some first.",
+                    ));
+                }
             }
             let notice = before
                 .unwrap_or_else(|| Notice {
@@ -574,6 +624,9 @@ fn answer_call(ctx: &WKWebExtensionContext, message: Value, reply: Box<dyn FnOnc
             let path = bridge::download_path(&dir, &text("name"));
             match std::fs::write(&path, &bytes) {
                 Ok(()) => {
+                    // Marked as from the internet, as a browser's downloads are: Gatekeeper
+                    // checks it before it runs.
+                    quarantine(&path);
                     let n = DOWNLOADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                     webkit::say(format!(
                         "{} downloaded {} to Downloads",
@@ -589,13 +642,16 @@ fn answer_call(ctx: &WKWebExtensionContext, message: Value, reply: Box<dyn FnOnc
         }
         "downloads.show" => {
             let path = text("path");
+            let downloads = bridge::downloads_dir().canonicalize();
             let target = if path.is_empty() {
-                bridge::downloads_dir()
+                bridge::downloads_dir().canonicalize()
             } else {
-                std::path::PathBuf::from(path)
+                std::path::PathBuf::from(path).canonicalize()
             };
-            // Only what's in Downloads.
-            if target.starts_with(bridge::downloads_dir()) {
+            // Only what's really in Downloads (`..` and links resolved first).
+            if let (Ok(target), Ok(downloads)) = (target, downloads)
+                && target.starts_with(&downloads)
+            {
                 let _ = std::process::Command::new("/usr/bin/open")
                     .arg("-R")
                     .arg(&target)
@@ -605,6 +661,16 @@ fn answer_call(ctx: &WKWebExtensionContext, message: Value, reply: Box<dyn FnOnc
         }
         "sidePanel.open" => {
             let url = text("url");
+            let base = unsafe { ctx.baseURL() }
+                .absoluteString()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            // Its own page only (as offscreen documents): never a web or file address.
+            if !bridge::is_own_page(&url, &base) {
+                return reply(bridge::err(
+                    "A side panel must be one of the extension's own pages.",
+                ));
+            }
             match NSURL::URLWithString(&NSString::from_str(&url)) {
                 Some(u) if !url.is_empty() => {
                     webkit::open_page(ctx, &u);
@@ -613,16 +679,27 @@ fn answer_call(ctx: &WKWebExtensionContext, message: Value, reply: Box<dyn FnOnc
                 _ => reply(bridge::err("It has no side panel page.")),
             }
         }
-        "log.shim" => {
-            tracing::info!("browser extensions: {id}: shim in {}: {}", text("where"), a);
-            reply(bridge::ok(Value::Null))
-        }
-        "log.error" => {
-            tracing::info!(
-                "browser extensions: {id} ({}) said: {}",
-                text("where"),
-                text("text")
-            );
+        "log.shim" | "log.error" => {
+            // Capped per extension here (the shim's own cap is the extension's to undo), and
+            // with what looks like a secret taken out before it reaches Trek's log.
+            let room = with(|s| {
+                let n = s.logged.entry(id.clone()).or_default();
+                *n += 1;
+                *n <= bridge::MAX_LOG_LINES
+            });
+            if room {
+                let what: String = if call.method == "log.shim" {
+                    a.to_string()
+                } else {
+                    text("text")
+                };
+                let what: String = what.chars().take(2000).collect();
+                tracing::info!(
+                    "browser extensions: {id} ({}) said: {}",
+                    trek_core::scrub::redact_secrets(&text("where")),
+                    trek_core::scrub::redact_secrets(&what)
+                );
+            }
             reply(bridge::ok(Value::Null))
         }
         other => reply(bridge::err(format!("Trek doesn't answer {other}."))),
@@ -630,6 +707,38 @@ fn answer_call(ctx: &WKWebExtensionContext, message: Value, reply: Box<dyn FnOnc
 }
 
 static DOWNLOADS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Mark `path` as downloaded from the internet by Trek (`com.apple.quarantine`).
+fn quarantine(path: &std::path::Path) {
+    use std::os::unix::ffi::OsStrExt as _;
+    let Ok(file) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return;
+    };
+    let id = uuid::Uuid::new_v4().to_string().to_uppercase();
+    let value = bridge::quarantine_value(updates_now(), "Trek", &id);
+    let name = c"com.apple.quarantine";
+    // SAFETY: valid C strings and a byte buffer of the given length.
+    let set = unsafe {
+        libc::setxattr(
+            file.as_ptr(),
+            name.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+            0,
+        )
+    };
+    if set != 0 {
+        tracing::warn!(
+            "browser extensions: couldn't mark {} as downloaded",
+            path.display()
+        );
+    }
+}
+
+fn updates_now() -> u64 {
+    super::updates::now()
+}
 
 fn idle_seconds() -> f64 {
     crate::push::idle_seconds()
@@ -751,6 +860,20 @@ define_class!(
             }
             decide.call((1,));
         }
+
+        #[unsafe(method(webView:didCommitNavigation:))]
+        fn committed(
+            &self,
+            webview: &WKWebView,
+            _navigation: Option<&objc2_web_kit::WKNavigation>,
+        ) {
+            // The address line: where the page is now, as WebKit says, drawn by Trek.
+            let url = unsafe { webview.URL() }
+                .and_then(|u| u.absoluteString())
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            self.show_origin(&url);
+        }
     }
 
     unsafe impl NSWindowDelegate for AuthWindow {
@@ -762,6 +885,14 @@ define_class!(
 );
 
 impl AuthWindow {
+    /// The window's subtitle, under its title: the page's origin (`bridge::origin_line`). AppKit
+    /// draws it; nothing in the page can change it.
+    fn show_origin(&self, url: &str) {
+        if let Some(window) = self.ivars().window.borrow().as_ref() {
+            window.setSubtitle(&NSString::from_str(&bridge::origin_line(url)));
+        }
+    }
+
     fn finish(&self, result: Result<String, String>) {
         let Some(reply) = self.ivars().reply.borrow_mut().take() else {
             return;
@@ -818,6 +949,7 @@ fn open_auth_window(ext: &str, name: &str, url: &str, reply: Box<dyn FnOnce(Valu
         window.center();
         window.makeKeyAndOrderFront(None);
         *this.ivars().window.borrow_mut() = Some(window);
+        this.show_origin(url);
     }
     with(|s| s.auth.push(this));
 }

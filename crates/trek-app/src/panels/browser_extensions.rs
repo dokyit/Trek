@@ -22,6 +22,8 @@ pub mod catalog;
 pub mod channel;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // Only WebKit's extensions need it.
 pub mod compat;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // Only the Mac's updates check it.
+pub mod crx;
 pub mod manifest;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // WebView2 keeps its own list.
 pub mod registry;
@@ -212,12 +214,19 @@ fn download(store: Store, id: String) -> async_channel::Receiver<Result<PathBuf,
                 .await
                 .and_then(|r| r.error_for_status())
                 .map_err(|e| format!("The store didn't send the extension ({e})."))?;
-            let bytes = response.bytes().await.map_err(|e| e.to_string())?;
-            if bytes.len() > MAX_BYTES {
-                return Err("The extension is too large.".to_string());
-            }
+            let bytes = updates::read_capped(response, MAX_BYTES)
+                .await
+                .map_err(|e| format!("The extension couldn't be downloaded: {e}."))?;
+            // The store's package for this id, signed as Chrome checks it (by the extension's
+            // own key, and from the Chrome Web Store by the store's too).
+            let zip = crx::verified(&bytes, &id, store == Store::Chrome)
+                .map_err(|e| format!("The store's package was refused: {e}"))?;
             let dest = incoming_dir().join(&id);
-            unpack_crx(&bytes, &dest)?;
+            unpack_crx(zip, &dest)?;
+            // From the Chrome Web Store: Trek keeps it up to date.
+            if store == Store::Chrome {
+                let _ = std::fs::write(dest.join(updates::STORE_MARK), "");
+            }
             Ok(dest)
         }
         .await;

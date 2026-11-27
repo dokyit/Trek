@@ -107,12 +107,16 @@ impl Notice {
         format!("{TAG_PREFIX}{}:{}", self.ext, self.id)
     }
 
-    /// The headline: the extension's name, then its title (a banner names who posted it).
+    /// The headline: the extension's name, then its title (a banner names who posted it, and is
+    /// never only Trek's: an extension with no name is named by its id).
     pub fn headline(&self) -> String {
-        match (self.from.trim(), self.title.trim()) {
-            ("", t) => t.to_string(),
-            (f, "") => f.to_string(),
-            (f, t) => format!("{f}: {t}"),
+        let from = match self.from.trim() {
+            "" => format!("Extension {}", self.ext.chars().take(8).collect::<String>()),
+            f => f.to_string(),
+        };
+        match self.title.trim() {
+            "" => from,
+            t => format!("{from}: {t}"),
         }
     }
 }
@@ -130,6 +134,124 @@ pub fn button_id(index: usize) -> String {
 pub fn button_index(id: &str) -> Option<usize> {
     id.strip_prefix("button-")?.parse().ok()
 }
+
+/// The permission an extension must have asked for itself (its manifest, or granted when it
+/// asked later) before Trek answers `method` for it, as Chrome gates these APIs.
+pub fn required_permission(method: &str) -> Option<&'static str> {
+    let api = method.split('.').next().unwrap_or("");
+    match api {
+        "notifications" => Some("notifications"),
+        "downloads" => Some("downloads"),
+        "identity" => Some("identity"),
+        "sidePanel" => Some("sidePanel"),
+        "offscreen" => Some("offscreen"),
+        "idle" => Some("idle"),
+        _ => None,
+    }
+}
+
+/// The permissions extension's `manifest` asked for itself: its `permissions` without what Trek
+/// added for its channel (`compat::ADDED_KEY`), and those granted later (`granted`).
+pub fn own_permissions(manifest: &Value, granted: &[String]) -> Vec<String> {
+    let list = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|p| p.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let added = list(&manifest[super::compat::ADDED_KEY]);
+    let mut own: Vec<String> = list(&manifest["permissions"])
+        .into_iter()
+        .filter(|p| !added.contains(p))
+        .collect();
+    own.extend(granted.iter().cloned());
+    own
+}
+
+/// How many banners an extension may post: `BURST` in a short while, `PER_MINUTE` in a minute.
+pub struct RateLimit {
+    times: std::collections::VecDeque<std::time::Instant>,
+}
+
+impl RateLimit {
+    pub const BURST: usize = 3;
+    pub const BURST_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+    pub const PER_MINUTE: usize = 10;
+
+    pub fn new() -> Self {
+        Self {
+            times: Default::default(),
+        }
+    }
+
+    /// Whether one more is allowed at `now` (and if so, it's counted).
+    pub fn allow(&mut self, now: std::time::Instant) -> bool {
+        let minute = std::time::Duration::from_secs(60);
+        while self
+            .times
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > minute)
+        {
+            self.times.pop_front();
+        }
+        let recent = self
+            .times
+            .iter()
+            .filter(|t| now.duration_since(**t) <= Self::BURST_WINDOW)
+            .count();
+        if recent >= Self::BURST || self.times.len() >= Self::PER_MINUTE {
+            return false;
+        }
+        self.times.push_back(now);
+        true
+    }
+}
+
+impl Default for RateLimit {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// How many notifications one extension, and all of them, may keep at once.
+pub const MAX_NOTICES_EACH: usize = 20;
+pub const MAX_NOTICES: usize = 200;
+
+/// What macOS records on a file from the internet (`com.apple.quarantine`), as browsers set it:
+/// flags (downloaded, not yet opened), the time, the app that saved it, an id.
+pub fn quarantine_value(now_secs: u64, agent: &str, id: &str) -> String {
+    format!("0083;{now_secs:x};{agent};{id}")
+}
+
+/// The line a sign-in window shows above the page: the origin it's on, as Trek sees it (the
+/// page can't draw it). `https://accounts.google.com`; a non-default port too.
+pub fn origin_line(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.chars().take(80).collect();
+    };
+    let host_port = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Never the credentials part (`user:pass@`), which a page could use to look like a host.
+    let host_port = host_port.rsplit('@').next().unwrap_or("");
+    format!(
+        "{}://{}",
+        scheme.to_ascii_lowercase(),
+        host_port.to_ascii_lowercase()
+    )
+}
+
+/// Whether `url` is one of extension `base`'s own pages (`webkit-extension://<id>/…`).
+pub fn is_own_page(url: &str, base: &str) -> bool {
+    !base.is_empty()
+        && base.ends_with('/')
+        && url.starts_with(base)
+        && !url[base.len()..].contains("..")
+}
+
+/// What one extension may write to Trek's log in a run, at most.
+pub const MAX_LOG_LINES: usize = 200;
 
 /// A native messaging host's manifest.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -256,6 +378,16 @@ pub fn ask_line(host: &Host) -> String {
     )
 }
 
+/// What the user's yes to `host` is kept as: its name and the program it resolved to, so a
+/// manifest that later names another program asks again.
+pub fn host_grant(host: &Host) -> String {
+    let program = host
+        .path
+        .canonicalize()
+        .unwrap_or_else(|_| host.path.clone());
+    format!("{} {}", host.name, program.display())
+}
+
 /// One message to a host: its length in the Mac's byte order, then the JSON.
 pub fn encode(message: &Value) -> Result<Vec<u8>, String> {
     let body = serde_json::to_vec(message).map_err(|e| e.to_string())?;
@@ -317,11 +449,28 @@ pub fn start(host: &Host, id: &str) -> Result<Running, String> {
     })
 }
 
-/// `sendNativeMessage`: start `host`, send `message`, wait for one answer, end it.
-pub fn one_message(host: &Host, id: &str, message: &Value) -> Result<Value, String> {
+/// How long `sendNativeMessage` waits for its host's one answer.
+pub const ONE_MESSAGE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `sendNativeMessage`: start `host`, send `message`, wait (at most `wait`) for one answer, end
+/// it: a host that doesn't answer in time is stopped.
+pub fn one_message(
+    host: &Host,
+    id: &str,
+    message: &Value,
+    wait: std::time::Duration,
+) -> Result<Value, String> {
     let mut run = start(host, id)?;
     let sent = encode(message).and_then(|b| run.input.write_all(&b).map_err(|e| e.to_string()));
-    let answer = sent.and_then(|()| read_message(&mut run.output));
+    let answer = sent.and_then(|()| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut output = run.output;
+        std::thread::spawn(move || {
+            let _ = tx.send(read_message(&mut output));
+        });
+        rx.recv_timeout(wait)
+            .map_err(|_| format!("{} didn't answer in {} s.", host.name, wait.as_secs()))?
+    });
     let _ = run.child.kill();
     let _ = run.child.wait();
     answer?.ok_or_else(|| format!("{} ended without answering.", host.name))
@@ -413,6 +562,77 @@ mod tests {
     }
 
     #[test]
+    fn trek_answers_only_what_the_extension_asked_for() {
+        let m = json!({
+            "permissions": ["storage", "notifications", "nativeMessaging"],
+            "trek_added_permissions": ["nativeMessaging"],
+        });
+        let own = own_permissions(&m, &["downloads".to_string()]);
+        assert_eq!(own, vec!["storage", "notifications", "downloads"]);
+        assert_eq!(
+            required_permission("notifications.create"),
+            Some("notifications")
+        );
+        assert_eq!(required_permission("sidePanel.open"), Some("sidePanel"));
+        assert_eq!(
+            required_permission("identity.launchWebAuthFlow"),
+            Some("identity")
+        );
+        assert_eq!(required_permission("downloads.save"), Some("downloads"));
+        assert_eq!(required_permission("log.error"), None);
+        // A banner always names an extension, never Trek alone.
+        let n = Notice {
+            ext: "abcdefghijklmnop".into(),
+            title: "Trek".into(),
+            ..Default::default()
+        };
+        assert_eq!(n.headline(), "Extension abcdefgh: Trek");
+    }
+
+    #[test]
+    fn banners_are_rate_limited() {
+        let mut limit = RateLimit::new();
+        let t0 = std::time::Instant::now();
+        let at = |s: u64| t0 + std::time::Duration::from_secs(s);
+        assert!((0..RateLimit::BURST).all(|_| limit.allow(at(0))));
+        assert!(!limit.allow(at(1)));
+        // Past the short window, more come, up to the minute's.
+        let mut posted = RateLimit::BURST;
+        for s in (11..60).step_by(11) {
+            for _ in 0..RateLimit::BURST {
+                if limit.allow(at(s)) {
+                    posted += 1;
+                }
+            }
+        }
+        assert_eq!(posted, RateLimit::PER_MINUTE);
+        assert!(limit.allow(at(200)));
+    }
+
+    #[test]
+    fn origins_and_own_pages() {
+        assert_eq!(
+            origin_line("https://Accounts.Google.com/o/oauth2?x=1"),
+            "https://accounts.google.com"
+        );
+        assert_eq!(
+            origin_line("https://evil.example@accounts.google.com/"),
+            "https://accounts.google.com"
+        );
+        assert_eq!(
+            origin_line("http://127.0.0.1:8080/a"),
+            "http://127.0.0.1:8080"
+        );
+        let base = "webkit-extension://abc/";
+        assert!(is_own_page("webkit-extension://abc/panel.html", base));
+        assert!(!is_own_page("file:///etc/passwd", base));
+        assert!(!is_own_page("https://example.com/", base));
+        assert!(!is_own_page("webkit-extension://abcd/x.html", base));
+        assert!(!is_own_page("webkit-extension://abc/../x", base));
+        assert_eq!(quarantine_value(255, "Trek", "u1"), "0083;ff;Trek;u1");
+    }
+
+    #[test]
     fn a_host_is_found_only_when_it_lets_the_extension_in() {
         let dir = std::env::temp_dir().join(format!("trek-nm-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -492,9 +712,30 @@ mod tests {
             manifest: PathBuf::new(),
         };
         assert_eq!(
-            one_message(&host, "aaaa", &json!({"ping": true})).unwrap(),
+            one_message(&host, "aaaa", &json!({"ping": true}), ONE_MESSAGE_WAIT).unwrap(),
             json!({"ping": true})
         );
+        // One that never answers is stopped after the wait.
+        let silent = dir.join("silent.sh");
+        std::fs::write(&silent, "#!/bin/sh\nexec sleep 60\n").unwrap();
+        std::fs::set_permissions(&silent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = std::time::Instant::now();
+        let quiet = Host {
+            path: silent,
+            ..host.clone()
+        };
+        let e = one_message(
+            &quiet,
+            "aaaa",
+            &json!(1),
+            std::time::Duration::from_millis(300),
+        )
+        .unwrap_err();
+        assert!(e.contains("didn't answer"), "{e}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        // A grant names the program, so another program in the manifest asks again.
+        assert!(host_grant(&host).starts_with("com.example.echo /"));
+        assert_ne!(host_grant(&host), host_grant(&quiet));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

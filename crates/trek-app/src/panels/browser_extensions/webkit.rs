@@ -364,6 +364,25 @@ pub(super) fn context(id: &str) -> Option<Retained<WKWebExtensionContext>> {
     with(|s| s.contexts.get(id).cloned()).flatten()
 }
 
+/// The permissions extension `id` asked for itself: its manifest's (without what Trek added for
+/// its channel) and those the user allowed when it asked later.
+pub(super) fn own_permissions(id: &str) -> Vec<String> {
+    let Some(entry) = registry::load(&extensions_dir())
+        .into_iter()
+        .find(|e| e.id == id)
+    else {
+        return vec![];
+    };
+    let manifest =
+        std::fs::read_to_string(entry.folder_in(&extensions_dir()).join("manifest.json"))
+            .ok()
+            .and_then(|t| {
+                serde_json::from_str::<serde_json::Value>(t.trim_start_matches('\u{feff}')).ok()
+            })
+            .unwrap_or_default();
+    super::bridge::own_permissions(&manifest, &entry.allowed)
+}
+
 /// Whether the user let extension `id` start native host `host`.
 pub(super) fn host_allowed(id: &str, host: &str) -> bool {
     registry::load(&extensions_dir())
@@ -457,10 +476,11 @@ pub fn check_updates(force: bool) -> async_channel::Receiver<String> {
     }
     state.checked = now;
     updates::save(&dir, &state);
-    // Only what Trek unpacked (a folder of the user's is theirs to update).
+    // Only what Trek installed from the Chrome Web Store (a file or folder of the user's is
+    // theirs to update, whatever its id).
     let installed: Vec<(String, String, PathBuf)> = registry::load(&dir)
         .into_iter()
-        .filter(|e| e.folder.is_none())
+        .filter(|e| e.folder.is_none() && updates::from_store(&e.folder_in(&dir)))
         .filter_map(|e| {
             let folder = e.folder_in(&dir);
             let version = manifest::read(&folder).ok()?.version;

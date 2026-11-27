@@ -180,6 +180,9 @@ def main():
     check("downloads.download saves to the profile's Downloads",
           isinstance(downloaded, int) and os.path.exists(path) and open(path).read() == "hello from the fixture", downloaded)
 
+    marked = subprocess.run(["xattr", "-p", "com.apple.quarantine", path], capture_output=True, text=True)
+    check("the download is marked as from the internet", marked.returncode == 0 and ";Trek;" in marked.stdout, marked.stdout)
+
     check("getRedirectURL names its chromiumapp.org address", run("redirect") == f"https://{ID}.chromiumapp.org/cb")
     start("auth", f"http://127.0.0.1:{port}/auth")
     got = finish("auth")
