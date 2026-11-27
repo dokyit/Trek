@@ -196,8 +196,10 @@ It has its own cache, parallel with the tests.
 `.github/workflows/release.yml`:
 
 - **`ci-passed`**: the macOS, Intel and Windows builds wait for it. It looks up the CI workflow's
-  completed runs of the commit being released and fails unless one passed. Dry runs aren't held
-  up. `skip_ci_check` is the emergency override, and it's visible in the run's inputs.
+  completed runs that tested the code being released and fails unless one passed: a run of the
+  commit itself, or the run of the pull request it merged when the tree that run tested is the
+  release commit's tree (`script/ci-gate.py`; docs/RELEASING.md, "The CI gate"). Dry runs aren't
+  held up. `skip_ci_check` is the emergency override, and it's visible in the run's inputs.
 - **`complete`**: after the publish jobs, whatever became of them. It checks that the release has
   every platform's archive, signature, disk image or installer, and that its `<channel>.json`
   lists `darwin-aarch64`, `darwin-x86_64` and `windows-x86_64` for this version. A release left

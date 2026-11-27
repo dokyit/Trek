@@ -40,6 +40,26 @@ env:
   # (Job timeouts leave room for a cold cache: a new dependency, a new toolchain.)
 
 jobs:
+  # The code this run tests, for the release gate (script/ci-gate.py, docs/RELEASING.md): a pull
+  # request's run tests GitHub's merge of it into main, not its head, so the tree of that merge
+  # goes in the run's `tested-tree` artifact. A release whose commit has this tree reuses this run.
+  tested-tree:
+    name: Tested tree
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Record the tested tree
+        run: python3 script/ci-gate.py record tested-tree.json --scope full
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tested-tree
+          path: tested-tree.json
+          overwrite: true
+          retention-days: 30
+
   audit:
     name: Rust dependency audit
     runs-on: ubuntu-latest
@@ -78,6 +98,7 @@ jobs:
           bash script/tests/merge-manifest.sh
           bash script/tests/release-manifests.sh
           bash script/tests/release-finish.sh
+          python3 script/tests/ci-gate.py
           zsh ios/scripts/tests/phone-update.sh
           zsh script/capture.sh check
           node script/site/test/run.mjs
