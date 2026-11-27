@@ -4,8 +4,9 @@ on:
   push:
     branches: [main, windows-port]
     paths-ignore: ['docs/**', 'media/**', '**.md', 'ios/**', 'assets/brand/**']
+  # Every pull request, whatever it touches: the Plan job decides what that needs (a change to the
+  # docs alone runs nothing but it), so every job always reports under its own name.
   pull_request:
-    paths-ignore: ['docs/**', 'media/**', '**.md', 'ios/**', 'assets/brand/**']
   workflow_dispatch:
 
 permissions:
@@ -15,15 +16,21 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# Every job finishes in under ten minutes on GitHub's standard runners (about 7 for the whole run,
-# measured 2026-10-27; it was 35-45). Where the time went: trek-app's 63 test binaries (each links
-# the whole app; ~13 s apiece on Windows), its tests run one binary after another (~18 min on
-# Windows), and caches that held little of what the jobs build. So: the workspace and trek-app
-# halves are jobs of their own, trek-app's test targets are split across several
-# (script/ci-shard.py: every target in exactly one), and each kind of job keeps its own cache of
-# the dependencies, vendor/ included (script/ci-cache.py). The tests, the lints and the way they
-# run (`cargo test`, one test binary at a time) are what they were. A cold cache (a new toolchain;
-# a new dependency only recompiles itself) makes one run take ~20 min.
+# What a run tests (script/ci-plan.py, the Plan job): a push to main, a dispatch, and a pull request
+# labelled `ci:full` or touching what every crate builds on (Cargo.toml/.lock, the toolchain,
+# vendor/, .github/, a build script, …) run the full suite. Any other pull request runs the crates its
+# files belong to and every crate depending on them, on the platforms that compile those files; a
+# skipped job reports as passed under its name, and "CI result" is the one check that sums them up.
+# The release gate takes a run only when it tested the full suite (script/ci-gate.py).
+#
+# How the jobs are fast (docs/CI.md has the measurements): one cache per kind of job that keeps the
+# dependencies and the workspace's libraries, with what didn't change dated so Cargo finds it fresh
+# (script/ci-cache.py); trek-app's 87 test binaries split across jobs (script/ci-shard.py);
+# `cargo nextest`, which runs a job's test binaries side by side (.config/nextest.toml); no debug
+# info in CI's builds; and doc tests on Linux (all three platforms on a full run).
+#
+# Runners: each job's `runs-on` is a label of its own (macos-15, windows-2022, ubuntu-22.04): another
+# runner provider is one line per job.
 env:
   CARGO_TERM_COLOR: always
   # Incremental builds don't help a fresh runner and bloat the cache.
@@ -31,6 +38,9 @@ env:
   # The build stays free of warnings: one fails it. (Crates from crates.io have their lints
   # capped by Cargo; this covers the workspace and vendor/.)
   RUSTFLAGS: -D warnings
+  # No debug info in CI's builds: smaller artifacts and caches, quicker links (a test binary of the
+  # app was ~170 MB). A failing test still names its file and line.
+  CARGO_PROFILE_DEV_DEBUG: '0'
   # trek-core, trek-agents, trek-remote and trek-app at opt-level 0 (.github/ci-profile.toml).
   CI_PROFILE: .github/ci-profile.toml
   # How many jobs trek-app's tests are split across, per runner (the matrices below match).
@@ -40,19 +50,50 @@ env:
   # (Job timeouts leave room for a cold cache: a new dependency, a new toolchain.)
 
 jobs:
-  # The code this run tests, for the release gate (script/ci-gate.py, docs/RELEASING.md): a pull
-  # request's run tests GitHub's merge of it into main, not its head, so the tree of that merge
-  # goes in the run's `tested-tree` artifact. A release whose commit has this tree reuses this run.
-  tested-tree:
-    name: Tested tree
+  # What this run builds and tests, and the record of the code it tested for the release gate.
+  # Also the checks that need no build: rustfmt, and that trek-app's shards cover its targets.
+  plan:
+    name: Plan
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
+    outputs:
+      full: ${{ steps.plan.outputs.full }}
+      packages: ${{ steps.plan.outputs.packages }}
+      selected: ${{ steps.plan.outputs.selected }}
+      app: ${{ steps.plan.outputs.app }}
+      others: ${{ steps.plan.outputs.others }}
+      macos: ${{ steps.plan.outputs.macos }}
+      windows: ${{ steps.plan.outputs.windows }}
+      linux: ${{ steps.plan.outputs.linux }}
+      scripts: ${{ steps.plan.outputs.scripts }}
+      audit: ${{ steps.plan.outputs.audit }}
+      arm: ${{ steps.plan.outputs.arm }}
+      rust: ${{ steps.plan.outputs.rust }}
+      phone: ${{ contains(format(' {0} ', steps.plan.outputs.packages), ' trek-phone ') }}
+      # The one job of each kind that saves its cache: main's runs.
+      save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows-port' }}
     steps:
+      # Two deep: a pull request's merge commit and its parents (what it brings is HEAD^1..HEAD).
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          fetch-depth: 2
           persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
+        with:
+          toolchain: '1.99.0'
+          components: rustfmt
+
+      - name: What this run tests
+        id: plan
+        run: python3 script/ci-plan.py
+
+      # The code this run tests, for the release gate (script/ci-gate.py, docs/RELEASING.md): a pull
+      # request's run tests GitHub's merge of it into main, not its head, so the tree of that merge
+      # (and whether all of it was tested) goes in the run's `tested-tree` artifact.
       - name: Record the tested tree
-        run: python3 script/ci-gate.py record tested-tree.json --scope full
+        run: python3 script/ci-gate.py record tested-tree.json --scope ${{ steps.plan.outputs.scope }}
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: tested-tree
@@ -60,8 +101,21 @@ jobs:
           overwrite: true
           retention-days: 30
 
+      # The tree is rustfmt-clean under the pinned toolchain; keep it that way.
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      # trek-app's test targets all land in a shard, on each runner (prints the split).
+      - name: trek-app shards
+        run: |
+          python3 script/ci-shard.py --check "$APP_SHARDS_MACOS"
+          python3 script/ci-shard.py --check "$APP_SHARDS_WINDOWS"
+          python3 script/ci-shard.py --check "$APP_SHARDS_LINUX"
+
   audit:
     name: Rust dependency audit
+    needs: plan
+    if: needs.plan.outputs.audit == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -74,24 +128,26 @@ jobs:
       - name: Audit Cargo.lock
         run: cargo audit
 
-  test:
-    name: Test (macOS)
+  # The scripts' own tests, on each platform, when a script or what they test changed (or a full
+  # run). Seconds each, with no Rust toolchain or cache.
+  #
+  # The release notes step (script/lib/notes.sh) against its fixtures: every release body carries
+  # the install block exactly once. The end of a release (script/lib/release-finish.sh: the atomic
+  # push, resuming a failed run, the gate's bump check) against throwaway repositories, and the
+  # release gate's judgement (script/ci-gate.py) and this workflow's plan (script/ci-plan.py). The
+  # phone updater's words, against stand-ins. The capture manifests against the commands this
+  # driver knows, so a suite can't use one it would refuse (media/README.md). The web remote's
+  # plain code (its framing, pairing link and headers) and the site's headers, in Node.
+  scripts-macos:
+    name: Scripts (macOS)
+    needs: plan
+    if: needs.plan.outputs.scripts == 'true'
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-
-      # Seconds each, with no toolchain, cache or ~1 GB Metal download in front of them.
       - name: Scripts parse
         run: for f in script/*.sh script/lib/*.sh; do zsh -n "$f"; done
-
-      # The release notes step (script/lib/notes.sh) against its fixtures: every release body
-      # carries the install block exactly once. The end of a release (script/lib/release-finish.sh:
-      # the atomic push, resuming a failed run, the gate's bump check) against throwaway
-      # repositories. The phone updater's words, against stand-ins.
-      # The capture manifests against the commands this driver knows, so a suite can't use one it
-      # would refuse (media/README.md). The web remote's plain code (its framing, pairing link and
-      # headers) and the site's headers, in Node (script/site/test).
       - name: Script tests
         run: |
           bash script/tests/release-notes.sh
@@ -99,91 +155,94 @@ jobs:
           bash script/tests/release-manifests.sh
           bash script/tests/release-finish.sh
           python3 script/tests/ci-gate.py
+          python3 script/tests/ci-plan.py
           zsh ios/scripts/tests/phone-update.sh
           zsh script/capture.sh check
           node script/site/test/run.mjs
 
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
-        with:
-          toolchain: '1.99.0'
-          components: rustfmt
-
-      # The tree is rustfmt-clean under the pinned toolchain; keep it that way.
-      - name: rustfmt
-        run: cargo fmt --all -- --check
-
-      # trek-app's test targets all land in a shard (prints the split).
-      - name: trek-app shards
-        run: python3 script/ci-shard.py --check "$APP_SHARDS_MACOS"
-
-      # One cache per kind of job (script/ci-cache.py): each builds its own feature set. (One key
-      # shared by this job and Clippy used to be saved by whichever finished first: Clippy's
-      # check-only artifacts, so this job compiled all 640 crates on every push.)
-      - name: Cache key
-        id: key
-        run: python3 script/ci-cache.py key test-workspace
-
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        id: cache
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ steps.key.outputs.key }}
-          restore-keys: ${{ steps.key.outputs.restore }}
-
-      - name: Cache freshness
-        run: python3 script/ci-cache.py restore
-
-      # gpui compiles its Metal shaders at build time with `xcrun metal`. Since Xcode 26 the Metal
-      # toolchain is a separate component that an image may not have; `xcrun -f metal` finds a
-      # stub either way, so run the compiler to tell. Right before the build that needs it.
-      - name: Metal toolchain
+  # The PowerShell twin of the Mac's `zsh -n`, then assertions over the release-manifest merge the
+  # Windows release runs and over the uninstallers' clean-up of Trek's registry keys (against
+  # throwaway keys of the test's own); every capture manifest, the Windows suites too, against the
+  # commands capture.ps1 knows; the web remote's plain code.
+  scripts-windows:
+    name: Scripts (Windows)
+    needs: plan
+    if: needs.plan.outputs.scripts == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Scripts parse
         run: |
-          xcodebuild -version
-          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
-            xcodebuild -downloadComponent MetalToolchain
-          fi
-          xcrun -sdk macosx metal --version
+          foreach ($f in Get-ChildItem script\*.ps1, script\lib\*.ps1, script\tests\*.ps1 -ErrorAction SilentlyContinue) {
+            [void][scriptblock]::Create((Get-Content -Raw -LiteralPath $f.FullName))
+          }
+      - name: Script tests
+        run: |
+          script\tests\release-manifest.Tests.ps1
+          script\tests\uninstall-keys.Tests.ps1
+          script\capture.ps1 check
+          node script/site/test/run.mjs
 
-      # Every crate but the app: trek-remote (the phone server's protocol, TLS and pairing) and
-      # trek-ipc too. `--no-fail-fast`: one run reports every failing test binary, not just the
-      # first. trek-app runs in the jobs below.
+  # The Linux scripts (the Mac's job parses the zsh ones), the manifest merge the Linux release runs
+  # (and the whole chain of them, dry and real), and the web remote's plain code.
+  scripts-linux:
+    name: Scripts (Linux)
+    needs: plan
+    if: needs.plan.outputs.scripts == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Scripts parse
+        run: |
+          bash -n script/bundle-linux.sh script/release-linux.sh
+          for f in script/linux/*.sh script/linux/AppRun; do sh -n "$f"; done
+      - name: Script tests
+        run: |
+          bash script/tests/merge-manifest.sh
+          bash script/tests/release-manifests.sh
+          python3 script/tests/ci-plan.py
+          node script/site/test/run.mjs
+
+  # Every crate but the app that the change reaches: trek-remote (the phone server's protocol, TLS
+  # and pairing) and trek-ipc too. trek-app runs in the jobs below.
+  test:
+    name: Test (macOS)
+    needs: plan
+    if: needs.plan.outputs.others != '' && needs.plan.outputs.macos == 'true'
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/rust-setup
+        id: setup
+        with:
+          kind: test-workspace
+          nextest: 'true'
+          metal: 'true'
+
       - name: Test (workspace, except trek-app)
-        run: cargo test --config "$CI_PROFILE" --workspace --exclude trek-app --locked --no-fail-fast
+        run: cargo nextest run --config "$CI_PROFILE" --locked --profile ci --no-tests=warn ${{ needs.plan.outputs.full == 'true' && '--workspace --exclude trek-app' || needs.plan.outputs.others }}
 
       # The iPhone's screen and taps through CoreDevice (trek-phone's `coredevice` feature, the
       # `pc_screen` example): built here, as a test run leaves out an example whose feature is off.
       - name: Build the CoreDevice example (trek-phone)
+        if: needs.plan.outputs.phone == 'true'
         run: cargo build --config "$CI_PROFILE" -p trek-phone --features coredevice --example pc_screen --locked
 
-      # trek-app's doc tests: what `cargo test -p trek-app` ran last. Here rather than in a trek-app
-      # job: a `--doc` run resolves features apart from the test targets (it compiles a graph of
-      # its own), and this job has the time.
-      - name: Doc tests (trek-app)
-        run: cargo test --config "$CI_PROFILE" -p trek-app --locked --doc
-
-      - name: Cache contents
-        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
-        run: python3 script/ci-cache.py prune
-
-      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+      - uses: ./.github/actions/rust-cache-save
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ steps.key.outputs.key }}
+          key: ${{ steps.setup.outputs.key }}
+          cache-hit: ${{ steps.setup.outputs.cache-hit }}
+          save: ${{ needs.plan.outputs.save }}
 
   # trek-app's targets split across jobs (script/ci-shard.py): the 1st also runs the unit tests in
-  # src/ (its doc tests run in the job above). Each job compiles the app once and only its own test
-  # binaries.
+  # src/. Each job compiles the app once and only its own test binaries.
   test-app:
     name: Test (macOS, trek-app ${{ matrix.shard }}/3)
+    needs: plan
+    if: needs.plan.outputs.app == 'true' && needs.plan.outputs.macos == 'true'
     runs-on: macos-15
     timeout-minutes: 60
     strategy:
@@ -192,62 +251,32 @@ jobs:
         shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
+      - uses: ./.github/actions/rust-setup
+        id: setup
         with:
-          toolchain: '1.99.0'
-
-      - name: Cache key
-        id: key
-        run: python3 script/ci-cache.py key test-app
-
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        id: cache
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ steps.key.outputs.key }}
-          restore-keys: ${{ steps.key.outputs.restore }}
-
-      - name: Cache freshness
-        run: python3 script/ci-cache.py restore
-
-      - name: Metal toolchain
-        run: |
-          xcodebuild -version
-          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
-            xcodebuild -downloadComponent MetalToolchain
-          fi
-          xcrun -sdk macosx metal --version
+          kind: test-app
+          nextest: 'true'
+          metal: 'true'
 
       - name: Test (trek-app)
         run: |
           targets=$(python3 script/ci-shard.py ${{ matrix.shard }} "$APP_SHARDS_MACOS")
           echo "targets: $targets"
-          cargo test --config "$CI_PROFILE" -p trek-app --locked --no-fail-fast $targets
+          cargo nextest run --config "$CI_PROFILE" -p trek-app --locked --profile ci --no-tests=warn $targets
 
       # Every shard builds the same dependencies; the 1st saves them.
-      - name: Cache contents
-        if: github.ref == 'refs/heads/main' && matrix.shard == 1 && steps.cache.outputs.cache-hit != 'true'
-        run: python3 script/ci-cache.py prune
-
-      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        if: github.ref == 'refs/heads/main' && matrix.shard == 1 && steps.cache.outputs.cache-hit != 'true'
+      - uses: ./.github/actions/rust-cache-save
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ steps.key.outputs.key }}
+          key: ${{ steps.setup.outputs.key }}
+          cache-hit: ${{ steps.setup.outputs.cache-hit }}
+          save: ${{ needs.plan.outputs.save == 'true' && matrix.shard == 1 }}
 
-  # The Windows port runs the same suite as the Mac (Phase 5 of the port): the runner's Git for
-  # Windows, PowerShell 7 and Windows PowerShell cover what the tests spawn.
+  # The Windows port runs the same suite as the Mac: the runner's Git for Windows, PowerShell 7 and
+  # Windows PowerShell cover what the tests spawn.
   test-windows:
     name: Test (Windows)
+    needs: plan
+    if: needs.plan.outputs.others != '' && needs.plan.outputs.windows == 'true'
     runs-on: windows-2022
     timeout-minutes: 60
     env:
@@ -258,86 +287,34 @@ jobs:
       # Deep build paths under the runner's workspace can pass MAX_PATH.
       - name: Long paths
         run: git config --system core.longpaths true
-
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-
-      # The PowerShell twin of the Mac's `zsh -n` over the shell scripts - seconds, before the
-      # toolchain install and cache restore.
-      - name: Scripts parse
-        run: |
-          foreach ($f in Get-ChildItem script\*.ps1, script\lib\*.ps1, script\tests\*.ps1 -ErrorAction SilentlyContinue) {
-            [void][scriptblock]::Create((Get-Content -Raw -LiteralPath $f.FullName))
-          }
-
-      # Assertions over the release-manifest merge the Windows release runs (the step above
-      # only checks syntax), and over the uninstallers' clean-up of Trek's registry keys (run
-      # against throwaway keys of the test's own). Then every capture manifest, the Windows
-      # suites too, against the commands capture.ps1 knows. And the web remote's plain code, in
-      # Node, as on the Mac.
-      - name: Script tests
-        run: |
-          script\tests\release-manifest.Tests.ps1
-          script\tests\uninstall-keys.Tests.ps1
-          script\capture.ps1 check
-          node script/site/test/run.mjs
-
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
+      - uses: ./.github/actions/rust-setup
+        id: setup
         with:
-          toolchain: '1.99.0'
+          kind: test-workspace
+          nextest: 'true'
 
-      - name: trek-app shards
-        run: python script/ci-shard.py --check $env:APP_SHARDS_WINDOWS
-
-      - name: Cache key
-        id: key
-        run: python script/ci-cache.py key test-workspace
-
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        id: cache
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ steps.key.outputs.key }}
-          restore-keys: ${{ steps.key.outputs.restore }}
-
-      - name: Cache freshness
-        run: python script/ci-cache.py restore
-
-      # Every crate but the app: trek-remote (the phone server's protocol, TLS and pairing) and
-      # trek-ipc too. `--no-fail-fast`: one run reports every failing test binary, not just the
-      # first. TREK_QUIET_SPAWNS_CONTROL: the console-window check's control, which would flash
-      # windows on a desktop, runs here (crates/trek-core/tests/quiet_spawns.rs).
+      # TREK_QUIET_SPAWNS_CONTROL: the console-window check's control, which would flash windows on
+      # a desktop, runs here (crates/trek-core/tests/quiet_spawns.rs).
       - name: Test (workspace, except trek-app)
-        run: cargo test --config $env:CI_PROFILE --workspace --exclude trek-app --locked --no-fail-fast
+        run: cargo nextest run --config $env:CI_PROFILE --locked --profile ci --no-tests=warn ${{ needs.plan.outputs.full == 'true' && '--workspace --exclude trek-app' || needs.plan.outputs.others }}
         env:
           TREK_QUIET_SPAWNS_CONTROL: "1"
 
-      # The iPhone's screen and taps through CoreDevice (trek-phone's `coredevice` feature, the
-      # `pc_screen` example): built here, as a test run leaves out an example whose feature is off.
       - name: Build the CoreDevice example (trek-phone)
+        if: needs.plan.outputs.phone == 'true'
         run: cargo build --config $env:CI_PROFILE -p trek-phone --features coredevice --example pc_screen --locked
 
-      - name: Cache contents
-        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows-port') && steps.cache.outputs.cache-hit != 'true'
-        run: python script/ci-cache.py prune
-
-      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows-port') && steps.cache.outputs.cache-hit != 'true'
+      - uses: ./.github/actions/rust-cache-save
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ steps.key.outputs.key }}
+          key: ${{ steps.setup.outputs.key }}
+          cache-hit: ${{ steps.setup.outputs.cache-hit }}
+          save: ${{ needs.plan.outputs.save }}
 
-  # As on the Mac; the 'doc' job runs trek-app's doc tests (the Windows workspace job hasn't the
-  # time for that graph too).
   test-windows-app:
-    name: Test (Windows, trek-app ${{ matrix.shard == 'doc' && 'doc tests' || format('{0}/9', matrix.shard) }})
+    name: Test (Windows, trek-app ${{ matrix.shard }}/9)
+    needs: plan
+    if: needs.plan.outputs.app == 'true' && needs.plan.outputs.windows == 'true'
     runs-on: windows-2022
     timeout-minutes: 60
     env:
@@ -345,292 +322,73 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ['1', '2', '3', '4', '5', '6', '7', '8', '9', doc]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9]
     steps:
       - name: Long paths
         run: git config --system core.longpaths true
-
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
+      - uses: ./.github/actions/rust-setup
+        id: setup
         with:
-          toolchain: '1.99.0'
-
-      - name: Cache key
-        id: key
-        run: python script/ci-cache.py key test-app
-
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        id: cache
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ steps.key.outputs.key }}
-          restore-keys: ${{ steps.key.outputs.restore }}
-
-      - name: Cache freshness
-        run: python script/ci-cache.py restore
+          kind: test-app
+          nextest: 'true'
 
       - name: Test (trek-app)
-        if: matrix.shard != 'doc'
         run: |
           $targets = (python script/ci-shard.py ${{ matrix.shard }} $env:APP_SHARDS_WINDOWS) -split ' '
           if ($LASTEXITCODE -ne 0 -or -not $targets) { throw 'script/ci-shard.py failed' }
           "targets: $targets"
-          cargo test --config $env:CI_PROFILE -p trek-app --locked --no-fail-fast @targets
+          cargo nextest run --config $env:CI_PROFILE -p trek-app --locked --profile ci --no-tests=warn @targets
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         env:
           TREK_QUIET_SPAWNS_CONTROL: "1"
 
-      - name: Doc tests (trek-app)
-        if: matrix.shard == 'doc'
-        run: cargo test --config $env:CI_PROFILE -p trek-app --locked --doc
-        env:
-          TREK_QUIET_SPAWNS_CONTROL: "1"
-
-      # Every shard builds the same dependencies; the 1st saves them.
-      - name: Cache contents
-        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows-port') && matrix.shard == '1' && steps.cache.outputs.cache-hit != 'true'
-        run: python script/ci-cache.py prune
-
-      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows-port') && matrix.shard == '1' && steps.cache.outputs.cache-hit != 'true'
+      - uses: ./.github/actions/rust-cache-save
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ steps.key.outputs.key }}
+          key: ${{ steps.setup.outputs.key }}
+          cache-hit: ${{ steps.setup.outputs.cache-hit }}
+          save: ${{ needs.plan.outputs.save == 'true' && matrix.shard == 1 }}
 
-  # Clippy in its own job, parallel with the tests: run after them in the same job it redoes the
-  # whole graph anyway (clippy's RUSTC_WORKSPACE_WRAPPER changes every fingerprint), so it might
-  # as well overlap. On macOS because trek-app's build compiles gpui's Metal shaders even under
-  # clippy, and the Mac compiles this workspace fastest.
-  lint:
-    name: Clippy
-    runs-on: macos-15
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
-        with:
-          toolchain: '1.99.0'
-          components: clippy
-          targets: x86_64-apple-darwin
-
-      - name: Cache key
-        id: key
-        run: python3 script/ci-cache.py key clippy
-
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        id: cache
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ steps.key.outputs.key }}
-          restore-keys: ${{ steps.key.outputs.restore }}
-
-      - name: Cache freshness
-        run: python3 script/ci-cache.py restore
-
-      - name: Metal toolchain
-        run: |
-          xcodebuild -version
-          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
-            xcodebuild -downloadComponent MetalToolchain
-          fi
-          xcrun -sdk macosx metal --version
-
-      # Lints that catch bugs fail the build; style lints don't (`-A clippy::all` first, so the
-      # `-D warnings` above doesn't turn them into errors). The app first: most of the graph, and
-      # its test targets too. The second run covers every crate's lib and bins.
-      - name: Clippy (trek-app)
-        run: cargo clippy -p trek-app --all-targets --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
-
-      - name: Clippy (workspace lib and bins)
-        run: cargo clippy --workspace --lib --bins --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
-
-      # The capture build (`--features shots`: the verify driver's screenshots and `control` verbs)
-      # is built by no test, so a change could break it unnoticed until someone verifies a screen.
-      - name: Check the capture build
-        run: cargo check -p trek-app --features shots --locked
-
-      # Intel Macs get a build of their own at release (`release.yml`'s `intel` job): a change that
-      # only breaks that target is caught here, not at release time. A check, not a build, and in
-      # a target folder of its own so the Apple-silicon cache above stays as it is.
-      - name: Check for Intel Macs
-        run: |
-          rustup target add x86_64-apple-darwin
-          MACOSX_DEPLOYMENT_TARGET=13.0 cargo check -p trek-app -p trek-mcp --target x86_64-apple-darwin --locked
-
-      - name: Cache contents
-        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
-        run: python3 script/ci-cache.py prune
-
-      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ steps.key.outputs.key }}
-
-  # The same lints on Windows: the Mac's clippy never reads a `#[cfg(windows)]` line, and trek-app
-  # alone has some 600 platform gates (docs/parity/gates.toml, docs/CROSS_PLATFORM.md). Its own
-  # cache, parallel with the tests as the Mac's is.
-  lint-windows:
-    name: Clippy (Windows)
-    runs-on: windows-2022
-    timeout-minutes: 60
-    env:
-      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld.exe
-    steps:
-      - name: Long paths
-        run: git config --system core.longpaths true
-
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
-        with:
-          toolchain: '1.99.0'
-          components: clippy
-
-      - name: Cache key
-        id: key
-        run: python script/ci-cache.py key clippy
-
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        id: cache
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ steps.key.outputs.key }}
-          restore-keys: ${{ steps.key.outputs.restore }}
-
-      - name: Cache freshness
-        run: python script/ci-cache.py restore
-
-      - name: Clippy (trek-app)
-        run: cargo clippy -p trek-app --all-targets --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
-
-      - name: Clippy (workspace lib and bins)
-        run: cargo clippy --workspace --lib --bins --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
-
-      # The capture build, as on the Mac: the Windows driver's screenshots and verbs (`dictate`,
-      # `dictate-file`, the iPhone tool) are only built with it.
-      - name: Check the capture build
-        run: cargo check -p trek-app --features shots --locked
-
-      - name: Cache contents
-        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
-        run: python script/ci-cache.py prune
-
-      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ steps.key.outputs.key }}
-
-  # Linux, on Ubuntu 22.04: the oldest glibc (2.35) Trek's Linux builds support, so what passes
-  # here runs on it and everything newer. The same suite as the other two, with the system
-  # libraries Trek links installed first (script/linux/packages.sh: GTK 3, WebKitGTK 4.1, xkbcommon
-  # and the rest). trek-app's UI tests run on GPUI's headless platform with the Linux text system;
-  # the app itself starts on a display of its own in live.yml.
+  # Linux, on Ubuntu 22.04: the oldest glibc (2.35) Trek's Linux builds support, so what passes here
+  # runs on it and everything newer. The same suite as the other two, with the system libraries
+  # Trek links installed first (script/linux/packages.sh: GTK 3, WebKitGTK 4.1, xkbcommon and the
+  # rest). trek-app's UI tests run on GPUI's headless platform with the Linux text system; the app
+  # itself starts on a display of its own in live.yml. ffmpeg too: trek-mcp's video tests watch a
+  # clip they make with it (and pass as skipped without it).
   test-linux:
     name: Test (Linux)
+    needs: plan
+    if: needs.plan.outputs.others != '' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-
-      # The Linux scripts (the Mac's job parses the zsh ones): seconds, before the toolchain.
-      - name: Scripts parse
-        run: |
-          bash -n script/bundle-linux.sh script/release-linux.sh
-          for f in script/linux/*.sh script/linux/AppRun; do sh -n "$f"; done
-
-      # ffmpeg too: trek-mcp's video tests watch a clip they make with it (and pass as skipped
-      # without it), so the video watcher is run on Linux by a test, not only compiled.
       - name: System packages
         run: |
           sudo sh script/linux/packages.sh --with-packaging
           sudo apt-get install -y --no-install-recommends ffmpeg
-
-      # The manifest merge the Linux release runs (and the whole chain of them, dry and real), and
-      # the web remote's plain code, as on the others.
-      - name: Script tests
-        run: |
-          bash script/tests/merge-manifest.sh
-          bash script/tests/release-manifests.sh
-          node script/site/test/run.mjs
-
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
+      - uses: ./.github/actions/rust-setup
+        id: setup
         with:
-          toolchain: '1.99.0'
-
-      - name: trek-app shards
-        run: python3 script/ci-shard.py --check "$APP_SHARDS_LINUX"
-
-      - name: Cache key
-        id: key
-        run: python3 script/ci-cache.py key test-workspace
-
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        id: cache
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ steps.key.outputs.key }}
-          restore-keys: ${{ steps.key.outputs.restore }}
-
-      - name: Cache freshness
-        run: python3 script/ci-cache.py restore
+          kind: test-workspace
+          nextest: 'true'
 
       - name: Test (workspace, except trek-app)
-        run: cargo test --config "$CI_PROFILE" --workspace --exclude trek-app --locked --no-fail-fast
+        run: cargo nextest run --config "$CI_PROFILE" --locked --profile ci --no-tests=warn ${{ needs.plan.outputs.full == 'true' && '--workspace --exclude trek-app' || needs.plan.outputs.others }}
 
-      - name: Doc tests (trek-app)
-        run: cargo test --config "$CI_PROFILE" -p trek-app --locked --doc
-
-      - name: Cache contents
-        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
-        run: python3 script/ci-cache.py prune
-
-      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+      - uses: ./.github/actions/rust-cache-save
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ steps.key.outputs.key }}
+          key: ${{ steps.setup.outputs.key }}
+          cache-hit: ${{ steps.setup.outputs.cache-hit }}
+          save: ${{ needs.plan.outputs.save }}
 
-  # As on the Mac. The 1st shard also packages the debug build the tests leave (an AppImage, a
-  # .deb and a tarball, script/bundle-linux.sh) and opens each, so a change that breaks the
-  # packaging shows here rather than at release time.
+  # As on the Mac. The 1st shard also packages the debug build the tests leave (an AppImage, a .deb
+  # and a tarball, script/bundle-linux.sh) and opens each, so a change that breaks the packaging
+  # shows here rather than at release time.
   test-linux-app:
     name: Test (Linux, trek-app ${{ matrix.shard }}/4)
+    needs: plan
+    if: needs.plan.outputs.app == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     strategy:
@@ -639,37 +397,19 @@ jobs:
         shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-
       - name: System packages
         run: sudo sh script/linux/packages.sh --with-packaging --with-test-fonts
-
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
+      - uses: ./.github/actions/rust-setup
+        id: setup
         with:
-          toolchain: '1.99.0'
-
-      - name: Cache key
-        id: key
-        run: python3 script/ci-cache.py key test-app
-
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        id: cache
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ steps.key.outputs.key }}
-          restore-keys: ${{ steps.key.outputs.restore }}
-
-      - name: Cache freshness
-        run: python3 script/ci-cache.py restore
+          kind: test-app
+          nextest: 'true'
 
       - name: Test (trek-app)
         run: |
           targets=$(python3 script/ci-shard.py ${{ matrix.shard }} "$APP_SHARDS_LINUX")
           echo "targets: $targets"
-          cargo test --config "$CI_PROFILE" -p trek-app --locked --no-fail-fast $targets
+          cargo nextest run --config "$CI_PROFILE" -p trek-app --locked --profile ci --no-tests=warn $targets
 
       - name: Packages
         if: matrix.shard == 1
@@ -685,124 +425,240 @@ jobs:
           test -x squashfs-root/AppRun && test -x squashfs-root/usr/bin/trek && test -x squashfs-root/usr/bin/trek-mcp
           desktop-file-validate squashfs-root/dev.trek.Trek.desktop
 
-      - name: Cache contents
-        if: github.ref == 'refs/heads/main' && matrix.shard == 1 && steps.cache.outputs.cache-hit != 'true'
-        run: python3 script/ci-cache.py prune
-
-      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        if: github.ref == 'refs/heads/main' && matrix.shard == 1 && steps.cache.outputs.cache-hit != 'true'
+      - uses: ./.github/actions/rust-cache-save
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ steps.key.outputs.key }}
+          key: ${{ steps.setup.outputs.key }}
+          cache-hit: ${{ steps.setup.outputs.cache-hit }}
+          save: ${{ needs.plan.outputs.save == 'true' && matrix.shard == 1 }}
 
-  # The lints on Linux: neither of the others reads a `#[cfg(target_os = "linux")]` line. Then the
-  # Arm build, which release.yml makes on an Arm runner: checked here so a change that breaks only
-  # that target shows before release time.
-  lint-linux:
-    name: Clippy (Linux)
+  # Doc tests (nextest doesn't run them) of every crate the change reaches, trek-app's too: on
+  # Linux, which has runners to spare, for every run; on the Mac and Windows too for a full run
+  # (every push to main, and what a release is gated on). A `--doc` run resolves features apart
+  # from the test targets (it compiles a graph of its own).
+  doc-linux:
+    name: Doc tests (Linux)
+    needs: plan
+    if: needs.plan.outputs.rust == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-
       - name: System packages
         run: sudo sh script/linux/packages.sh
-
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
+      - uses: ./.github/actions/rust-setup
         with:
-          toolchain: '1.99.0'
+          kind: test-workspace
+      - name: Doc tests
+        run: cargo test --config "$CI_PROFILE" --locked --doc ${{ needs.plan.outputs.full == 'true' && '--workspace' || needs.plan.outputs.selected }}
+
+  doc-macos:
+    name: Doc tests (macOS)
+    needs: plan
+    if: needs.plan.outputs.full == 'true'
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/rust-setup
+        with:
+          kind: test-workspace
+          metal: 'true'
+      - name: Doc tests
+        run: cargo test --config "$CI_PROFILE" --locked --doc --workspace
+
+  doc-windows:
+    name: Doc tests (Windows)
+    needs: plan
+    if: needs.plan.outputs.full == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld.exe
+    steps:
+      - name: Long paths
+        run: git config --system core.longpaths true
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/rust-setup
+        with:
+          kind: test-workspace
+      - name: Doc tests
+        run: cargo test --config $env:CI_PROFILE --locked --doc --workspace
+        env:
+          TREK_QUIET_SPAWNS_CONTROL: "1"
+
+  # Clippy in its own job, parallel with the tests: run after them in the same job it redoes the
+  # whole graph anyway (clippy's RUSTC_WORKSPACE_WRAPPER changes every fingerprint), so it might as
+  # well overlap. Lints that catch bugs fail the build; style lints don't (`-A clippy::all` first, so
+  # the `-D warnings` above doesn't turn them into errors). The app first: most of the graph, and
+  # its test targets too; then every other crate's lib and bins (those the change reaches).
+  lint:
+    name: Clippy
+    needs: plan
+    if: needs.plan.outputs.rust == 'true' && needs.plan.outputs.macos == 'true'
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/rust-setup
+        id: setup
+        with:
+          kind: clippy
           components: clippy
-
-      - name: Cache key
-        id: key
-        run: python3 script/ci-cache.py key clippy
-
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        id: cache
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ steps.key.outputs.key }}
-          restore-keys: ${{ steps.key.outputs.restore }}
-
-      - name: Cache freshness
-        run: python3 script/ci-cache.py restore
+          targets: x86_64-apple-darwin
+          metal: 'true'
 
       - name: Clippy (trek-app)
+        if: needs.plan.outputs.app == 'true'
         run: cargo clippy -p trek-app --all-targets --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
 
       - name: Clippy (workspace lib and bins)
-        run: cargo clippy --workspace --lib --bins --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
+        if: needs.plan.outputs.others != ''
+        run: cargo clippy ${{ needs.plan.outputs.full == 'true' && '--workspace' || needs.plan.outputs.others }} --lib --bins --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
 
+      # The capture build (`--features shots`: the verify driver's screenshots and `control` verbs)
+      # is built by no test, so a change could break it unnoticed until someone verifies a screen.
       - name: Check the capture build
+        if: needs.plan.outputs.app == 'true'
         run: cargo check -p trek-app --features shots --locked
 
-      - name: Cache contents
-        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
-        run: python3 script/ci-cache.py prune
+      # Intel Macs get a build of their own at release (`release.yml`'s `intel` job): a change that
+      # only breaks that target is caught on a full run (every push to main, and before a release),
+      # not at release time. A check, in a target folder of its own.
+      - name: Check for Intel Macs
+        if: needs.plan.outputs.full == 'true'
+        run: MACOSX_DEPLOYMENT_TARGET=13.0 cargo check -p trek-app -p trek-mcp --target x86_64-apple-darwin --locked
 
-      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+      - uses: ./.github/actions/rust-cache-save
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ steps.key.outputs.key }}
+          key: ${{ steps.setup.outputs.key }}
+          cache-hit: ${{ steps.setup.outputs.cache-hit }}
+          save: ${{ needs.plan.outputs.save }}
 
+  # The same lints on Windows: the Mac's clippy never reads a `#[cfg(windows)]` line, and trek-app
+  # alone has some 600 platform gates (docs/parity/gates.toml, docs/CROSS_PLATFORM.md).
+  lint-windows:
+    name: Clippy (Windows)
+    needs: plan
+    if: needs.plan.outputs.rust == 'true' && needs.plan.outputs.windows == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld.exe
+    steps:
+      - name: Long paths
+        run: git config --system core.longpaths true
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/rust-setup
+        id: setup
+        with:
+          kind: clippy
+          components: clippy
+
+      - name: Clippy (trek-app)
+        if: needs.plan.outputs.app == 'true'
+        run: cargo clippy -p trek-app --all-targets --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
+
+      - name: Clippy (workspace lib and bins)
+        if: needs.plan.outputs.others != ''
+        run: cargo clippy ${{ needs.plan.outputs.full == 'true' && '--workspace' || needs.plan.outputs.others }} --lib --bins --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
+
+      # The capture build, as on the Mac: the Windows driver's screenshots and verbs (`dictate`,
+      # `dictate-file`, the iPhone tool) are only built with it.
+      - name: Check the capture build
+        if: needs.plan.outputs.app == 'true'
+        run: cargo check -p trek-app --features shots --locked
+
+      - uses: ./.github/actions/rust-cache-save
+        with:
+          key: ${{ steps.setup.outputs.key }}
+          cache-hit: ${{ steps.setup.outputs.cache-hit }}
+          save: ${{ needs.plan.outputs.save }}
+
+  # The lints on Linux: neither of the others reads a `#[cfg(target_os = "linux")]` line.
+  lint-linux:
+    name: Clippy (Linux)
+    needs: plan
+    if: needs.plan.outputs.rust == 'true' && needs.plan.outputs.linux == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: System packages
+        run: sudo sh script/linux/packages.sh
+      - uses: ./.github/actions/rust-setup
+        id: setup
+        with:
+          kind: clippy
+          components: clippy
+
+      - name: Clippy (trek-app)
+        if: needs.plan.outputs.app == 'true'
+        run: cargo clippy -p trek-app --all-targets --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
+
+      - name: Clippy (workspace lib and bins)
+        if: needs.plan.outputs.others != ''
+        run: cargo clippy ${{ needs.plan.outputs.full == 'true' && '--workspace' || needs.plan.outputs.others }} --lib --bins --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
+
+      - name: Check the capture build
+        if: needs.plan.outputs.app == 'true'
+        run: cargo check -p trek-app --features shots --locked
+
+      - uses: ./.github/actions/rust-cache-save
+        with:
+          key: ${{ steps.setup.outputs.key }}
+          cache-hit: ${{ steps.setup.outputs.cache-hit }}
+          save: ${{ needs.plan.outputs.save }}
+
+  # The Arm build, which release.yml makes on an Arm runner: checked here so a change that breaks
+  # only that target shows before release time.
   check-linux-arm:
     name: Check (Linux, Arm)
+    needs: plan
+    if: needs.plan.outputs.arm == 'true'
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-
       - name: System packages
         run: sudo sh script/linux/packages.sh
-
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
+      - uses: ./.github/actions/rust-setup
+        id: setup
         with:
-          toolchain: '1.99.0'
-
-      - name: Cache key
-        id: key
-        run: python3 script/ci-cache.py key check
-
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        id: cache
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ steps.key.outputs.key }}
-          restore-keys: ${{ steps.key.outputs.restore }}
-
-      - name: Cache freshness
-        run: python3 script/ci-cache.py restore
+          kind: check
 
       - name: Check (trek-app, trek-mcp)
         run: cargo check -p trek-app -p trek-mcp --locked
 
-      - name: Cache contents
-        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
-        run: python3 script/ci-cache.py prune
-
-      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+      - uses: ./.github/actions/rust-cache-save
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ steps.key.outputs.key }}
+          key: ${{ steps.setup.outputs.key }}
+          cache-hit: ${{ steps.setup.outputs.cache-hit }}
+          save: ${{ needs.plan.outputs.save }}
+
+  # The one check that sums up the run: it fails when any job failed or was cancelled, and passes
+  # when every job passed or was skipped for this change. Branch protection (and an agent about to
+  # merge) needs only this one.
+  result:
+    name: CI result
+    if: always()
+    needs: [plan, audit, scripts-macos, scripts-windows, scripts-linux, test, test-app, test-windows,
+            test-windows-app, test-linux, test-linux-app, doc-linux, doc-macos, doc-windows, lint, lint-windows, lint-linux,
+            check-linux-arm]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every job passed or was skipped
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys
+          needs = json.loads(os.environ['NEEDS'])
+          bad = {k: v['result'] for k, v in needs.items() if v['result'] not in ('success', 'skipped')}
+          for k, v in sorted(needs.items()):
+              print(f"{v['result']:>9}  {k}")
+          if needs.get('plan', {}).get('result') != 'success':
+              sys.exit('the Plan job did not pass, so nothing was decided')
+          if bad:
+              sys.exit(f'not passed: {bad}')
+          EOF

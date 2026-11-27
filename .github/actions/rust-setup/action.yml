@@ -1,0 +1,87 @@
+name: Rust job setup
+description: >-
+  What every Rust job of ci.yml starts with: the pinned toolchain, its build cache restored and
+  made fresh (script/ci-cache.py), and optionally cargo-nextest and the Metal compiler. The job's
+  own steps come after; its cache is saved by ./.github/actions/rust-cache-save.
+inputs:
+  kind:
+    description: The cache's kind (script/ci-cache.py key KIND); one per kind of job, as each builds its own feature set.
+    required: true
+  components:
+    description: rustup components (clippy, rustfmt)
+    default: ''
+  targets:
+    description: rustup targets
+    default: ''
+  nextest:
+    description: Install cargo-nextest
+    default: 'false'
+  metal:
+    description: Make sure the Metal compiler is there (macOS; gpui compiles its shaders at build time)
+    default: 'false'
+outputs:
+  cache-hit:
+    description: The cache's exact key was found
+    value: ${{ steps.cache.outputs.cache-hit }}
+  key:
+    description: The cache's key
+    value: ${{ steps.key.outputs.key }}
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
+      with:
+        toolchain: '1.99.0'
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.targets }}
+
+    - name: Cache key
+      id: key
+      shell: bash
+      run: $(command -v python3 || command -v python) script/ci-cache.py key "${{ inputs.kind }}"
+
+    - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      id: cache
+      with:
+        path: |
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ steps.key.outputs.key }}
+        restore-keys: ${{ steps.key.outputs.restore }}
+
+    # Unchanged files dated before the cached artifacts, the registry's sources unpacked and dated
+    # too: what didn't change isn't compiled again (script/ci-cache.py, "restore").
+    - name: Cache freshness
+      shell: bash
+      run: $(command -v python3 || command -v python) script/ci-cache.py restore
+
+    # cargo-nextest: each test in a process of its own, the binaries' tests run side by side
+    # (.config/nextest.toml). A pinned release's prebuilt binary, from nextest's own site.
+    - name: cargo-nextest
+      if: inputs.nextest == 'true'
+      shell: bash
+      run: |
+        case "$RUNNER_OS-$RUNNER_ARCH" in
+          macOS-*) platform=mac ;;
+          Linux-ARM64) platform=linux-arm ;;
+          Linux-*) platform=linux ;;
+          Windows-*) platform=windows-tar ;;
+        esac
+        bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+        curl -LsSf --retry 5 --retry-all-errors "https://get.nexte.st/0.9.151/$platform" | tar zxf - -C "$bin"
+        cargo nextest --version
+
+    # gpui compiles its Metal shaders at build time with `xcrun metal`. Since Xcode 26 the Metal
+    # toolchain is a separate component that an image may not have; `xcrun -f metal` finds a stub
+    # either way, so run the compiler to tell.
+    - name: Metal toolchain
+      if: inputs.metal == 'true'
+      shell: bash
+      run: |
+        xcodebuild -version
+        if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+          xcodebuild -downloadComponent MetalToolchain
+        fi
+        xcrun -sdk macosx metal --version
