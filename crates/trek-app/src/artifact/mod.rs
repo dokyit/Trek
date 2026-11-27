@@ -756,20 +756,30 @@ fn ask_strip(doc: &Doc, key: usize, look: &Look, cx: &App) -> Option<AnyElement>
 /// draws it, outside the page, so nothing in the page can word or cover it; the host is shown
 /// as written (punycode stays punycode). `None` when no link waits.
 fn link_ask_strip(doc: &Doc, key: usize, look: &Look, cx: &App) -> Option<AnyElement> {
-    let (_url, host) = cx
+    let (url, host) = cx
         .try_global::<Registry>()
         .and_then(|r| r.link_asks.get(&doc.hash).cloned())?;
     let hash = doc.hash;
     let button = |name: &str, label: &'static str, primary: bool, open: bool| {
+        // The answer is for the address this strip drew: the page may have asked for another
+        // while the click was on its way, and that one keeps its own confirm.
+        let drawn = url.clone();
         ask_button(
             SharedString::from(format!("artifact-link-{name}-{key}")),
             label,
             primary,
             look,
             move |_, cx| {
-                let pending = cx.default_global::<Registry>().link_asks.remove(&hash);
-                if open && let Some((url, _)) = pending {
-                    cx.open_url(&url);
+                let registry = cx.default_global::<Registry>();
+                if registry
+                    .link_asks
+                    .get(&hash)
+                    .is_some_and(|(pending, _)| *pending == drawn)
+                {
+                    registry.link_asks.remove(&hash);
+                    if open {
+                        cx.open_url(&drawn);
+                    }
                 }
                 crate::visualization::relayout(cx);
                 cx.refresh_windows();

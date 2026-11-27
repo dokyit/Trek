@@ -588,6 +588,13 @@ fn a_page_opens_a_link_only_on_a_click_the_app_saw() {
         // The user clicks a link in the page: the system's click, then the page's asking.
         log.borrow_mut().click();
         wants(&trek, cx, "https://threejs.org/docs", None);
+        // threejs.org is no host a page may load from: a click alone doesn't open it, the
+        // card's own confirm does.
+        assert_eq!(cx.opened_url(), None);
+        settle(&trek, cx);
+        let open = on_screen(&trek, cx, "artifact-link-open-").expect("the card asks");
+        trek.click(cx, open);
+        settle(&trek, cx);
         assert_eq!(cx.opened_url().as_deref(), Some("https://threejs.org/docs"));
         // One click opens one address: a second riding on it goes nowhere.
         wants(&trek, cx, "https://evil.example.org/rides-along", None);
@@ -601,6 +608,12 @@ fn a_page_opens_a_link_only_on_a_click_the_app_saw() {
         wants(&trek, cx, "file:///etc/passwd", Some(true));
         assert_eq!(cx.opened_url().as_deref(), Some("https://threejs.org/docs"));
         wants(&trek, cx, "https://example.org/clicked", Some(true));
+        // The engine's gesture vouches for a click, not for the host: the card confirms first.
+        assert_eq!(cx.opened_url().as_deref(), Some("https://threejs.org/docs"));
+        settle(&trek, cx);
+        let open = on_screen(&trek, cx, "artifact-link-open-").expect("the card asks");
+        trek.click(cx, open);
+        settle(&trek, cx);
         assert_eq!(
             cx.opened_url().as_deref(),
             Some("https://example.org/clicked")
@@ -650,6 +663,9 @@ fn a_host_the_policy_stopped_is_the_users_to_allow() {
         );
         let once = on_screen(&trek, cx, "artifact-allow-once-").expect("the card asks");
         assert_eq!(log.borrow().reloads, 0, "nothing loads until the user says");
+        // A click this soon after the drawn hosts changed is ignored: the strip may be one
+        // redraw behind what the queue holds.
+        std::thread::sleep(std::time::Duration::from_millis(350));
         trek.click(cx, once);
         settle(&trek, cx);
         assert_eq!(log.borrow().reloads, 1, "allowed, the page loads again");
@@ -669,6 +685,7 @@ fn a_host_the_policy_stopped_is_the_users_to_allow() {
             r#"{"n":"{nonce}","t":"blocked","u":"https://api.github.com/repos/x/y"}"#,
         );
         let always = on_screen(&trek, cx, "artifact-allow-always-").expect("the card asks");
+        std::thread::sleep(std::time::Duration::from_millis(350));
         trek.click(cx, always);
         settle(&trek, cx);
         assert_eq!(hosts(&trek, cx), ["api.github.com"]);
@@ -684,6 +701,7 @@ fn a_host_the_policy_stopped_is_the_users_to_allow() {
         let tracker = r#"{"n":"{nonce}","t":"blocked","u":"https://tracker.example.org/p.gif"}"#;
         post(&trek, cx, tracker);
         let deny = on_screen(&trek, cx, "artifact-deny-").expect("the card asks");
+        std::thread::sleep(std::time::Duration::from_millis(350));
         trek.click(cx, deny);
         settle(&trek, cx);
         assert_eq!(log.borrow().reloads, 2);
