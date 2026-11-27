@@ -68,7 +68,7 @@ pub fn check_url(id: &str, version: &str) -> String {
     format!(
         "https://clients2.google.com/service/update2/crx?response=updatecheck&acceptformat=crx3\
          &prodversion={}.0.0.0&x=id%3D{id}%26v%3D{version}%26uc",
-        super::webkit::CHROME_MAJOR
+        super::CHROME_MAJOR
     )
 }
 

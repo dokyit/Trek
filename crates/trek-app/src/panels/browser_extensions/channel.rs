@@ -596,7 +596,7 @@ fn answer_call(ctx: &WKWebExtensionContext, message: Value, reply: Box<dyn FnOnc
             };
             // Only what's in Downloads.
             if target.starts_with(bridge::downloads_dir()) {
-                let _ = std::process::Command::new("open")
+                let _ = std::process::Command::new("/usr/bin/open")
                     .arg("-R")
                     .arg(&target)
                     .spawn();

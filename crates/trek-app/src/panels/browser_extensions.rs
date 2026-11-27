@@ -47,6 +47,10 @@ use gpui_wry::WebView;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// The Chrome release extensions are told they run in, and the store's update service is asked
+/// as (one current when this was written).
+pub const CHROME_MAJOR: u32 = 142;
+
 /// The Extensions page's address: the Browser opens the page for it (Settings links here).
 pub const PAGE_URL: &str = "trek://extensions";
 

@@ -196,12 +196,8 @@ pub fn ensure() -> bool {
 /// What extensions' own pages add to WebKit's agent: a Chrome of the same age as this WebKit
 /// (`Chrome/<n>`), so Chrome packages take their Chrome paths.
 pub fn extension_application_name() -> String {
-    format!("Chrome/{CHROME_MAJOR}.0.0.0 Safari/605.1.15")
+    format!("Chrome/{}.0.0.0 Safari/605.1.15", super::CHROME_MAJOR)
 }
-
-/// The Chrome release extensions are told they run in (one current when this was written; an
-/// extension that needs a newer one says so on the Extensions page).
-pub(super) const CHROME_MAJOR: u32 = 142;
 
 fn uuid_bytes(path: &std::path::Path) -> [u8; 16] {
     use sha2::Digest as _;

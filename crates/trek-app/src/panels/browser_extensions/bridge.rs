@@ -296,7 +296,7 @@ pub struct Running {
 /// Start `host` for extension `id`, as Chrome does (its folder as the working directory, the
 /// origin as its argument).
 pub fn start(host: &Host, id: &str) -> Result<Running, String> {
-    let mut command = std::process::Command::new(&host.path);
+    let mut command = trek_core::procs::command(&host.path);
     command
         .arg(origin(id))
         .stdin(std::process::Stdio::piped())
