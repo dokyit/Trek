@@ -207,10 +207,15 @@ pub fn navigating(tab: u64, view: &WKWebView, url: &str) {
     };
     let lookup = started.elapsed();
     let controller = unsafe { view.configuration().userContentController() };
-    // The other scripts (wry's, passkeys', the agent's) stay; the last page's of Trek's go.
+    // The other scripts (wry's, passkeys', the agent's) stay; the last page's of Trek's go. Every
+    // one of Trek's starts with `MARK`, scriptlets included: a script without it stayed, so each
+    // navigation added another copy of the site's scriptlets (some 90 KB a page) until the pile
+    // made each load stall the main thread for seconds and WebKit died sending it to a new web
+    // process. Only the start of each source is looked at, not the whole of it copied out.
+    let mark = NSString::from_str(MARK);
     let others: Vec<Retained<WKUserScript>> = unsafe { controller.userScripts() }
         .iter()
-        .filter(|s| !unsafe { s.source() }.to_string().starts_with(MARK))
+        .filter(|s| !unsafe { s.source() }.hasPrefix(&mark))
         .collect();
     let had = unsafe { controller.userScripts() }.count() != others.len();
     if !had && page.is_none() {
@@ -227,6 +232,7 @@ pub fn navigating(tab: u64, view: &WKWebView, url: &str) {
         return;
     };
     let script = |source: String, world: &WKContentWorld, main_only: bool| unsafe {
+        let source = marked(source);
         WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld(
             WKUserScript::alloc(mtm),
             &NSString::from_str(&source),
@@ -259,7 +265,7 @@ pub fn navigating(tab: u64, view: &WKWebView, url: &str) {
             controller.addUserScript(&script(isolated, &world, true));
         }
         controller.addUserScript(&script(
-            format!("{MARK}\nglobalThis.__trekAdblock = {data};\n{COSMETIC_JS}"),
+            format!("globalThis.__trekAdblock = {data};\n{COSMETIC_JS}"),
             &world,
             true,
         ));
@@ -276,10 +282,21 @@ pub fn navigating(tab: u64, view: &WKWebView, url: &str) {
                 "isolated_bytes": isolated_scriptlets.len(),
                 // What the engine took for this page, and setting its scripts.
                 "lookup_us": lookup.as_micros(),
+                // Trek's scripts on the view now: one set per page, never a pile.
+                "trek_scripts": unsafe { controller.userScripts() }
+                    .iter()
+                    .filter(|s| unsafe { s.source() }.hasPrefix(&mark))
+                    .count(),
                 "total_us": started.elapsed().as_micros(),
             }),
         )
     });
+}
+
+/// `source` as one of Trek's page scripts: it starts with `MARK`, which is how `navigating` knows
+/// to take it away when the tab goes to the next page.
+fn marked(source: String) -> String {
+    format!("{MARK}\n{source}")
 }
 
 /// What tab `tab`'s page got (the shots driver's `adblock-state`).
