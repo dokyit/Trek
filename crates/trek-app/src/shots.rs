@@ -16,7 +16,7 @@
 //! `pair` (a pairing code, its link written to `pair.txt`), `pair-phone [name]|leave` (a stand-in iPhone paired over the protocol, connected or gone), `heic-demo` (an iPhone photo made by the system's codec, attached), `open-link <trek:// link>` (as the system hands Trek one), `file <path> [contains <text>]` and `private <path>` (in the data folder unless absolute, `*name` for a name's end: there, holding `text`, and readable by the user alone), `second-launch <arg>` (Windows: Trek started again, handing `arg` over), `keep-working` / `show-main` (the windows closed with an agent at work, and the main one back), `freeze <seconds>` / `freeze told [n]` (the main thread held as a freeze holds it; the freeze watch told it, with a stacks file on a Mac), `close-main` (Windows: the close button's own path, with Keep Trek in the tray on), `badge <n>[+]` (the count on the app's icon), `count-all <id> <n>[+]` (`count` over every window), `tray off|on|<state>` (the system's tray or menu bar icon), `programs <name> <n>[+]` / `programs-ended` (programs running under Trek, then gone), `console-windows mark|new <n>` (Windows: console windows on screen), `native` (not translated or emulated), `banners mark|new <n>[+]` (Windows: banners in the notification center), `renders mark|<view> <n>+|<n>-|<=<view>…` (how often views drew), `housekeeping hold|on` (the workspace's once-a-minute round held off, for at most 30 s, while renders are counted, or let run), `within <id>[*] <id>` (inside another, as drawn), `banner-permission off|restore` and `file-app <ext> on|off` (Windows: Trek's switch in the notification settings; a default app of the check's own), `cloud-file <abs-path> <text>|fetched <n>[+]|away|off` (Windows: a file that lives only in the cloud, from a sync provider of the check's own), `editor has <text>|note <text>` (the file in front shows it; the preview in front says it), `photos open|shown <0|1>|close` (Mac: the system's Photos picker as the + menu opens it, a sheet on the window), `bonjour on|found|off` (the phone server announced through the system's responder, under a name of the check's own, and found as a phone finds it), `programs-stop`, `motion on|system` (animations whatever the system asks, or back to its setting), `signed-out` (`gh`, as Trek starts it, has no login: a capture run never acts as the user), `self-contained` (no runtime from elsewhere loaded), `browser crash` / `browser expect crashed|failed[:<address>]|loaded|why:<word>` (the page's process ended; the tab as the panel has it, and the reason Trek's page gives), `pair-phone upload <name>` (the stand-in sends a file up), `push on|test|alert`, `new` (⌘N), `settled [on|off]`,
 //! `glass on|off`, `tint <0.2–0.95>`, `theme night|paper`, `title <text>` (renames the thread on screen), `dress <Agent>|<Fast model>|<Deep model>` or `dress off` (the mock agent under other names, for marketing frames of a whole window; captioned as examples wherever they're shown), `tools on|off|git|explorer|terminal|browser|sidechat|simulator`,
 //! `range today|week|all` (Basecamp's), `accounts-demo` (accounts for Settings, the picker and the Usage card), `compact-demo` (the thread on screen large and idle past its prompt cache, for the Compact chip), `secret-demo` (a secret's request card), `usage-demo` (plans and limits for the Usage card, no real agent asked), `limits-demo` (the same windows for the mock agent, for the composer's context card), `update-demo ready|wait|later|clear` (an update staged, for the updater's states with work running), `resume-demo resuming|failed|offered|waiting` (the thread on screen's offer after a relaunch), `pace <f>` (the mock agent's speed: 1.0 demo, 0 instant),
-//! `wait <ms>` or `wait idle|permission|question|plan [cap ms]`, `wait file <path> [cap ms]` (until the app has written it), `record <name> <ms> [fps]` (frames
+//! `wait <ms>` or `wait idle|permission|question|plan [cap ms]`, `wait file <path> [cap ms]` (until the app has written it), `wait formatted [cap ms]` (until Format Document's formatter has answered), `record <name> <ms> [fps]` (frames
 //! to `<name>.frames/` plus `<name>.ffconcat` for ffmpeg's concat demuxer; `record stop`, `record wait`),
 //! `editor on|off|root|view|panel|chat|ai|open …` (Trek IDE; see `run`), `terminal feed <text>|link <n>`
 //! (the terminal on screen: text as if its shell printed it, or its n-th link opened as a ⌘-click would), `agent-install <id> <percent>|fail <message>|clear`
@@ -721,9 +721,45 @@ async fn wait(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::R
         }
         return Ok(());
     }
+    // `wait formatted [cap ms]`: until Format Document in the editor in front has its formatter's
+    // answer (the text replaced, or a toast saying why not). The formatter runs off the main
+    // thread for up to `format::LIMIT`, and the first run of one can take seconds (rustup's
+    // proxy, a virus scan of the program on Windows): a save before it answers saves the text as
+    // it was.
+    if kind == "formatted" {
+        let cap = match it.next() {
+            Some(v) => v
+                .parse::<u64>()
+                .map_err(|_| anyhow::anyhow!("wait formatted: bad cap {v:?}"))?,
+            None => crate::format::LIMIT.as_millis() as u64 + 5_000,
+        };
+        let main = cx
+            .update(|cx| ws.read(cx).main_window)
+            .ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        let deadline = Instant::now() + Duration::from_millis(cap);
+        loop {
+            let busy = main.update(cx, |root, _, cx| {
+                root.downcast::<gpui_kit::component::Root>()
+                    .ok()
+                    .map(|r| r.read(cx).view().clone())
+                    .and_then(|v| v.downcast::<crate::root::TrekWindow>().ok())
+                    .and_then(|t| t.read(cx).ide.read(cx).active_editor())
+                    .is_some_and(|e| e.read(cx).formatting())
+            })?;
+            if !busy {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!("wait formatted: the formatter hasn't answered after {cap} ms");
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
+        }
+    }
     if !matches!(kind, "idle" | "permission" | "question" | "plan") {
         anyhow::bail!(
-            "wait: unknown condition {kind:?} (idle|permission|question|plan|shown|file or milliseconds)"
+            "wait: unknown condition {kind:?} (idle|permission|question|plan|shown|file|formatted or milliseconds)"
         );
     }
     let cap = match it.next() {
