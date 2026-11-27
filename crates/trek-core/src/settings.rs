@@ -911,6 +911,9 @@ pub struct Browser {
     /// The user's own filters (the element picker's `site##selector` lines, and any they add),
     /// read by Trek's ad blocker with uBlock Origin's lists.
     pub my_filters: Vec<String>,
+    /// Don't keep the Browser's tabs between launches (`browser_tabs`). Off (they're kept, and
+    /// come back on the next launch) unless the user turns it off; turning it off deletes them.
+    pub keep_tabs_off: bool,
 }
 
 /// The built-in terminal panel.

@@ -32,6 +32,10 @@ tar = { version = "0.4", default-features = false }
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 # The Recycle Bin on Windows, the Trash on macOS, the XDG trash on Linux.
 trash = "5"
+# The Browser's kept tabs (`browser_tabs`): their history as base64 in the file, and WebKit's
+# history (a property list) cleaned of what forms sent. Both already in the lockfile.
+base64 = "0.22"
+plist = "1"
 
 [target.'cfg(unix)'.dependencies]
 # renamex_np(RENAME_SWAP): swap the app bundle for its update in one step (macOS); whether a

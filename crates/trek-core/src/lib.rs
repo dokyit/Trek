@@ -6,6 +6,7 @@ pub mod agent_update;
 pub mod approval_text;
 pub mod artifact;
 pub mod basecamp;
+pub mod browser_tabs;
 pub mod catalog;
 pub mod changelog;
 pub mod changes;
