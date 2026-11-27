@@ -138,10 +138,11 @@ jobs:
   # phone updater's words, against stand-ins. The capture manifests against the commands this
   # driver knows, so a suite can't use one it would refuse (media/README.md). The web remote's
   # plain code (its framing, pairing link and headers) and the site's headers, in Node.
+  # (On a full run these run in Test (macOS) instead: one macOS runner fewer.)
   scripts-macos:
     name: Scripts (macOS)
     needs: plan
-    if: needs.plan.outputs.scripts == 'true'
+    if: needs.plan.outputs.scripts == 'true' && needs.plan.outputs.full != 'true'
     runs-on: macos-15
     timeout-minutes: 15
     steps:
@@ -206,7 +207,9 @@ jobs:
           node script/site/test/run.mjs
 
   # Every crate but the app that the change reaches: trek-remote (the phone server's protocol, TLS
-  # and pairing) and trek-ipc too. trek-app runs in the jobs below.
+  # and pairing) and trek-ipc too. trek-app runs in the jobs below. On a full run this job also has
+  # the Mac's script tests and every crate's doc tests (jobs of their own elsewhere): macOS runners
+  # are the ones a run waits for.
   test:
     name: Test (macOS)
     needs: plan
@@ -215,6 +218,21 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Scripts parse
+        if: needs.plan.outputs.full == 'true'
+        run: for f in script/*.sh script/lib/*.sh; do zsh -n "$f"; done
+      - name: Script tests
+        if: needs.plan.outputs.full == 'true'
+        run: |
+          bash script/tests/release-notes.sh
+          bash script/tests/merge-manifest.sh
+          bash script/tests/release-manifests.sh
+          bash script/tests/release-finish.sh
+          python3 script/tests/ci-gate.py
+          python3 script/tests/ci-plan.py
+          zsh ios/scripts/tests/phone-update.sh
+          zsh script/capture.sh check
+          node script/site/test/run.mjs
       - uses: ./.github/actions/rust-setup
         id: setup
         with:
@@ -230,6 +248,10 @@ jobs:
       - name: Build the CoreDevice example (trek-phone)
         if: needs.plan.outputs.phone == 'true'
         run: cargo build --config "$CI_PROFILE" -p trek-phone --features coredevice --example pc_screen --locked
+
+      - name: Doc tests
+        if: needs.plan.outputs.full == 'true'
+        run: cargo test --config "$CI_PROFILE" --locked --doc --workspace
 
       - uses: ./.github/actions/rust-cache-save
         with:
@@ -432,8 +454,8 @@ jobs:
           save: ${{ needs.plan.outputs.save == 'true' && matrix.shard == 1 }}
 
   # Doc tests (nextest doesn't run them) of every crate the change reaches, trek-app's too: on
-  # Linux, which has runners to spare, for every run; on the Mac and Windows too for a full run
-  # (every push to main, and what a release is gated on). A `--doc` run resolves features apart
+  # Linux, which has runners to spare, for every run; on Windows (here) and the Mac (in Test
+  # (macOS)) too for a full run (every push to main, and what a release is gated on). A `--doc` run resolves features apart
   # from the test targets (it compiles a graph of its own).
   doc-linux:
     name: Doc tests (Linux)
@@ -450,21 +472,6 @@ jobs:
           kind: test-workspace
       - name: Doc tests
         run: cargo test --config "$CI_PROFILE" --locked --doc ${{ needs.plan.outputs.full == 'true' && '--workspace' || needs.plan.outputs.selected }}
-
-  doc-macos:
-    name: Doc tests (macOS)
-    needs: plan
-    if: needs.plan.outputs.full == 'true'
-    runs-on: macos-15
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - uses: ./.github/actions/rust-setup
-        with:
-          kind: test-workspace
-          metal: 'true'
-      - name: Doc tests
-        run: cargo test --config "$CI_PROFILE" --locked --doc --workspace
 
   doc-windows:
     name: Doc tests (Windows)
@@ -642,7 +649,7 @@ jobs:
     name: CI result
     if: always()
     needs: [plan, audit, scripts-macos, scripts-windows, scripts-linux, test, test-app, test-windows,
-            test-windows-app, test-linux, test-linux-app, doc-linux, doc-macos, doc-windows, lint, lint-windows, lint-linux,
+            test-windows-app, test-linux, test-linux-app, doc-linux, doc-windows, lint, lint-windows, lint-linux,
             check-linux-arm]
     runs-on: ubuntu-latest
     timeout-minutes: 5

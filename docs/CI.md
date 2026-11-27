@@ -40,7 +40,7 @@ its run when nothing else reached `main` in between.
 | Test (macOS / Windows / Linux) | `cargo nextest` over the affected crates but trek-app | a crate other than trek-app is affected |
 | Test (…, trek-app N/M) | trek-app's test targets, split by `script/ci-shard.py` | trek-app is affected |
 | Doc tests (Linux) | `cargo test --doc` of the affected crates | any crate is affected |
-| Doc tests (macOS / Windows) | every crate's doc tests | full runs |
+| Doc tests (Windows), and in Test (macOS) | every crate's doc tests | full runs |
 | Clippy (macOS / Windows / Linux) | correctness and suspicious lints of the affected crates, the capture build | any crate is affected on that platform |
 | Check (Linux, Arm) | `cargo check` of trek-app and trek-mcp on Arm | either is affected |
 | Rust dependency audit | `cargo audit` | `Cargo.lock` changed, or full runs |
