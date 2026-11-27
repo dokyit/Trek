@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""A small GTK window for Live (Linux)'s computer-use checks (docs/parity/ledger.toml):
+one label, one entry and one button, titled so `computer elements` finds it. It exists so
+the check has an app with an accessibility tree on a bare Xvfb, where no desktop app is
+installed. NO_AT_BRIDGE comes off before GTK starts: headless.sh sets it for Trek's own
+web views, and this window must be on the accessibility bus for `elements` to read it.
+"""
+
+import os
+import sys
+
+os.environ.pop("NO_AT_BRIDGE", None)
+
+import faulthandler
+
+faulthandler.enable(file=sys.stderr)
+print("atspi-check: starting", file=sys.stderr, flush=True)
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk
+
+window = Gtk.Window(title="Trek Computer Check")
+window.set_default_size(420, 160)
+box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+window.add(box)
+
+label = Gtk.Label(label="Trek computer use check")
+entry = Gtk.Entry()
+entry.set_placeholder_text("type here")
+button = Gtk.Button(label="Check me")
+for widget in (label, entry, button):
+    box.pack_start(widget, False, False, 0)
+
+window.connect("destroy", Gtk.main_quit)
+window.show_all()
+window.present()
+# No window manager on Xvfb: take the input focus itself, so `elements` (which reads the
+# window in front) finds this one and not Trek's. Once the main loop runs, the GdkWindow
+# exists for sure (asking for it earlier can answer None on a slow start).
+from gi.repository import GLib
+
+
+def take_focus():
+    gdk_window = window.get_window()
+    if gdk_window is not None:
+        gdk_window.focus(0)
+    return False
+
+
+GLib.idle_add(take_focus)
+print("atspi-check: in Gtk.main()", file=sys.stderr, flush=True)
+Gtk.main()
+print("atspi-check: Gtk.main() returned", file=sys.stderr, flush=True)

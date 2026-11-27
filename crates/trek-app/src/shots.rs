@@ -88,7 +88,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 mod cloud_files;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 mod computer_use;
 #[cfg(any(windows, target_os = "macos"))]
 mod dns_sd;
@@ -3998,11 +3998,12 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         }
         return Ok(());
     }
-    // `computer open <program>`, `computer elements <window> expect <text>`, `computer close`:
-    // computer use by element, live (`shots/computer_use.rs`): another app opened for the check,
-    // read through Trek's own computer tools as an agent reads it (its outline must hold `text`),
-    // and closed. On CI's machines alone (the ledger's `live_ci`).
-    #[cfg(any(windows, target_os = "macos"))]
+    // `computer open <program>`, `computer elements <window> expect <text>`, `computer click
+    // <target>`, `computer type <text> [into <target>]`, `computer press <target> [action]`,
+    // `computer key <combo>`, `computer shot <name>`, `computer close`: computer use, live
+    // (`shots/computer_use.rs`): another app opened for the check, driven and read through Trek's
+    // own computer tools as an agent does (its outline must hold `text`; a target is a ref like
+    // e12, `"a name"` or `field`), and closed. On CI's machines alone (the ledger's `live_ci`).
     if verb == "computer" {
         match arg.trim().split_once(' ').unwrap_or((arg.trim(), "")) {
             ("open", app) => computer_use::open(app.trim())?,
@@ -4017,7 +4018,14 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                     "computer elements: {window}'s outline holds no {want:?}:\n{outline}"
                 );
             }
-            (other, _) => anyhow::bail!("computer {other}? (open|elements|close)"),
+            ("click", target) => computer_use::click(target.trim())?,
+            ("type", rest) => computer_use::type_text(rest.trim())?,
+            ("press", rest) => computer_use::press(rest.trim())?,
+            ("key", combo) => computer_use::key(combo.trim())?,
+            ("shot", name) => computer_use::shot(name.trim())?,
+            (other, _) => {
+                anyhow::bail!("computer {other}? (open|elements|click|type|press|key|shot|close)")
+            }
         }
         return Ok(());
     }

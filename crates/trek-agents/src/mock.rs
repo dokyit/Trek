@@ -65,6 +65,8 @@
 //! | `mock:video`                 | makes a 6-second test clip with ffmpeg in Trek's data folder, |
 //! |                              | watches it with Trek's `watch_video` (for real, through the   |
 //! |                              | session's `trek-video` server) and links the clip in its answer|
+//! | `mock:computer`              | lists the open windows through the session's `trek-computer`  |
+//! |                              | server (for real); fails the turn when Trek gave none          |
 //! | `simulator`, `mock:simcheck` | builds an iOS app, then installs, launches, reads, taps and   |
 //! |                              | pictures it with Trek's simulator tools, as calls only: no    |
 //! |                              | simulator is touched (the Simulator tool comes forward)       |
@@ -343,6 +345,8 @@ enum Script {
     Background,
     /// Watch a test clip with Trek's `watch_video`, and link it (`mock:video`).
     Video,
+    /// List the open windows through the session's `trek-computer` server (`mock:computer`).
+    Computer,
     /// Use Trek's browser tools on a test site, checking each step (`mock:browser`).
     Browser,
     /// Run an iOS app's tests on a simulator in a shell, one failing (`mock:simtest`).
@@ -582,6 +586,7 @@ impl Script {
                 "mcp" if w.starts_with("mock:") => Script::Mcp,
                 "background" if w.starts_with("mock:") => Script::Background,
                 "video" if w.starts_with("mock:") => Script::Video,
+                "computer" if w.starts_with("mock:") => Script::Computer,
                 "browser" if w.starts_with("mock:") => Script::Browser,
                 "simtest" if w.starts_with("mock:") => Script::SimTest,
                 "simcheck" if w.starts_with("mock:") => Script::SimCheck,
@@ -683,6 +688,7 @@ pub fn title(request: &str) -> String {
         Script::Mcp => "List the MCP servers",
         Script::Background => "Check the page in the background",
         Script::Video => "Watch the demo clip",
+        Script::Computer => "List the open windows",
         Script::Browser => "Check the sign-up form in the browser",
         Script::SimTest => "Run the iOS tests",
         Script::SimCheck => "Check the Threads screen",
@@ -836,6 +842,8 @@ struct Session {
     mcp: Vec<String>,
     /// Trek's video watcher, when Trek gave the session it (`mock:video` calls it).
     video: Option<crate::McpServer>,
+    /// Trek's computer use, when Trek gave the session it (`mock:computer` calls it).
+    computer: Option<crate::McpServer>,
     /// The way to Trek's browser tools, when Trek gave the session them (`mock:browser`).
     browser: Option<trek_ipc::Client>,
 }
@@ -873,15 +881,16 @@ async fn make_clip(ffmpeg: &std::path::Path, clip: &std::path::Path) -> Result<(
     }
 }
 
-/// Call `watch_video` on `clip` through `server` (stdio, as the session would start it): its
-/// text blocks, or why it failed.
-async fn call_watch_video(
+/// Call `tool` with `arguments` on `server` (stdio, as the session would start it): its text
+/// blocks, or why it failed.
+async fn call_mcp_tool(
     server: &crate::McpServer,
-    clip: &std::path::Path,
+    tool: &str,
+    arguments: serde_json::Value,
 ) -> Result<String, String> {
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
     let crate::McpTransport::Stdio { command, args, env } = &server.transport else {
-        return Err("the video watcher isn't a local server".into());
+        return Err("the server isn't a local one".into());
     };
     let mut child = trek_core::procs::async_command(command)
         .args(args)
@@ -894,7 +903,7 @@ async fn call_watch_video(
         .map_err(|e| format!("couldn't start {command}: {e}"))?;
     let mut stdin = child.stdin.take().ok_or("no stdin")?;
     let mut lines = tokio::io::BufReader::new(child.stdout.take().ok_or("no stdout")?).lines();
-    let call = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "watch_video", "arguments": {"source": clip, "fps": 1, "transcript": false}}});
+    let call = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": tool, "arguments": arguments}});
     let script = format!(
         "{}\n{}\n{call}\n",
         serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "trek-mock", "version": "0"}}}),
@@ -916,7 +925,7 @@ async fn call_watch_video(
     .await
     .ok()
     .flatten()
-    .ok_or("the video watcher didn't answer")?;
+    .ok_or("the server didn't answer")?;
     drop(stdin);
     let text = answer["result"]["content"]
         .as_array()
@@ -1108,6 +1117,11 @@ pub async fn run(
             .iter()
             .find(|m| m.name == trek_core::media::VIDEO_SERVER)
             .cloned(),
+        computer: config
+            .mcp_servers
+            .iter()
+            .find(|m| m.name == "trek-computer")
+            .cloned(),
         browser: config
             .mcp_servers
             .iter()
@@ -1291,6 +1305,21 @@ impl Session {
             Script::Handoff => self.handoff(text).await?,
             Script::Background => self.background_use(text).await?,
             Script::Video => self.watch_video().await?,
+            Script::Computer => {
+                if self.computer_use().await? {
+                    self.say("I listed the open windows through Trek's computer tools.")
+                        .await?
+                } else {
+                    return self
+                        .emit(AgentEvent::TurnComplete {
+                            error: Some(
+                                "mock:computer found no trek-computer server: Settings › Tools › Computer use is off, or this platform has none."
+                                    .into(),
+                            ),
+                        })
+                        .await;
+                }
+            }
             Script::Browser => self.browser_check(text).await?,
             Script::SimTest => {
                 self.tool(
@@ -3357,10 +3386,18 @@ impl Session {
         )
         .await?;
         let (output, ok) = match &self.video {
-            Some(server) => match call_watch_video(server, &clip).await {
-                Ok(text) => (text, true),
-                Err(e) => (e, false),
-            },
+            Some(server) => {
+                match call_mcp_tool(
+                    server,
+                    "watch_video",
+                    serde_json::json!({"source": clip, "fps": 1, "transcript": false}),
+                )
+                .await
+                {
+                    Ok(text) => (text, true),
+                    Err(e) => (e, false),
+                }
+            }
             None => ("Trek gave this session no video watcher (Settings › Tools › Video watcher is off).".to_string(), false),
         };
         self.emit(AgentEvent::ToolFinished { id, output, ok })
@@ -3377,6 +3414,33 @@ impl Session {
             )
         };
         self.say(&answer).await
+    }
+
+    /// `mock:computer`: `list_windows` through the session's own `trek-computer` server, as an
+    /// agent would call it. `Ok(false)` when Trek gave the session none, or it didn't answer:
+    /// the turn then fails, so a live check sees it.
+    async fn computer_use(&mut self) -> Step<bool> {
+        self.think("I'll see what windows are open through Trek's computer tools.")
+            .await?;
+        let id = self.id("tool");
+        self.tool_start(&id, "mcp__trek-computer__list_windows", "the open windows")
+            .await?;
+        let (output, ok) = match &self.computer {
+            Some(server) => {
+                match call_mcp_tool(server, "list_windows", serde_json::json!({})).await {
+                    Ok(text) => (text, true),
+                    Err(e) => (e, false),
+                }
+            }
+            None => (
+                "Trek gave this session no computer tools (Settings › Tools › Computer use is off)."
+                    .to_string(),
+                false,
+            ),
+        };
+        self.emit(AgentEvent::ToolFinished { id, output, ok })
+            .await?;
+        Ok(ok)
     }
 
     /// `mock:server`: a dev server left running in the background, printing as it goes. It runs
@@ -4687,6 +4751,7 @@ mod tests {
         assert_eq!(Script::parse("mock:told", false), Script::Told);
         assert_eq!(Script::parse("mock:mcp", false), Script::Mcp);
         assert_eq!(Script::parse("mock:video", false), Script::Video);
+        assert_eq!(Script::parse("mock:computer", false), Script::Computer);
         assert_eq!(
             Script::parse("mock:browser approvals", false),
             Script::Browser

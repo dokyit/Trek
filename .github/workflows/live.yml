@@ -387,6 +387,8 @@ jobs:
             live-linux.md
             start.json
             ${{ env.RUNTIME }}/shot/live-*.png
+            ${{ env.RUNTIME }}/shot/live-computer-open-*.log
+            ${{ env.RUNTIME }}/shot/live-computer-open-*.exit
             ${{ env.RUNTIME }}/trek.log
           if-no-files-found: warn
           retention-days: 7
