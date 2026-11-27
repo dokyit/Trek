@@ -417,6 +417,11 @@ define_class!(
                 });
                 return;
             }
+            // Trek's ad blocker readies the page it goes to (its lists, its scripts), before the
+            // document exists.
+            if own_page {
+                crate::panels::browser_adblock::page::navigating(v.tab, webview, &url);
+            }
             unsafe {
                 let _: () = msg_send![
                     &*v.inner,

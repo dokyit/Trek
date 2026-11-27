@@ -2068,6 +2068,7 @@ impl BrowserPanel {
             };
             // Before the first page: its scripts run at each document's start.
             passkeys::install(&built, id, tx.clone());
+            browser_adblock::page::install(&built, id);
             webkit::hook(&built, id, tx, Some(make));
             if !is_popup {
                 let _ = built.load_url(&to_view(url));
@@ -2310,6 +2311,7 @@ impl BrowserPanel {
         {
             self.passkeys_gone(id, cx);
             webkit::unhook(id);
+            browser_adblock::page::remove(id);
         }
         #[cfg(windows)]
         webview2::unhook(id);
@@ -3274,11 +3276,21 @@ impl BrowserPanel {
     fn compile_adblock(&mut self, cx: &mut Context<Self>) {
         #[cfg(target_os = "macos")]
         {
-            let browser = &self.workspace.read(cx).settings.browser;
+            let browser = self.workspace.read(cx).settings.browser.clone();
             if browser.ad_blocker {
                 let allowed = browser.ad_allow.clone();
                 self.adblock.update(cx, |a, cx| a.compile(allowed, cx));
             }
+            // Trek's own blocker (uBlock Origin's lists), on unless turned off.
+            self.adblock.update(cx, |a, cx| {
+                a.run_blocker(
+                    !browser.blocker_off,
+                    browser.ad_allow.clone(),
+                    browser.my_filters.clone(),
+                    false,
+                    cx,
+                )
+            });
         }
         #[cfg(not(target_os = "macos"))]
         let _ = cx;
@@ -3392,16 +3404,77 @@ impl BrowserPanel {
             ws.save_settings(cx);
             allowed
         });
-        if allowed {
+        let imported = self.workspace.read(cx).settings.browser.ad_blocker;
+        if allowed && imported {
             if let Some(tab) = self.active_tab() {
                 let view = tab.view.read(cx).raw();
                 browser_adblock::webkit::apply(view, &self.adblock_applied, &[]);
                 let _ = view.reload();
                 self.adblock_paused = Some(tab.id);
             }
-        } else {
+        } else if imported {
             self.adblock_reload = true;
         }
+        self.compile_adblock(cx);
+        // Trek's own blocker lets the site through (or stops) at once: the page loads again.
+        if !imported && let Some(tab) = self.active_tab() {
+            let _ = tab.view.read(cx).raw().reload();
+        }
+        cx.notify();
+    }
+
+    /// Turn Trek's own blocker on or off (macOS): the setting, then every tab's next page (the
+    /// one in front loads again).
+    #[cfg(target_os = "macos")]
+    fn set_blocker(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.workspace.update(cx, |ws, cx| {
+            ws.settings.browser.blocker_off = !on;
+            ws.save_settings(cx);
+        });
+        self.compile_adblock(cx);
+        if let Some(tab) = self
+            .active_tab()
+            .filter(|t| !t.page.url.starts_with("trek://"))
+        {
+            let _ = tab.view.read(cx).raw().reload();
+        }
+        cx.notify();
+    }
+
+    /// Let the user pick an element on the page in front to block there from now on (macOS):
+    /// `site##selector` joins their own filters, and the element goes at once.
+    #[cfg(target_os = "macos")]
+    fn pick_element(&mut self, cx: &mut Context<Self>) {
+        let Some((tab, site)) = self
+            .active_tab()
+            .and_then(|t| Some((t.id, browser_adblock::site_of(&t.page.url)?)))
+        else {
+            return;
+        };
+        let picked = browser_adblock::page::pick(tab);
+        cx.spawn(async move |this, cx| {
+            let Ok(Some(selector)) = picked.recv().await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.block_selector(tab, &site, &selector, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// Block `selector` on `site` from now on (and on tab `tab`'s page at once).
+    #[cfg(target_os = "macos")]
+    fn block_selector(&mut self, tab: u64, site: &str, selector: &str, cx: &mut Context<Self>) {
+        let line = format!("{site}##{selector}");
+        browser_adblock::page::hide_now(tab, selector);
+        self.workspace.update(cx, |ws, cx| {
+            let mine = &mut ws.settings.browser.my_filters;
+            if !mine.contains(&line) {
+                mine.push(line);
+            }
+            ws.save_settings(cx);
+        });
         self.compile_adblock(cx);
         cx.notify();
     }
@@ -3477,7 +3550,92 @@ impl BrowserPanel {
         );
         let settings = &self.workspace.read(cx).settings.browser;
         let (on, allowed) = (settings.ad_blocker, settings.ad_allow.clone());
+        let trek_on = cfg!(target_os = "macos") && !settings.blocker_off;
         let mut rows = vec![];
+        // Trek's own blocker (macOS): uBlock Origin's lists, on unless turned off.
+        #[cfg(target_os = "macos")]
+        {
+            let state = blocker.blocker.clone();
+            rows.push(
+                ui::menu_row("browser-blocker-toggle", false, cx)
+                    .test_support()
+                    .child(Icon::new(Lucide::Shield).small().text_color(muted))
+                    .child(div().flex_1().child("Block ads (uBlock Origin's lists)"))
+                    .children(check(trek_on))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_blocker(!trek_on, cx);
+                    }))
+                    .into_any_element(),
+            );
+            if trek_on && let Some(site) = self.site_in_front() {
+                let allowing = allowed.contains(&site);
+                rows.push(
+                    ui::menu_row("browser-adblock-allow-site", false, cx)
+                        .test_support()
+                        .child(Icon::new(Lucide::CircleSlash).small().text_color(muted))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .child(format!("Allow ads on {site}")),
+                        )
+                        .children(check(allowing))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.toggle_allow_site(site.clone(), cx);
+                        }))
+                        .into_any_element(),
+                );
+                if !allowing {
+                    rows.push(
+                        ui::menu_row("browser-blocker-pick", false, cx)
+                            .test_support()
+                            .child(Icon::new(Lucide::Crosshair).small().text_color(muted))
+                            .child(div().flex_1().child("Block an element…"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_menu_open(false, cx);
+                                this.pick_element(cx);
+                            }))
+                            .into_any_element(),
+                    );
+                }
+            }
+            let line = match (&state.busy, &state.error, &state.stats) {
+                (Some(busy), _, _) => Some(
+                    h_flex()
+                        .gap(px(6.))
+                        .child(Spinner::new().xsmall())
+                        .child(*busy)
+                        .into_any_element(),
+                ),
+                (None, Some(e), _) if trek_on => Some(
+                    div()
+                        .text_color(theme.red)
+                        .child(e.clone())
+                        .into_any_element(),
+                ),
+                (None, _, Some(stats)) if trek_on => Some(
+                    div()
+                        .child(browser_adblock::blocker_summary(stats, &state))
+                        .into_any_element(),
+                ),
+                _ => None,
+            };
+            if let Some(line) = line {
+                rows.push(
+                    div()
+                        .id("browser-blocker-status")
+                        .test_support()
+                        .px(px(10.))
+                        .pl(px(36.))
+                        .pb(px(6.))
+                        .text_size(to_rems(text::META))
+                        .text_color(muted)
+                        .child(line)
+                        .into_any_element(),
+                );
+            }
+        }
         let import_row = |label: &'static str, cx: &mut Context<Self>| {
             ui::menu_row("browser-adblock-import", false, cx)
                 .test_support()
@@ -3490,7 +3648,7 @@ impl BrowserPanel {
                 .into_any_element()
         };
         // No ad blocker on: block ads with uBlock Origin Lite, on the Extensions page.
-        if !(imported.is_some() && on) && browser_extensions::offers_ad_blocking() {
+        if !trek_on && !(imported.is_some() && on) && browser_extensions::offers_ad_blocking() {
             rows.push(
                 ui::menu_row("browser-block-ads", false, cx)
                     .test_support()
@@ -3530,7 +3688,10 @@ impl BrowserPanel {
                         .into_any_element(),
                 );
                 #[cfg(target_os = "macos")]
-                if on && let Some(site) = self.site_in_front() {
+                if on
+                    && !trek_on
+                    && let Some(site) = self.site_in_front()
+                {
                     let allowing = allowed.contains(&site);
                     rows.push(
                         ui::menu_row("browser-adblock-allow-site", false, cx)
@@ -4265,8 +4426,28 @@ impl BrowserPanel {
                     site.ok_or_else(|| anyhow::anyhow!("adblock-allow: no site in front"))?;
                 self.toggle_allow_site(site, cx);
             }
+            // Trek's own blocker: on or off, its lists fetched again now, and an element on the
+            // page in front blocked as the picker would (`blocker-hide <selector>`).
+            #[cfg(target_os = "macos")]
+            "blocker" => self.set_blocker(arg == "on", cx),
+            #[cfg(target_os = "macos")]
+            "blocker-refresh" => {
+                let mine = self.workspace.read(cx).settings.browser.clone();
+                self.adblock.update(cx, |a, cx| {
+                    a.run_blocker(!mine.blocker_off, mine.ad_allow, mine.my_filters, true, cx)
+                });
+            }
+            #[cfg(target_os = "macos")]
+            "blocker-hide" => {
+                let (tab, site) = self
+                    .active_tab()
+                    .and_then(|t| Some((t.id, browser_adblock::site_of(&t.page.url)?)))
+                    .ok_or_else(|| anyhow::anyhow!("blocker-hide: no site in front"))?;
+                anyhow::ensure!(!arg.is_empty(), "blocker-hide needs a selector");
+                self.block_selector(tab, &site, arg, cx);
+            }
             _ => anyhow::bail!(
-                "browser: unknown command {cmd:?} (go <address>|back|forward|reload|focus|unfocus|press <keys>|eval <js>|state|snap <name>|ask yes|no|text <words>|passkey yes [n]|no|offer|passkey-uv allow|deny|passkey-delete <site>|passkeys on|off|tab <id>|adblock-import <path>|adblock on|off|adblock-allow|ext-page|ext-install <folder, file or id>|ext-list|ext-on|ext-off|ext-remove <id or name>|ext-allow|ext-deny|ext-options <id or name>|ext-popup <js>)"
+                "browser: unknown command {cmd:?} (go <address>|back|forward|reload|focus|unfocus|press <keys>|eval <js>|state|snap <name>|ask yes|no|text <words>|passkey yes [n]|no|offer|passkey-uv allow|deny|passkey-delete <site>|passkeys on|off|tab <id>|adblock-import <path>|adblock on|off|adblock-allow|blocker on|off|blocker-refresh|blocker-hide <selector>|ext-page|ext-install <folder, file or id>|ext-list|ext-on|ext-off|ext-remove <id or name>|ext-allow|ext-deny|ext-options <id or name>|ext-popup <js>)"
             ),
         }
         Ok(())
@@ -4364,7 +4545,38 @@ impl BrowserPanel {
             })).collect::<Vec<_>>(),
             // Passkey requests waiting on the user, and the passkeys Trek keeps (macOS).
             "passkeys": self.shots_passkeys(),
+            // Trek's own ad blocker: where it stands, and what the page in front got.
+            "blocker": self.shots_blocker(cx),
         })
+    }
+
+    fn shots_blocker(&self, cx: &App) -> serde_json::Value {
+        #[cfg(target_os = "macos")]
+        {
+            let b = &self.adblock.read(cx).blocker;
+            serde_json::json!({
+                "on": !self.workspace.read(cx).settings.browser.blocker_off,
+                "ready": browser_adblock::page::ready(),
+                "busy": b.busy,
+                "error": b.error,
+                "release": b.release,
+                "scriptlets": b.scriptlets,
+                "failed": b.failed,
+                "stats": b.stats.as_ref().map(|s| serde_json::json!({
+                    "lists": s.lists, "network": s.network, "converted": s.converted,
+                    "rules": s.rules, "webkit_lists": s.webkit_lists, "rules_ms": s.took.as_millis(),
+                    "engine_ms": s.engine_took.as_millis(), "webkit_ms": s.webkit_took.as_millis(),
+                    "webkit_compiled": s.compiled,
+                })),
+                "page": self.active_tab().and_then(|t| browser_adblock::page::last(t.id)),
+                "my_filters": self.workspace.read(cx).settings.browser.my_filters,
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = cx;
+            serde_json::Value::Null
+        }
     }
 
     fn shots_passkeys(&self) -> serde_json::Value {

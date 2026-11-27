@@ -17,12 +17,23 @@
 
 #[cfg_attr(windows, allow(dead_code))] // Windows installs the extension instead.
 pub mod convert;
+/// Trek's own blocker (macOS): uBlock Origin's lists, its scriptlets, Brave's engine.
+#[cfg(target_os = "macos")]
+pub mod engine;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // Only the Mac's blocker reads them.
+pub mod lists;
+#[cfg(target_os = "macos")]
+pub mod page;
+#[cfg(target_os = "macos")]
+pub mod scriptlets;
 
 use crate::workspace::{Workspace, WorkspaceEvent};
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::time::Duration;
 
 /// Where the ad blocker keeps what it imported and compiled.
 pub fn dir() -> PathBuf {
@@ -479,7 +490,44 @@ pub struct AdBlocker {
     /// Where to say how an import went, once it's ready (or failed).
     announce: Option<WeakEntity<Workspace>>,
     _task: Option<Task<()>>,
+    /// Trek's own blocker (macOS): where it stands, and its work under way.
+    #[cfg(target_os = "macos")]
+    pub blocker: Blocker,
+    #[cfg(target_os = "macos")]
+    blocker_task: Option<Task<()>>,
+    #[cfg(target_os = "macos")]
+    blocker_lists: Vec<webkit::List>,
+    /// Looks at the lists again every few hours while Trek runs (they change daily).
+    #[cfg(target_os = "macos")]
+    blocker_timer: Option<Task<()>>,
 }
+
+/// Where Trek's own blocker stands (macOS), for the menu and Settings.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Default)]
+pub struct Blocker {
+    /// What's under way ("Fetching uBlock Origin's lists…"), while something is.
+    pub busy: Option<&'static str>,
+    pub error: Option<String>,
+    pub stats: Option<engine::Stats>,
+    /// uBlock Origin's release its scriptlets came from, and how many there are.
+    pub release: String,
+    pub scriptlets: usize,
+    /// Lists that couldn't be fetched last time (their last copy is used).
+    pub failed: Vec<String>,
+    /// When the lists were last built, and what the user's own filters were then.
+    pub built: Option<std::time::Instant>,
+    built_with: Option<Vec<String>>,
+    /// What was asked while a build ran (on, sites let through, the user's filters): built next.
+    wanted: Option<(bool, Vec<String>, Vec<String>)>,
+    /// What was asked last (for the periodic look at the lists).
+    last: Option<(bool, Vec<String>, Vec<String>)>,
+}
+
+/// Where Trek's own blocker keeps its lists, uBlock Origin's release and its compiled lists'
+/// prefix in WebKit's store.
+#[cfg(target_os = "macos")]
+pub const BLOCKER_PREFIX: &str = "trek-blocker-";
 
 struct Shared(Entity<AdBlocker>);
 impl Global for Shared {}
@@ -504,6 +552,14 @@ impl AdBlocker {
             pending: None,
             announce: None,
             _task: None,
+            #[cfg(target_os = "macos")]
+            blocker: Blocker::default(),
+            #[cfg(target_os = "macos")]
+            blocker_task: None,
+            #[cfg(target_os = "macos")]
+            blocker_lists: vec![],
+            #[cfg(target_os = "macos")]
+            blocker_timer: None,
         });
         cx.set_global(Shared(entity.clone()));
         entity
@@ -666,6 +722,271 @@ impl AdBlocker {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl AdBlocker {
+    /// Run Trek's own blocker as the settings say: `on`, with `allowed` sites let through and the
+    /// user's own filters `mine`. The first time (and when its lists are due, or `refresh`), it
+    /// fetches uBlock Origin's lists and release, reads its scriptlets, builds the engine and
+    /// compiles WebKit's lists (found again at once when compiled before); otherwise only what's
+    /// let through changes, at once.
+    pub fn run_blocker(
+        &mut self,
+        on: bool,
+        allowed: Vec<String>,
+        mine: Vec<String>,
+        refresh: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.blocker.last = Some((on, allowed.clone(), mine.clone()));
+        if !on {
+            page::set(false, allowed, None, self.blocker_lists.clone());
+            cx.notify();
+            return;
+        }
+        let fresh = self.blocker.built_with.as_ref() == Some(&mine)
+            && self
+                .blocker
+                .built
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(6 * 3600));
+        if self.blocker.busy.is_some() {
+            // After the build under way, with these.
+            self.blocker.wanted = Some((on, allowed.clone(), mine));
+            page::set(true, allowed, None, self.blocker_lists.clone());
+            return;
+        }
+        if fresh && !refresh {
+            // The engine as it is; only on, off or what's let through changes.
+            page::set(true, allowed, None, self.blocker_lists.clone());
+            return;
+        }
+        self.blocker.busy = Some("Fetching uBlock Origin's lists…");
+        self.blocker.error = None;
+        cx.notify();
+        // While Trek runs, the lists are looked at again every few hours (each is fetched when
+        // its own interval has passed: the quick fixes daily, most every four days).
+        if self.blocker_timer.is_none() {
+            self.blocker_timer = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_secs(6 * 3600))
+                        .await;
+                    let again = this.update(cx, |this, cx| {
+                        if let Some((on, allowed, mine)) = this.blocker.last.clone() {
+                            this.run_blocker(on, allowed, mine, false, cx);
+                        }
+                    });
+                    if again.is_err() {
+                        break;
+                    }
+                }
+            }));
+        }
+        let base = dir();
+        self.blocker_task = Some(cx.spawn(async move |this, cx| {
+            let result = build_blocker(base, mine.clone(), refresh, &this, cx).await;
+            let _ = this.update(cx, |this, cx| {
+                this.blocker.busy = None;
+                match result {
+                    Ok((engine, lists, built)) => {
+                        tracing::info!(
+                            "adblock: Trek's blocker: {} lists, {} network filters, {} WebKit rules in {} lists, built in {:?}; {} scriptlets from uBlock Origin {}",
+                            built.stats.lists,
+                            built.stats.network,
+                            built.stats.rules,
+                            built.stats.webkit_lists,
+                            built.stats.took,
+                            built.scriptlets,
+                            built.release
+                        );
+                        this.blocker.stats = Some(built.stats);
+                        this.blocker.release = built.release;
+                        this.blocker.scriptlets = built.scriptlets;
+                        this.blocker.failed = built.failed;
+                        this.blocker.built = Some(std::time::Instant::now());
+                        this.blocker.built_with = Some(mine);
+                        this.blocker_lists = lists.clone();
+                        page::set(true, allowed, Some(engine), lists);
+                    }
+                    Err(e) => {
+                        tracing::warn!("adblock: Trek's blocker: {e}");
+                        this.blocker.error = Some(e);
+                        // Not again before the next check.
+                        this.blocker.built = Some(std::time::Instant::now());
+                        this.blocker.built_with = Some(mine);
+                    }
+                }
+                // Asked for more meanwhile (another element picked): that next.
+                if let Some((on, allowed, mine)) = this.blocker.wanted.take() {
+                    this.run_blocker(on, allowed, mine, false, cx);
+                }
+                cx.notify();
+            });
+        }));
+    }
+}
+
+/// The menu's line on Trek's blocker: "9 lists · 312,000 network filters → 140,000 WebKit rules ·
+/// 160 scriptlets (uBlock Origin 1.77.2)".
+#[cfg(target_os = "macos")]
+pub fn blocker_summary(stats: &engine::Stats, state: &Blocker) -> String {
+    let mut line = format!(
+        "{} lists · {} network filters → {} WebKit rules",
+        stats.lists,
+        thousands(stats.network),
+        thousands(stats.rules)
+    );
+    if state.scriptlets > 0 {
+        line.push_str(&format!(
+            " · {} scriptlets (uBlock Origin {})",
+            state.scriptlets, state.release
+        ));
+    }
+    if !state.failed.is_empty() {
+        line.push_str(&format!(" · {} lists not updated", state.failed.len()));
+    }
+    line
+}
+
+/// What a build of Trek's blocker came to.
+#[cfg(target_os = "macos")]
+struct Built {
+    stats: engine::Stats,
+    release: String,
+    scriptlets: usize,
+    failed: Vec<String>,
+}
+
+/// Build Trek's blocker: fetch what's due, read the scriptlets, build the engine and compile the
+/// WebKit lists.
+#[cfg(target_os = "macos")]
+async fn build_blocker(
+    base: PathBuf,
+    mine: Vec<String>,
+    refresh: bool,
+    this: &WeakEntity<AdBlocker>,
+    cx: &mut AsyncApp,
+) -> Result<(std::sync::Arc<adblock::Engine>, Vec<webkit::List>, Built), String> {
+    let say = |cx: &mut AsyncApp, what: &'static str| {
+        let _ = this.update(cx, |this, cx| {
+            this.blocker.busy = Some(what);
+            cx.notify();
+        });
+    };
+    // The lists and uBlock Origin's release, from the web, on Trek's runtime.
+    let (tx, rx) = async_channel::bounded(1);
+    {
+        let base = base.clone();
+        trek_core::runtime().spawn(async move {
+            let (fetched, failed) = lists::refresh(&base, refresh).await;
+            let release =
+                if refresh || scriptlets::stale(&base) || scriptlets::current(&base).is_none() {
+                    match scriptlets::fetch(&base).await {
+                        Ok(f) => Ok(f),
+                        // Offline: the last release is fine.
+                        Err(e) => scriptlets::current(&base).ok_or(e),
+                    }
+                } else {
+                    scriptlets::current(&base)
+                        .ok_or_else(|| "No uBlock Origin release.".to_string())
+                };
+            let _ = tx.send((fetched, failed, release)).await;
+        });
+    }
+    let (_fetched, failed, release) = rx
+        .recv()
+        .await
+        .map_err(|_| "The fetch stopped.".to_string())?;
+    // Scriptlets: read from the release once (WebKit evaluates its modules), then kept.
+    say(cx, "Reading uBlock Origin's scriptlets…");
+    let mut resources = vec![];
+    let mut release_name = String::new();
+    if let Ok(release) = &release {
+        release_name = release
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let cache = release.join("trek-scriptlets.json");
+        let json = match std::fs::read_to_string(&cache) {
+            Ok(json) => Ok(json),
+            Err(_) => match scriptlets::bundle(release) {
+                Ok(script) => {
+                    let answer = cx
+                        .update(|_| page::evaluate(script))
+                        .recv()
+                        .await
+                        .map_err(|_| "WebKit didn't answer.".to_string())
+                        .and_then(|a| a);
+                    if let Ok(json) = &answer {
+                        let _ = std::fs::write(&cache, json);
+                    }
+                    answer
+                }
+                Err(e) => Err(e),
+            },
+        };
+        match json.and_then(|j| {
+            serde_json::from_str::<Vec<scriptlets::Scriptlet>>(&j).map_err(|e| e.to_string())
+        }) {
+            Ok(list) => resources = scriptlets::resources(&list),
+            Err(e) => tracing::warn!("adblock: uBlock Origin's scriptlets: {e}"),
+        }
+        resources.extend(scriptlets::redirect_resources(release));
+    } else if let Err(e) = &release {
+        tracing::warn!("adblock: uBlock Origin's release: {e}");
+    }
+    let scriptlet_count = resources.len();
+    // The engine and the WebKit rules, off the main thread.
+    say(cx, "Building the ad blocker…");
+    let user = mine.join("\n");
+    let built = cx
+        .background_spawn({
+            let base = base.clone();
+            async move {
+                let sources = engine::sources(&base);
+                if sources.is_empty() {
+                    return Err("No filter list could be fetched.".to_string());
+                }
+                let key = engine::key(&sources, &user);
+                let (json, mut stats) = engine::content_rules(&sources, &user);
+                let started = std::time::Instant::now();
+                let engine = engine::engine(&sources, &user, resources);
+                stats.engine_took = started.elapsed();
+                Ok((std::sync::Arc::new(engine), json, stats, key))
+            }
+        })
+        .await?;
+    let (engine, json, mut stats, key) = built;
+    say(cx, "Compiling the ad blocker's rules…");
+    let lists: Vec<(String, String)> = json
+        .into_iter()
+        .enumerate()
+        .map(|(i, j)| (format!("{BLOCKER_PREFIX}{i}-{key:016x}"), j))
+        .collect();
+    let loaded = cx
+        .update(|_| webkit::load_in(lists, BLOCKER_PREFIX))
+        .recv()
+        .await
+        .map_err(|_| "WebKit didn't answer.".to_string())??;
+    tracing::info!(
+        "adblock: Trek's blocker: {} WebKit lists ready in {:?} ({} compiled)",
+        loaded.lists.len(),
+        loaded.took,
+        loaded.compiled
+    );
+    stats.webkit_took = loaded.took;
+    stats.compiled = loaded.compiled;
+    Ok((
+        engine,
+        loaded.lists,
+        Built {
+            stats,
+            release: release_name,
+            scriptlets: scriptlet_count,
+            failed,
+        },
+    ))
+}
+
 /// Turn the ad blocker on or off for every Browser (the setting, then each Browser's views).
 pub fn set_enabled(ws: &Entity<Workspace>, on: bool, cx: &mut App) {
     let allowed = ws.update(cx, |ws, cx| {
@@ -764,6 +1085,7 @@ pub mod webkit {
         started: Instant,
         tx: async_channel::Sender<Result<Loaded, String>>,
         keep: Vec<String>,
+        prefix: &'static str,
     }
 
     fn arrived(waiting: &Rc<RefCell<Waiting>>, ix: usize, list: Result<List, String>) {
@@ -785,14 +1107,24 @@ pub mod webkit {
             }),
         };
         let keep = std::mem::take(&mut w.keep);
+        let prefix = w.prefix;
         let _ = w.tx.try_send(answer);
         drop(w);
-        prune(keep);
+        prune_in(keep, prefix);
     }
 
     /// Find each of `lists` (identifier, JSON) in the store, or compile it there (WebKit works
     /// off the main thread and answers on it); then drop the store's other lists.
     pub fn load(lists: Vec<(String, String)>) -> async_channel::Receiver<Result<Loaded, String>> {
+        load_in(lists, LIST_PREFIX)
+    }
+
+    /// `load`, for lists whose identifiers start with `prefix` (only those of the store's lists
+    /// are dropped): Trek's own blocker keeps its lists apart from an imported uBlock Origin's.
+    pub fn load_in(
+        lists: Vec<(String, String)>,
+        prefix: &'static str,
+    ) -> async_channel::Receiver<Result<Loaded, String>> {
         let (tx, rx) = async_channel::bounded(1);
         let Some(mtm) = MainThreadMarker::new() else {
             let _ = tx.try_send(Err("Not on the main thread.".into()));
@@ -810,6 +1142,7 @@ pub mod webkit {
             started: Instant::now(),
             tx: tx.clone(),
             keep: lists.iter().map(|(id, _)| id.clone()).collect(),
+            prefix,
         }));
         if lists.is_empty() {
             let _ = tx.try_send(Ok(Loaded {
@@ -817,7 +1150,7 @@ pub mod webkit {
                 compiled: 0,
                 took: Duration::ZERO,
             }));
-            prune(vec![]);
+            prune_in(vec![], prefix);
             return rx;
         }
         for (ix, (id, json)) in lists.into_iter().enumerate() {
@@ -864,6 +1197,11 @@ pub mod webkit {
 
     /// Remove the store's lists other than `keep` (old imports, sites allowed before).
     pub fn prune(keep: Vec<String>) {
+        prune_in(keep, LIST_PREFIX)
+    }
+
+    /// `prune`, for lists whose identifiers start with `prefix`.
+    pub fn prune_in(keep: Vec<String>, prefix: &'static str) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
@@ -878,7 +1216,7 @@ pub mod webkit {
             };
             for id in ids.iter() {
                 let id = id.to_string();
-                if id.starts_with(LIST_PREFIX) && !keep.contains(&id) {
+                if id.starts_with(prefix) && !keep.contains(&id) {
                     let done = RcBlock::new(|_: *mut NSError| {});
                     // SAFETY: main thread; WebKit copies the block.
                     unsafe {

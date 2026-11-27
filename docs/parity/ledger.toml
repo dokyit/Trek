@@ -808,6 +808,18 @@ note = "No per-site allow on Windows, and it stops working when Edge drops Manif
 code = ["crates/trek-app/src/panels/browser_adblock.rs"]
 
 [[feature]]
+id = "trek-ad-blocker"
+area = "Browser"
+what = "Block ads with uBlock Origin's lists, built in"
+macos = "yes"
+windows = "no"
+linux = "no"
+live = ["route project:{project}", "tools browser", "wait 600", "click browser-more-button", "wait 300", "count browser-blocker-toggle 1", "key escape"]
+how = { macos = "uBlock Origin's default lists read by Brave's adblock crate: network filters as WebKit content rules, the site's element hiding, procedural filters, generic hiding and uBlock Origin's scriptlets set on each page as it starts; Allow ads on this site, Block an element…; lists kept current. adblock-tester 100, YouTube's pre-roll and Sponsored tiles gone (2026-11-27).", windows = "None of its own: the imported uBlock Origin blocks (ad-blocker)." }
+note = "Windows: the Browser is WebView2, which runs the user's own uBlock Origin (Manifest V2) as an extension today (ad-blocker); the same engine would go through WebView2's WebResourceRequested (every request, blocking and redirecting) and AddScriptToExecuteOnDocumentCreated, not written yet. Linux: WebKitGTK takes content rules too (WebKitUserContentFilterStore) and user scripts, so the Mac's design fits, but Trek's WebKitGTK Browser doesn't wire either yet. On the Mac, what WebKit's public content rules can't express ($redirect as a block, $removeparam, $csp, $header) isn't applied."
+code = ["crates/trek-app/src/panels/browser_adblock.rs", "crates/trek-app/src/panels/browser_adblock/engine.rs", "crates/trek-app/src/panels/browser_adblock/page.rs"]
+
+[[feature]]
 id = "browser-extensions"
 area = "Browser"
 what = "Browser extensions with their button, popup and options"
