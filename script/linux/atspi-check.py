@@ -11,6 +11,13 @@ import sys
 
 os.environ.pop("NO_AT_BRIDGE", None)
 
+# `open_app` starts this with stderr to nothing: keep a copy in the shot folder when Trek's
+# live check pointed one out (TREK_SHOT_DIR), so a dead fixture still says how.
+shot_dir = os.environ.get("TREK_SHOT_DIR")
+if shot_dir:
+    log = open(os.path.join(shot_dir, "live-computer-open-fixture.log"), "w")
+    os.dup2(log.fileno(), sys.stderr.fileno())
+
 import faulthandler
 
 faulthandler.enable(file=sys.stderr)

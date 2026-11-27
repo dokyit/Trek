@@ -17,6 +17,8 @@ use std::time::Duration;
 
 /// The app opened for the check.
 static OPENED: Mutex<Option<Child>> = Mutex::new(None);
+/// The app `open` had `trek-mcp` start on Linux: detached, so `close` ends it by pid.
+static OPENED_PID: Mutex<Option<u32>> = Mutex::new(None);
 /// The `trek-mcp computer` session the verbs share: its refs are per session.
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
 /// The window `elements` last found, for verbs that name an element rather than a ref.
@@ -30,6 +32,11 @@ const ANSWER_WITHIN: Duration = Duration::from_secs(45);
 /// it ends in `live-computer-open-<n>.exit`, so a fixture that dies leaves word of how in the
 /// run's artifacts.
 pub fn open(app: &str) -> Result<()> {
+    // Linux: computer use refuses Trek's own processes and their children, and an app spawned
+    // here would count as one — `trek-mcp`'s `open_app` starts it instead, as an agent's does.
+    if cfg!(target_os = "linux") {
+        return open_as_agent(app);
+    }
     let mut command = trek_core::procs::command(app);
     let mut log = None;
     if let Some(dir) = std::env::var_os("TREK_SHOT_DIR") {
@@ -76,12 +83,56 @@ pub fn open(app: &str) -> Result<()> {
 
 /// Close the app `open` opened, and the `trek-mcp` session with it.
 pub fn close() {
+    let pid = OPENED_PID.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(pid) = pid {
+        let _ = trek_core::procs::command("kill")
+            .args(["-9", &pid.to_string()])
+            .output();
+    }
     if let Some(mut child) = OPENED.lock().unwrap_or_else(|e| e.into_inner()).take() {
         let _ = child.kill();
         let _ = child.wait();
     }
     drop(SESSION.lock().unwrap_or_else(|e| e.into_inner()).take());
     *WINDOW.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// The `(window_id, pid)` pairs `list_windows` shows.
+fn window_ids(session: &mut Session) -> Result<Vec<(u64, u32)>> {
+    let listed = session.call("list_windows", json!({}))?;
+    Ok(listed
+        .lines()
+        .skip(1)
+        .filter_map(|row| {
+            let w: Value = serde_json::from_str(row).ok()?;
+            let pid = u32::try_from(w["pid"].as_i64()?).ok()?;
+            Some((w["window_id"].as_u64()?, pid))
+        })
+        .collect())
+}
+
+/// Open `app` through the session's `open_app`, as an agent would: on Linux computer use
+/// refuses Trek's own processes and their children (a fixture spawned by Trek would count),
+/// while what `trek-mcp` starts is exactly what an agent may work in. `trek-mcp` detaches the
+/// app, so `close` ends it by the pid of the window that appears.
+fn open_as_agent(app: &str) -> Result<()> {
+    with_session(|session| {
+        let before = window_ids(session)?;
+        session.call("open_app", json!({"name": app}))?;
+        let started = std::time::Instant::now();
+        loop {
+            for (id, pid) in window_ids(session)? {
+                if !before.iter().any(|(old, _)| *old == id) {
+                    *OPENED_PID.lock().unwrap_or_else(|e| e.into_inner()) = Some(pid);
+                    return Ok(());
+                }
+            }
+            if started.elapsed() > Duration::from_secs(20) {
+                bail!("computer: no new window after open_app {app}");
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    })
 }
 
 /// Where Trek's own MCP server is: `TREK_MCP_BIN` (CI builds it beside the capture build), else
