@@ -218,7 +218,7 @@ release from wherever the last one stopped:
 - The gate (`ci-passed`) takes CI on the parent for exactly that commit: one parent, the message
   `Release v<version>` for the version asked for, and a diff that touches only Cargo.toml's
   `[workspace.package]` version and the workspace packages' version lines in Cargo.lock
-  (`release-finish.sh is-bump`). Any other commit needs its own CI pass; `skip_ci_check` stays the
+  (`release-finish.sh is-bump`). Any other commit needs its own CI pass ("The CI gate" below); `skip_ci_check` stays the
   emergency override. (The workflow's token pushes that commit, and pushes by it don't start CI.)
 - A GitHub release that already exists is finished, not refused: this platform's archive, signature and
   disk image are uploaded with its entry merged into `stable.json` only if they aren't all there already,
@@ -286,6 +286,32 @@ whatever `TREK_POSTHOG_KEY` its shell has.
 The Mac's own way, `script/release.sh` on the Mac, works as before. Run one or the other for a release,
 not both. It publishes the Apple-silicon build only, and Intel Macs then hear their build is on its way
 (see "Intel Macs" to add it by hand).
+
+### The CI gate
+
+The release's `ci-passed` job asks `script/ci-gate.py judge <commit>` whether a completed CI run
+tested exactly the code being released, and passed. Two kinds of run count:
+
+- **A run of the commit itself**: CI on the push to `main`, or a dispatch. These always run the
+  full suite.
+- **The pull request's run, when nothing else reached `main` in between.** A pull request's run
+  doesn't test its head commit: it tests GitHub's merge of it into `main` (`refs/pull/N/merge`).
+  So every CI run records the tree it tested (`git rev-parse HEAD^{tree}`), with the run's id,
+  event, head and scope, in its `tested-tree` artifact (job **Tested tree**). The gate finds the
+  pull requests GitHub links to the release commit (and a merge commit's second parent), reads
+  each of their runs' records, and takes a run only when its record is that run's own, of that
+  head, of the full suite, and of a tree equal to `git rev-parse <commit>^{tree}`. A merge (or a
+  squash) of a branch whose CI ran against the `main` it landed on has exactly that tree, so a
+  release dispatched right after the merge doesn't wait for CI on `main` again. When `main`
+  moved after the pull request's run, the merge's tree is different code, and the run doesn't
+  count: the push's own run must pass.
+
+A run with no record (from before the gate read them), a record of another run or head, or a run
+that tested only what its change touched (`scope` other than `full`) never counts for a pull
+request. The record is written by the run's own workflow, from the tree it tested: a run whose
+tree is the release's ran the release's own `ci.yml` and `ci-gate.py`. Tests:
+`python3 script/tests/ci-gate.py` (throwaway repositories; a `main` that moved after the pull
+request's run among them), run by CI's macOS job with the other script tests.
 
 ## Intel Macs
 
@@ -461,7 +487,7 @@ The `linux` jobs (x86_64 and Arm) build with `script/release-linux.sh --build-on
 and `publish-linux` joins the release last, after the Intel publish. Nothing the Mac, Intel or Windows
 jobs do waits for them, so a Linux failure leaves those whole and Linux missing:
 
-- **CI.** The gate (`ci-passed`) wants a CI run of the commit where every job without "Linux" in its
+- **CI.** The gate (`ci-passed`) wants a CI run of the commit's code ("The CI gate") where every job without "Linux" in its
   name passed. Whether the Linux ones passed too goes to the `linux` jobs, whose first step stops
   them, saying why, when they didn't.
 - **Both or neither.** `publish-linux` runs only when both architectures built, so the release
