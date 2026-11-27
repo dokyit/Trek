@@ -58,21 +58,28 @@ runs:
       run: $(command -v python3 || command -v python) script/ci-cache.py restore
 
     # cargo-nextest: each test in a process of its own, the binaries' tests run side by side
-    # (.config/nextest.toml). A pinned release's prebuilt binary, from nextest's own site.
+    # (.config/nextest.toml). A pinned release's prebuilt binary from its GitHub release, checked
+    # against the release's SHA-256, with timeouts: a download through get.nexte.st once hung a
+    # macOS job for its whole hour.
     - name: cargo-nextest
       if: inputs.nextest == 'true'
       shell: bash
       run: |
+        version=0.9.151
         case "$RUNNER_OS-$RUNNER_ARCH" in
-          macOS-*) platform=mac ;;
-          Linux-ARM64) platform=linux-arm ;;
-          Linux-*) platform=linux ;;
-          Windows-*) platform=windows-tar ;;
+          macOS-*) asset=universal-apple-darwin; sum=d1d7d025d4bfc9fb154cd76aea3949bd78534829a0589abefa6e5dd4edb135dd ;;
+          Linux-ARM64) asset=aarch64-unknown-linux-gnu; sum=3e35e8f6913af92558ba09d7155f74e35dd1f0024ef3cd891637433ae4eacbdd ;;
+          Linux-*) asset=x86_64-unknown-linux-gnu; sum=1d4ce302b820c41f4b89c5fb9bce45f0f0c94882c1cf08fc360caf08be6e7df4 ;;
+          Windows-*) asset=x86_64-pc-windows-msvc; sum=e51bdb4b5883df48f335381b287378edb244318fac65ae0adaf6b9e69298246b ;;
         esac
+        url="https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$version/cargo-nextest-$version-$asset.tar.gz"
+        curl -fLsS --connect-timeout 20 --max-time 120 --retry 5 --retry-all-errors -o "$RUNNER_TEMP/nextest.tar.gz" "$url"
+        got=$( (sha256sum "$RUNNER_TEMP/nextest.tar.gz" 2>/dev/null || shasum -a 256 "$RUNNER_TEMP/nextest.tar.gz") | cut -d' ' -f1)
+        [ "$got" = "$sum" ] || { echo "::error::cargo-nextest $version $asset: SHA-256 $got, not $sum"; exit 1; }
         bin="${CARGO_HOME:-$HOME/.cargo}/bin"
         # Git Bash's tar takes C:\… for a remote host named C: give it /c/….
         if [ "$RUNNER_OS" = Windows ]; then bin=$(cygpath -u "$bin"); fi
-        curl -LsSf --retry 5 --retry-all-errors "https://get.nexte.st/0.9.151/$platform" | tar zxf - -C "$bin"
+        tar zxf "$RUNNER_TEMP/nextest.tar.gz" -C "$bin"
         cargo nextest --version
 
     # gpui compiles its Metal shaders at build time with `xcrun metal`. Since Xcode 26 the Metal
