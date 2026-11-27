@@ -75,11 +75,18 @@ sh ios/scripts/embed-activity.sh /tmp/trek-ios-dd/Build/Products/Debug-iphonesim
 Tap **Explore the demo** on the pairing screen (or launch with `-TrekDemo YES`). `MockHost` plays a
 Mac with 13 realistic threads across four projects and five agents: pending approval, question and
 plan, a failed build, threads that keep working, and replies to whatever you send. It answers the
-same protocol messages a Mac does, so everything in the app works without one.
+same protocol messages a Mac does, so everything in the app works without one. Like a Mac, it
+leaves a thread unread when its turn ends, and the app says it's seen while you're reading it.
+What you type and don't send is kept per thread, across launches too (`Application
+Support/drafts.json`), in the demo as with a Mac.
 
 Launch arguments for screenshots: `-TrekOpen <thread id>` (e.g. `t-flaky`, `t-inbox`,
 `t-ratelimit`, `t-settings`; `t-background` is done with its turn while its dev server still runs,
-with `-TrekSheet background-output` its output open from the strip), `-TrekTab basecamp|usage|notes|settings|appearance|search`, `-TrekSheet new` (or `model`, with
+with `-TrekSheet background-output` its output open from the strip; `t-markdown` is an answer
+written as agents write on the Mac: the recap under its rule, a loose numbered list starting at 3
+with nested bullets and a code block in an item, a task list, a quote over three lines, a
+four-backtick fence holding a three-backtick one, a picture on the line after text, a
+`trek://thread/…` link to `t-parity` and a notice with bold marks), `-TrekTab basecamp|usage|notes|settings|appearance|search`, `-TrekSheet new` (or `model`, with
 `-TrekOpen`: the model picker; `side`: the thread's side chat, e.g. `-TrekOpen t-tailscale` which
 has one from earlier, or `-TrekOpen t-worktree -TrekSideAsk "What does the job prune?"` to ask
 one as `/side …` does; `image`: a message's first picture full screen, e.g. `-TrekOpen t-offline`),
@@ -95,6 +102,9 @@ its files, one ticked viewed; `t-limit`: Continue on Work; `t-worktree`: the Com
 approval's Always allow; `-TrekTab settings -TrekSheet rules`: the permission rules), `-TrekDemoRelease newer` (the update card),
 `-TrekDemoOffline demo-pc` (debug builds: that machine can't be reached, its banner over the threads),
 `-TrekDemoConnection identity|refused|connecting|local-network|offline` (debug builds: the demo Mac's own banner),
+`-TrekDemoNoAnswer <thread id>` (debug builds, with `-TrekOpen` of the same thread: the demo Mac doesn't send that
+thread's transcript the first time it's asked, so after the 20 s a reply may take the thread says "Couldn't load
+this thread"; Try again gets it),
 `-TrekDemoEmpty none|quiet` (a Mac with no threads and no notes, or with everything settled),
 `-TrekGallery YES` (debug builds: chips, tables, status pills, the hiker and the effort picker on
 one page), `-TrekSheet sharing` (the question asked before the first message goes to an agent, for
@@ -223,7 +233,8 @@ limitation in `docs/MOBILE.md`); scanning pins the whole thing. See `docs/MOBILE
   installs on the plugged-in iPhone (or one on the same Wi-Fi, once Xcode has paired it). It runs
   for 7 days from when Xcode made its provisioning profile; installing again with the same profile
   doesn't extend that, so the script sets a profile with 2 days or less left aside first and Xcode
-  makes a fresh one.
+  makes a fresh one (`FRESH=1 ios/scripts/install-device.sh` does that whatever is left: the way
+  to renew the 7 days early; `LAUNCH=0` installs without opening Trek on the phone).
 - **Kept up to date by the Mac:** `ios/scripts/install-phone-update.sh` installs a LaunchAgent
   that runs `ios/scripts/phone-update.sh` every 30 minutes: when the iPhone is in reach and Trek on
   the Mac is newer than the app, or the signing has 2 days or less left, it builds the app at the

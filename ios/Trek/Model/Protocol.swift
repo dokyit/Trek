@@ -753,7 +753,65 @@ nonisolated enum ErrorCode: String, LenientEnum {
     case badRequest = "bad_request", unauthorized, pairingFailed = "pairing_failed", rateLimited = "rate_limited"
     case unsupportedProtocol = "unsupported_protocol", notFound = "not_found", conflict, hostError = "host_error"
     case unknown
+    // The phone's own, never on the wire: what became of a request the Mac didn't answer.
+    /// Nothing went: no connection, or the user said no to sharing.
+    case notSent = "phone_not_sent"
+    /// It went, and the connection dropped before the answer.
+    case dropped = "phone_dropped"
+    /// It went, and no answer came in the time allowed (`ReplyTimeout`).
+    case timedOut = "phone_timed_out"
+    /// The answer came and this app couldn't read it.
+    case unreadable = "phone_unreadable"
     static var fallback: ErrorCode { .unknown }
+
+    /// One of the phone's own.
+    var isLocal: Bool { self == .notSent || self == .dropped || self == .timedOut || self == .unreadable }
+    /// The request went and its answer never arrived: the Mac may have done it all the same.
+    var unsure: Bool { self == .dropped || self == .timedOut || self == .unreadable }
+}
+
+/// How long the phone waits for the Mac's answer to a request before whoever asked hears that
+/// none came. Without it a reply that never arrives (a host call stuck on the Mac, an answer this
+/// app couldn't read) left its caller waiting until the socket dropped: a thread spinning for ever.
+nonisolated enum ReplyTimeout {
+    /// Something read: a transcript, a list, a status.
+    static let read: TimeInterval = 20
+    /// Something done, answered with an ack: longer, since the Mac runs a connection's actions one
+    /// after another and a false "no answer" on a message invites sending it twice.
+    static let action: TimeInterval = 60
+    /// Bytes moving (a file going up, a picture or a video coming down) and work that can take the
+    /// Mac minutes (a push, a merge, a worktree made or removed, files put back).
+    static let slow: TimeInterval = 180
+
+    /// The wait for `message`'s answer; nil for one that has none.
+    static func seconds(for message: ClientMessage) -> TimeInterval? {
+        switch message {
+        case .pair, .hello, .unsubscribe, .markSeen:
+            return nil
+        case .subscribe, .transcriptBefore, .ping, .machineInfo, .usage, .basecamp, .notes, .note, .gitStatus, .gitDiff,
+             .gitBranches, .commands, .settings, .backgroundOutput, .icon, .contextCard, .turnPreview, .subAgent,
+             .switchPreview, .rules, .ruleTest:
+            return read
+        case .uploadPart, .media, .attachment, .noteAsset, .noteFile, .addNoteImage,
+             .gitCommit, .gitPush, .gitSwitch, .worktreeMerge, .worktreeRemove, .turnAction, .newThread, .updatePhone:
+            return slow
+        case .send(_, _, _, let images, let files):
+            return images.isEmpty && files.isEmpty ? action : slow
+        case .sendConsult(_, _, _, let images, _, let files):
+            return images.isEmpty && files.isEmpty ? action : slow
+        case .sideChat(_, _, let images):
+            return images.isEmpty ? action : slow
+        default:
+            return action
+        }
+    }
+
+    /// What whoever asked is told. For something done, whether it went through isn't known.
+    static func words(for message: ClientMessage, machine: String) -> String {
+        seconds(for: message) == read
+            ? "\(machine) didn't answer."
+            : "\(machine) didn't answer. Check that it went through before trying again."
+    }
 }
 
 nonisolated enum ServerMessage {
@@ -921,14 +979,24 @@ nonisolated enum ServerMessage {
 
 nonisolated extension ServerMessage {
     /// Decodes off the main actor: a long transcript takes a while to read, and the UI keeps going.
-    /// A message that doesn't decode is logged and left out.
+    /// A message that doesn't decode is logged and left out; when it answered a request (`re`),
+    /// whoever asked hears that the answer couldn't be read, rather than wait for one for ever.
     @concurrent static func decodeInBackground(_ data: Data) async -> ServerMessage? {
         do {
             return try decode(data)
         } catch {
             protocolLog.error("Left out a message from the Mac that didn't decode: \(String(describing: error), privacy: .public)")
-            return nil
+            return unreadable(data)
         }
+    }
+
+    /// For a reply that didn't decode: an error to the request it answered. Nil for a message
+    /// that answered nothing (a push), which is just left out.
+    static func unreadable(_ data: Data) -> ServerMessage? {
+        nonisolated struct Head: Decodable { var re: String? }
+        guard let re = (try? decoder.decode(Head.self, from: data))?.re else { return nil }
+        return .error(re: re, code: .unreadable,
+                      message: "This iPhone couldn't read the answer. Update Trek on this iPhone and on your computer.")
     }
 }
 

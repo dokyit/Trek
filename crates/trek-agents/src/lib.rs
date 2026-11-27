@@ -502,7 +502,9 @@ pub enum Prompt {
     /// A plan to approve before the agent starts changing things (Claude's ExitPlanMode), as Markdown.
     Plan(String),
     /// A secret the agent asked for through Trek's `request_secret`: Trek saves the value and tells
-    /// the agent where, so it's never in the conversation. Only ever answered on this computer.
+    /// the agent where, so it's never in the conversation. Answered in its card: on this computer,
+    /// or from a paired device over its own connection (`secret_answer`), the value going one
+    /// way only, to the computer that asked.
     Secret { name: String, why: String },
 }
 

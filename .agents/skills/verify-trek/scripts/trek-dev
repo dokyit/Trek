@@ -53,7 +53,7 @@ port = 7431
 
 TOOLS = {"git", "explorer", "terminal", "browser", "sidechat", "simulator", "iphone"}
 BASIC_ROUTES = {"draft", "no-project", "basecamp", "notes", "study", "appearance", "first", "onboarding"}
-CONTROL_VERBS = {"plugin", "plugin-keys", "browser", "range", "settled", "glass", "background", "tint", "theme", "look", "dress", "title", "pace", "wait", "new", "diff", "tools", "editor", "ide", "artifacts", "scroll", "reveal", "reveal-in", "click", "rclick", "hover", "drag", "sidebar", "elements", "key", "note", "background-use", "terminal", "type", "attach", "pair", "limits-demo", "pr-demo", "dictate", "dictate-file", "dictate-demo", "onboarding", "phone", "pair-phone", "pair-self", "machine-draft", "heic-demo", "open-link", "file", "private", "second-launch", "keep-working", "freeze", "show-main", "badge", "count-all", "tray", "programs", "programs-ended", "console-windows", "native", "self-contained", "banners", "renders", "within", "banner-permission", "file-app", "programs-stop", "signed-out", "motion", "cloud-file", "photos", "bonjour", "close-main", "update-demo", "resume-demo", "accounts-demo", "sign-in-demo", "media-demo", "compact-demo", "secret-demo", "import-demo", "checks-demo", "privacy-demo", "approve", "deny", "answer"}
+CONTROL_VERBS = {"plugin", "plugin-keys", "browser", "range", "settled", "glass", "background", "tint", "theme", "look", "dress", "title", "pace", "wait", "new", "diff", "tools", "editor", "ide", "artifacts", "scroll", "reveal", "reveal-in", "click", "rclick", "hover", "drag", "sidebar", "elements", "key", "note", "background-use", "terminal", "type", "attach", "pair", "limits-demo", "pr-demo", "dictate", "dictate-file", "dictate-demo", "onboarding", "phone", "pair-phone", "pair-device", "pair-self", "machine-draft", "heic-demo", "open-link", "file", "private", "second-launch", "keep-working", "freeze", "show-main", "badge", "count-all", "tray", "programs", "programs-ended", "console-windows", "native", "self-contained", "banners", "renders", "within", "banner-permission", "file-app", "programs-stop", "signed-out", "motion", "cloud-file", "photos", "bonjour", "close-main", "update-demo", "resume-demo", "accounts-demo", "sign-in-demo", "media-demo", "compact-demo", "secret-demo", "import-demo", "checks-demo", "privacy-demo", "approve", "deny", "answer"}
 
 
 # Values of TREK_TEST_DISPLAY that turn the test display off.
@@ -926,7 +926,7 @@ def parser() -> argparse.ArgumentParser:
     control.add_argument("argument", nargs="*", help="Arguments passed to the command.")
     control.add_argument("--timeout", type=float, default=90, help="Seconds to wait for completion (default: 90).")
     control.add_argument("--dry-run", action="store_true", help="Validate and show the command without sending it.")
-    control.epilog = "Examples: trek-dev control theme paper; trek-dev control wait idle 60000"
+    control.epilog = "Examples: trek-dev control theme paper; trek-dev control wait idle 60000; trek-dev control hover 'user-msg#0' // click 'rewind-user#0' (several commands in one batch)"
 
     shot = sub.add_parser("screenshot", help="Render the Trek window to a PNG without Screen Recording permission; --real for the pixels macOS composites.")
     shot.add_argument("name", help="Screenshot name, or output filename when --output is omitted.")
@@ -1020,8 +1020,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif cmd == "control":
             if any("\n" in value or "\r" in value for value in [args.verb, *args.argument]):
                 raise CliError("Control commands cannot contain line breaks.")
-            line = " ".join([args.verb, *args.argument]).strip()
-            data = dry_result(cmd, [f"send {line!r} to isolated Trek"]) if args.dry_run else (driver.batch([line], timeout=args.timeout) and {"command_sent": line})
+            # `//` between commands runs them as one batch, so what one sets up is still so for
+            # the next: a pointer left over a row (`hover`) while its hover-only button is clicked.
+            lines, words = [], [args.verb]
+            for word in [*args.argument, "//"]:
+                if word != "//":
+                    words.append(word)
+                    continue
+                if not words or words[0] not in CONTROL_VERBS:
+                    raise CliError(f"After //, a control verb is expected, not {' '.join(words) or 'nothing'!r}.")
+                lines.append(" ".join(words).strip())
+                words = []
+            line = " // ".join(lines)
+            data = dry_result(cmd, [f"send {line!r} to isolated Trek"]) if args.dry_run else (driver.batch(lines, timeout=args.timeout) and {"command_sent": line})
         elif cmd == "screenshot":
             name = safe_shot_name(args.name)
             output = args.output or (driver.home / "artifacts" / f"{name}.png")

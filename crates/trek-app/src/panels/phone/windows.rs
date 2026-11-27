@@ -55,12 +55,13 @@ const STRIP_LINGER: Duration = Duration::from_secs(12);
 /// How long an approval card waits for the user.
 const ASK_WAIT: Duration = Duration::from_secs(15 * 60);
 
-/// What needs the user's yes, by the thread's access level: installing an app unless the thread
-/// has full access; writing or removing files unless it's on Auto or full access. (As on a Mac.)
+/// What needs the user's yes, by the thread's access level: installing an app or writing a file on
+/// this computer unless the thread has full access; writing or removing files on the phone unless
+/// it's on Auto or full access. (As on a Mac.)
 pub fn needs_asking(kind: Sensitive, access: HandHolding) -> bool {
     match access {
         HandHolding::FullAccess => false,
-        HandHolding::Auto => kind == Sensitive::Install,
+        HandHolding::Auto => matches!(kind, Sensitive::Install | Sensitive::LocalWrite),
         HandHolding::Supervised | HandHolding::AutoAcceptEdits => true,
     }
 }
@@ -2552,6 +2553,13 @@ fn ask_text(method: &str, p: &Value) -> (String, String) {
             format!("Remove {} from your iPhone", file_name(&s("path"))),
             place(s("path")),
         ),
+        "phone_pull_file" => (
+            format!(
+                "Copy {} from your iPhone to this computer",
+                file_name(&s("remote"))
+            ),
+            format!("{} → {}", place(s("remote")), s("local")),
+        ),
         _ => (
             format!("Copy {} to your iPhone", file_name(&s("local"))),
             format!("{} → {}", s("local"), place(s("remote"))),
@@ -3194,6 +3202,18 @@ mod tests {
         assert!(!needs_asking(Sensitive::Files, FullAccess));
         assert!(needs_asking(Sensitive::Install, Auto));
         assert!(!needs_asking(Sensitive::Files, Auto));
+        assert!(needs_asking(Sensitive::LocalWrite, Auto));
+        assert!(!needs_asking(Sensitive::LocalWrite, FullAccess));
+        assert_eq!(
+            trek_ipc::phone::sensitive("phone_pull_file"),
+            Some(Sensitive::LocalWrite)
+        );
+        let (title, detail) = ask_text(
+            "phone_pull_file",
+            &serde_json::json!({ "remote": "/Downloads/x", "local": "/Users/u/.zshrc" }),
+        );
+        assert!(title.contains("to this computer"), "{title}");
+        assert!(detail.ends_with("/Users/u/.zshrc"), "{detail}");
         for level in [Supervised, AutoAcceptEdits] {
             assert!(needs_asking(Sensitive::Install, level));
             assert!(needs_asking(Sensitive::Files, level));

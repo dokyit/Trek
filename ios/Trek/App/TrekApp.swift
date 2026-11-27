@@ -91,6 +91,8 @@ struct TrekApp: App {
                         }
                         return
                     }
+                    // A thread's link from an answer (`trek://thread/<id>`).
+                    if model.open(link: url) { return }
                     // Never pairs by itself: the link waits in a confirmation sheet.
                     if let link = PairingLink(url.absoluteString) {
                         model.offer(link)
@@ -136,6 +138,15 @@ enum Launch {
     static var demoOffline: String? {
         #if DEBUG
         UserDefaults.standard.string(forKey: "TrekDemoOffline")
+        #else
+        nil
+        #endif
+    }
+    /// A demo thread whose transcript the demo Mac doesn't send the first time it's opened (debug
+    /// builds): the reply's wait runs out and the thread says it couldn't be loaded.
+    static var demoNoAnswer: String? {
+        #if DEBUG
+        UserDefaults.standard.string(forKey: "TrekDemoNoAnswer")
         #else
         nil
         #endif
@@ -198,8 +209,13 @@ struct RootView: View {
                 // An icon picked in an earlier version that this one no longer ships.
                 AppIconChoice.dropRetired()
             }
+            // Under the app switcher, a call or Control Centre: nothing is being read meanwhile.
+            if phase == .inactive { model.resignedActive() }
             if phase == .background { model.backgrounded() }
         }
+        // Started by iOS in the background (a Live Activity's button): no change of phase says
+        // so, and nothing is being read.
+        .onAppear { if scenePhase == .background { model.sceneActive = false } }
         .overlay(alignment: .top) { ToastOverlay() }
         .tint(Trek.foreground)
         .font(.ui(.body))
@@ -302,6 +318,7 @@ struct MainView: View {
     @State private var path: [String] = []
     @State private var basecampPath: [BasecampRoute] = []
     @State private var notesPath: [String] = []
+    @State private var searchPath: [String] = []
     @State private var showNew = false
 
     /// No "New thread" while the Mac can't be trusted or has refused this iPhone.
@@ -328,7 +345,7 @@ struct MainView: View {
                 SettingsView()
             }
             Tab(value: MainTab.search, role: .search) {
-                SearchView()
+                SearchView(path: $searchPath)
             }
         }
         .tabBarMinimizeBehavior(.onScrollDown)
@@ -389,7 +406,9 @@ extension MainView {
         case .threads: !path.isEmpty
         case .basecamp: basecampPath.contains { if case .thread = $0 { true } else { false } }
         case .notes: !notesPath.isEmpty
-        case .settings, .search: false
+        // A thread opened from a result: without this the pill stayed under its composer.
+        case .search: !searchPath.isEmpty
+        case .settings: false
         }
     }
 

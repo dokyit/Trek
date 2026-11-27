@@ -79,7 +79,10 @@ fn clone_url_ok(url: &str) -> bool {
     }
 }
 
-fn clone_folder_ok(folder: &str) -> bool {
+/// Whether a clone may go into `folder` (see `CloneProjectRequest::check`). The host checks it
+/// again on the folder as its disk resolves it (`clone_folder` in Trek's remote host), so a link
+/// in a parent folder can't lead into one of the folders refused here.
+pub fn clone_folder_ok(folder: &str) -> bool {
     if folder.is_empty() || folder.len() > 4096 || folder.chars().any(char::is_control) {
         return false;
     }
@@ -98,8 +101,26 @@ fn clone_folder_ok(folder: &str) -> bool {
     } else {
         return false;
     };
-    let mut parts = rest.split(['/', '\\']).filter(|p| !p.is_empty()).peekable();
-    parts.peek().is_some() && parts.all(|p| p != "..")
+    // Not a hidden folder (`~/.config/git`, whose `config` would be git's own for every
+    // repository) nor where the system runs what it finds: the Mac's `~/Library`
+    // (`LaunchAgents`), Windows' roaming app data and its Start Menu (the Startup folder). Each
+    // part as Windows reads it, too: it drops dots and spaces at a name's end, so `AppData.` and
+    // `Library ` are those folders.
+    let parts: Vec<&str> = rest
+        .split(['/', '\\'])
+        .filter(|p| !p.is_empty())
+        .map(|p| p.trim_end_matches(['.', ' ']))
+        .collect();
+    let raw = rest.split(['/', '\\']).filter(|p| !p.is_empty());
+    let is = |p: &str, name: &str| p.eq_ignore_ascii_case(name);
+    !parts.is_empty()
+        && raw.clone().all(|p| p != ".." && !p.starts_with('.'))
+        && parts.iter().all(|p| {
+            !p.is_empty() && !is(p, "Library") && !is(p, "Start Menu") && !is(p, "Startup")
+        })
+        && !parts
+            .windows(2)
+            .any(|w| is(w[0], "AppData") && is(w[1], "Roaming"))
 }
 
 /// The most `put_files` carries in one message, decoded (the 8 MiB frame limit caps the base64
@@ -202,8 +223,33 @@ pub fn safe_relative_path(path: &str) -> bool {
         return false;
     }
     path.split(['/', '\\']).all(|part| {
-        !part.is_empty() && part != "." && part != ".." && !part.eq_ignore_ascii_case(".git")
+        !part.is_empty() && part != "." && part != ".." && !windows_reads_otherwise(part)
     })
+}
+
+/// Whether a file name, on a Windows host, names something other than it seems, or `.git`:
+/// Windows drops dots and spaces at a name's end (`.git.` is `.git`), reads `name:stream` as a
+/// stream of `name` (`.git::$INDEX_ALLOCATION` is the `.git` folder), keeps 8.3 short names
+/// (`GIT~1` is `.git`), and gives `CON`, `NUL`, `COM1`… to devices whatever their extension.
+fn windows_reads_otherwise(part: &str) -> bool {
+    if part.contains(':') || part.ends_with(['.', ' ']) {
+        return true;
+    }
+    let lower = part.to_ascii_lowercase();
+    if lower == ".git" {
+        return true;
+    }
+    if let Some(n) = lower.strip_prefix("git~")
+        && !n.is_empty()
+        && n.bytes().all(|b| b.is_ascii_digit())
+    {
+        return true;
+    }
+    let stem = lower.split('.').next().unwrap_or_default().trim_end();
+    matches!(stem, "con" | "prn" | "aux" | "nul" | "conin$" | "conout$")
+        || (stem.len() == 4
+            && (stem.starts_with("com") || stem.starts_with("lpt"))
+            && stem.as_bytes()[3].is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -239,8 +285,29 @@ mod tests {
             "sub/.GIT/hooks/x",
             "a\0b",
             "a/",
+            // What a Windows host reads as `.git`, a stream, or a device.
+            ".git./config",
+            ".git /hooks/pre-commit",
+            ".git::$INDEX_ALLOCATION/config",
+            "GIT~1/config",
+            "sub/git~12/hooks/x",
+            "ab:stream",
+            "notes.",
+            "CON",
+            "nul.txt",
+            "a/COM1.log",
+            "lpt9",
         ] {
             assert!(!safe_relative_path(bad), "{bad:?}");
+        }
+        for ok in [
+            "git~/x",
+            "console.txt",
+            "com.apple.plist",
+            ".gitignore",
+            "git/x",
+        ] {
+            assert!(safe_relative_path(ok), "{ok}");
         }
     }
 
@@ -325,10 +392,36 @@ mod tests {
         ] {
             assert!(req(url, "~/trek").check().is_err(), "{url}");
         }
-        for folder in ["/Users/me/trek", "~/code/trek", "C:\\Users\\me\\trek"] {
+        for folder in [
+            "/Users/me/trek",
+            "~/code/trek",
+            "C:\\Users\\me\\trek",
+            // A temporary folder (CI's, a test's) is under local app data on Windows.
+            "C:\\Users\\me\\AppData\\Local\\Temp\\trek",
+        ] {
             assert_eq!(req("https://h/r", folder).check(), Ok(()), "{folder}");
         }
-        for folder in ["", "trek", "~", "~/", "/", "~/../etc", "/tmp/../etc", "-x"] {
+        for folder in [
+            "",
+            "trek",
+            "~",
+            "~/",
+            "/",
+            "~/../etc",
+            "/tmp/../etc",
+            "-x",
+            // Where a cloned repository's files would run: git's own config, login items.
+            "~/.config/git",
+            "~/Library/LaunchAgents",
+            "C:\\Users\\me\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup",
+            "/Users/me/.ssh",
+            // As a Windows host reads them.
+            "C:\\Users\\me\\AppData.\\Roaming\\x",
+            "C:\\Users\\me\\AppData\\Roaming \\x",
+            "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Startup",
+            "~/Library /LaunchAgents",
+            "~/code/ /x",
+        ] {
             assert!(req("https://h/r", folder).check().is_err(), "{folder}");
         }
         assert!(

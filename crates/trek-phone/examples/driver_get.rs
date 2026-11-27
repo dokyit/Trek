@@ -1,6 +1,7 @@
 //! One request to a running Trek Driver, as the iPhone tool makes it: `driver_get <token>
-//! [path] [save-to]` prints the answer's status, headers and body size (or where it was cut
-//! short), and saves the body when told where.
+//! [path] [save-to] [json]` prints the answer's status, headers and body size (or where it was
+//! cut short), and saves the body when told where (`-` for nowhere). With `json` it's a POST of
+//! that body: `driver_get <token> /key - '{"key":"home"}'`.
 #[cfg(target_os = "macos")]
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -8,12 +9,16 @@ fn main() {
     let path = args
         .next()
         .unwrap_or_else(|| "/screenshot?w=600&q=70".into());
-    let save = args.next();
+    let save = args.next().filter(|save| save != "-");
+    let body = args
+        .next()
+        .map(|json| serde_json::from_str::<serde_json::Value>(&json).expect("the body as JSON"));
+    let method = if body.is_some() { "POST" } else { "GET" };
     let started = std::time::Instant::now();
     let raw = trek_phone::device::exchange(
         None,
         8117,
-        &trek_phone::driver::request("GET", &path, &token, None),
+        &trek_phone::driver::request(method, &path, &token, body.as_ref()),
         std::time::Duration::from_secs(20),
     );
     match raw {

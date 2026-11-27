@@ -703,7 +703,7 @@ live_windows = ["phone ready", "wait 600", "count phone-apps 1", "count phone-in
 how = { macos = "Live screen and system audio over USB: the display service's HEVC and negotiated AAC-ELD streams off the CoreDevice tunnel, decoded by VideoToolbox and AudioToolbox once the developer disk image is mounted (the cable's ~1 fps screenshots stay the picture fallback), with keyboard and mouse over Bluetooth, iPhone Mirroring or Trek Driver for taps, apps and files.", windows = "Through Apple Devices (Apple Mobile Device Service, from the Microsoft Store): the phone's details, its screen (CoreDevice's screenshot service; a click a tap and a drag a swipe, typing, keys and Home through the HID back channel while the display service's stream runs; apps opened by name through its app service; once its developer disk image is installed from Xcode's iOS_DDI folder, as a cryptex on newer iOS), its apps (list, install an .ipa) and files (media, and apps' Documents: add, save, remove), AssistiveTouch, and agents' phone tools for them (phone_screenshot and phone_tap included), one agent at a time, with installs and file changes asked first. The panel says what's missing: Apple Devices, its service, a phone, Trust, unlocking, the disk image. Live system-audio playback is macOS-only because it uses AudioToolbox." }
 note = "The screen and taps on a PC come from CoreDevice's own services, the ones Xcode's Device Hub uses (trek_phone::coredevice: a screenshot service, the display service's media stream, and the HID back channel), over the phone's tunnel, with no Trek Driver to build or sign: the iPhone tool's Screen tab (a still about every second, a click a tap) and agents' phone_screenshot, phone_elements, phone_tap, phone_wait, phone_swipe, phone_type, phone_key, phone_home and phone_open_app. They need the phone's developer disk image, which the tool installs from Xcode's iOS_DDI folder copied from a Mac: newer iOS takes it as a cryptex (cryptexd), older through the image mounter (the image its manifest names for the phone). The tool notes the folder and installs the image from it again when the phone comes back without it (a restart takes it off), as Xcode does. Run from Windows on an iPhone 16 Pro Max with iOS 27.2: the image Xcode had put there was found, taken off and installed again from the folder (signed for the phone by Apple, in about 4 seconds), the screen showed in the Screen tab at 1320×2868, and taps landed: one opened a folder on the home screen and the next closed it. That run found three things a made-up phone couldn't. iOS 27 refuses the image mounter's image. Every picture stayed in memory (15 MB each, one a second); each is now decoded off the UI thread into a copy no bigger than it's drawn, and let go of when the next comes. And a tap did nothing, with no error: the stream that lets touches in was stopped as soon as the tap was sent, before its lift landed, so it now stays 0.7 s after. On the same phone a swipe paged the Home Screen and back, 12+30= typed into Calculator gave 42 (Shift held for +), and Home left an app and closed a folder. Opening an app by name hung, as iOS 27 lists apps only as a stream; it now streams the list (233 apps, Apple's included), and Calculator opened by name. The screen is read as elements through the phone's accessibility daemon (axauditd's remoteAXService, as Xcode 27's Device Hub reads it: trek_phone::ax), in the shape Trek Driver lists them on a Mac, so trek-mcp's outline, refs, tap by ref and phone_wait are the same: on the same phone the frames lined up with the screenshot, with nothing shown on the phone while it read. The difference left is the Mac's live picture (Trek Driver's stream) against a PC's still about every second. On a Mac the Screen tab's picture is now the display service's own live stream too (trek_phone::coredevice::live: the HEVC/RTP the phone sends to the tunnel's UDP socket, depacketized by idevice's HevcDepacketizer, access units cut at its AUD markers, decoded by a VideoToolbox session to BGRA, with the RTCP receiver reports Apple's encoder expects), the same media session touches already rode; it starts once the developer disk image is mounted (mounted from Xcode's iOS_DDI folder when it isn't) and the cable's screenshots stay the picture until the first frame and whenever it can't start. The decode is VideoToolbox's, so Windows keeps the ~1 fps stills for now. Linux: no iPhone tool or tab: no Apple Mobile Device Service to reach the phone through (usbmuxd from libimobiledevice would be the way)."
 code = ["crates/trek-phone/src/lib.rs", "crates/trek-phone/src/pc.rs", "crates/trek-app/src/panels/mod.rs", "crates/trek-app/src/panels/phone/windows.rs", "crates/trek-mcp/src/phone.rs", "crates/trek-phone/src/driver.rs", "crates/trek-phone/src/device.rs", "crates/trek-app/src/panels/phone.rs", "crates/trek-app/src/workspace/phone_use.rs", "crates/trek-app/src/settings_view.rs", "crates/trek-phone/src/coredevice/live.rs", "crates/trek-phone/src/coredevice/live/audio.rs"]
-tests = ["crates/trek-app/tests/iphone.rs", "crates/trek-phone/src/pc.rs", "crates/trek-phone/examples/driver_bench.rs", "crates/trek-phone/examples/driver_run.rs", "crates/trek-phone/examples/driver_get.rs", "crates/trek-phone/examples/mirror.rs", "crates/trek-phone/examples/devices.rs", "crates/trek-phone/examples/pc_screen.rs", "crates/trek-phone/src/coredevice.rs", "crates/trek-phone/src/coredevice/live.rs", "crates/trek-phone/src/coredevice/live/audio.rs"]
+tests = ["crates/trek-app/tests/iphone.rs", "crates/trek-phone/src/pc.rs", "crates/trek-phone/examples/driver_bench.rs", "crates/trek-phone/examples/driver_run.rs", "crates/trek-phone/examples/driver_get.rs", "crates/trek-phone/examples/mirror.rs", "crates/trek-phone/examples/devices.rs", "crates/trek-phone/examples/pc_screen.rs", "crates/trek-phone/examples/live.rs", "crates/trek-phone/src/coredevice.rs", "crates/trek-phone/src/coredevice/live.rs", "crates/trek-phone/src/coredevice/live/audio.rs"]
 
 [[feature]]
 id = "simulator"
@@ -1245,9 +1245,48 @@ windows = "yes"
 linux = "yes"
 live = ["route no-project", "pair-self", "wait 4000", "machine-draft", "attach {project}{/}README.md", "type What does the README say?", "key enter", "wait 4000", "file uploads{/}*README.md contains Live project", "count user-file* 1", "pair-self leave", "wait 800", "count machine-head* 0"]
 how = { macos = "The other machine keeps them in its data folder's uploads/ and the message names its path to each: a Mac's or a PC's, as that machine writes it.", windows = "The same code: a PC sends its own paths' files and is given the other machine's paths (backslashes on a PC, slashes on a Mac), and takes files into %APPDATA%'s uploads/ as a Mac does." }
-note = "Shared code on both platforms, tested on both CIs against a loopback machine (tests/machines.rs, tests/remote.rs, trek-remote's client tests). No run between two real computers has sent files yet, a PC on either end least of all (docs/MULTI-MACHINE.md). A folder can't go yet (it would need packing up), nor a file over 2 GB; a machine before Trek 0.4.61 takes pictures alone, inline."
+note = "Shared code on both platforms, tested on both CIs against a loopback machine (tests/machines.rs, tests/remote.rs, trek-remote's client tests). No run between two real computers has sent files yet, a PC on either end least of all (docs/MULTI-MACHINE.md). A folder goes as one zip of its files (0.4.68: what git ignores stays behind, and what can't be read is left out and said in a toast: tested with permission bits on a Mac and Linux, the one platform gate in machines/files.rs; on Windows the same code skips a file it can't open, with no test that makes one); a file or folder over 2 GB can't go; a machine before Trek 0.4.61 takes pictures alone, inline."
 code = ["crates/trek-app/src/machines/files.rs", "crates/trek-app/src/composer/machine_upload.rs", "crates/trek-app/src/remote/uploads.rs", "crates/trek-remote/src/protocol/uploads.rs", "crates/trek-remote/src/client.rs"]
 tests = ["crates/trek-app/tests/machines.rs", "crates/trek-app/tests/remote.rs", "crates/trek-app/src/machines/files.rs", "crates/trek-remote/tests/client.rs", "crates/trek-remote/src/protocol/uploads.rs"]
+
+[[feature]]
+id = "machine-from-here"
+area = "Machines"
+what = "A thread on another machine is rewound, edited, retried, forked, snoozed and deleted from here, the machine doing the work"
+macos = "yes"
+windows = "yes"
+linux = "yes"
+live = ["route no-project", "pair-self", "wait 4000", "machine-draft", "type hello there", "key enter", "wait 5000", "count user-msg* 1", "hover user-msg#0", "click rewind-user#0", "wait 1500", "count confirm-card 1", "click confirm-go", "wait 4000", "count user-msg* 0", "pair-self leave", "wait 800", "count machine-head* 0"]
+how = { macos = "`turn_action`, `turn_preview` and `thread_action` over the machine's own connection; the machine rewinds, forks and deletes its own thread and this computer shows what it answers.", windows = "The same code: a PC asks a Mac, and a Mac a PC (the owner's case), with the requests a phone has always made." }
+note = "Until 0.4.67 each said \"Do that in Trek on <machine>\". Shared code, tested on both CIs against a loopback machine (tests/machines.rs). Works with a machine on 0.4.67 (it has served these to phones since 0.4.8). Not yet seen between two real computers. Still the machine's alone: its git panel and diffs, terminal, explorer and editor, side chat, queue, limit bar and PR cards' buttons (docs/MULTI-MACHINE.md)."
+code = ["crates/trek-app/src/machines/turns.rs", "crates/trek-app/src/machines.rs", "crates/trek-app/src/workspace.rs", "crates/trek-app/src/thread_view.rs", "crates/trek-app/src/composer.rs", "crates/trek-app/src/thread_menu.rs"]
+tests = ["crates/trek-app/tests/machines.rs", "crates/trek-app/src/machines/turns.rs"]
+
+[[feature]]
+id = "machine-secret"
+area = "Machines"
+what = "A secret a thread on another machine asks for is given from here"
+macos = "yes"
+windows = "yes"
+linux = "yes"
+live = ["route no-project", "pair-self", "wait 4000", "machine-draft", "type open the pull request", "key enter", "wait 5000", "secret-demo", "wait 2500", "count secret-value 1", "click secret-value", "type not-a-real-secret", "click secret-save", "wait 3000", "count secret-value 0", "private session-secrets", "pair-self leave", "wait 800", "count machine-head* 0"]
+how = { macos = "The machine's row carries the request (`secret`), this computer draws its card, and the value goes as an `answer` of kind `secret` to the machine's private file for the thread.", windows = "The same code on both ends." }
+note = "New in 0.4.68 (feature `secret_answer`): the machine must run it too. One that doesn't keeps its notice, which says \"<machine> needs Trek 0.4.68 or later to take it from here\". The value is in no reply, item or log on either end (tests/machines.rs, trek-remote's protocol tests). Paired with itself the isolated app shows the card twice: its own, and the machine's."
+code = ["crates/trek-remote/src/protocol/from_here.rs", "crates/trek-app/src/remote.rs", "crates/trek-app/src/machines.rs", "crates/trek-app/src/workspace.rs"]
+tests = ["crates/trek-app/tests/machines.rs", "crates/trek-remote/tests/protocol.rs"]
+
+[[feature]]
+id = "message-show-more"
+area = "Threads"
+what = "A long message of yours is cut to ten wrapped lines, and Show more opens it whole"
+macos = "yes"
+windows = "yes"
+linux = "yes"
+live = ["route no-project", "type /goal keep patching and debugging until it fully works, also fixing the black screen from happening", "key shift-enter", "type The debugger I built earlier was broken. It told the game every exception was handled, so one normal, already-caught fault repeated about 770,000 times until the game died. The corrupted hook diagnosis came from that bug, not from the Live Editor.", "key shift-enter", "type Some of my patches made things worse. The four functions I labelled DX12 installers actually install the Live Editor's game hooks, so returning early from them switches off editor features. The other patched function writes database fields, so editing would silently do nothing.", "key shift-enter", "type The earlier run may never have crashed. It reached Main Menu reached /frontend/boot and sat there with the hook thread parked, which looks exactly like a hang from outside but is the game waiting on a shader cache that never finishes compiling.", "key shift-enter", "type So: first prove whether it crashes at all. Run it unpatched with the fixed debugger and log every first-chance exception with its module and offset.", "key enter", "wait 4000", "click user-more#0", "wait 300", "within user-text* user-msg#0", "count user-text* 1"]
+how = { macos = "Cut by height with every line wrapped; GPUI's line clamp left the paragraphs past its lines unwrapped and its cached layout kept the message cut once opened.", windows = "The same code and the same patch to GPUI's wrapped-line cache.", linux = "The same." }
+note = "0.4.67: \"Show less\" over the same cut text, the last paragraphs each one line off the bubble's edge, on any thread (reported on a thread that ran on a paired PC)."
+code = ["crates/trek-app/src/thread_view.rs", "crates/trek-app/src/ide/ai/transcript.rs", "vendor/gpui-pre/src/text_system/line_layout.rs"]
+tests = ["crates/trek-app/tests/machines.rs"]
 
 [[feature]]
 id = "machine-sub-agents"
@@ -1375,15 +1414,16 @@ how = { macos = "The same on both.", windows = "The same on both: made for Windo
 code = ["crates/trek-app/src/thread_view.rs", "crates/trek-app/src/context_popover.rs"]
 
 [[feature]]
-id = "timeline-thoughts"
+id = "tool-activity"
 area = "Threads"
-what = "The thought streaming in after a group of tool calls, in the timeline and the working bar"
-macos = "partial"
+what = "A working turn's thinking and tool calls: above the composer the hiker on its trail with a trail word and the turn's clock, and the live group over it (a summary line with what it's about, shimmering, and a row per call sliding in under a hairline); in the transcript a group's summary line, which opens to a row per call and thought, each opening to its output"
+macos = "yes"
 windows = "yes"
-linux = "partial"
-live = ["route project:{project}", "pace 1", "send mock:long 6s", "wait 2500", "count working-bar 1", "click stop", "pace 0"]
-note = "Shown by Windows' timeline design only (fluent::WINDOWS). Whether the Mac's timeline shows it too is a design decision, not a bug: kept apart until it's made. Linux: as on the Mac (Windows' timeline design only)."
-code = ["crates/trek-app/src/thread_view.rs", "crates/trek-app/src/working_bar.rs"]
+linux = "yes"
+live = ["route project:{project}", "pace 1", "send mock:explore 40s", "wait shown live-row-* 20000", "wait 3000", "count working-bar 1", "count live-group 1", "count live-row-* 2+", "shot live-tool-activity-working", "click stop", "wait idle 30000", "pace 0", "wait shown tool-group#* 10000", "click tool-group#*", "wait shown tool#* 5000", "count tool#* 2+", "count reasoning#* 1"]
+how = { macos = "One design, drawn by shared code with no platform branch (working_bar.rs's live group, thread_view.rs's closed_group and tool_row): the same structure, sizes, corners, words and motion everywhere.", windows = "The Mac's. Until 2026-11-26 Windows drew a design of its own behind its styling switch (a rail with a node per step, \"Thinking\" and \"Finished thinking\" in place of the summary line, a spinner on the step under way, the streaming thought as a step, files as chips under a step): the owner asked for the Mac's, and that design and its code are gone. Three greys stay a step stronger (the summary line's and rows' chevrons, the header's clock, a running file's name), as they were tuned on the Mac against glass that Windows' window doesn't have by default: at the Mac's strength they fall under 4.5:1 on Paper.", linux = "The Mac's, as it always was (the styling switch is Windows' alone)." }
+code = ["crates/trek-app/src/thread_view.rs", "crates/trek-app/src/working_bar.rs", "crates/trek-app/src/activity.rs"]
+tests = ["crates/trek-app/tests/activity.rs"]
 
 [[feature]]
 id = "cloud-file-preview"

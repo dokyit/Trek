@@ -268,7 +268,7 @@ pub fn model_pill<H: PickerHost>(
 ) -> AnyElement {
     let ws = host.workspace().read(cx);
     let prefs = shown_prefs(host, cx);
-    let models = ws.models_for(&prefs.agent);
+    let models = ws.models_for_in(host.scope(), &prefs.agent);
     let model_label = prefs
         .model
         .as_deref()
@@ -418,7 +418,7 @@ fn close_model_menu<H: PickerHost>(this: &mut H, cx: &mut Context<H>) {
 fn model_menu<H: PickerHost>(host: &mut H, fit: MenuFit, cx: &mut Context<H>) -> AnyElement {
     let prefs = shown_prefs(host, cx);
     let ws = host.workspace().read(cx);
-    let models = ws.models_for(&prefs.agent);
+    let models = ws.models_for_in(host.scope(), &prefs.agent);
     let current = prefs
         .model
         .clone()
@@ -697,15 +697,20 @@ fn model_choices<H: PickerHost>(host: &H, prefs: &Prefs, cx: &App) -> Choices {
         .to_string();
     let query = query_clean.to_lowercase();
     let list: Vec<(AgentId, ModelInfo)> = match &rail {
+        // A thread on another machine lists that machine's agents and models.
         Rail::Agent(a) => ws
-            .models_for(a)
+            .models_for_in(host.scope(), a)
             .into_iter()
             .map(|m| (a.clone(), m))
             .collect(),
         Rail::Favorites => ws
-            .ready_agents()
+            .picker_agents_in(host.scope())
             .iter()
-            .flat_map(|a| ws.models_for(a).into_iter().map(move |m| (a.clone(), m)))
+            .flat_map(|a| {
+                ws.models_for_in(host.scope(), a)
+                    .into_iter()
+                    .map(move |m| (a.clone(), m))
+            })
             .filter(|(a, m)| favorites.contains(&format!("{}/{}", a.key(), m.id)))
             .collect(),
         Rail::Unready(_) => vec![],
@@ -806,7 +811,11 @@ fn model_panel<H: PickerHost>(
     cx: &mut Context<H>,
 ) -> AnyElement {
     let Choices { rail, list, custom } = model_choices(host, prefs, cx);
-    if let Rail::Agent(AgentId::Direct(ref p)) = rail {
+    // On another machine: its list is what it sent; nothing is fetched from here.
+    let on_machine = host.workspace().read(cx).machine_in(host.scope()).is_some();
+    if let Rail::Agent(AgentId::Direct(ref p)) = rail
+        && !on_machine
+    {
         let (empty, inflight) = {
             let ws = host.workspace().read(cx);
             (
@@ -838,8 +847,13 @@ fn model_panel<H: PickerHost>(
     };
 
     let ws = host.workspace().read(cx);
-    let agents = ws.picker_agents();
-    let unready = ws.unready_agents();
+    let agents = ws.picker_agents_in(host.scope());
+    // What isn't set up on another machine is set up there: only this computer's are listed.
+    let unready = if on_machine {
+        vec![]
+    } else {
+        ws.unready_agents()
+    };
     let favorites = ws.settings.general.favorite_models.clone();
     let searching = !host
         .pickers_ref()
@@ -1213,7 +1227,11 @@ pub fn access_pill<H: PickerHost>(
 fn access_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
     let ws = host.workspace().read(cx);
     let current = ws.prefs_in(host.scope()).hand_holding;
-    let unlocked = ws.settings.permissions.full_access_unlocked;
+    // The lock of the computer that runs the thread: another machine's is its own to lift.
+    let access = ws.full_access_in(host.scope());
+    let unlocked = access == Ok(true);
+    let locked_there = access.err();
+    let on_machine = locked_there.is_some();
     let theme = cx.theme().clone();
     look::surface(cx)
         .w(px(340.))
@@ -1249,15 +1267,23 @@ fn access_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
                             .whitespace_normal()
                             .line_height(relative(1.4))
                             .text_color(theme.muted_foreground)
-                            .child(if locked {
-                                "Turn on in Settings → Permissions to use it."
-                            } else {
-                                level.description()
+                            .child(match (&locked_there, locked) {
+                                (Some(name), true) => format!(
+                                    "Locked on {name}. Only {name} can unlock it, in its own Settings → Permissions: nothing that reaches it over a network can. Auto is the most to choose from here."
+                                ),
+                                (None, true) => {
+                                    "Turn on in Settings → Permissions to use it.".to_string()
+                                }
+                                _ => level.description().to_string(),
                             }),
                     ),
             )
             .when(locked, |el| el.opacity(0.55))
             .on_click(cx.listener(move |this: &mut H, _, _, cx| {
+                // Another machine's lock isn't in this computer's settings.
+                if locked && on_machine {
+                    return;
+                }
                 if locked {
                     let route = Route::Settings(crate::workspace::SettingsPage::Permissions);
                     let main = this.scope().in_main_window();

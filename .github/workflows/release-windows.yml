@@ -115,9 +115,13 @@ jobs:
           Expand-Archive $zip "$env:RUNNER_TEMP\minisign" -Force
           "TREK_MINISIGN_EXE=$env:RUNNER_TEMP\minisign\minisign-win64\x86_64\minisign.exe" >> $env:GITHUB_ENV
 
+      # As in release.yml: the image's own, else a pinned version, never Chocolatey's newest in a
+      # job that holds the signing key.
       - name: Install Inno Setup
         run: |
-          choco install innosetup --no-progress -y
+          if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --version=6.7.1 --no-progress -y
+          }
           "C:\Program Files (x86)\Inno Setup 6" >> $env:GITHUB_PATH
 
       # The secret is the key file's whole contents (it is all ASCII).

@@ -808,9 +808,21 @@ pub fn stream(
     })?
 }
 
+/// The apps in installation_proxy's answer, by name. Left out: the ones iOS itself keeps off the
+/// Home Screen (`SBAppTags` says `hidden`: CarPlay's settings, the call screen, the setup
+/// assistant, …). Several of those share a name with an app people know ("Settings" is also
+/// `com.apple.CarPlaySettings`, which opens to a black screen on the phone), so one opened by
+/// name must never be one of them.
 pub(crate) fn apps_from(found: std::collections::HashMap<String, plist::Value>) -> Vec<App> {
+    let hidden = |info: &plist::Value| {
+        info.as_dictionary()
+            .and_then(|d| d.get("SBAppTags"))
+            .and_then(|tags| tags.as_array())
+            .is_some_and(|tags| tags.iter().any(|tag| tag.as_string() == Some("hidden")))
+    };
     let mut apps: Vec<App> = found
         .into_iter()
+        .filter(|(_, info)| !hidden(info))
         .map(|(bundle, info)| {
             let d = info.as_dictionary();
             let s = |k: &str| {
@@ -1010,6 +1022,44 @@ pub fn remove(udid: Option<&str>, path: &str, app: Option<&str>) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apps_ios_keeps_off_the_home_screen_are_not_listed() {
+        let app = |name: &str, tags: &[&str]| {
+            let mut info = plist::Dictionary::new();
+            info.insert("CFBundleDisplayName".into(), name.into());
+            if !tags.is_empty() {
+                info.insert(
+                    "SBAppTags".into(),
+                    plist::Value::Array(tags.iter().map(|t| (*t).into()).collect()),
+                );
+            }
+            plist::Value::Dictionary(info)
+        };
+        let found = std::collections::HashMap::from([
+            // As a real iPhone lists them: two apps called "Settings", one of them CarPlay's.
+            (
+                "com.apple.CarPlaySettings".to_string(),
+                app("Settings", &["hidden"]),
+            ),
+            ("com.apple.Preferences".to_string(), app("Settings", &[])),
+            (
+                "com.apple.InCallService".to_string(),
+                app("Phone", &["hidden"]),
+            ),
+            (
+                "com.apple.mobilephone".to_string(),
+                app("Phone", &["some-other-tag"]),
+            ),
+        ]);
+        let apps = apps_from(found);
+        let bundles: Vec<&str> = apps.iter().map(|a| a.bundle.as_str()).collect();
+        assert_eq!(bundles, ["com.apple.mobilephone", "com.apple.Preferences"]);
+        assert_eq!(
+            crate::driver::find_app(&apps, "settings").as_deref(),
+            Some("com.apple.Preferences")
+        );
+    }
     use std::io::{Read as _, Write as _};
 
     type Answer = Box<dyn FnOnce(&mut std::net::TcpStream) + Send>;
