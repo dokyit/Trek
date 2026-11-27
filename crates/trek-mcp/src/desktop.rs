@@ -1,8 +1,11 @@
 //! The platform under computer use: mouse and keyboard input, the window list, screen capture and
 //! app launch. `computer` decides what to do (and refuses what it mustn't); a `Desktop` does it.
-//! macOS and Windows each have one; tests use a recording fake that never reaches the real
-//! mouse, keyboard or screen.
+//! macOS, Windows and Linux (X11) each have one; tests use a recording fake that never reaches
+//! the real mouse, keyboard or screen.
 
+// Linux' elements through AT-SPI: what they read as is plain data, built and tested everywhere;
+// the D-Bus that reads them (`atspi::bus`) is Linux'.
+mod atspi;
 #[cfg(target_os = "macos")]
 mod ax;
 #[cfg(target_os = "macos")]
@@ -16,6 +19,9 @@ mod spaces;
 mod uia;
 #[cfg(windows)]
 mod windows;
+// Linux' screen, pointer, keys and windows through X11: what's decided is plain data, built and
+// tested everywhere; the X server's side (`x11::server`) is Linux'.
+mod x11;
 
 #[cfg(all(test, windows))]
 pub use uia::com::testing::TestWindow;
@@ -24,14 +30,18 @@ pub use uia::com::testing::TestWindow;
 pub use macos::Mac as Native;
 #[cfg(windows)]
 pub use windows::Win as Native;
+#[cfg(target_os = "linux")]
+pub use x11::server::Linux as Native;
 
 use crate::keys::Combo;
 use crate::outline::{Action, Node};
 
-/// One window on screen. Bounds are in screen coordinates: points on macOS, pixels on Windows.
+/// One window on screen. Bounds are in screen coordinates: points on macOS, pixels on Windows
+/// and Linux.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowInfo {
-    /// The app that owns it: its name on macOS, its executable's name on Windows.
+    /// The app that owns it: its name on macOS, its executable's name on Windows, its windows'
+    /// class on Linux (else its program's name).
     pub owner: String,
     pub title: String,
     pub pid: i64,
@@ -333,7 +343,7 @@ pub trait Desktop {
     }
 
     // Elements: a window's accessibility tree (macOS: Accessibility, `ax`; Windows: UI
-    // Automation, `uia`), and its elements' own actions. Reading and acting go to the window's
+    // Automation, `uia`; Linux: AT-SPI, `atspi`), and its elements' own actions. Reading and acting go to the window's
     // app alone: nothing is activated or raised, no pointer or key is posted.
 
     /// Whether this platform can read a window's elements.

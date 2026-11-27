@@ -3,7 +3,7 @@ name = "trek-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Model Context Protocol server (stdio) giving coding agents computer use (macOS and Windows), iOS Simulator control, a video watcher and sub-agents"
+description = "Model Context Protocol server (stdio) giving coding agents computer use (macOS, Windows and Linux), iOS Simulator control, a video watcher and sub-agents"
 
 [[bin]]
 name = "trek-mcp"
@@ -23,8 +23,20 @@ trek-ipc = { workspace = true, features = ["server"] }
 tokio.workspace = true
 trek-test-fixtures.workspace = true
 
-# Computer use runs on macOS and Windows, the iOS Simulator on macOS; `orchestrate`, `browser` and
-# `video` run everywhere.
+# Computer use runs on macOS, Windows and Linux (X11), the iOS Simulator on macOS; `orchestrate`,
+# `browser` and `video` run everywhere.
+[target.'cfg(target_os = "linux")'.dependencies]
+# The screen (GetImage), the window list (EWMH's properties) and, through the XTEST extension,
+# the pointer and keys (src/desktop/x11/server.rs). The version GPUI's X11 platform is on, already
+# in the lockfile.
+x11rb = { version = "0.13", features = ["xtest"] }
+# Elements: apps' accessibility trees over AT-SPI's D-Bus (src/desktop/atspi/bus.rs). The version
+# GPUI's Linux platform, the desktop portal's crate and the notifications are on, already in the
+# lockfile.
+zbus = "5"
+# Screenshots out as PNG; already in the lockfile via trek-app.
+png = "0.18"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = { version = "0.24", features = ["highsierra", "elcapitan"] }
 # `proc_pidpath` and `dlsym`, to tell whether the host app's bundle was replaced under it.

@@ -1,6 +1,6 @@
-//! `trek-mcp computer` — computer use on macOS and Windows: screenshots, the mouse and keyboard,
-//! the window list and app launch. The tools, their arguments and what they answer are the same
-//! on both; the platform does the work behind `desktop::Desktop`.
+//! `trek-mcp computer` — computer use on macOS, Windows and Linux (X11): screenshots, the mouse
+//! and keyboard, the window list and app launch. The tools, their arguments and what they answer
+//! are the same on each; the platform does the work behind `desktop::Desktop`.
 
 use std::time::Duration;
 
@@ -29,6 +29,15 @@ an image plus the coordinate scale. All x/y arguments to click, move_mouse, drag
 most recent full-screen screenshot (origin top-left), as frames are; trek-mcp converts them to screen pixels. Prefer \
 `key` shortcuts (ctrl+c, alt+tab, win+r) and `open_app` over hunting for UI. Trek's own windows are off limits: clicks, \
 drags and scrolls in them are refused, and so are keys while Trek is in front (bring the app you mean forward first)."
+} else if cfg!(target_os = "linux") {
+    "Linux computer use for the X11 screen. Read the window in front with `elements` first: an outline whose \
+controls carry refs (e12) that `press`, `click` and `type_text` act on (a ref lasts while its element stays; read \
+again after the window changes); `wait` waits for text or an element. Take a `screenshot` when looks matter: it returns \
+an image plus the coordinate scale. All x/y arguments to click, move_mouse, drag and scroll are pixel coordinates in the \
+most recent full-screen screenshot (origin top-left), as frames are; trek-mcp converts them to screen pixels. Prefer \
+`key` shortcuts (ctrl+c, alt+tab) and `open_app` over hunting for UI. Trek's own windows are off limits: clicks, drags \
+and scrolls in them are refused, and so are keys while Trek is in front (bring the app you mean forward first). In a \
+Wayland session the screen, pointer and keys are refused, and the tool says so."
 } else {
     "macOS computer use for the main display. Read the window in front with `elements` first: an outline whose \
 controls carry refs (e12) that `press`, `click` and `type_text` act on (a ref lasts while its element stays; read \
@@ -53,11 +62,20 @@ if only reading, and acting there is refused until they switch. While they're aw
 minutes idle) any app will do. Some apps (games, canvases) ignore input not from the real mouse: if one doesn't \
 respond, say so rather than retrying; the user can switch computer use to work in front in Trek's settings.";
 
-/// What a screen coordinate is: macOS moves the mouse in points, Windows (per-monitor DPI aware)
-/// in pixels.
-const SCREEN_UNITS: &str = if cfg!(windows) { "pixels" } else { "points" };
+/// The screen is measured in pixels (Windows, per-monitor DPI aware, and Linux's X11) rather
+/// than in the Mac's points.
+const IN_PIXELS: bool = cfg!(any(windows, target_os = "linux"));
 
-const KEY_DESCRIPTION: &str = if cfg!(windows) {
+/// What a screen coordinate is: macOS moves the mouse in points, Windows and X11 in pixels.
+const SCREEN_UNITS: &str = if IN_PIXELS { "pixels" } else { "points" };
+
+const KEY_DESCRIPTION: &str = if cfg!(target_os = "linux") {
+    "Press a key or shortcut, e.g. \"return\", \"escape\", \"tab\", \"up\", \"ctrl+shift+t\", \"ctrl+c\", \
+\"alt+tab\", \"super+d\", \"f5\". Modifiers: ctrl, shift, alt, super (cmd is taken as ctrl). Keys: letters, digits, punctuation, \
+return, tab, space, delete (backspace), forwarddelete, escape, up/down/left/right, home, end, pageup, pagedown, insert, \
+f1-f24, numpad0-numpad9 (and numpadadd, numpadsubtract, numpadmultiply, numpaddivide, numpaddecimal, numpadenter), \
+printscreen, pause, scrolllock, numlock, apps (the menu key), win (the Super key alone)."
+} else if cfg!(windows) {
     "Press a key or shortcut, e.g. \"return\", \"escape\", \"tab\", \"up\", \"ctrl+shift+t\", \"ctrl+c\", \
 \"alt+tab\", \"win+r\", \"f5\". Modifiers: ctrl, shift, alt, win (cmd is taken as ctrl). Keys: letters, digits, punctuation, \
 return, tab, space, delete (backspace), forwarddelete, escape, up/down/left/right, home, end, pageup, pagedown, insert, \
@@ -76,7 +94,10 @@ Modifiers: cmd, shift, alt/option, ctrl, fn. Keys: letters, digits, punctuation,
 forwarddelete, escape, up/down/left/right, home, end, pageup, pagedown, f1-f20, numpad0-numpad9 (and numpadadd, \
 numpadsubtract, numpadmultiply, numpaddivide, numpaddecimal, numpadequals, numpadenter).";
 
-const OPEN_APP_DESCRIPTION: &str = if cfg!(windows) {
+const OPEN_APP_DESCRIPTION: &str = if cfg!(target_os = "linux") {
+    "Launch a Linux app by name, e.g. \"Files\", \"Firefox\", \"Text Editor\" (as its desktop entry names it), or \
+by program name or path, e.g. \"gedit\", \"/usr/bin/xterm\". An app that's already running is brought forward instead."
+} else if cfg!(windows) {
     "Launch a Windows app by name, e.g. \"Notepad\", \"Microsoft Edge\", \"Visual Studio Code\" (as named in the \
 Start menu), or by program name or path, e.g. \"calc\", \"msedge\"."
 } else {
@@ -497,6 +518,9 @@ const WINDOW_WAIT: Duration = Duration::from_millis(if cfg!(test) { 0 } else { 8
 /// Said when an agent points at Trek itself.
 const OWN_WINDOW: &str = "That's in Trek's own window. Agents don't operate Trek itself: its approvals, questions and settings are the user's to answer. Ask the user, or work in another app's window.";
 
+/// Said when the agent asks to open Trek itself.
+const OWN_OPEN: &str = "That's Trek itself. Agents don't operate Trek: its approvals, questions and settings are the user's to answer. Ask the user, or work in another app.";
+
 /// Said when the agent picks one of Trek's windows to work in, in the background.
 const OWN_WINDOW_BEHIND: &str = "That's one of Trek's own windows. Agents don't operate Trek itself: its approvals, questions and settings are the user's to answer. Ask the user, or work in another app's window.";
 
@@ -513,6 +537,16 @@ const OWN_KEYS: &str = "Trek's own window is in front, so the keys would go to T
 /// the repository.
 fn is_trek_app(owner: &str) -> bool {
     owner.eq_ignore_ascii_case("trek")
+}
+
+/// Whether `open_app`'s `name` asks for Trek itself: `Trek` in any case, `trek.exe`, or a path
+/// whose last part is one of those or `Trek.app`.
+fn names_trek(name: &str) -> bool {
+    let name = name.trim().trim_end_matches(['/', '\\']);
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let lower = base.to_ascii_lowercase();
+    let stem = lower.strip_suffix(".app").unwrap_or(&lower);
+    stem == "trek" || lower == "trek.exe"
 }
 
 fn is_trek(w: &WindowInfo) -> bool {
@@ -594,7 +628,7 @@ fn full_info(
     let physical = physical
         .map(|(pw, ph)| format!(", {pw}x{ph} physical pixels"))
         .unwrap_or_default();
-    let units = if cfg!(windows) {
+    let units = if IN_PIXELS {
         "pixels"
     } else {
         "logical points"
@@ -807,6 +841,9 @@ impl Computer {
         if name.is_empty() {
             return Err("name is empty".into());
         }
+        if names_trek(name) {
+            return Err(OWN_OPEN.into());
+        }
         self.desktop
             .open_app(name)
             .map_err(|e| format!("Could not open {name:?}: {e}"))?;
@@ -845,12 +882,13 @@ impl Computer {
                 v
             })
             .collect();
-        let titles = if cfg!(windows) {
-            ""
-        } else {
+        // Only the Mac asks for a permission before it gives titles.
+        let titles = if cfg!(target_os = "macos") {
             " Window titles are empty without Screen Recording permission."
+        } else {
+            ""
         };
-        let units = if cfg!(windows) {
+        let units = if IN_PIXELS {
             " bounds_points is in screen pixels."
         } else {
             ""
@@ -1714,7 +1752,7 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         if name.is_empty() {
             return Err("name is empty".into());
         }
-        if is_trek_app(name) || name.trim_end_matches('/').ends_with("/Trek.app") {
+        if names_trek(name) {
             return Err(OWN_WINDOW_BEHIND.into());
         }
         let new_window = args
@@ -2930,7 +2968,7 @@ for finding your way.",
                 description: pick(KEY_DESCRIPTION, BACKGROUND_KEY_DESCRIPTION),
                 input_schema: json!({
                     "type": "object",
-                    "properties": {"combo": {"type": "string", "description": if cfg!(windows) { "Key combo joined with '+', e.g. \"ctrl+shift+t\"" } else { "Key combo joined with '+', e.g. \"cmd+shift+t\"" }}},
+                    "properties": {"combo": {"type": "string", "description": if IN_PIXELS { "Key combo joined with '+', e.g. \"ctrl+shift+t\"" } else { "Key combo joined with '+', e.g. \"cmd+shift+t\"" }}},
                     "required": ["combo"],
                 }),
             },
@@ -3479,6 +3517,24 @@ mod tests {
                 !open.contains("macOS") && !INSTRUCTIONS.contains("macOS"),
                 "{open}"
             );
+        } else if cfg!(target_os = "linux") {
+            assert!(
+                key.contains("ctrl+c") && key.contains("super") && !key.contains("fn"),
+                "{key}"
+            );
+            assert!(
+                open.contains("desktop entry")
+                    && !open.contains("macOS")
+                    && !open.contains("Windows"),
+                "{open}"
+            );
+            assert!(
+                INSTRUCTIONS.contains("X11")
+                    && INSTRUCTIONS.contains("Wayland")
+                    && !INSTRUCTIONS.contains("macOS")
+                    && !INSTRUCTIONS.contains("Windows"),
+                "{INSTRUCTIONS}"
+            );
         } else {
             assert!(key.contains("cmd+c") && open.contains("macOS"));
         }
@@ -3898,6 +3954,41 @@ mod tests {
                 .is_none(),
             "in front, there's no window to pick"
         );
+    }
+
+    #[test]
+    fn in_front_trek_itself_is_never_opened() {
+        let fake = Recording::new();
+        let mut c = on(&fake);
+        for name in [
+            "Trek",
+            "trek",
+            "/Applications/Trek.app",
+            "/Applications/Trek.app/",
+            "/Applications/TREK.APP",
+            "trek.exe",
+            r"C:\Tools\trek.exe",
+        ] {
+            assert_eq!(
+                c.call("open_app", &json!({"name": name})),
+                Err(OWN_OPEN.to_string()),
+                "{name}"
+            );
+        }
+        assert!(
+            fake.events()
+                .iter()
+                .all(|e| !matches!(e, Event::OpenApp(_))),
+            "the desktop was never asked: {:?}",
+            fake.events()
+        );
+        // Another app's name that only starts like Trek's still opens.
+        c.call("open_app", &json!({"name": "Trekking Maps"}))
+            .unwrap();
+        assert!(matches!(
+            fake.events().last(),
+            Some(Event::OpenApp(n)) if n == "Trekking Maps"
+        ));
     }
 
     #[test]

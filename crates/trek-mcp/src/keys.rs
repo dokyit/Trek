@@ -1,9 +1,10 @@
 //! Key-combo parsing ("cmd+shift+t", "return", "ctrl+left") into a macOS virtual keycode (ANSI
-//! layout) plus CGEventFlags bits, or a Windows virtual-key code (US layout) plus the modifier
-//! keys to hold. One table names every key with both codes, so the platforms accept the same
-//! names. Pure — no FFI.
+//! layout) plus CGEventFlags bits, a Windows virtual-key code (US layout) plus the modifier
+//! keys to hold, or an X11 keysym plus the modifiers' keysyms (Linux). One table names every key
+//! with the Mac's and Windows' codes, and `keysym` gives each of those names X11's, so the
+//! platforms accept the same names. Pure — no FFI.
 //!
-//! Both platforms' codes are built (and tested) everywhere; each uses its own.
+//! Every platform's codes are built (and tested) everywhere; each uses its own.
 #![cfg_attr(not(test), allow(dead_code))]
 
 pub const FLAG_SHIFT: u64 = 0x0002_0000; // kCGEventFlagMaskShift
@@ -22,6 +23,17 @@ pub const VK_CONTROL: u16 = 0x11;
 pub const VK_MENU: u16 = 0x12; // Alt
 pub const VK_LWIN: u16 = 0x5B;
 const VK_OEM_PLUS: u16 = 0xBB; // the =/+ key
+
+// X11's keysyms (keysymdef.h) for the keys held or pressed by name.
+pub const XK_RETURN: u32 = 0xff0d;
+pub const XK_TAB: u32 = 0xff09;
+pub const XK_SHIFT: u32 = 0xffe1; // Shift_L
+pub const XK_CONTROL: u32 = 0xffe3; // Control_L
+pub const XK_ALT: u32 = 0xffe9; // Alt_L
+pub const XK_SUPER: u32 = 0xffeb; // Super_L
+
+/// A PC's keyboard (Windows, Linux) rather than a Mac's: which keys an error's list names.
+const PC: bool = cfg!(any(windows, target_os = "linux"));
 
 /// The code of a key one platform's keyboards don't have: naming it there says so.
 const NONE: u16 = u16::MAX;
@@ -193,9 +205,9 @@ const KEYS: &[(&str, u16, u16)] = &[
     ("windows", NONE, VK_LWIN),
 ];
 
-/// A modifier as written in a combo. `Cmd` and `Super` are one key on the Mac; on Windows `cmd`
-/// means Ctrl (what a Mac shortcut is there: cmd+c copies) and `win`/`super`/`meta` the
-/// Windows key.
+/// A modifier as written in a combo. `Cmd` and `Super` are one key on the Mac; on Windows and
+/// Linux `cmd` means Ctrl (what a Mac shortcut is there: cmd+c copies) and `win`/`super`/`meta`
+/// the Windows (Super) key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Modifier {
     Cmd,
@@ -279,6 +291,8 @@ pub fn parse_chord(combo: &str) -> Result<Chord, String> {
                 "Unknown modifier {m:?} in {combo:?} (use {})",
                 if cfg!(windows) {
                     "ctrl, shift, alt, win"
+                } else if cfg!(target_os = "linux") {
+                    "ctrl, shift, alt, super"
                 } else {
                     "cmd, shift, alt/option, ctrl, fn"
                 }
@@ -300,13 +314,13 @@ pub fn parse_chord(combo: &str) -> Result<Chord, String> {
             None if modifier(k).is_some() => {
                 return Err(format!(
                     "Key combo {combo:?} has only modifiers; add a key, e.g. \"{}\"",
-                    if cfg!(windows) { "ctrl+c" } else { "cmd+c" }
+                    if PC { "ctrl+c" } else { "cmd+c" }
                 ));
             }
             None => {
                 return Err(format!(
                     "Unknown key {k:?} in {combo:?}. Use a letter/digit/punctuation or one of: return, tab, space, delete, forwarddelete, escape, up, down, left, right, home, end, pageup, pagedown, insert, {}",
-                    if cfg!(windows) {
+                    if PC {
                         "f1-f24, numpad0-numpad9, numpadadd, numpadsubtract, numpadmultiply, numpaddivide, numpaddecimal, printscreen, pause, scrolllock, numlock, apps, win"
                     } else {
                         "f1-f20, numpad0-numpad9, numpadadd, numpadsubtract, numpadmultiply, numpaddivide, numpaddecimal, numpadequals"
@@ -386,11 +400,118 @@ pub fn parse_vk(combo: &str) -> Result<VkCombo, String> {
     })
 }
 
+/// X11's keysym for a (lowercased) key name: what the key is, whatever the layout puts where.
+/// Every name in the table has one (X names keys a keyboard may lack: the server is asked for a
+/// key that gives it, and lent one for the press when the layout has none).
+pub fn keysym(name: &str) -> Option<u32> {
+    KEYS.iter().find(|k| k.0 == name)?;
+    let mut chars = name.chars();
+    if let (Some(c), None) = (chars.next(), chars.next()) {
+        // A letter, digit or punctuation mark: Latin-1's own code.
+        return Some(c as u32);
+    }
+    if let Some(n) = name.strip_prefix('f').and_then(|n| n.parse::<u32>().ok()) {
+        // F1 (0xffbe) to F24 are one run.
+        return (1..=24).contains(&n).then_some(0xffbd + n);
+    }
+    if let Some(n) = name
+        .strip_prefix("numpad")
+        .and_then(|n| n.parse::<u32>().ok())
+    {
+        // KP_0 to KP_9.
+        return (n <= 9).then_some(0xffb0 + n);
+    }
+    Some(match name {
+        "equal" | "equals" => 0x3d,
+        "minus" => 0x2d,
+        "rightbracket" => 0x5d,
+        "leftbracket" => 0x5b,
+        "quote" => 0x27,
+        "semicolon" => 0x3b,
+        "backslash" => 0x5c,
+        "comma" => 0x2c,
+        "slash" => 0x2f,
+        "period" => 0x2e,
+        "grave" | "backtick" => 0x60,
+        "return" | "enter" | "ret" => XK_RETURN,
+        "tab" => XK_TAB,
+        "space" | "spacebar" => 0x20,
+        // The Mac's Delete is X's BackSpace; forward delete is its Delete.
+        "delete" | "backspace" | "bksp" => 0xff08,
+        "escape" | "esc" => 0xff1b,
+        "forwarddelete" | "fwddelete" | "del" => 0xffff,
+        "home" => 0xff50,
+        "left" | "arrowleft" | "leftarrow" => 0xff51,
+        "up" | "arrowup" | "uparrow" => 0xff52,
+        "right" | "arrowright" | "rightarrow" => 0xff53,
+        "down" | "arrowdown" | "downarrow" => 0xff54,
+        // Prior and Next.
+        "pageup" | "pgup" => 0xff55,
+        "pagedown" | "pgdn" => 0xff56,
+        "end" => 0xff57,
+        "capslock" => 0xffe5,
+        "numpadmultiply" => 0xffaa,
+        "numpadadd" | "numpadplus" => 0xffab,
+        "numpadsubtract" | "numpadminus" => 0xffad,
+        "numpaddecimal" => 0xffae,
+        "numpaddivide" => 0xffaf,
+        "numpadenter" => 0xff8d,
+        "numpadequals" => 0xffbd,
+        "insert" | "ins" => 0xff63,
+        // Print.
+        "printscreen" | "prtsc" | "prtscn" => 0xff61,
+        "pause" => 0xff13,
+        "scrolllock" => 0xff14,
+        "numlock" => 0xff7f,
+        // Menu.
+        "apps" | "contextmenu" => 0xff67,
+        "win" | "windows" => XK_SUPER,
+        _ => return None,
+    })
+}
+
+/// A combo as X11 presses it: the modifiers' keysyms to hold (in the order they go down) and the
+/// key's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeysymCombo {
+    pub held: Vec<u32>,
+    pub keysym: u32,
+}
+
+pub fn parse_x11(combo: &str) -> Result<KeysymCombo, String> {
+    let chord = parse_chord(combo)?;
+    if chord.has(Modifier::Fn) {
+        return Err(format!(
+            "{combo:?} needs fn, which only the keyboard itself can press on Linux. Name the key fn would give instead (e.g. f5, delete, pageup)."
+        ));
+    }
+    let keysym =
+        keysym(chord.key.0).ok_or_else(|| format!("{combo:?}: X11 has no {} key", chord.key.0))?;
+    // Ctrl, Alt, Shift, then Super, as Windows' are held, and Ctrl once for cmd and ctrl both.
+    let mut held = Vec::new();
+    for (wanted, sym) in [
+        (
+            chord.has(Modifier::Ctrl) || chord.has(Modifier::Cmd),
+            XK_CONTROL,
+        ),
+        (chord.has(Modifier::Alt), XK_ALT),
+        (chord.has(Modifier::Shift), XK_SHIFT),
+        (chord.has(Modifier::Super), XK_SUPER),
+    ] {
+        if wanted {
+            held.push(sym);
+        }
+    }
+    Ok(KeysymCombo { held, keysym })
+}
+
 /// The combo this platform's `Desktop` presses.
 #[cfg(target_os = "macos")]
 pub type Combo = KeyCombo;
 #[cfg(windows)]
 pub type Combo = VkCombo;
+#[cfg(target_os = "linux")]
+pub type Combo = KeysymCombo;
 
 #[cfg(target_os = "macos")]
 pub fn parse(combo: &str) -> Result<Combo, String> {
@@ -399,6 +520,10 @@ pub fn parse(combo: &str) -> Result<Combo, String> {
 #[cfg(windows)]
 pub fn parse(combo: &str) -> Result<Combo, String> {
     parse_vk(combo)
+}
+#[cfg(target_os = "linux")]
+pub fn parse(combo: &str) -> Result<Combo, String> {
+    parse_x11(combo)
 }
 
 #[cfg(test)]
@@ -661,7 +786,7 @@ mod tests {
         // An unknown key's message lists them.
         let why = parse_vk("ctrl+banana").unwrap_err();
         assert!(why.contains("insert"), "{why}");
-        if cfg!(windows) {
+        if PC {
             assert!(
                 why.contains("f1-f24") && why.contains("printscreen"),
                 "{why}"
@@ -719,5 +844,103 @@ mod tests {
         );
         // fn never reaches Windows: it's the keyboard's own key.
         assert!(parse_vk("fn+f1").unwrap_err().contains("fn"));
+    }
+
+    #[test]
+    fn every_key_name_has_an_x11_keysym() {
+        // The names the Mac and Windows take are all keys to X11 too.
+        for (name, ..) in KEYS {
+            let sym = keysym(name).unwrap_or_else(|| panic!("{name} has no keysym"));
+            assert_eq!(parse_x11(name).unwrap().keysym, sym, "{name}");
+            // A character's keysym is its Latin-1 code; a named key's is in the 0xff00 block.
+            assert!(
+                (0x20..=0x7e).contains(&sym) || (0xff00..=0xffff).contains(&sym),
+                "{name}: {sym:#x}"
+            );
+        }
+        assert_eq!(keysym("banana"), None);
+        // keysymdef.h's own numbers.
+        for (name, sym) in [
+            ("a", 0x61),
+            ("z", 0x7a),
+            ("0", 0x30),
+            ("=", 0x3d),
+            ("equals", 0x3d),
+            ("`", 0x60),
+            ("return", 0xff0d),
+            ("tab", 0xff09),
+            ("space", 0x20),
+            ("delete", 0xff08),
+            ("forwarddelete", 0xffff),
+            ("escape", 0xff1b),
+            ("left", 0xff51),
+            ("up", 0xff52),
+            ("right", 0xff53),
+            ("down", 0xff54),
+            ("pageup", 0xff55),
+            ("pagedown", 0xff56),
+            ("home", 0xff50),
+            ("end", 0xff57),
+            ("f1", 0xffbe),
+            ("f12", 0xffc9),
+            ("f13", 0xffca),
+            ("f24", 0xffd5),
+            ("numpad0", 0xffb0),
+            ("numpad9", 0xffb9),
+            ("numpadenter", 0xff8d),
+            ("numpadadd", 0xffab),
+            ("insert", 0xff63),
+            ("printscreen", 0xff61),
+            ("apps", 0xff67),
+            ("win", 0xffeb),
+        ] {
+            assert_eq!(keysym(name), Some(sym), "{name}");
+        }
+        // Aliases are one key, and the keypad's digits aren't the top row's.
+        assert_eq!(keysym("delete"), keysym("backspace"));
+        assert_eq!(keysym("pgdn"), keysym("pagedown"));
+        assert_ne!(keysym("numpad1"), keysym("1"));
+    }
+
+    #[test]
+    fn x11_modifiers_follow_the_pc() {
+        // cmd means Ctrl, as on Windows; win/super/meta are the Super key.
+        assert_eq!(
+            parse_x11("cmd+c").unwrap(),
+            KeysymCombo {
+                held: vec![XK_CONTROL],
+                keysym: 0x63
+            }
+        );
+        assert_eq!(parse_x11("cmd+ctrl+c").unwrap().held, vec![XK_CONTROL]);
+        assert_eq!(parse_x11("super+e").unwrap().held, vec![XK_SUPER]);
+        assert_eq!(parse_x11("win+r").unwrap().held, vec![XK_SUPER]);
+        assert_eq!(
+            parse_x11("shift+win+alt+ctrl+t").unwrap().held,
+            vec![XK_CONTROL, XK_ALT, XK_SHIFT, XK_SUPER]
+        );
+        assert_eq!(
+            parse_x11("Return").unwrap(),
+            KeysymCombo {
+                held: vec![],
+                keysym: XK_RETURN
+            }
+        );
+        // The plus key is shift with the = key, as on the others.
+        assert_eq!(
+            parse_x11("ctrl++").unwrap(),
+            KeysymCombo {
+                held: vec![XK_CONTROL, XK_SHIFT],
+                keysym: 0x3d
+            }
+        );
+        assert_eq!(parse_x11("ctrl+win").unwrap().keysym, XK_SUPER);
+        assert!(parse_x11("fn+f1").unwrap_err().contains("fn"));
+        assert!(
+            parse_x11("ctrl+banana")
+                .unwrap_err()
+                .contains("Unknown key")
+        );
+        assert!(parse_x11("ctrl").unwrap_err().contains("only modifiers"));
     }
 }
