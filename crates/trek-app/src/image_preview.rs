@@ -202,7 +202,17 @@ pub fn pixels(path: &Path) -> Option<(u32, u32)> {
 
 /// How long drawing waits for a picture's header: far longer than a file on this disk takes,
 /// and too short to notice when one never answers.
+#[cfg(not(feature = "test-support"))]
 const PIXELS_WAIT: std::time::Duration = std::time::Duration::from_millis(25);
+/// In tests, as long as a file the test has just written takes to read on a loaded runner. The
+/// 25 ms is real time, which the test executor's clock doesn't stop: with dozens of tests
+/// drawing side by side (a CI runner, `cargo test`'s threads) the header thread could start
+/// late, the size came back unknown, and the picture was drawn as one without a size (no
+/// small copy in an answer, the preview not growing out of its thumbnail). The thread and its
+/// wait are still the ones drawing uses; only the patience differs. `pixels_within`'s own tests
+/// keep the short wait.
+#[cfg(feature = "test-support")]
+const PIXELS_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// A picture's size as far as it's known: asked and not yet answered, or answered.
 #[derive(Clone, Copy)]
