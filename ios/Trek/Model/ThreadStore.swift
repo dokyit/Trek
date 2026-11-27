@@ -238,6 +238,7 @@ final class ThreadStore {
     /// reset only means the host lost track of this phone (a reconnect, a restart): its last page
     /// lines up with what's here, and the earlier items stay, with the reader's place.
     func applyReply(reset: Bool, seq: Int64, items new: [TItem], more: Bool, rewritten: Bool = false) {
+        Self.parseAhead(new)
         flushQueued()
         if reset, !rewritten, loaded, let first = new.first, let at = index[first.id],
            Self.linesUp(items[at...].map(\.id), with: new.map(\.id)) {
@@ -302,7 +303,16 @@ final class ThreadStore {
     }
 
     /// A page of earlier items, put before the ones loaded.
+    /// A page's finished answers are parsed in the background, so opening a thread (or paging
+    /// back in it) doesn't parse them on the main thread at first draw.
+    private static func parseAhead(_ items: [TItem]) {
+        Markdown.prewarm(items.compactMap {
+            if case .assistant(let text, false) = $0.body { text } else { nil }
+        })
+    }
+
     func prepend(_ page: [TItem], more: Bool) {
+        Self.parseAhead(page)
         let fresh = page.filter { index[$0.id] == nil }
         loadingEarlier = false
         if self.more != more { self.more = more }

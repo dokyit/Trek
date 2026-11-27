@@ -79,7 +79,11 @@ same protocol messages a Mac does, so everything in the app works without one.
 
 Launch arguments for screenshots: `-TrekOpen <thread id>` (e.g. `t-flaky`, `t-inbox`,
 `t-ratelimit`, `t-settings`; `t-background` is done with its turn while its dev server still runs,
-with `-TrekSheet background-output` its output open from the strip), `-TrekTab basecamp|usage|notes|settings|appearance|search`, `-TrekSheet new` (or `model`, with
+with `-TrekSheet background-output` its output open from the strip; `t-markdown` is an answer
+written as agents write on the Mac: the recap under its rule, a loose numbered list starting at 3
+with nested bullets and a code block in an item, a task list, a quote over three lines, a
+four-backtick fence holding a three-backtick one, a picture on the line after text, a
+`trek://thread/…` link to `t-parity` and a notice with bold marks), `-TrekTab basecamp|usage|notes|settings|appearance|search`, `-TrekSheet new` (or `model`, with
 `-TrekOpen`: the model picker; `side`: the thread's side chat, e.g. `-TrekOpen t-tailscale` which
 has one from earlier, or `-TrekOpen t-worktree -TrekSideAsk "What does the job prune?"` to ask
 one as `/side …` does; `image`: a message's first picture full screen, e.g. `-TrekOpen t-offline`),

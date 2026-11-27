@@ -1141,6 +1141,19 @@ final class MockHost: Backend {
         // Newer than any copy a phone kept of an older demo's: drawn whole.
         rewritten[id] = seq[id]
 
+        // An answer written as agents write on the Mac: the recap under its rule, loose and nested
+        // lists, a task list, a quote, a fence in a fence, a picture after text, a notice in bold.
+        id = "t-markdown"
+        threads.insert(t(id, "Keep the session cache across restarts", "p-trek", "claude-code", "claude-opus-5-5", .idle, section: .inbox,
+                         branch: "perf/session-cache", worktree: true, ago: 6, add: 92, del: 14), at: 6)
+        seq[id] = 0
+        items[id] = []
+        for (body, at, extras) in DemoMac.markdownThread(endingAt: now) {
+            add(id, body, at: at)
+            if let extras, let last = items[id]?.indices.last { items[id]?[last].extras = extras }
+        }
+        rewritten[id] = seq[id]
+
         // Stopped at its agent's usage limit, with a message waiting for the reset.
         id = "t-limit"
         var limited = t(id, "Port the docs search to Rust", "p-atlas", "claude-code", "claude-opus-5-5", .idle, section: .inbox,

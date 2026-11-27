@@ -789,6 +789,7 @@ nonisolated struct AnswerPart: Equatable {
         var current: [Substring] = []
         var size = 0
         var fence = false, math = false
+        var opened: (mark: Character, count: Int)?
         func continues(_ line: Substring) -> Bool {
             let t = line.drop { $0 == " " }
             if line.first == " " || line.first == "\t" || t.hasPrefix(">") || t.hasPrefix("|") { return true }
@@ -798,7 +799,19 @@ nonisolated struct AnswerPart: Equatable {
         }
         for (i, line) in lines.enumerated() {
             let t = line.trimmingCharacters(in: .whitespaces)
-            if t.hasPrefix("```") || t.hasPrefix("~~~") { fence.toggle() }
+            // A fence closes only on its own kind, at least as long, with nothing after it (a
+            // four-backtick block holds three-backtick ones): the cut never falls inside one.
+            if let c = t.first, c == "`" || c == "~" {
+                let n = t.prefix { $0 == c }.count
+                if n >= 3 {
+                    if let o = opened {
+                        if o.mark == c, n >= o.count, t.dropFirst(n).allSatisfy({ $0 == " " }) { opened = nil }
+                    } else {
+                        opened = (c, n)
+                    }
+                }
+            }
+            fence = opened != nil
             if !fence, t == "$$" || (t.hasPrefix("$$") && !(t.count > 2 && t.hasSuffix("$$"))) { math.toggle() }
             if !fence, !math, t.isEmpty, size >= target, i + 1 < lines.count, !continues(lines[i + 1]),
                lines[(i + 1)...].contains(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) {
@@ -946,7 +959,9 @@ struct BlockRow: View, nonisolated Equatable {
                 }
             }
         case .notice(let text):
-            Label(text, systemImage: "info.circle").font(.ui(.subheadline)).foregroundStyle(Trek.muted)
+            // Its marks read as on the Mac: "**Compacted**" came with its asterisks.
+            Label { RichText(markdown: text, size: 15, style: .subheadline) } icon: { Image(systemName: "info.circle") }
+                .font(.ui(.subheadline)).foregroundStyle(Trek.muted)
         case .error(let text):
             Label {
                 Text(text)
