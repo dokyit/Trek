@@ -26,21 +26,50 @@ static WINDOW: Mutex<Option<String>> = Mutex::new(None);
 const ANSWER_WITHIN: Duration = Duration::from_secs(45);
 
 /// Open `app` (a program: `notepad.exe`, or a path on Linux) for the check, kept to close after.
-/// Its stderr goes to `computer-open-<n>.log` in the shot folder, so a fixture's own complaints
-/// (a traceback, a missing library) are in the run's artifacts.
+/// Its stderr goes to `live-computer-open-<n>.log` in the shot folder and a watcher notes when
+/// it ends in `live-computer-open-<n>.exit`, so a fixture that dies leaves word of how in the
+/// run's artifacts.
 pub fn open(app: &str) -> Result<()> {
     let mut command = trek_core::procs::command(app);
+    let mut log = None;
     if let Some(dir) = std::env::var_os("TREK_SHOT_DIR") {
         static OPEN_LOGS: AtomicU64 = AtomicU64::new(0);
         let n = OPEN_LOGS.fetch_add(1, Ordering::Relaxed);
-        let path = PathBuf::from(dir).join(format!("computer-open-{n}.log"));
+        let dir = PathBuf::from(dir);
+        let path = dir.join(format!("live-computer-open-{n}.log"));
         if let Ok(file) = std::fs::File::create(&path) {
             command.stderr(Stdio::from(file));
+            log = Some((n, dir));
         }
     }
     let child = command
         .spawn()
         .with_context(|| format!("computer open {app}"))?;
+    if let Some((n, dir)) = log {
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+                let ended = {
+                    let mut guard = OPENED.lock().unwrap_or_else(|e| e.into_inner());
+                    match guard.as_mut().map(|child| child.try_wait()) {
+                        Some(Ok(Some(status))) => {
+                            *guard = None;
+                            Some(status)
+                        }
+                        Some(Ok(None)) => None,
+                        Some(Err(_)) | None => return,
+                    }
+                };
+                if let Some(status) = ended {
+                    let _ = std::fs::write(
+                        dir.join(format!("live-computer-open-{n}.exit")),
+                        format!("{status}\n"),
+                    );
+                    return;
+                }
+            }
+        });
+    }
     *OPENED.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
     Ok(())
 }

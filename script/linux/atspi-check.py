@@ -7,8 +7,14 @@ web views, and this window must be on the accessibility bus for `elements` to re
 """
 
 import os
+import sys
 
 os.environ.pop("NO_AT_BRIDGE", None)
+
+import faulthandler
+
+faulthandler.enable(file=sys.stderr)
+print("atspi-check: starting", file=sys.stderr, flush=True)
 
 import gi
 
@@ -44,4 +50,6 @@ def take_focus():
 
 
 GLib.idle_add(take_focus)
+print("atspi-check: in Gtk.main()", file=sys.stderr, flush=True)
 Gtk.main()
+print("atspi-check: Gtk.main() returned", file=sys.stderr, flush=True)
