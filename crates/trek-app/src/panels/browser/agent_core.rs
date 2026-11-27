@@ -326,6 +326,9 @@ pub enum Sensitive {
     Download,
     /// Running the agent's own script in the page (`browser_eval`).
     Eval,
+    /// Opening a file of this computer's (`file:`): a page's text is the agent's to read, and
+    /// another page to send it to is one `browser_open` away.
+    LocalFile,
     /// Using or making one of the passkeys Trek keeps, which a page the agent drives asked for
     /// (`passkeys.rs`). It signs the Browser in to an account, so it's the user's to allow each
     /// time, whatever the thread's access.
@@ -366,14 +369,18 @@ pub fn same_page(asked: (u64, &str), now: (u64, &str)) -> bool {
 
 /// Whether `kind` needs the user's yes at `access`. A passkey always does. For the rest, Full
 /// access asks nothing; Auto lets a form go to another site and a download start, but asks before
-/// a password or a script; Supervised and Auto-accept edits ask before all four.
+/// a password, a script or a file of the computer's; Supervised and Auto-accept edits ask before
+/// all of them.
 pub fn needs_asking(kind: &Sensitive, access: HandHolding) -> bool {
     if *kind == Sensitive::Passkey {
         return true;
     }
     match access {
         HandHolding::FullAccess => false,
-        HandHolding::Auto => matches!(kind, Sensitive::Password | Sensitive::Eval),
+        HandHolding::Auto => matches!(
+            kind,
+            Sensitive::Password | Sensitive::Eval | Sensitive::LocalFile
+        ),
         HandHolding::Supervised | HandHolding::AutoAcceptEdits => true,
     }
 }
@@ -411,6 +418,19 @@ pub fn ask_for(tool: &str, args: &Value, probe: Option<&Value>) -> Option<Ask> {
         .unwrap_or("an element")
         .to_string();
     let site = site_of(page);
+    if tool == "browser_open" {
+        let target = open_target(args["url"].as_str().unwrap_or_default()).ok()?;
+        let file = target
+            .get(..5)
+            .is_some_and(|s| s.eq_ignore_ascii_case("file:"));
+        return file.then(|| Ask {
+            kind: Sensitive::LocalFile,
+            title: "Open a file from this computer".into(),
+            detail: format!("The agent wants to open {target} in the Browser, and read it."),
+            site: "file:".into(),
+            hidden: 0,
+        });
+    }
     if tool == "browser_eval" {
         let js = args["js"].as_str().unwrap_or_default().trim();
         let length = js.chars().count();
@@ -721,6 +741,16 @@ Focused: textbox \"Email\"
             assert!(needs_asking(&kind, Supervised), "{kind:?}");
             assert!(needs_asking(&kind, AutoAcceptEdits), "{kind:?}");
         }
+        assert!(needs_asking(&Sensitive::LocalFile, Auto));
+        assert!(needs_asking(&Sensitive::LocalFile, AutoAcceptEdits));
+        assert!(!needs_asking(&Sensitive::LocalFile, FullAccess));
+        let open = |url: &str| ask_for("browser_open", &json!({ "url": url }), None);
+        let a = open("file:///Users/x/.aws/credentials").unwrap();
+        assert_eq!(a.kind, Sensitive::LocalFile);
+        assert!(a.detail.contains(".aws/credentials"), "{}", a.detail);
+        assert!(open("FILE:///etc/hosts").is_some());
+        assert!(open("https://example.com").is_none());
+        assert!(open("localhost:3000").is_none());
         assert!(needs_asking(&Sensitive::Password, Auto));
         assert!(needs_asking(&Sensitive::Eval, Auto));
         assert!(!needs_asking(&Sensitive::ForeignSubmit, Auto));

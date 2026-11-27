@@ -92,9 +92,69 @@ The composer sends them when send is pressed and holds the draft meanwhile: a ba
 tile, a line says how far ("Sending 2 files to T-Book · 1.2 MB of 2.6 MB") with Cancel. A failure
 (B refused it, the connection dropped, a file changed while it went), Cancel, taking a file off or
 moving to another thread stops them and leaves the draft and its attachments as they were, the
-failure said in a toast. Still refused, with why: a folder (it would need packing up), a file over
-2 GB, and a B on a Trek before 0.4.61, which doesn't list `machine_files` ("T-Book needs Trek
-0.4.61 or later to receive files"; pictures alone still go to it inline, as before).
+failure said in a toast. Still refused, with why: a file over 2 GB, and a B on a Trek before
+0.4.61, which doesn't list `machine_files` ("T-Book needs Trek 0.4.61 or later to receive
+files"; pictures alone still go to it inline, as before). A folder goes as a zip since 0.4.68
+(below).
+
+## Everything from here (0.4.68)
+
+Until 0.4.67 a thread on B could be followed, sent to, stopped and answered from A, and anything
+else said "Do that in Trek on T-Book". B already did those things for a phone; A never asked.
+Now A asks, B does the work on its own thread, and A shows what B answers:
+
+- **Rewind, undo, retry, edit and send again, fork** go as `turn_action`. The confirmation lists
+  the files B would put back, as B says (`turn_preview`); the message taken back comes into A's
+  composer once B has done it (A's own copy of it, with A's files); an edited message is B's
+  rewind followed by a send; a fork is B's new thread, opened on A when its row arrives.
+- **Snooze, Wake now, Delete…** go as `thread_action`. Delete asks B first, unconfirmed: B deletes
+  nothing and answers with its own confirmation's words (a worktree's uncommitted work,
+  sub-agents that go too), which A's dialog shows before asking again, confirmed.
+- **A secret** B's agent asks for is given in A's card (`secret_answer`, new in 0.4.68: see
+  `docs/MOBILE.md`). It goes to B's private file for the thread over the paired, pinned
+  connection, and nowhere on A.
+- **A folder** attached on A goes as one zip of its files (what git ignores, and `.git`, stay
+  behind), named `<folder> folder.zip`, over the same route as any file; A's transcript still
+  shows the folder. B needs nothing new (0.4.61 takes files). What in it can't be read is left
+  out, and a toast says how much.
+- **The start of a long thread**: a thread opens with its last 300 items, and A now reads the
+  ones before them in pages (`transcript_before`) until the whole conversation is there.
+- **The composer reads B**: the model menu lists the agents and models set up on B (its
+  snapshot's `agents`), and Full access is offered when B has it unlocked (`full_access`).
+- **B's threads call for you on A**: a banner and sound when one starts waiting on you, finishes
+  unread or fails, as for a thread of A's own. A's phone isn't pushed for it: B pushes its own.
+- **`/new` and `/clear`** typed in a thread on B open a new draft on A, set to start on B (B
+  answers them with "open a new thread", which A used to drop).
+
+**B's item ids are positions.** `i200` is the 200th item, so after a rewind on B it can be
+another message. When B says a thread was rewritten (`transcript_reset`), or sends a transcript
+again whose items aren't the ones their ids named (`machines::rewritten`), A lets go of what it
+kept by id: messages opened with "Show more", a rewind confirmation left waiting, an edit begun
+in the composer ("That message can't be edited any more."). A page of earlier items asked for
+before the transcript came again is dropped and asked for anew. An edited message is B's rewind
+and then a send: if B rewinds and then doesn't take the message, the words and pictures go back
+into A's composer.
+
+**Where the line is.** B keeps its own locks. A can't lift B's Full access lock (it's a setting of
+B's Trek that nothing arriving over a network may change: a paired device that could would make
+pairing equal to full control of B), can't add B's permission rules unless B allows it, and B
+still checks every request against its own access level and rules. A says what it is ("Locked on
+T-Book. Only T-Book can unlock it…") and offers the most that can be chosen from here (Auto).
+
+**Mixed versions.** Everything above but the secret uses requests B has served since 0.4.8, so a
+0.4.68 A does them with a 0.4.67 B. The secret needs B on 0.4.68: until then B's notice stays,
+with "T-Book needs Trek 0.4.68 or later to take it from here." A request B doesn't know at all is
+answered `bad_request` "Unknown message type", which A words as "T-Book needs a newer Trek to …
+from here", never "do it there". A 0.4.67 A paired with a 0.4.68 B ignores the row's `secret`.
+
+**Still on B only.** A doesn't draw these yet: B's git panel and changes diffs, its terminal,
+file explorer and editor, the side chat, B's queue of follow-ups, the limit bar's buttons, PR
+cards' buttons, `@` mentions of B's files and B's own slash-command list (the composer lists
+A's), the pictures B's agent made, B's usage, and search across B's threads. The requests for
+most exist and phones use them (`git_*`, `queue_action`, `side_chat`, `media`, `card_action`,
+`commands`, `usage`, `search`); a terminal, a file listing and reading or writing B's files need
+new ones. "Auto-settle behavior" isn't offered for B's threads (there's no request for it; it
+used to be offered and change nothing).
 
 ## Protocol additions (v1, additive)
 

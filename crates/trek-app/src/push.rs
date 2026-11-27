@@ -314,8 +314,19 @@ pub fn send_web_push(
     trek_core::runtime().spawn(async move {
         let key = vapid_key().ok_or("there's no push key")?;
         let body = webpush::encrypt(&sub, &note.to_bytes()).map_err(|e| e.to_string())?;
+        // The service's name is looked up here, once, and every address it has must be public;
+        // the POST goes to the address checked (no second lookup that could answer otherwise),
+        // and isn't sent on elsewhere.
+        let (host, port) = sub.host_port().ok_or("that isn't a push endpoint")?;
+        let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
+            .await
+            .map_err(|e| format!("{host} couldn't be looked up: {e}"))?
+            .collect();
+        let addr = webpush::public_target(&addrs).map_err(str::to_string)?;
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve(&host, addr)
             .build()
             .map_err(|e| e.to_string())?;
         let service = sub.audience();
@@ -438,6 +449,11 @@ impl Workspace {
     /// An alert the computer raised: to the phone too, when phone notifications are on (and
     /// you're away, if that's the setting).
     pub fn push_alert(&mut self, message: &str, thread: &str) {
+        // A thread on another machine: that machine tells the phone itself (it's the one the
+        // phone can open the thread on).
+        if crate::machines::is_remote(thread) {
+            return;
+        }
         let m = &self.settings.mobile;
         if !m.push || cfg!(any(test, feature = "test-support")) || !self.has_phone_route() {
             return;

@@ -2809,7 +2809,16 @@ impl Render for GitPanel {
             return self.render_turn(window, cx);
         }
         if self.cwd.is_none() {
-            return super::empty("Open a project to see its changes.", cx).into_any_element();
+            // A thread on another machine: its repository is there, and this panel reads this
+            // computer's. Said as it is, rather than as if no project were open.
+            let ws = self.workspace.read(cx);
+            let hint = match ws.on_machine_in(&ws.harness_scope()) {
+                Some(name) => format!(
+                    "This thread's files are on {name}. Showing {name}'s changes and diffs here isn't built yet."
+                ),
+                None => "Open a project to see its changes.".to_string(),
+            };
+            return super::empty(hint, cx).into_any_element();
         }
         if let Some(t) = self.target.clone() {
             return self.render_review(t, window, cx);

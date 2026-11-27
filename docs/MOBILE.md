@@ -272,6 +272,7 @@ listed, so an older Mac (no list) simply doesn't show them. The protocol version
 | `machine_files` | `upload_part.from` and `.image`, `upload_progress.path`, image uploads attached as images, user items' `image_paths`: another Trek's attachments (0.4.61) |
 | `side_chat` | `side_chat`: a thread's side chat found, or one started beside it (the phone's `/side`) |
 | `sub_agent_view` | tool items' `sub_agent`, at-work rows' `call_id`, and `sub_agent` / `sub_agent_action`: a sub-agent opened from its row, stopped and sent a message |
+| `secret_answer` | a row's `secret` while its thread waits for a secret, and `answer` with a `secret` response: another computer's Trek gives it (0.4.68; see "A secret from another computer") |
 
 `use_reset` to `icon`, and `card_actions` to `consult`, `uploads`, `side_chat` and `sub_agent_view`, are described under "Keeping up with the
 Mac" below, `basecamp_v2` under
@@ -459,7 +460,18 @@ streaming text growing, a tool finishing, an approval resolving):
 {"type":"transcript_reset","thread_id":"01J…"}
 ```
 
-`transcript_reset` tells the phone to `subscribe` again (the thread was rewound or rewritten).
+`transcript_reset` tells the phone to `subscribe` again. The Mac sends it for two reasons and
+doesn't say which: the thread was rewound or rewritten (its transcript got shorter), or the phone
+fell behind on events and missed some (a slow connection: every subscribed thread gets one, with a
+fresh `snapshot`). The phone tells them apart from the page that comes back
+(`ThreadStore.fit`, `ios/Trek/Model/ThreadStore.swift`): it compares the items that stand in order
+on both sides (not requests, which the Mac puts at a page's end, nor `changes`), and where they
+overlap each pair must be the same item, not only the same id, since ids are positions and a
+rewind hands the old ids to new items (a message's text and time, a tool's `call_id`, a turn end's
+time, how an answer starts). A page that lines up and reaches at least as far as what the phone
+holds continues it: the earlier pages the reader scrolled back to stay, and so does their place.
+Anything else is a rewrite: everything is replaced and the list is drawn at the latest. The same
+goes for a `transcript` reply with `reset: true` to a `subscribe` with `after_seq`.
 
 Earlier items come in pages, oldest last-asked first; a read, so it never waits behind an action:
 
@@ -471,7 +483,8 @@ Earlier items come in pages, oldest last-asked first; a read, so it never waits 
 `before` is an item id (`i<n>`, or `c<n>`: up to and with `i<n>`); the page holds the `limit` (at
 most 500) items just before it, in order, with their turns' changed files, and `more` says whether
 still earlier ones exist. Unknown ids answer `not_found`. Items in a page are as they are now, with
-the seq they were last sent with. The Mac only follows items some phone was sent: an `item` may
+the seq they were last sent with. A page that arrives after the transcript was rewritten is for a
+transcript that no longer is: the phone drops it and asks afresh at the next scroll to the top. The Mac only follows items some phone was sent: an `item` may
 still arrive for an id earlier than the phone's first (another phone paged further back); a phone
 that doesn't hold it can drop it (paging it in brings it as it is).
 
@@ -576,6 +589,9 @@ All are acknowledged with `{"type":"ack","re":"<id>"}` or answered with an `erro
 {"type":"ping","id":"15"}
 ```
 
+- `answer` with `{"kind":"secret","value":"…"}` (feature `secret_answer`, Trek 0.4.68) gives a
+  secret the thread's agent asked for; without `value` it declines. See "A secret from another
+  computer" below.
 - `send.mode`: `steer` (inject into the running turn) · `queue` (deliver after it). On an idle thread
   both just start a turn. The Mac's own follow-up setting applies when omitted.
 - Trek's own commands work in `send` as typed on the Mac (`/permissions edits`, `/usage`, `/context`,
@@ -588,6 +604,27 @@ All are acknowledged with `{"type":"ack","re":"<id>"}` or answered with an `erro
   `thread` message. `model` null = the project's or agent's default. `worktree` is a request; a
   project that isn't a git repo runs locally.
 - `decision`: `allow` · `allow_for_session` · `deny`.
+- `mark_seen` has no `id` and no answer worth waiting for. The Mac counts a thread unread when it
+  changed after it was last seen, and a turn that ends is a change unless the thread is on the
+  Mac's own screen, so once when the thread opens isn't enough: a thread being read on the phone
+  turned unread as its turn ended. The phone sends it again while the thread's screen is the one in
+  view and the app is in front: when its row arrives unread, when its turn ends, when items come in
+  outside a running turn, and once when the app comes back to the front on it or a sheet over it
+  closes. At most one every 2 s for a thread, with one more at the end of that gap for what
+  happened meanwhile (`SeenPolicy`, `ios/Trek/Model/SeenPolicy.swift`). Never from the background,
+  nor for a thread under another's screen.
+- The phone waits for an answer to what it sends with an `id`, and not for ever
+  (`ReplyTimeout`, `ios/Trek/Model/Protocol.swift`): 20 s for something read (`subscribe`,
+  `transcript_before`, the lists and statuses), 60 s for an action's ack, 180 s where bytes move
+  (`upload_part`, `media`, `attachment`, a note's files and pictures, a message with pictures or
+  files) or the Mac may work for minutes (`git_push`, `git_commit`, `git_switch`, the worktree
+  actions, `turn_action`, `new_thread`, `update_phone`). After that whoever asked hears an error
+  made on the phone ("<Mac> didn't answer.", with "Check that it went through before trying
+  again." for anything that isn't a read); the request isn't sent again by itself. A reply that
+  arrives later finds no one waiting, except a `transcript`, which is applied whenever it comes.
+  A reply the phone can't decode fails its request at once with the same kind of error. A
+  `subscribe` that fails, or isn't answered, for a thread the phone has nothing of shows "Couldn't
+  load this thread" with the reason and Try again, where it used to spin.
 - `thread_action`: what the sidebar's thread menu does.
 
   ```json
@@ -992,6 +1029,36 @@ running turn to compact."), while it's paused at a limit, or before any message.
  "compact":"ready"}
 {"type":"thread_action","id":"4","thread_id":"t","action":{"kind":"compact"}}   → ack
 ```
+
+**A secret from another computer** (feature `secret_answer`, Trek 0.4.68). An agent asks for a
+secret through Trek's `request_secret`; the computer that runs the thread puts up a card, saves
+the value in a private file for the thread and gives the agent the file's path. Until 0.4.67 the
+card could be answered on that computer alone: phones and other machines got a notice ("Needs
+GITHUB_TOKEN. Enter it on this Mac."). A paired Trek can now give it. While a thread waits for
+one, its row carries `secret`:
+
+```json
+{"id":"01J…","title":"Open the PR","needs":{"kind":"question","text":"Needs GITHUB_TOKEN. Enter it on this Mac."},"secret":{"request_id":"trek-secret-ask-3","name":"GITHUB_TOKEN","why":"To open the pull request."}}
+{"type":"answer","id":"21","thread_id":"01J…","request_id":"trek-secret-ask-3","response":{"kind":"secret","value":"…"}}
+{"type":"answer","id":"22","thread_id":"01J…","request_id":"trek-secret-ask-3","response":{"kind":"secret"}}
+```
+
+The value travels once, over the device's own authenticated, certificate-pinned connection, and
+goes where the card's value goes: `session_secrets` on the computer that asked. It is in no reply,
+item, notice or log on either end (`SecretValue` prints as `…`; the host doesn't keep the response
+with the card's answers as it does a question's), and what the agent prints of it is scrubbed as
+before. No `value` declines: the agent is told to carry on without it. `bad_request` for an empty
+value, or a request that isn't a secret's; `conflict` once it's answered. The transcript's item
+for the request stays the notice it was (`r<request_id>`), so a client that doesn't know `secret`
+shows what it always did; one that does shows its card in the notice's place.
+
+Any paired device may send it, a phone as well as another computer's Trek: the host doesn't ask
+what kind of client answers. That is meant. A device that holds a token can already allow the
+thread's commands, which is more than handing it a value, and the value only ever travels
+towards the computer that asked: nothing a device is sent holds it. (The two things a phone
+can't do by default, allowing for a whole session and writing permission rules, widen what an
+agent may do without asking; a secret doesn't.) The iPhone app doesn't offer the card yet. A computer whose machine doesn't list `secret_answer` says so by name:
+"T-Book needs Trek 0.4.68 or later to take it from here."
 
 **`turn_preview`**: what the Mac's confirmation before an `undo`, `retry` or `rewind` says, for the
 same `item_id` `turn_action` would take (a turn's end, or for `rewind` one of the user's
@@ -1470,7 +1537,7 @@ SwiftUI, iOS 26 (Liquid Glass), bundle id `dev.trek.TrekMobile`, no third-party 
 ### Transcript components: Mac and phone
 
 What the Mac's transcript and composer draw, and what the phone draws for the same thing
-(inventory of 2026-10-30, after the live cards; updated 2026-10-31 for the transcript parity). *same*: the phone draws it as the Mac does, in
+(inventory of 2026-10-30, after the live cards; updated 2026-10-31 for the transcript parity and 2026-11-26 for how answers' Markdown reads). *same*: the phone draws it as the Mac does, in
 its own layout; *reduced*: it shows less; *missing*: it shows nothing, or raw text.
 
 | Component (Mac source) | Phone | Phone source | Note |
@@ -1488,13 +1555,13 @@ its own layout; *reduced*: it shows less; *missing*: it shows nothing, or raw te
 | "Asked to restate it first" line (`restate::split_restate`) | same | `Model/MessageParts.swift`, `Thread/MessageNotes.swift` | |
 | Videos attached to a message (`video::AttachedVideos`) | same | `Thread/MediaViews.swift` AttachedVideos | `user.videos`; poster, then plays here, fetched with `media` (a Mac without it: "on your Mac"). |
 | Wake row: folded "↳ summary" of sub-agent results (Row::Wake) | same | `Thread/MessageNotes.swift` WakeRow | Folded to the Mac's summary; tap for what came back. No edit, rewind or fork on it. |
-| Assistant answer, long-answer parts (Row::Assistant) | same | `MarkdownText.swift` | |
-| Code blocks (`md.rs`) | same | `CodeBlockView.swift` | Language over the code, Copy. |
+| Assistant answer, long-answer parts (Row::Assistant) | same | `MarkdownText.swift`, `MarkdownParser.swift` | CommonMark's blocks as the Mac reads them: rules (the recap's `---`), ATX and setext headings (`#128` is text), lists that keep the number they start at across blank lines and what's under an item, nested by their indentation, task boxes (read-only), a quote as one block, hard line breaks. Not read: indented code, HTML blocks. Parsed in the background as a transcript arrives; a streaming answer is parsed from its last settled block on. |
+| Code blocks (`md.rs`) | same | `CodeBlockView.swift` | Language over the code, Copy. A fence closes only on its own character and at least its own length, so Markdown shown inside Markdown survives. |
 | Tables (`md.rs`) | same | MarkdownText | Scroll sideways. |
 | Math, inline and display (`math`) | same | `Views/Math` | |
-| `trek-viz` visualizations, all 11 kinds (`visualization/`) | same | `Views/Viz` | |
-| `trek-html` interactive artifacts (`artifact/`) | same | `LivePage.swift` | |
-| Local images in answers, `![](path)` (`md.rs` LocalImage) | same | `Thread/MediaViews.swift` AnswerImages | A line of pictures; from the Mac (`media`, scaled) or the web; tap for full screen. |
+| `trek-viz` visualizations, all 11 kinds (`visualization/`) | reduced | `Views/Viz` | Every kind draws, but the phone reads the block strictly where the Mac forgives (type aliases such as `pie`, trailing commas, a missing `version`): such a block says "Couldn't draw this visualization" with its JSON behind a button. |
+| `trek-html` interactive artifacts (`artifact/`) | reduced | `LivePage.swift` | Run on a tap (the Mac runs it by itself). While its fence is open: a quiet "Building…" card (a `trek-study` block too), nothing to run. No refusal of a page past the Mac's 512 KB, and of the page API only `send` and `copy`. |
+| Local images in answers, `![](path)` (`md.rs` LocalImage) | reduced | `Thread/MediaViews.swift` AnswerImages | A line of pictures, on its own or straight after text, in a list item or a quote: drawn under the text; from the Mac (`media`, scaled) or the web; tap for full screen. A picture in the middle of a sentence still shows as its alt text. |
 | Videos linked in answers (`video::AnswerVideos`) | same | `Thread/MediaViews.swift` AnswerVideo | A link to a video on a line of its own: a file on the Mac comes in pieces (`media`), an https one plays from the web. |
 | File and path chips in answers (`md::link_path`) | reduced | `InlineMarkdown.swift` | Drawn, but a tap doesn't open the file. |
 | Reasoning, "Thought" (Row::Reasoning) | same | Transcript ToolRow | Markdown, in the group. |
@@ -1502,11 +1569,11 @@ its own layout; *reduced*: it shows less; *missing*: it shows nothing, or raw te
 | Tool row: chips, status, output (Row::Tool) | reduced | Transcript ToolRow | File chips with lines, and the Mac's status mark at the end (spinner, tick, red cross); output is the last 4 KiB. |
 | `watch_video` row with player and frames (`video::WatchedVideo`) | same | `Thread/MediaViews.swift` WatchedVideoView | `tool.watch`: the video card and the frames the model saw, each opening full screen. |
 | Sub-agent row: live state, answer as markdown (Row::SubAgent) | reduced | ToolRow, `Thread/SubAgentsCard.swift` | In the transcript an "Agent" step with 4 KiB of raw output; live state in the footer card. |
-| Notice row (Row::Notice) | same | ThreadView `.notice` | Markdown marks show raw. |
+| Notice row (Row::Notice) | same | ThreadView `.notice` | Its inline Markdown is drawn (bold, `code`), where the Mac drops the marks. |
 | Error row (Row::Error) | same | ThreadView `.error` | |
 | Limit row (Row::Limit) | same | ThreadView `.limit` | |
 | Handoff row (Row::Handoff) | same | `Thread/TurnBadges.swift` HandoffRow | `from_agent`/`to_agent` glyphs. |
-| Thread links (Row::Lineage) | same | `Thread/ThreadLinkRow.swift` | |
+| Thread links (Row::Lineage) | same | `Thread/ThreadLinkRow.swift` | A `trek://thread/<id>` link in an answer opens that thread when this iPhone lists it (`Model/TrekLink.swift`), and says so when it doesn't. |
 | Turn footer: copy, time, undo, retry, fork (Row::TurnEnd) | same | MessageActions TurnActions | |
 | "Verified" badge on the turn footer | same | `Thread/TurnBadges.swift` VerifiedBadge | `turn_end.verified`; a tap says what ran. Just the seal on the latest turn, where the actions are out. |
 | Restate check: "Is that what you meant?" | same | `Thread/RestateCheck.swift` | Go ahead sends the Mac's go-ahead (with the held-back consult); Not quite brings the keyboard up. |
@@ -1647,14 +1714,31 @@ Where the phone was paired doesn't matter: it looks for the Mac afresh wherever 
   it was.
 - A transcript has more than one reader on the phone (`AppModel.subscribe(_:as:)`): the thread's
   own screen, and a parent showing its sub-agent's request. The Mac hears `unsubscribe` when the
-  last of them lets go, and `mark_seen` only for the thread's own screen.
+  last of them lets go, and `mark_seen` only for the thread's own screen, while it's the one in
+  view (see `mark_seen` under Actions).
+- Drafts are the phone's own; nothing of them is on the wire. Each thread's composer belongs to
+  the model (`AppModel.composer`), keyed by the thread's qualified id (`host:thread`), so its text,
+  photos and files are there again when the thread is opened again in the same run. The text is
+  also written to `Application Support/drafts.json` as it changes and when the app leaves the
+  front (`DraftStore`, `ios/Trek/Model/Drafts.swift`), so it survives iOS ending the app; the
+  new-thread sheet's text has a key of its own. Kept: the newest 50, 20,000 characters each, for 30
+  days; a draft goes when its message is acked, when the Mac says `thread_removed`, and with its
+  machine's pairing. A message is taken out of the composer as it's sent and put back if the Mac
+  doesn't ack it, also when the thread's screen has gone by then (the toast then says "Not sent.
+  Your message is back in the thread's draft."). Nothing is sent while the Mac is out of reach,
+  and nothing is queued on the phone: the text stays in the composer.
+- An item whose `kind` the phone doesn't know isn't left out without a word: a run of them is one
+  muted row, "Update Trek on this iPhone to see this".
+- The new-thread sheet starts from the machine's `settings` (`default_agent`, `default_model`,
+  `default_effort`) as far as its agents offer them, else its first agent. An agent's icon is
+  asked (`icon`) of a machine that lists the agent, not of whichever machine is picked.
 
 ## Phases and milestones
 
 | Phase | Mac | Phone | Exit |
 |---|---|---|---|
 | **1a. LAN remote** (this branch) | `trek-remote` crate, protocol v1, pairing, tests | App with demo mode, live client, all screens | Fake host ↔ simulator round trip |
-| **1b. Wire it up** | Implement `RemoteHost` in trek-app over Workspace/Store; Settings › Mobile (toggle, QR, devices); stable item seqs; TLS (done in `trek-remote`) | QR scanner, reconnect/backoff, offline banner with queued sends; certificate pinning (done) | Approve a real Claude Code request from the phone |
+| **1b. Wire it up** | Implement `RemoteHost` in trek-app over Workspace/Store; Settings › Mobile (toggle, QR, devices); stable item seqs; TLS (done in `trek-remote`) | QR scanner, reconnect/backoff, offline banner (sends are refused while the Mac is out of reach, not queued: what was typed stays in the thread's draft, see below); certificate pinning (done) | Approve a real Claude Code request from the phone |
 | **2. Away from the network** | iroh/Noise transport; Trek push + mailbox service; presence-aware alerts; Mac-side step-up for "Allow for session" | APNs + Notification Service Extension with Approve/Deny/Reply; Live Activity; diff view | Approval round trip on cellular in seconds; nothing readable on Trek servers |
 | **3. Always on** | `trek-hostd` LaunchAgent; multiple Macs | Multi-host inbox, widgets, Watch | Sessions survive quitting Trek |
 

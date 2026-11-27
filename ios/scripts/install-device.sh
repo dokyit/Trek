@@ -8,7 +8,9 @@
 #      Trek Driver, the test runner inside the app that Trek's iPhone tool taps through over USB
 #      or Wi-Fi;
 #      see ios/scripts/build-driver.sh), ACTIVITY=0 (without the Live Activity, which a free team
-#      counts as one more of the three apps it allows; see ios/scripts/embed-activity.sh).
+#      counts as one more of the three apps it allows; see ios/scripts/embed-activity.sh),
+#      FRESH=1 (a fresh provisioning profile now, however long the present one has left: the
+#      way to renew the 7 days early).
 # With a free Apple ID the app works for 7 days from when Xcode made its provisioning profile;
 # installing again with the same profile doesn't extend that, so a profile with 2 days or less
 # left is set aside first and Xcode makes a fresh one. The first time, the iPhone asks you to
@@ -54,9 +56,9 @@ for f in "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"/*.mobile
   [ -f "$f" ] || continue
   set -- $(expiry "$f")
   case "${2:-}" in *".$BUNDLE"|*".$BUNDLE.Activity") ;; *) continue ;; esac
-  if [ $(( ${1:-0} - $(date +%s) )) -le $((2 * 86400)) ]; then
+  if [ "${FRESH:-0}" = 1 ] || [ $(( ${1:-0} - $(date +%s) )) -le $((2 * 86400)) ]; then
     mkdir -p "$STATE/old-profiles"
-    mv "$f" "$STATE/old-profiles/" && echo "Signing lapses within 2 days: Xcode makes a fresh profile."
+    mv "$f" "$STATE/old-profiles/" && echo "Signing lapses within 2 days (or FRESH=1): Xcode makes a fresh profile."
   fi
 done
 

@@ -156,7 +156,29 @@ final class AppModel {
     /// The Live Activity.
     @ObservationIgnored let activities = TurnActivities()
 
-    init() {
+    /// What was typed and not sent, by thread, kept across launches (AppModel+Drafts.swift).
+    @ObservationIgnored let drafts: DraftStore
+    /// Each thread's composer (its text, and the photos and files picked for it), by qualified
+    /// id: the model's, so it outlives the thread's screen. Leaving a thread and coming back finds
+    /// it as it was, and a message the Mac refuses after the screen has gone still has somewhere
+    /// to come back to.
+    @ObservationIgnored var composers: [String: ComposerState] = [:]
+    /// Messages on their way from each thread's composer: until the Mac has answered, an empty
+    /// composer doesn't drop the kept draft (the app may be ended before the answer comes).
+    @ObservationIgnored var sending: [String: Int] = [:]
+    /// The thread screens up, the one in view last (a side chat's sheet is over its thread's).
+    @ObservationIgnored private(set) var screens: [String] = []
+    /// The app is in front (not in the background, nor under the app switcher).
+    @ObservationIgnored var sceneActive = true
+    /// When the Mac is told a thread has been seen.
+    @ObservationIgnored var seen = SeenPolicy()
+    /// The clock `seen` runs on, and its timer (a test runs time by hand).
+    @ObservationIgnored var now: () -> TimeInterval = { Date().timeIntervalSinceReferenceDate }
+    @ObservationIgnored var after: (_ delay: TimeInterval, _ work: @escaping @MainActor () -> Void) -> Void = { Timeline().after($0, $1) }
+
+    /// `drafts`: where unsent text is kept (tests keep theirs apart, or in memory).
+    init(drafts: DraftStore = DraftStore()) {
+        self.drafts = drafts
         followUpMode = SendMode(rawValue: UserDefaults.standard.string(forKey: "followUpMode") ?? "") ?? .steer
         selectedHostId = UserDefaults.standard.string(forKey: "selectedHost")
     }
@@ -376,15 +398,27 @@ final class AppModel {
 
     /// The app came back to the front.
     func foregrounded() {
+        sceneActive = true
         for link in links { link.backend.wake() }
         activities.refresh()
+        // Back on the thread that was open: whatever ended while the app was away has been seen now.
+        if let top = screens.last { noteSeen(top) }
+    }
+
+    /// The app is no longer the one in front (the app switcher, a call, the background): nothing
+    /// that arrives from here on is being read.
+    func resignedActive() {
+        sceneActive = false
     }
 
     /// The app left the front. iOS may end it from here on without a word: what's open is saved
     /// now (its next save may never come), so it opens as it was and asks the Mac only for what
     /// came after.
     func backgrounded() {
+        sceneActive = false
         for s in stores.values where s.subscribed { saveCache(s) }
+        // What's typed and not sent, written before iOS can end the app.
+        drafts.flush()
         activities.backgrounded()
     }
 
@@ -398,8 +432,11 @@ final class AppModel {
     func leave(_ link: HostLink) {
         detach(link)
         PairedMac.remove(hostId: link.id)
+        // What was typed for its threads and never sent goes with the pairing.
+        drafts.forget(host: link.id)
         pairingError = nil
         if links.isEmpty {
+            drafts.removeAll()
             mode = .unpaired
             // Nothing left to come back to: the next launch opens on pairing, not the demo.
             UserDefaults.standard.set(false, forKey: "demoMode")
@@ -433,6 +470,11 @@ final class AppModel {
         for s in stores.values where link.owns(s.id) { saveCache(s); s.subscribed = false }
         stores = stores.filter { !link.owns($0.key) }
         holders = holders.filter { !link.owns($0.key) }
+        screens.removeAll { link.owns($0) }
+        // Their text is kept on disk (a machine paired again finds it); photos and files aren't.
+        for (id, c) in composers where link.owns(id) { c.onDraft = nil; for f in c.files { f.discard() } }
+        composers = composers.filter { !link.owns($0.key) }
+        sending = sending.filter { !link.owns($0.key) }
         sideChats = sideChats.filter { !link.owns($0.key) }
         commands = commands.filter { !link.owns($0.key) }
         gitStatus = gitStatus.filter { !$0.key.owned(by: link) }
@@ -498,6 +540,10 @@ final class AppModel {
         projects = []
         stores = [:]
         holders = [:]
+        screens = []
+        for c in composers.values { c.onDraft = nil; for f in c.files { f.discard() } }
+        composers = [:]
+        sending = [:]
         sideChats = [:]
         unlisted = [:]
         gitStatus = [:]
@@ -570,15 +616,19 @@ final class AppModel {
             unlisted = unlisted.filter { !link.owns($0.key) || kept.contains($0.key) || stores[$0.key] != nil }
             for t in s.unlisted { setUnlisted(qualify(t, on: link)) }
             learnIcons()
+            // The thread being read came back unread (a list sent afresh after events were missed).
+            if let top = screens.last, link.owns(top), thread(top)?.unseen == true { noteSeen(top) }
         case .thread(let incoming):
             let t = qualify(incoming, on: link)
             if unlisted[t.id] != nil { unlisted[t.id] = nil }
+            var old: ThreadSummary?
             if let i = threads.firstIndex(where: { $0.id == t.id }) {
-                let old = threads[i]
-                guard old != t else { break }
+                let was = threads[i]
+                old = was
+                guard was != t else { break }
                 // A working thread's row changes several times a second (its activity): only a
                 // move between sections is animated, not every update in place.
-                if old.section != t.section || old.runState != t.runState || (old.needs == nil) != (t.needs == nil) {
+                if was.section != t.section || was.runState != t.runState || (was.needs == nil) != (t.needs == nil) {
                     withAnimation(.snappy) { threads[i] = t }
                 } else {
                     threads[i] = t
@@ -586,19 +636,25 @@ final class AppModel {
             } else {
                 withAnimation(.snappy) { threads.insert(t, at: 0) }
             }
+            // Being read here: the Mac calls it unread once its turn ends (it isn't on the Mac's
+            // screen), so it's told again that it's seen.
+            if t.unseen || (old?.runState == .working && t.runState != .working) { noteSeen(t.id) }
         case .threadRemoved(let id):
             let qid = link.qualified(id)
             threads.removeAll { $0.id == qid }
             unlisted[qid] = nil
             TranscriptCache.remove(host: link.id, thread: id)
+            // Nothing can be sent to it any more: what was typed for it goes with it.
+            forgetComposer(qid)
         case .transcript(let re, let tid, let reset, let seq, let items, let more):
             let qid = link.qualified(tid)
             if let s = stores[qid] {
-                let rewritten = rewrites.remove(qid) != nil
-                if reset, s.loaded {
-                    protocolLog.info("transcript \(qid, privacy: .public): reset\(rewritten ? " (rewritten)" : "", privacy: .public), \(s.items.count) items → \(items.count) (re \(re ?? "-", privacy: .public))")
+                let before = s.generation
+                let had = s.items.count
+                s.applyReply(reset: reset, seq: seq, items: items.map { qualify($0, on: link) }, more: more)
+                if reset, had > 0 {
+                    protocolLog.info("transcript \(qid, privacy: .public): sent whole\(s.generation != before ? " (rewritten)" : ", lines up", privacy: .public), \(had) items → \(s.items.count) (re \(re ?? "-", privacy: .public))")
                 }
-                s.applyReply(reset: reset, seq: seq, items: items.map { qualify($0, on: link) }, more: more, rewritten: rewritten)
                 if let start = openStarts.removeValue(forKey: qid) {
                     Perf.report("open \(qid): reply after \(Perf.ms(Perf.now - start)), \(items.count) items\(reset ? "" : " since the cache")")
                     Perf.untilFrame("open \(qid): on screen", from: start)
@@ -612,11 +668,13 @@ final class AppModel {
             guard let s = stores[link.qualified(tid)], s.subscribed else { return }
             s.enqueue(qualify(item, on: link))
         case .transcriptReset(let tid):
-            // Rewound or rewritten on the host: the whole (last page of the) transcript again.
+            // The host wants this phone to read the transcript again: it was rewound or rewritten,
+            // or this phone fell behind on its events (the host can't say which). The last page
+            // comes whole, and the store tells the two apart by what's in it (`ThreadStore.fit`):
+            // only a rewrite replaces what's here.
             let qid = link.qualified(tid)
-            protocolLog.info("transcript \(qid, privacy: .public): the host reset it")
-            rewrites.insert(qid)
-            if let s = stores[qid], s.subscribed { request(.subscribe(threadId: qid, afterSeq: nil, limit: Self.firstPage)) }
+            protocolLog.info("transcript \(qid, privacy: .public): the host asked for it to be read again")
+            if let s = stores[qid], s.subscribed { resubscribe(s, on: link, whole: true) }
         case .ack(let re, _, _, _), .pong(let re), .machineInfo(let re, _):
             link.reply(re, message)
         case .usage(let re, _), .basecamp(let re, _), .notes(let re, _), .note(let re, _), .gitStatus(let re, _),
@@ -631,7 +689,8 @@ final class AppModel {
         case .phoneUpdate(let update):
             heard(update)
         case .error(let re, let code, let text):
-            if let re, link.hasReply(re) { link.reply(re, message) } else if code != .unauthorized { show(text, error: true) }
+            // One of the phone's own (an answer it couldn't read) with no one waiting: nothing to say.
+            if let re, link.hasReply(re) { link.reply(re, message) } else if code != .unauthorized, !code.isLocal { show(text, error: true) }
         case .unknown:
             break
         }
@@ -783,7 +842,7 @@ final class AppModel {
     func request(_ message: ClientMessage, on explicit: HostLink? = nil, then: ((ServerMessage) -> Void)? = nil) -> String {
         guard let link = explicit ?? route(message) else {
             // No machine to ask: whoever waits for the answer hears so, rather than never.
-            then?(.error(re: nil, code: .unknown, message: Self.notConnected))
+            then?(.error(re: nil, code: .notSent, message: Self.notConnected))
             return ""
         }
         // The user's own words or files: never before they've been told where those go and said
@@ -791,7 +850,7 @@ final class AppModel {
         if let recipient = sharingRecipient(of: message, on: link),
            !mayShare(with: recipient, on: link,
                      then: { [weak self] in _ = self?.request(message, on: explicit, then: then) },
-                     declined: { then?(.error(re: nil, code: .unknown, message: SharingConsent.notSent)) }) {
+                     declined: { then?(.error(re: nil, code: .notSent, message: SharingConsent.notSent)) }) {
             return ""
         }
         return link.request(stripped(message, on: link), then: then)
@@ -820,15 +879,13 @@ final class AppModel {
     }
 
     @ObservationIgnored private var openStarts: [String: Double] = [:]
-    /// Threads whose host said it rewrote them (`transcript_reset`): the reply to the subscribe
-    /// that follows replaces what's here, where a plain reset keeps the earlier items.
-    @ObservationIgnored private var rewrites: Set<String> = []
 
     /// The thread's store, made on first use (`tid` qualified, as the list carries it).
     func store(_ tid: String) -> ThreadStore {
         if let s = stores[tid] { return s }
         let s = ThreadStore(id: tid, host: link(for: tid)?.id ?? "demo", summary: thread(tid))
         s.onChange = { [weak self, weak s] in if let s { self?.scheduleCacheSave(s) } }
+        s.onArrived = { [weak self, weak s] in if let s { self?.itemsArrived(s) } }
         stores[tid] = s
         return s
     }
@@ -841,10 +898,15 @@ final class AppModel {
     /// own screen unless said); it stays open until each has let go (`unsubscribe`).
     func subscribe(_ tid: String, as holder: String = AppModel.onScreen) {
         holders[tid, default: []].insert(holder)
+        if holder == Self.onScreen {
+            // Its screen is the one in view now, over any that was (a side chat over its thread).
+            screens.removeAll { $0 == tid }
+            screens.append(tid)
+        }
         let s = store(tid)
         guard !s.subscribed else {
             // Open already for another reader, and now on its own screen: seen.
-            if holder == Self.onScreen { markSeen(tid) }
+            if holder == Self.onScreen { opened(tid) }
             return
         }
         if Perf.enabled { openStarts[tid] = Perf.navigated ?? Perf.now; Perf.navigated = nil }
@@ -856,20 +918,49 @@ final class AppModel {
         s.subscribed = true
         resubscribe(s)
         // Read for its request from its parent's thread, a sub-agent's own thread hasn't been seen.
-        if holder == Self.onScreen { markSeen(tid) }
+        if holder == Self.onScreen { opened(tid) }
     }
 
     /// Who has `tid`'s transcript open.
     func holders(of tid: String) -> Set<String> { holders[tid] ?? [] }
 
-    private func resubscribe(_ s: ThreadStore, on link: HostLink? = nil) {
-        protocolLog.info("transcript \(s.id, privacy: .public): subscribe after \(s.loaded ? String(s.seq) : "-", privacy: .public)")
-        request(.subscribe(threadId: s.id, afterSeq: s.loaded ? s.seq : nil, limit: Self.firstPage), on: link)
+    /// Asks the host for `s`'s transcript: what's newer than what's here, or (`whole`, or nothing
+    /// here yet) its last page. A refusal, or no answer in time, while nothing of it is here shows
+    /// in the thread with Try again (`ThreadStore.failure`) instead of a spinner that never ends.
+    private func resubscribe(_ s: ThreadStore, on link: HostLink? = nil, whole: Bool = false) {
+        protocolLog.info("transcript \(s.id, privacy: .public): subscribe after \(s.loaded && !whole ? String(s.seq) : "-", privacy: .public)")
+        if s.failure != nil { s.failure = nil }
+        request(.subscribe(threadId: s.id, afterSeq: s.loaded && !whole ? s.seq : nil, limit: Self.firstPage), on: link) { [weak self, weak s] reply in
+            guard let self, let s, case .error(_, let code, let text) = reply else { return }
+            // Not sent, or the connection went: the thread says the machine can't be reached,
+            // and a new connection asks again by itself.
+            guard code != .notSent, code != .dropped else { return }
+            protocolLog.error("transcript \(s.id, privacy: .public): no transcript (\(code.rawValue, privacy: .public))")
+            if !s.loaded {
+                s.failure = text.isEmpty ? "Something went wrong on \(self.hostName(of: s.id) ?? "your Mac")." : text
+            } else if !code.isLocal {
+                // What's here stays; the host's words say why it couldn't be brought up to date.
+                self.show(text, error: true)
+            }
+        }
+    }
+
+    /// Try again, from a thread that says its transcript couldn't be fetched.
+    func retryLoad(_ tid: String) {
+        guard let s = stores[tid], s.subscribed else { return }
+        resubscribe(s)
     }
 
     /// `holder` is done with `tid`'s transcript; the last one to let go closes it.
     func unsubscribe(_ tid: String, as holder: String = AppModel.onScreen) {
         holders[tid]?.remove(holder)
+        if holder == Self.onScreen {
+            let was = screens.last
+            screens.removeAll { $0 == tid }
+            // A sheet over another thread closed (a side chat): that thread is the one being read
+            // again, with whatever happened in it meanwhile.
+            if let top = screens.last, top != was { opened(top) }
+        }
         guard holders[tid]?.isEmpty ?? true else { return }
         holders[tid] = nil
         guard let s = stores[tid], s.subscribed else { return }
@@ -885,16 +976,25 @@ final class AppModel {
         guard let s = stores[tid], s.more, !s.loadingEarlier, let before = s.earliestID else { return }
         s.loadingEarlier = true
         let start = Perf.now
+        // What the page is for: it's dropped if the transcript is rewritten before it arrives.
+        let asked = s.paging
         request(.transcriptBefore(threadId: tid, before: before, limit: Self.earlierPage)) { [weak self, weak s] reply in
             guard let s else { return }
             switch reply {
             case .transcriptPage(_, _, let items, let more):
-                s.prepend(items, more: more)
-                Perf.untilFrame("earlier page (\(items.count) items) on screen", from: start)
+                if s.prepend(items, more: more, asked: asked) {
+                    Perf.untilFrame("earlier page (\(items.count) items) on screen", from: start)
+                } else {
+                    protocolLog.info("transcript \(s.id, privacy: .public): dropped a page of \(items.count) earlier items asked for before it was rewritten")
+                }
             case .error(_, _, let text):
+                // An answer to an ask the transcript has moved on from says nothing about it now
+                // (the item it named is gone with the rewind).
+                guard asked == s.paging else { return }
                 s.loadingEarlier = false
                 self?.show(text, error: true)
-            default: s.loadingEarlier = false
+            default:
+                if asked == s.paging { s.loadingEarlier = false }
             }
         }
     }
@@ -920,11 +1020,6 @@ final class AppModel {
 
     // MARK: Turn actions
 
-    /// Text for a thread's composer when it opens (a fork from a message).
-    @ObservationIgnored private var drafts: [String: String] = [:]
-
-    func takeDraft(_ tid: String) -> String? { drafts.removeValue(forKey: tid) }
-
     /// Undo, retry or fork a turn (from its `turn_end` item), or rewind or fork from a message
     /// (its `user` item). A fork opens the new thread; a rewind puts the message in `compose`.
     func turnAction(_ tid: String, item: String, _ action: TurnAction, model: String? = nil, restoreFiles: Bool = true,
@@ -937,7 +1032,7 @@ final class AppModel {
                 guard let self, let newThread else { self?.show("Forked"); return }
                 // Forked from a message: it waits in the new thread's composer.
                 let qid = link.qualified(newThread)
-                if let text { self.drafts[qid] = text }
+                if let text { self.composer(qid).put(text) }
                 self.openRequest = qid
             case .rewind, .undo:
                 if let text { compose?(text) }
@@ -953,18 +1048,28 @@ final class AppModel {
     }
 
     /// `files`: upload ids of what went up first. `failed`: the host refused it (after its words
-    /// are shown); `sent`: it took it.
+    /// are shown); `sent`: it took it. `held`: what the send took out of the thread's composer
+    /// (`takeComposed`): put back there if the host doesn't take it, whether or not the thread's
+    /// screen is still up, and its kept draft dropped once the host has it.
     func send(_ text: String, to tid: String, mode: SendMode?, images: [ImageUpload] = [], consult: ConsultRequest? = nil,
-              files: [String] = [], failed: ((ErrorCode) -> Void)? = nil, sent: (() -> Void)? = nil) {
+              files: [String] = [], held: HeldMessage? = nil, failed: ((ErrorCode) -> Void)? = nil, sent: (() -> Void)? = nil) {
         let message: ClientMessage = consult.map { .sendConsult(threadId: tid, text: text, mode: mode, images: images, consult: $0, files: files) }
             ?? .send(threadId: tid, text: text, mode: mode, images: images, files: files)
         let link = route(message)
         request(message) { [weak self, weak link] reply in
             if case .error(_, let code, let text) = reply {
-                self?.show(text, error: true)
+                if let self, let held {
+                    self.sendSettled(tid, restoring: held)
+                    // Its screen isn't the one showing: the toast is all there is to say where
+                    // the words went.
+                    self.show(SendFailure.toast(reason: text, code: code, away: self.screens.last != tid), error: true)
+                } else {
+                    self?.show(text, error: true)
+                }
                 failed?(code)
                 return
             }
+            if held != nil { self?.sendSettled(tid, restoring: nil) }
             sent?()
             // `/new`: the host leaves its own screen be and asks the phone to open its sheet.
             guard let self, let link else { return }

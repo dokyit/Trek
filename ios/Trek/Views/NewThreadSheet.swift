@@ -1,5 +1,29 @@
 import SwiftUI
 
+/// What the new-thread sheet starts with: the agent, model and effort the machine's own "New
+/// thread" would (its settings' defaults, which it sends), as far as it offers them; else its
+/// first agent, with that agent's own default model. The sheet used to start on whichever agent
+/// the machine listed first.
+enum NewThreadStart {
+    struct Choice: Equatable {
+        var agent: String?
+        /// Nil: the agent's own default.
+        var model: String?
+        /// Nil: the machine's default for the model.
+        var effort: String?
+    }
+
+    static func choice(agents: [AgentOption], settings: MacSettings?) -> Choice {
+        guard let settings, let agent = agents.first(where: { $0.key == settings.defaultAgent }) else {
+            return Choice(agent: agents.first?.key)
+        }
+        // A default the agent no longer offers falls back to the agent's own.
+        let model = settings.defaultModel.flatMap { id in agent.models.first { ModelNaming.same(id, $0.id) } }
+        let efforts = (model ?? ModelNaming.defaultModel(agent))?.efforts ?? []
+        return Choice(agent: agent.key, model: model?.id, effort: efforts.contains(settings.defaultEffort) ? settings.defaultEffort : nil)
+    }
+}
+
 /// "What are we building?": pick a project, an agent and model, worktree or local; then describe it.
 struct NewThreadSheet: View {
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -23,6 +47,8 @@ struct NewThreadSheet: View {
     /// Its files are going up: it starts once they're in.
     @State private var uploading = false
     @State private var choosingModel = false
+    /// The agent or model was picked here: the machine's defaults no longer replace it.
+    @State private var pickedModel = false
     @FocusState private var focused: Bool
 
     /// `project` and `prompt` start it filled in (`/new` sent from a thread: its project, and what
@@ -101,9 +127,24 @@ struct NewThreadSheet: View {
         .onAppear {
             projectID = linkProjects.contains(where: { $0.id == projectID }) || isNoProject
                 ? projectID : linkProjects.first?.id ?? noProjectID
-            agentKey = agents.contains(where: { $0.key == agentKey }) ? agentKey : agents.first?.key
+            startFromDefaults()
+            // What was typed here last time and never sent (`/new`'s own prompt comes first).
+            if text.isEmpty { text = model.drafts.text(DraftBook.newThread) ?? "" } else { model.drafts.set(DraftBook.newThread, text) }
             focused = true
         }
+        // The machine's settings came in while the sheet was up (it had only just connected).
+        .onChange(of: link?.macSettings) { startFromDefaults() }
+        .onChange(of: link?.agents) { startFromDefaults() }
+        .onChange(of: text) { model.drafts.set(DraftBook.newThread, text) }
+    }
+
+    /// The machine's default agent, model and effort, unless one was picked here.
+    private func startFromDefaults() {
+        guard !pickedModel else { return }
+        let start = NewThreadStart.choice(agents: agents, settings: link?.macSettings)
+        agentKey = start.agent
+        modelID = start.model
+        effort = start.effort
     }
 
     private var card: some View {
@@ -209,7 +250,9 @@ struct NewThreadSheet: View {
             Picker("Machine", selection: Binding(get: { link?.id }, set: { id in
                 machine = model.links.first { $0.id == id }
                 projectID = linkProjects.first?.id ?? noProjectID
-                agentKey = agents.first?.key
+                // Another machine: its own agents, and its own defaults among them.
+                pickedModel = false
+                startFromDefaults()
             })) {
                 ForEach(model.links) { l in
                     Text(l.kind.word.map { "\(l.name) · \($0)" } ?? l.name).tag(Optional(l.id))
@@ -261,10 +304,14 @@ struct NewThreadSheet: View {
                 effort: effort,
                 efforts: { key, id in ModelNaming.current(id, agent: agents.first { $0.key == key })?.efforts ?? [] },
                 pickModel: { key, id in
+                    pickedModel = true
                     agentKey = key
                     modelID = id
                 },
-                pickEffort: { effort = $0 })
+                pickEffort: {
+                    pickedModel = true
+                    effort = $0
+                })
         }
     }
 
@@ -306,6 +353,8 @@ struct NewThreadSheet: View {
                                 : words,
                             worktree: worktree && (project?.isRepo ?? false),
                             effort: effort, access: access, plan: plan, images: images, files: ids, failed: failed) { tid in
+                // The machine has it: what was typed is the thread's first message now.
+                model.drafts.clear(DraftBook.newThread)
                 for f in files { f.discard() }
                 dismiss()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { opened(tid) }

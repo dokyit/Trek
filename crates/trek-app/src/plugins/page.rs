@@ -56,6 +56,8 @@ pub struct Spec {
     /// The window colour, for the moment before the page draws.
     pub background: (u8, u8, u8),
     pub messages: async_channel::Sender<String>,
+    /// The hash the plugin's files were allowed at, for one with permissions (see `respond`).
+    pub sealed: Option<String>,
 }
 
 /// The page open in the main pane.
@@ -87,12 +89,16 @@ impl Focusable for PageHost {
 }
 
 /// The answer to a request for `path` under a plugin's origin: one of Trek's fonts, or a file of
-/// the plugin's own (an HTML file with Trek's head first: the policy and the theme).
+/// the plugin's own (an HTML file with Trek's head first: the policy and the theme). A plugin with
+/// permissions (`sealed`: the hash its files had when the user allowed it) has its pages served
+/// only while its files still hash so: one edited since (even at the same size and time, which
+/// the folder watcher wouldn't see) gets no page until the user allows it again.
 pub fn respond(
     dir: &std::path::Path,
     path: &str,
     csp: &str,
     theme_css: &str,
+    sealed: Option<&str>,
 ) -> wry::http::Response<Vec<u8>> {
     let fail = |status: u16| {
         wry::http::Response::builder()
@@ -124,6 +130,12 @@ pub fn respond(
         return fail(404);
     };
     let mime = core::mime(&file);
+    if let Some(hash) = sealed
+        && (mime.starts_with("text/html") || mime.contains("javascript"))
+        && trek_core::plugins::grant::content_hash(dir).as_deref() != Some(hash)
+    {
+        return fail(403);
+    }
     if mime.starts_with("text/html") {
         let html = String::from_utf8_lossy(&bytes);
         let page = trek_core::artifact::document_with(&html, theme_css, csp);
@@ -308,6 +320,7 @@ impl PageHost {
                 (bg.b * 255.) as u8,
             ),
             messages: tx,
+            sealed: sealed_hash(&plugin, cx),
         };
         self.make(spec, window, cx);
         // What the page asks, answered here.
@@ -490,6 +503,16 @@ impl PageHost {
 
 /// Plugin `plugin`'s page or panel `page`, while the plugin runs: its manifest, its folder and
 /// the file the page opens at.
+/// The hash plugin `plugin`'s files were allowed at, when it has permissions to be allowed.
+fn sealed_hash(plugin: &str, cx: &App) -> Option<String> {
+    let pl = cx.try_global::<Plugins>()?.find(plugin)?;
+    if pl.manifest.permissions.is_empty() {
+        return None;
+    }
+    // With permissions and no hash, nothing hashes as allowed.
+    Some(pl.hash.clone().unwrap_or_default())
+}
+
 pub fn page_of(plugin: &str, page: &str, cx: &App) -> Option<(Manifest, PathBuf, String)> {
     let p = cx.try_global::<Plugins>()?;
     let pl = p.find(plugin)?;
@@ -735,6 +758,7 @@ mod native {
             theme_css,
             background,
             messages,
+            sealed,
         } = spec;
         // The profile artifacts use, beside the Browser's and not in it: a plugin's page shares
         // no cookies, logins or storage with the user's own browsing.
@@ -767,12 +791,13 @@ mod native {
             .with_initialization_script_for_main_only(bootstrap, true)
             .with_asynchronous_custom_protocol(core::SCHEME.into(), move |_, request, responder| {
                 let (dir, csp, theme_css) = (dir.clone(), csp.clone(), theme_css.clone());
+                let sealed = sealed.clone();
                 let path = request.uri().path().to_string();
                 let plugin = plugin.clone();
                 // Files are read off the UI thread.
                 std::thread::spawn(move || {
                     let css = theme_css.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                    let answer = respond(&dir, &path, &csp, &css);
+                    let answer = respond(&dir, &path, &csp, &css, sealed.as_deref());
                     // A file the page asked for that isn't there is said in the plugin's log:
                     // it's how its author finds a wrong path.
                     if answer.status() != 200 && path != "/favicon.ico" {
@@ -793,5 +818,31 @@ mod native {
             .build_as_child(parent)
             .inspect_err(|e| tracing::warn!("plugin page: no web view: {e}"))
             .ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::respond;
+
+    #[test]
+    fn a_sealed_plugins_page_is_served_only_as_it_was_allowed() {
+        let dir =
+            std::env::temp_dir().join(format!("trek_test_sealed_page_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.html"), "<p>a</p>").unwrap();
+        std::fs::write(dir.join("page.js"), "let a = 1;").unwrap();
+        let hash = trek_core::plugins::grant::content_hash(&dir).unwrap();
+        let get = |path: &str, sealed: Option<&str>| respond(&dir, path, "", "", sealed).status();
+        assert_eq!(get("/index.html", Some(&hash)), 200);
+        assert_eq!(get("/page.js", Some(&hash)), 200);
+        // Edited at the same size: the folder watcher, which goes by size and time, can miss it.
+        std::fs::write(dir.join("page.js"), "let a = 2;").unwrap();
+        assert_eq!(get("/index.html", Some(&hash)), 403);
+        assert_eq!(get("/page.js", Some(&hash)), 403);
+        // A plugin with no permissions has nothing sealed.
+        assert_eq!(get("/index.html", None), 200);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

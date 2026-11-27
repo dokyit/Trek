@@ -6,7 +6,6 @@ use crate::activity::{Place, ToolKind, kind_icon, placement, summarize, tool_kin
 use crate::fluent;
 use crate::palette;
 use crate::scale::{radius, text, to_rems};
-use crate::thinking_timeline as timeline;
 use crate::workspace::{ForkAt, ItemRef, Scope, Workspace, WorkspaceEvent};
 use crate::workspace::{LineageRow, TaskState, ThreadState};
 use gpui_kit::component::StyledExt as _;
@@ -82,9 +81,6 @@ enum Row {
         running: bool,
         open: bool,
         tools: Vec<Row>,
-        /// The thought streaming right after its calls, which has no row of its own yet: the
-        /// timeline shows where it has got to.
-        live_thought: Option<usize>,
     },
     /// A sub-agent: one Trek runs as a thread of its own (`delegate_task`), or the agent's own
     /// (Claude's Task, Codex's agents). `open`: its answer shows in full.
@@ -345,6 +341,12 @@ pub fn part_of<'a>(text: &'a str, cuts: &[usize], n: usize) -> Option<&'a str> {
     text.get(start..end)
 }
 
+/// A message's line height, in its font's sizes.
+const MESSAGE_LINE: f32 = 1.5;
+
+/// The lines of a long message of the user's on show until "Show more".
+const CLAMPED_LINES: f32 = 10.;
+
 /// The key of part `n` of item `key`'s document: the item's own for the first, so an answer that
 /// grows long enough to be cut keeps the document it had.
 fn part_key(key: &str, n: usize) -> String {
@@ -448,6 +450,13 @@ pub struct ThreadView {
     current: Option<String>,
     revision: u64,
     count: usize,
+    /// The item the first row showed when the rows were last counted: rows that have come in
+    /// front of it since (the earlier part of a long thread on another machine, read in pages)
+    /// are added to the scroller at the front, so what's on screen stays where it is.
+    first_item: Option<String>,
+    /// `LiveThread::replaced` as last seen: when it moves (a thread on another machine was
+    /// rewritten there), what's kept by item id is let go of.
+    replaced: u64,
     /// Markdown documents by item id. Built when a row is first drawn, so opening a long thread
     /// doesn't parse all of it; kept by what they weigh (`MD_BUDGET`).
     md: Documents,
@@ -544,6 +553,9 @@ struct Confirm {
     files: Files,
     /// Also put the files back.
     restore: bool,
+    /// On another machine: whether its agent carries on from a recap, as the machine says once
+    /// asked (`None`: a thread of this computer, worked out here).
+    recap: Option<bool>,
     _check: Option<Task<()>>,
 }
 
@@ -606,6 +618,8 @@ struct Stashed {
     expanded: HashSet<String>,
     expanded_gen: u64,
     count: usize,
+    first_item: Option<String>,
+    replaced: u64,
     revision: u64,
     end: Option<usize>,
     scroller: Entity<MessageScrollerState>,
@@ -763,6 +777,8 @@ impl ThreadView {
             current: None,
             revision: 0,
             count: 0,
+            first_item: None,
+            replaced: 0,
             md: Documents::new(MD_BUDGET, MD_CAP),
             draws: 0,
             expanded: HashSet::new(),
@@ -826,6 +842,8 @@ impl ThreadView {
                 expanded: std::mem::take(&mut self.expanded),
                 expanded_gen: self.expanded_gen,
                 count: self.count,
+                first_item: self.first_item.take(),
+                replaced: self.replaced,
                 revision: self.revision,
                 end: self.end,
                 scroller: self.scroller.clone(),
@@ -888,6 +906,8 @@ impl ThreadView {
         self.expanded = s.expanded;
         self.expanded_gen = s.expanded_gen;
         self.count = s.count;
+        self.first_item = s.first_item;
+        self.replaced = s.replaced;
         self.revision = s.revision;
         self.end = s.end;
         self.scroller = s.scroller;
@@ -920,6 +940,7 @@ impl ThreadView {
         let ws = self.workspace.read(cx);
         let live = id.as_ref().and_then(|id| ws.live.get(id));
         let revision = live.map_or(0, |l| l.revision);
+        let replaced = live.map_or(0, |l| l.replaced);
         let opened = live.and_then(|l| l.opened.clone());
         // A sub-agent's row asked for (from the working bar's list, the hub): where it is.
         let revealed = live.and_then(|l| l.revealed.clone());
@@ -1062,6 +1083,17 @@ impl ThreadView {
             self.confirm = None;
             self.flash = None;
         }
+        // A thread on another machine was rewritten there (a rewind, an edit) since this last
+        // looked: its item ids are positions, so the ones kept here may name other items now.
+        // Nothing stays open on their strength, and no confirmation waits to act on one.
+        if replaced != self.replaced {
+            self.replaced = replaced;
+            if !switched {
+                self.confirm = None;
+                self.expanded.clear();
+                self.expanded_gen += 1;
+            }
+        }
         let quiet = appended
             && !switched
             && self.shown.as_ref().is_some_and(|s| {
@@ -1152,6 +1184,27 @@ impl ThreadView {
         if quiet && new_count == old {
             return;
         }
+        // How many rows came in front of the one that was first: a transcript only grows there
+        // when the earlier part of a thread on another machine is read in.
+        let (first_item, front) = {
+            let rows = self.rows(cx);
+            let ws = self.workspace.read(cx);
+            let live = self.current.as_ref().and_then(|id| ws.live.get(id));
+            let first = live
+                .zip(rows.rows.first())
+                .and_then(|(l, r)| l.items.id_at(r.item()))
+                .map(str::to_string);
+            let front = match (&self.first_item, live) {
+                (Some(was), Some(l)) if !switched && first.as_ref() != Some(was) => l
+                    .items
+                    .position(was)
+                    .and_then(|ix| rows.row_of(ix))
+                    .unwrap_or(0),
+                _ => 0,
+            };
+            (first, front.min(new_count.saturating_sub(old)))
+        };
+        self.first_item = first_item;
         self.count = new_count;
         self.scroller.update(cx, |s, cx| {
             if switched {
@@ -1165,7 +1218,12 @@ impl ThreadView {
                     s.reset(new_count, cx);
                 }
             } else if new_count > old {
-                let _ = s.append(new_count - old, cx);
+                if front > 0 {
+                    let _ = s.prepend(front, cx);
+                }
+                if new_count - old > front {
+                    let _ = s.append(new_count - old - front, cx);
+                }
             }
             // Streaming only ever changes the tail; remeasure the last couple of rows (a few
             // more where rows went: what's left at the end may have regrouped).
@@ -1550,7 +1608,6 @@ impl ThreadView {
                 Slot::Group(members) => {
                     let ix = members[0];
                     let key: SharedString = ids[ix].clone().into();
-                    let live_thought = thought_after(&live.items, live.reasoning, &members);
                     let mut kinds = Vec::with_capacity(members.len());
                     let mut running = false;
                     let trouble =
@@ -1623,7 +1680,6 @@ impl ThreadView {
                         kind: tool_kinds.last().copied().unwrap_or(ToolKind::Thought),
                         running,
                         tools,
-                        live_thought,
                     }
                 }
                 Slot::Item(ix) => {
@@ -1697,213 +1753,6 @@ impl ThreadView {
             .filter(|t| !t.is_empty())
             .collect::<Vec<_>>()
             .join("\n\n")
-    }
-
-    /// One step of an open group's timeline. It draws from its item where the item lies: only a
-    /// call's output, once opened, is copied, so long outputs cost a frame nothing until then.
-    fn timeline_step(
-        row: &Row,
-        rail: timeline::Rail,
-        row_ix: usize,
-        view: &WeakEntity<ThreadView>,
-        at: &RowContext,
-        cx: &mut App,
-    ) -> AnyElement {
-        let md = match row {
-            Row::Reasoning {
-                ix,
-                key,
-                open: true,
-            } => view
-                .update(cx, |this, cx| this.markdown(key, 0, *ix, cx))
-                .ok()
-                .flatten(),
-            _ => None,
-        };
-        let cx: &App = cx;
-        let Some(live) = at.workspace.read(cx).live.get(&at.thread) else {
-            return div().into_any_element();
-        };
-        let theme = cx.theme();
-        let muted = theme.muted_foreground;
-        let still = !at.pulse;
-        // A step's line, with room for its hover fill either side of the text.
-        let line = |el: Stateful<Div>, clickable: bool, key: &SharedString| {
-            el.test_support()
-                .mx(px(-6.))
-                .px(px(6.))
-                .rounded(px(fluent::CONTROL_RADIUS))
-                .when(clickable, |el| {
-                    el.cursor_pointer()
-                        .hover(|s| s.bg(theme.list_hover))
-                        .on_click(toggle_row(view.clone(), key.clone(), row_ix))
-                })
-        };
-        match (row, live.items.get(row.item())) {
-            (Row::Reasoning { ix, key, open }, Some(_)) => {
-                timeline::step(rail, timeline::Mark::Dot, at.clock, still, cx)
-                    .pb(px(timeline::step_bottom(false, rail.below)))
-                    .child(
-                        v_flex()
-                            .child(
-                                line(h_flex().id(("reasoning", *ix)), true, key)
-                                    .h(px(timeline::LINE))
-                                    .gap_1()
-                                    .text_size(px(timeline::TEXT_SIZE))
-                                    .text_color(muted)
-                                    .child(div().child("Thought"))
-                                    .child(
-                                        Icon::new(if *open {
-                                            IconName::ChevronDown
-                                        } else {
-                                            IconName::ChevronRight
-                                        })
-                                        .xsmall()
-                                        .opacity(CHEVRON),
-                                    ),
-                            )
-                            .when_some(md.filter(|_| *open), |el, md| {
-                                el.child(div().pt_1().child(crate::md::thought(
-                                    &md,
-                                    at.cwd.clone(),
-                                    at.folder,
-                                    at.text_size * 0.93,
-                                    cx,
-                                )))
-                            }),
-                    )
-                    .into_any_element()
-            }
-            (
-                Row::Tool {
-                    ix,
-                    key,
-                    open,
-                    activity,
-                },
-                Some(Item::Tool {
-                    id: tool_id,
-                    title,
-                    detail,
-                    output,
-                    status,
-                }),
-            ) => {
-                let kind = tool_kind(title);
-                let chips = timeline::chips(kind, *status, detail, output);
-                let words = timeline::wording(title, detail, activity.as_deref());
-                let running = *status == ToolStatus::Running;
-                // Its chips say what a read, a change or a fetch was of; a search's are what it
-                // found, under what it looked for.
-                let detail = if !chips.is_empty() && kind != ToolKind::Search {
-                    ""
-                } else {
-                    words.detail
-                };
-                let has_output = !output.is_empty();
-                let lines = live
-                    .lines
-                    .get(tool_id)
-                    .copied()
-                    .filter(|_| !matches!(status, ToolStatus::Failed | ToolStatus::Denied));
-                // The step under way is at full foreground; the rest in the theme's muted ink.
-                let (ink, sweep) = if running {
-                    (theme.foreground, muted)
-                } else {
-                    (muted, theme.foreground)
-                };
-                timeline::step(rail, timeline::mark(kind, *status), at.clock, still, cx)
-                    .pb(px(timeline::step_bottom(!chips.is_empty(), rail.below)))
-                    .child(
-                        v_flex()
-                            .min_w_0()
-                            .child(
-                                line(v_flex().id(("tool", *ix)), has_output, key)
-                                    .child(
-                                        h_flex()
-                                            .h(px(timeline::LINE))
-                                            .gap_2()
-                                            .text_size(px(timeline::TEXT_SIZE))
-                                            .text_color(ink)
-                                            .child(
-                                                div()
-                                                    .flex_none()
-                                                    .max_w(relative(0.5))
-                                                    .truncate()
-                                                    .child(crate::working_bar::shimmer(
-                                                        words.label.to_string().into(),
-                                                        at.clock,
-                                                        still || !running,
-                                                        ink,
-                                                        sweep,
-                                                    )),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .truncate()
-                                                    .when(words.code, |el| {
-                                                        el.font_family(
-                                                            theme.mono_font_family.clone(),
-                                                        )
-                                                    })
-                                                    .text_size(to_rems(text::META))
-                                                    .child(detail.to_string()),
-                                            )
-                                            .when_some(lines, |el, (a, r)| {
-                                                el.child(crate::working_bar::lines_chip(a, r, cx))
-                                            })
-                                            // A step with output opens: its chevron says so, as
-                                            // a thought's does here and a tool row's on a Mac.
-                                            .when(has_output, |el| {
-                                                el.child(
-                                                    div()
-                                                        .id(("tool-chevron", *ix))
-                                                        .test_support()
-                                                        .flex_none()
-                                                        .child(
-                                                            Icon::new(if *open {
-                                                                IconName::ChevronDown
-                                                            } else {
-                                                                IconName::ChevronRight
-                                                            })
-                                                            .xsmall()
-                                                            .opacity(CHEVRON),
-                                                        ),
-                                                )
-                                            }),
-                                    )
-                                    .children(timeline::source_chips(
-                                        &chips,
-                                        *ix,
-                                        &at.workspace,
-                                        &at.thread,
-                                        cx,
-                                    )),
-                            )
-                            .when(*open && has_output, |el| {
-                                el.child(
-                                    div()
-                                        .id(("tool-out", *ix))
-                                        .test_support()
-                                        .mt_1()
-                                        .max_h(px(260.))
-                                        .overflow_y_scroll()
-                                        .p_3()
-                                        .rounded(px(fluent::surface(theme.radius.as_f32())))
-                                        .bg(theme.muted)
-                                        .font_family(theme.mono_font_family.clone())
-                                        .text_size(to_rems(text::META))
-                                        .whitespace_normal()
-                                        .child(output.clone()),
-                                )
-                            }),
-                    )
-                    .into_any_element()
-            }
-            _ => div().into_any_element(),
-        }
     }
 
     /// One transcript row. `row_ix` is its place in the list (tool rows inside a group pass the
@@ -2050,7 +1899,7 @@ impl ThreadView {
                     .gap_2()
                     .px_2()
                     .py_1()
-                    .rounded(px(fluent::control(theme.radius.as_f32())))
+                    .rounded(theme.radius)
                     .text_size(to_rems(text::LABEL))
                     .when(has_output, |el| {
                         el.cursor_pointer()
@@ -2077,7 +1926,9 @@ impl ThreadView {
                                     px(11.5),
                                     cx,
                                 )
-                                .when(fluent::WINDOWS, |el| el.rounded(px(fluent::CONTROL_RADIUS))),
+                                // The Mac's corners everywhere, as the rest of the row's are:
+                                // the chip's own share of its text size, not a step of the scale.
+                                .rounded(px(11.5 * crate::file_icon::CHIP_CORNER)), // scale: ok
                             ),
                         ),
                         None => el.child(
@@ -2120,7 +1971,7 @@ impl ThreadView {
                         .max_h(px(260.))
                         .overflow_y_scroll()
                         .p_3()
-                        .rounded(px(fluent::surface(theme.radius.as_f32())))
+                        .rounded(theme.radius)
                         .bg(theme.muted)
                         .font_family(theme.mono_font_family.clone())
                         .text_size(to_rems(text::META))
@@ -2161,27 +2012,6 @@ impl ThreadView {
             _ => None,
         };
         let children: Vec<AnyElement> = match &row {
-            Row::ToolGroup {
-                open: true,
-                tools,
-                running,
-                live_thought,
-                ..
-            } if fluent::WINDOWS => {
-                let more_after = live_thought.is_some()
-                    || group_state(tools, *running, at, cx) == timeline::GroupState::Finished;
-                tools
-                    .iter()
-                    .enumerate()
-                    .map(|(n, t)| {
-                        let rail = timeline::Rail {
-                            above: n > 0,
-                            below: n + 1 < tools.len() || more_after,
-                        };
-                        Self::timeline_step(t, rail, row_ix, view, at, cx)
-                    })
-                    .collect()
-            }
             Row::ToolGroup {
                 open: true, tools, ..
             } => tools
@@ -2567,7 +2397,14 @@ impl ThreadView {
                     .into_iter()
                     .filter(|f| !videos.contains(f))
                     .collect();
-                let text = SharedString::from(words.to_string());
+                // Line ends as Windows writes them (a paste on a PC, a thread that runs on one)
+                // are one break each: GPUI splits lines at `\n` alone, so a `\r` left in would be
+                // shaped as part of its line.
+                let text = if words.contains('\r') {
+                    SharedString::from(words.replace("\r\n", "\n").replace('\r', "\n"))
+                } else {
+                    SharedString::from(words.to_string())
+                };
                 // A Trek theme may set the user's words as a line, flush with the answers, after
                 // a mark of its own, rather than in a bubble.
                 let look = crate::themes::look(cx);
@@ -2782,7 +2619,7 @@ impl ThreadView {
                                                 .border_color(fluent::stroke(theme.border, cx))
                                         })
                                         .text_size(text_size)
-                                        .line_height(relative(1.5))
+                                        .line_height(relative(MESSAGE_LINE))
                                         // A Trek theme's conversation font, as the answers have.
                                         .when_some(crate::themes::conversation_font(cx), |el, f| {
                                             el.font_family(f)
@@ -2811,10 +2648,18 @@ impl ThreadView {
                                                     })
                                                     .child(
                                                         div()
+                                                            .id(("user-text", ix))
+                                                            .test_support()
                                                             .flex_1()
                                                             .min_w_0()
+                                                            // Cut by height, not by a line
+                                                            // clamp: clamped, the paragraphs
+                                                            // past the clamp's lines were
+                                                            // still drawn, each as one line
+                                                            // that ran off the bubble's edge.
                                                             .when(long && !open, |el| {
-                                                                el.line_clamp(10)
+                                                                el.max_h(at.line * CLAMPED_LINES)
+                                                                    .overflow_hidden()
                                                             })
                                                             .child(text),
                                                     ),
@@ -2824,6 +2669,7 @@ impl ThreadView {
                                             el.child(
                                                 div()
                                                     .id(("user-more", ix))
+                                                    .test_support()
                                                     .text_size(to_rems(text::META))
                                                     .text_color(theme.muted_foreground)
                                                     .cursor_pointer()
@@ -3239,129 +3085,6 @@ impl ThreadView {
                     }),
             )
             .into_any_element(),
-            // Open on Windows, a group draws as its timeline: the summary line stays for it closed.
-            (
-                Row::ToolGroup {
-                    ix,
-                    key,
-                    summary,
-                    running,
-                    open: true,
-                    tools,
-                    live_thought,
-                    ..
-                },
-                _,
-            ) if fluent::WINDOWS => {
-                let state = group_state(&tools, running, at, cx);
-                let thought_secs = live.and_then(|l| {
-                    timeline::thought_total(tools.iter().filter_map(|t| {
-                        match t {
-                            Row::Reasoning { key, .. } => Some(
-                                l.thought
-                                    .get(key.as_ref())
-                                    .map(|(a, b)| b.saturating_duration_since(*a)),
-                            ),
-                            _ => None,
-                        }
-                    }))
-                });
-                // The turn's clock, when it's also this group's.
-                let elapsed = live
-                    .filter(|l| at.busy && timeline::opens_turn(&l.items, ix))
-                    .and_then(|l| l.turn_started)
-                    .map(|t| crate::time::elapsed(t.elapsed()));
-                let still = !at.pulse;
-                let words: AnyElement = match timeline::header_words(state, &summary, thought_secs)
-                {
-                    timeline::Words::Thinking => h_flex()
-                        .gap_2()
-                        .child(crate::working_bar::shimmer(
-                            "Thinking".into(),
-                            at.clock,
-                            still,
-                            theme.foreground,
-                            muted,
-                        ))
-                        .children(elapsed.map(|e| div().flex_none().child(e)))
-                        .into_any_element(),
-                    timeline::Words::ThoughtFor(secs) => div()
-                        .child(format!(
-                            "Thought for {}",
-                            crate::time::took(secs.min(u32::MAX as u64) as u32)
-                        ))
-                        .into_any_element(),
-                    timeline::Words::Summary(s) => div()
-                        .min_w_0()
-                        .truncate()
-                        .child(s.to_string())
-                        .into_any_element(),
-                };
-                let thinking = live_thought.and_then(|t| match live?.items.get(t)? {
-                    Item::Reasoning { text } => Some(
-                        timeline::thought_line(text)
-                            .unwrap_or("Thinking")
-                            .to_string(),
-                    ),
-                    _ => None,
-                });
-                let finished = state == timeline::GroupState::Finished && thinking.is_none();
-                column(
-                    v_flex()
-                        .py(px(3.))
-                        .child(
-                            h_flex()
-                                .id(("tool-group", ix))
-                                .test_support()
-                                .relative()
-                                .h(px(timeline::LINE))
-                                .mb(px(timeline::GAP))
-                                .pl(px(timeline::TEXT_X))
-                                .gap_2()
-                                .text_size(px(timeline::TEXT_SIZE))
-                                .text_color(muted)
-                                .cursor_pointer()
-                                .hover(|s| s.text_color(theme.foreground))
-                                .child(timeline::chevron(cx))
-                                .child(words)
-                                .on_click(toggle(key.clone())),
-                        )
-                        .children(children)
-                        .when_some(thinking, |el, line| {
-                            let rail = timeline::Rail {
-                                above: !tools.is_empty(),
-                                below: false,
-                            };
-                            el.child(
-                                timeline::step(rail, timeline::Mark::Running, at.clock, still, cx)
-                                    .child(
-                                        div()
-                                            .id(("live-thought", ix))
-                                            .test_support()
-                                            .h(px(timeline::LINE))
-                                            .line_height(px(timeline::LINE))
-                                            .text_size(px(timeline::TEXT_SIZE))
-                                            .truncate()
-                                            .child(crate::working_bar::shimmer(
-                                                line.into(),
-                                                at.clock,
-                                                still,
-                                                theme.foreground,
-                                                muted,
-                                            )),
-                                    ),
-                            )
-                        })
-                        .when(finished, |el| {
-                            el.child(
-                                timeline::finished(cx)
-                                    .id(("tool-group-finished", ix))
-                                    .test_support(),
-                            )
-                        }),
-                )
-                .into_any_element()
-            }
             (
                 Row::ToolGroup {
                     ix,
@@ -4220,6 +3943,45 @@ impl ThreadView {
             _ => ws.turn_start_item(&thread, &anchor),
         };
         let Some(message) = message else { return };
+        // On another machine: it says what restoring would put back there (`turn_preview`).
+        if crate::machines::is_remote(&thread) {
+            let action = match ask {
+                Ask::Rewind => trek_remote::TurnAction::Rewind,
+                Ask::Undo => trek_remote::TurnAction::Undo,
+                Ask::Retry(_) => trek_remote::TurnAction::Retry,
+            };
+            let preview = ws.machine_turn_preview(&thread, &anchor, action);
+            let check = preview.map(|preview| {
+                cx.spawn(async move |this, cx| {
+                    let said = preview.await;
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(c) = this.confirm.as_mut() {
+                            c.recap = Some(said.recap);
+                            c.restore = said.files.is_ok();
+                            c.files = match said.files {
+                                Ok(changes) => Files::Changes(changes),
+                                Err(why) => Files::Unavailable(why),
+                            };
+                            cx.notify();
+                        }
+                    });
+                })
+            });
+            self.confirm = Some(Confirm {
+                ask,
+                anchor,
+                message,
+                files: match &check {
+                    Some(_) => Files::Checking,
+                    None => Files::Unavailable("Its machine isn't connected.".into()),
+                },
+                restore: false,
+                recap: Some(false),
+                _check: check,
+            });
+            cx.notify();
+            return;
+        }
         // What restoring puts back: the files the turns taken back changed, and no others.
         let checkpoint = ws.rewind_files(&thread, &message);
         let files = match &checkpoint {
@@ -4254,6 +4016,7 @@ impl ThreadView {
             message,
             files,
             restore,
+            recap: None,
             _check: check,
         });
         cx.notify();
@@ -4279,6 +4042,17 @@ impl ThreadView {
         let restore = c.restore && !nothing;
         let scope = self.scope.clone();
         self.workspace.update(cx, |ws, cx| {
+            // On another machine: it does it, and the message comes back here once it has.
+            if crate::machines::is_remote(&thread) {
+                match c.ask {
+                    Ask::Rewind => {
+                        ws.machine_take_back(&thread, &c.message, false, restore, scope, cx)
+                    }
+                    Ask::Undo => ws.machine_take_back(&thread, &c.anchor, true, restore, scope, cx),
+                    Ask::Retry(model) => ws.machine_retry(&thread, &c.anchor, model, restore, cx),
+                }
+                return;
+            }
             let back = match c.ask {
                 Ask::Rewind => ws.rewind(&thread, &c.message, restore, cx),
                 Ask::Undo => ws.undo_turn(&thread, &c.anchor, restore, cx),
@@ -4310,8 +4084,9 @@ impl ThreadView {
             return div().into_any_element();
         };
         let agent = thread.agent.display_name();
-        let recap =
-            ws.rewind_plan(&thread.id, &c.message) == Some(trek_core::rewind::Reopen::Recap);
+        let recap = c.recap.unwrap_or_else(|| {
+            ws.rewind_plan(&thread.id, &c.message) == Some(trek_core::rewind::Reopen::Recap)
+        });
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let (title, action) = match &c.ask {
@@ -5330,7 +5105,7 @@ fn toggle_row(
             this.expanded_gen += 1;
             this.scroller.update(cx, |s, cx| {
                 s.remeasure_items(row_ix..row_ix + 1, cx);
-                // Pinned to the bottom, a row opening grows upward, and a timeline is tall enough
+                // Pinned to the bottom, a row opening grows upward, and a group is tall enough
                 // to take what was just clicked off the top; so it grows down from the top instead.
                 // (Made for Windows' timeline at first; the Mac's grows the same way.)
                 if opened && s.is_following_tail() {
@@ -5349,32 +5124,6 @@ fn toggle_row(
 /// terminal. Codex's Windows sandbox is set up by Codex itself, which asks once when it's run.
 fn notice_fix(text: &str) -> Option<(&'static str, &'static str)> {
     (text == trek_agents::CODEX_SANDBOX_SETUP_NOTICE).then_some(("Set up in Terminal", "codex"))
-}
-
-/// How the group of `tools` stands right now: a turn ending changes that with no change to its row.
-fn group_state(tools: &[Row], running: bool, at: &RowContext, cx: &App) -> timeline::GroupState {
-    let after = at
-        .workspace
-        .read(cx)
-        .live
-        .get(&at.thread)
-        .zip(tools.last())
-        .map_or(timeline::After::Nothing, |(l, last)| {
-            timeline::after_group(&l.items, last.item())
-        });
-    timeline::group_state(running, after, at.busy)
-}
-
-/// The thought streaming in right after the group of `members`, with no row between them. Only
-/// Windows' timeline shows it.
-fn thought_after(items: &[Item], reasoning: Option<usize>, members: &[usize]) -> Option<usize> {
-    let (thought, last) = (reasoning?, *members.last()?);
-    (fluent::WINDOWS
-        && thought > last
-        && items[last + 1..thought]
-            .iter()
-            .all(|i| matches!(i, Item::Reasoning { .. }) || placement(i) == Place::Hidden))
-    .then_some(thought)
 }
 
 /// The tallest a failed turn's error grows before it scrolls.
@@ -5734,6 +5483,8 @@ struct RowContext {
     /// The thread's worktree is missing: no files can be restored until it's back.
     worktree_missing: bool,
     text_size: Pixels,
+    /// A line of a message at that size, as the window draws it (on whole device pixels).
+    line: Pixels,
     /// The column's widest (`Workspace::column`).
     column: Pixels,
     cwd: Option<std::path::PathBuf>,
@@ -5809,6 +5560,8 @@ impl Render for ThreadView {
                 .is_some_and(crate::system::lately::worktree_missing),
             thread,
             text_size: px(ws.settings.appearance.transcript_font_size()),
+            line: window
+                .pixel_snap(px(ws.settings.appearance.transcript_font_size()) * MESSAGE_LINE),
             column: ws.column(),
             cwd: ws.cwd_in(&self.scope),
             folder: t.and_then(|t| ws.thread_project_tint(t, cx)),

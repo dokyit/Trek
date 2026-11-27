@@ -633,6 +633,12 @@ fn make_runnable(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Whether starting a program failed only because a process still had it open for writing
+/// (`ETXTBSY` on Linux; Windows has no such error, so it never matches there).
+fn text_file_busy(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::ExecutableFileBusy
+}
+
 /// Start `path` once with its version flag: a build the system won't run here (blocked, wrong
 /// processor, a missing runtime) is found now, not when an agent needs it.
 fn check_starts(path: &Path, program: &str) -> Result<()> {
@@ -641,13 +647,31 @@ fn check_starts(path: &Path, program: &str) -> Result<()> {
     } else {
         "-version"
     };
-    let mut child = crate::procs::command(path)
-        .arg(flag)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| anyhow!("The downloaded {program} won't start on this computer: {e}"))?;
+    let spawn = || {
+        crate::procs::command(path)
+            .arg(flag)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+    };
+    // Linux refuses to start a file some process still has open for writing ("Text file
+    // busy"). Trek closed its own handle, but a child another thread forked while the file
+    // was being written holds a copy until it execs: a moment, so the start is tried again.
+    let mut tries = 0;
+    let mut child = loop {
+        match spawn() {
+            Err(e) if text_file_busy(&e) && tries < 20 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            other => {
+                break other.map_err(|e| {
+                    anyhow!("The downloaded {program} won't start on this computer: {e}")
+                })?;
+            }
+        }
+    };
     let started = std::time::Instant::now();
     loop {
         match child.try_wait()? {

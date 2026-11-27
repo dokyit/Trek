@@ -196,6 +196,10 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
             generation = g
             rows = new
             reindex()
+            // Heights are kept by row id, and the Mac's ids are positions (`i<n>`): after a
+            // rewrite the same ids are other items, so what was measured for them isn't theirs.
+            measured.removeAll()
+            estimates.removeAll()
             heights = new.map { measured[$0.id] ?? estimate($0) }
             pinned = true
             if !first { userScrolled = false }
@@ -223,24 +227,30 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
         while s < old.count - p, s < new.count - p, old[old.count - 1 - s].id == new[new.count - 1 - s].id { s += 1 }
         let anchor = pinned ? nil : captureAnchor()
         carryWhole(from: old[p..<(old.count - s)], to: new[p..<(new.count - s)])
-        rows = new
-        reindex()
-        heights = new.map { measured[$0.id] ?? estimate($0) }
-        emptyFooter()
+        var newHeights = new.map { measured[$0.id] ?? estimate($0) }
+        let emptied = emptyFooter(of: new, heights: &newHeights)
         let deleted = (p..<(old.count - s)).map { IndexPath(item: $0, section: 0) }
         let inserted = (p..<(new.count - s)).map { IndexPath(item: $0, section: 0) }
         // The collection view counts from its last layout: when that isn't the list the batch
         // was built from (a layout it skipped), a batch update would be inconsistent and UIKit
-        // stops the app; it is drawn afresh instead.
+        // stops the app; it is drawn afresh instead. Counted while the rows are still the old
+        // ones, so a view that asks its data source here hears the list the batch starts from.
         let counted = collectionView.numberOfItems(inSection: 0)
         var batched = false
         if old.isEmpty || counted != old.count || deleted.count + inserted.count > 3000 {
             if counted != old.count { ScrollProbe.note("rows redrawn: the view counted \(counted), the list had \(old.count)") }
+            take(new, heights: newHeights)
             collectionView.reloadData()
         } else {
             batched = true
             UIView.performWithoutAnimation {
                 collectionView.performBatchUpdates {
+                    // The rows change inside the batch, as UIKit asks: a collection view whose
+                    // layout wasn't up to date reloads as the batch begins, and counted the new
+                    // rows as the ones before it when they had changed already. The inserts on top
+                    // then didn't add up, and UIKit stopped the app (`Invalid batch updates`, seen
+                    // on 21 November 2026).
+                    take(new, heights: newHeights)
                     collectionView.deleteItems(at: deleted)
                     collectionView.insertItems(at: inserted)
                 }
@@ -251,6 +261,7 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
             for k in 0..<s where old[old.count - 1 - k] != new[new.count - 1 - k] { changed.append(new.count - 1 - k) }
             reconfigure(changed)
         }
+        if let emptied { (collectionView.cellForItem(at: IndexPath(item: emptied, section: 0)) as? TranscriptCell)?.measureAgain() }
         collectionView.layoutIfNeeded()
         settle(anchor)
         // The rows at the new offset drawn now, not at the next pass.
@@ -281,11 +292,20 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
     /// The turn's last rows are coming in, and the working line under them is going: its room goes
     /// in the same layout. Left to measure itself, a frame or two later, it had the bottom go up by
     /// the rows and back down by the line at each turn's end (the scroll probe: 74 pt, then 93).
-    private func emptyFooter() {
-        guard case .footer(let store)? = rows.last, store.footerEmpty, let last = heights.indices.last, heights[last] > 0 else { return }
+    /// `heights` of `rows` with the working line's room gone, if it's going: its index, whose cell
+    /// is measured again once the rows are in.
+    private func emptyFooter(of rows: [TranscriptRow], heights: inout [CGFloat]) -> Int? {
+        guard case .footer(let store)? = rows.last, store.footerEmpty, let last = heights.indices.last, heights[last] > 0 else { return nil }
         heights[last] = 0
         measured[rows[last].id] = 0
-        (collectionView.cellForItem(at: IndexPath(item: last, section: 0)) as? TranscriptCell)?.measureAgain()
+        return last
+    }
+
+    /// The list's rows become `new`, with their heights.
+    private func take(_ new: [TranscriptRow], heights newHeights: [CGFloat]) {
+        rows = new
+        reindex()
+        heights = newHeights
     }
 
     /// An answer done being written goes from one row to its parts (`AnswerPart`), with new ids and
@@ -343,11 +363,18 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
         return e
     }
 
-    /// A row's measured height: kept, and, for a row that starts above the screen's top, the
-    /// offset to move by so what's on screen doesn't move (nil: none).
+    /// A row's measured height: kept, and the offset to move by so what's on screen doesn't move
+    /// (nil: none). A row wholly above the screen's top moves everything under it. One that
+    /// crosses the top does when it's measured for the first time (scrolling up brings it in
+    /// from above at its estimate: what's on screen is its foot and the rows after it). But a
+    /// row already measured that crosses the top and changes height is the answer being read
+    /// while it's still being written: it grows at its foot, below what's being read, and the
+    /// offset stays. It used to move by every line that arrived, so the text ran away under the
+    /// reader for as long as the answer streamed (seen on an iPhone).
     fileprivate func measured(_ h: CGFloat, at i: Int) -> CGFloat? {
         guard i < rows.count else { return nil }
         let old = heights[i]
+        let first = measured[rows[i].id] == nil
         heights[i] = h
         measured[rows[i].id] = h
         guard !pinned, let cv = collectionView else { return nil }
@@ -355,9 +382,17 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
         // A row going from empty to drawn (or back) takes (or gives back) the gap before it too.
         if (old == 0) != (h == 0) { delta += h > 0 ? gaps[i] : -gaps[i] }
         let top = cv.contentOffset.y + cv.adjustedContentInset.top
-        let above = layout.origin(of: i) < top - 0.5
-        if ScrollProbe.on, abs(delta) > 0.5 { ScrollProbe.note("measured \(rows[i].id): \(Int(old))→\(Int(h))\(above ? ", above the screen: offset \(Int(delta))" : "")") }
-        return above ? delta : nil
+        let moves = Self.movesWhatIsRead(origin: layout.origin(of: i), height: old, top: top, first: first)
+        if ScrollProbe.on, abs(delta) > 0.5 { ScrollProbe.note("measured \(rows[i].id): \(Int(old))→\(Int(h))\(moves ? ", above the screen: offset \(Int(delta))" : "")") }
+        return moves ? delta : nil
+    }
+
+    /// Whether a change in the height of a row at `origin`, `height` tall until now, moves what
+    /// is on screen below `top` (so the offset must follow it): `first`, it had only been
+    /// estimated.
+    nonisolated static func movesWhatIsRead(origin: CGFloat, height: CGFloat, top: CGFloat, first: Bool) -> Bool {
+        guard origin < top - 0.5 else { return false }
+        return first || origin + height <= top + 0.5
     }
 
     // MARK: Keeping the reader's place

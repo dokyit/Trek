@@ -1008,7 +1008,38 @@ pub(crate) fn http() -> Result<reqwest::Client> {
         .user_agent(format!("Trek/{}", crate::VERSION))
         .connect_timeout(std::time::Duration::from_secs(15))
         .read_timeout(std::time::Duration::from_secs(60))
+        // Never from https down to plain http on the way (anyone on the network could then
+        // answer: the signature still holds, but not the size or the time it takes).
+        .redirect(reqwest::redirect::Policy::custom(|a| {
+            if a.previous().len() >= 10 {
+                a.error("too many redirects")
+            } else if !web_ok(a.url()) {
+                a.error("an update address may only send Trek on to an https address")
+            } else {
+                a.follow()
+            }
+        }))
         .build()?)
+}
+
+/// The most an update's download may be: a Trek is a few hundred MB.
+const MAX_ARTIFACT: u64 = 1 << 30;
+/// The most an update manifest may be.
+const MAX_MANIFEST: usize = 1 << 20;
+
+/// Whether the updater may fetch from `url`: https, or plain http on this computer (a feed a
+/// developer serves, the tests' servers).
+fn web_ok(url: &reqwest::Url) -> bool {
+    match url.scheme() {
+        "https" => true,
+        "http" => url.host_str().is_some_and(|h| {
+            let h = h.trim_start_matches('[').trim_end_matches(']');
+            h == "localhost"
+                || h.parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        }),
+        _ => false,
+    }
 }
 
 /// Couldn't reach or read from the update server: worth retrying soon, unlike a release that
@@ -1059,12 +1090,14 @@ async fn fetch_manifest(client: &reqwest::Client, url: &str) -> Result<Manifest>
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         bail!("no release has been published on this channel yet");
     }
-    let bytes = resp
-        .error_for_status()
-        .map_err(net_error)?
-        .bytes()
-        .await
-        .map_err(net_error)?;
+    let mut resp = resp.error_for_status().map_err(net_error)?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(net_error)? {
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() > MAX_MANIFEST {
+            bail!("the update manifest at {url} is too big to be one");
+        }
+    }
     serde_json::from_slice(&bytes).with_context(|| format!("unreadable update manifest at {url}"))
 }
 
@@ -1199,6 +1232,11 @@ pub async fn download(
     use sha2::Digest;
     use tokio::io::AsyncWriteExt;
 
+    let url = reqwest::Url::parse(&update.artifact.url)
+        .map_err(|_| anyhow!("the update's address is unreadable"))?;
+    if !web_ok(&url) {
+        bail!("the update isn't offered over https; it was not downloaded");
+    }
     // Refuse before downloading anything if the release isn't signed for this version.
     let key = minisign_verify::PublicKey::from_base64(public_key())
         .context("this build's update key is invalid")?;
@@ -1217,6 +1255,9 @@ pub async fn download(
             .and_then(|r| r.error_for_status())
             .map_err(net_error)?;
         let total = resp.content_length().unwrap_or(0);
+        if total > MAX_ARTIFACT {
+            bail!("the update is too big to be one ({total} bytes)");
+        }
         let mut file = tokio::fs::File::create(&dest).await?;
         let mut hasher = sha2::Sha256::new();
         let mut got = 0u64;
@@ -1230,6 +1271,9 @@ pub async fn download(
             verifier.update(&chunk);
             file.write_all(&chunk).await?;
             got += chunk.len() as u64;
+            if got > MAX_ARTIFACT {
+                bail!("the update is too big to be one");
+            }
             if total > 0 {
                 progress(got as f32 / total as f32);
             }
@@ -1265,22 +1309,32 @@ fn archive_name(version: &semver::Version) -> String {
     }
 }
 
-/// Decode a release signature and check its trusted comment names `version`.
+/// Decode a release signature and check its trusted comment names `version` and this build's
+/// platform (`platform_key`). The comment is signed with the archive; the manifest that points at
+/// the archive isn't, so without the platform one Mac's (or one Linux architecture's) signed build
+/// could be offered to another, and installed there to not start.
 fn signature_for(text: &str, version: &semver::Version) -> Result<minisign_verify::Signature> {
     if text.trim().is_empty() {
         bail!("the update isn't signed; it was not downloaded");
     }
     let sig = minisign_verify::Signature::decode(text.trim())
         .map_err(|_| anyhow!("the update's signature is unreadable"))?;
+    comment_names(&sig.trusted_comment(), version, &platform_key())?;
+    Ok(sig)
+}
+
+/// Whether a release signature's trusted comment (`Trek 0.4.67 darwin-aarch64`) is for
+/// `version` on `platform`.
+fn comment_names(comment: &str, version: &semver::Version, platform: &str) -> Result<()> {
     let v = version.to_string();
-    if !sig
-        .trusted_comment()
-        .split_whitespace()
-        .any(|w| w.trim_start_matches('v') == v)
-    {
+    let mut words = comment.split_whitespace();
+    if !words.clone().any(|w| w.trim_start_matches('v') == v) {
         bail!("the update's signature is for another version");
     }
-    Ok(sig)
+    if !words.any(|w| w == platform) {
+        bail!("the update's signature is for another kind of computer ({platform} is this one)");
+    }
+    Ok(())
 }
 
 /// Check a whole file against a minisign signature (used where the bytes are already on disk).
@@ -2508,6 +2562,56 @@ mod tests {
             "release key must not accept the test key's signature"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn updates_come_over_https() {
+        let ok = |u: &str| web_ok(&reqwest::Url::parse(u).unwrap());
+        assert!(ok(
+            "https://github.com/dokyit/Trek/releases/download/x.json"
+        ));
+        assert!(ok("http://127.0.0.1:8765/beta.json"));
+        assert!(ok("http://localhost:8765/beta.json"));
+        assert!(ok("http://[::1]:8765/beta.json"));
+        assert!(!ok("http://example.com/Trek.tar.gz"));
+        assert!(!ok("http://10.0.0.1/Trek.tar.gz"));
+        assert!(!ok("ftp://example.com/Trek.tar.gz"));
+        assert!(!ok("file:///tmp/Trek.tar.gz"));
+    }
+
+    #[tokio::test]
+    async fn a_plain_http_download_is_refused_before_anything_is_written() {
+        let update = AvailableUpdate {
+            version: semver::Version::parse("99.0.0").unwrap(),
+            notes: String::new(),
+            pub_date: String::new(),
+            artifact: Artifact {
+                url: "http://example.com/Trek.tar.gz".into(),
+                sha256: String::new(),
+                signature: String::new(),
+            },
+        };
+        let err = download(&update, &AtomicBool::new(false), |_| {})
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("https"), "{err}");
+    }
+
+    #[test]
+    fn a_signature_names_this_platform() {
+        let v = |s: &str| semver::Version::parse(s).unwrap();
+        let one = v("1.0.0");
+        assert!(comment_names("Trek 1.0.0 linux-x86_64", &one, "linux-x86_64").is_ok());
+        assert!(comment_names("Trek v1.0.0 darwin-aarch64", &one, "darwin-aarch64").is_ok());
+        let other = comment_names("Trek 1.0.0 linux-aarch64", &one, "linux-x86_64").unwrap_err();
+        assert!(
+            other.to_string().contains("another kind of computer"),
+            "{other}"
+        );
+        assert!(comment_names("Trek 1.0.0", &one, "darwin-x86_64").is_err());
+        assert!(comment_names("Trek 1.0.0 darwin-aarch64x", &one, "darwin-aarch64").is_err());
+        let older = comment_names("Trek 0.9.0 linux-x86_64", &one, "linux-x86_64").unwrap_err();
+        assert!(older.to_string().contains("another version"), "{older}");
     }
 
     #[test]

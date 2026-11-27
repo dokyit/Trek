@@ -1732,22 +1732,26 @@ impl Sidebar {
                     },
                 ));
             }
-            menu = menu.submenu("Auto-settle behavior", window, cx, {
-                let (ws, tid) = (ws.clone(), tid.clone());
-                move |menu, _, _| {
-                    let set = |label: &'static str, never: bool| {
-                        let (ws, tid) = (ws.clone(), tid.clone());
-                        PopupMenuItem::new(label)
-                            .checked(never_settle == never)
-                            .on_click(move |_, _, cx| {
-                                let _ =
-                                    ws.update(cx, |ws, cx| ws.set_never_settle(&tid, never, cx));
-                            })
-                    };
-                    menu.item(set("Follow Trek's setting", false))
-                        .item(set("Never settle this thread", true))
-                }
-            });
+            // A thread on another machine settles by that machine's setting: there's nothing to
+            // ask it to keep for this one yet, so the choice isn't offered (it changed nothing).
+            if !f.remote {
+                menu = menu.submenu("Auto-settle behavior", window, cx, {
+                    let (ws, tid) = (ws.clone(), tid.clone());
+                    move |menu, _, _| {
+                        let set = |label: &'static str, never: bool| {
+                            let (ws, tid) = (ws.clone(), tid.clone());
+                            PopupMenuItem::new(label)
+                                .checked(never_settle == never)
+                                .on_click(move |_, _, cx| {
+                                    let _ = ws
+                                        .update(cx, |ws, cx| ws.set_never_settle(&tid, never, cx));
+                                })
+                        };
+                        menu.item(set("Follow Trek's setting", false))
+                            .item(set("Never settle this thread", true))
+                    }
+                });
+            }
             menu = menu.separator();
             menu = thread_menu::copy_submenu(menu, &ws, &f, window, cx);
             if let Some(dir) = f.cwd.clone() {

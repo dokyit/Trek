@@ -7,6 +7,51 @@ import WebKit
 /// them stays light; then it runs inline in a sandboxed web view (`LivePageView`), styled with
 /// Trek's `--trek-*` variables and as tall as its content. A button on the page may send text to
 /// the thread (`trek.send`) or copy it (`trek.copy`).
+/// A page (or a tutor's question) still being written: its fence hasn't closed, so there is
+/// nothing whole to run yet. The card's own header, at rest, with how much has come; the Mac
+/// shows "Building…" the same way. Run was offered on half a page before, and a page started
+/// that way loaded again with every piece that arrived.
+struct LivePageBuilding: View {
+    var title: String?
+    var bytes: Int
+    var size: CGFloat
+    /// False for something that won't be a page to run (a tutor's question).
+    var interactive = true
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: interactive ? "cube.transparent" : "ellipsis")
+                .font(.system(size: size * 1.05, weight: .medium))
+                .foregroundStyle(Trek.muted)
+                .frame(width: 34, height: 34)
+                .background(Trek.foreground.opacity(0.05), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title ?? (interactive ? "Interactive page" : "Question"))
+                    .scaledFont(size * 0.95, weight: .semibold)
+                    .foregroundStyle(Trek.foreground)
+                    .lineLimit(2)
+                Text("Building… \(Self.amount(bytes))")
+                    .scaledFont(size * 0.8)
+                    .foregroundStyle(Trek.muted)
+                    .lineLimit(1)
+                    .contentTransition(.identity)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(Trek.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Trek.border, lineWidth: 0.5))
+        .accessibilityElement(children: .combine)
+    }
+
+    /// "3 KB" of what has come so far.
+    nonisolated static func amount(_ bytes: Int) -> String {
+        bytes < 1024 ? "\(bytes) bytes" : "\(bytes / 1024) KB"
+    }
+}
+
 struct LivePageCard: View {
     var title: String?
     var html: String

@@ -439,9 +439,10 @@ fn a_follow_up_on_a_machine_takes_a_big_file_in_pieces_and_a_typed_mention() {
 }
 
 /// What can't go says why and leaves the draft as it was: a machine on an older Trek (no
-/// `machine_files`), a folder. Cancel stops files on their way, and nothing is sent.
+/// `machine_files`). Cancel stops files on their way, and nothing is sent. (A folder goes, as a
+/// zip: `a_folder_attached_here_goes_to_the_machine_as_a_zip_of_its_files`.)
 #[test]
-fn an_older_trek_a_folder_and_cancel_leave_the_draft_as_it_was() {
+fn an_older_trek_and_cancel_leave_the_draft_as_it_was() {
     run(async |cx| {
         let trek = open(cx);
         let link = serve_as_machine_b(&trek, cx);
@@ -504,24 +505,6 @@ fn an_older_trek_a_folder_and_cancel_leave_the_draft_as_it_was() {
                 .unwrap();
             m.entry.paired.features = features;
         });
-
-        // A folder can't go yet.
-        composer.update(cx, |c, cx| c.add_files(std::slice::from_ref(&dir), cx));
-        trek.press(cx, "enter");
-        trek.render(cx);
-        still(&trek, cx);
-        assert!(
-            heard
-                .lock()
-                .unwrap()
-                .toasts
-                .iter()
-                .any(|t| t.starts_with("Folders can't go to Machine B yet.")),
-            "{:?}",
-            heard.lock().unwrap().toasts
-        );
-        // Taken off, as its tile's × does.
-        composer.update(cx, |c, cx| c.remove_attachment(&dir, cx));
 
         // On its way (a file big enough to take a while), then Cancel: nothing went, and the
         // draft is as it was.
@@ -2691,5 +2674,983 @@ fn background_work_of_a_thread_on_another_machine_shows_reads_and_stops_from_her
         .await;
         trek.render(cx);
         assert!(!trek.visible(cx, "background-strip"));
+    });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Everything from here (0.4.68): what used to say "Do that in Trek on <machine>"
+// ---------------------------------------------------------------------------------------------
+
+/// The id here of the message `text` in thread `id`.
+fn message_id(trek: &Trek, cx: &TestAppContext, id: &str, text: &str) -> String {
+    trek.read(cx, |ws, _| {
+        let live = ws.live.get(id).expect("the thread, open here");
+        let ix = live
+            .items
+            .iter()
+            .position(|i| matches!(i, Item::User { text: t, .. } if t == text))
+            .unwrap_or_else(|| panic!("no message {text:?} in {:?}", live.items.to_vec()));
+        live.items.id_at(ix).unwrap().to_string()
+    })
+}
+
+/// The id here of what ends the last turn of thread `id`.
+fn last_turn_end(trek: &Trek, cx: &TestAppContext, id: &str) -> String {
+    trek.read(cx, |ws, _| {
+        let live = ws.live.get(id).expect("the thread, open here");
+        let ix = live
+            .items
+            .iter()
+            .rposition(trek_core::rewind::ends_turn)
+            .expect("a finished turn");
+        live.items.id_at(ix).unwrap().to_string()
+    })
+}
+
+/// Wait until thread `id` here is idle, loaded and holds what B's `theirs` holds of the user's
+/// messages.
+async fn settled(trek: &Trek, cx: &mut TestAppContext, id: &str, theirs: &str) {
+    let (id, theirs) = (id.to_string(), theirs.to_string());
+    trek.wait_explained(
+        cx,
+        "B's turn over, and the same messages here",
+        REAL_TIME_LIMIT,
+        |ws| {
+            let b_idle = ws
+                .live
+                .get(&theirs)
+                .is_some_and(|l| l.turn_started.is_none() && l.permissions.is_empty());
+            let here_idle = ws
+                .thread(&id)
+                .is_some_and(|t| t.run_state != RunState::Working)
+                && ws.live.get(&id).is_some_and(|l| l.turn_started.is_none());
+            b_idle && here_idle && typed_in(ws, &id) == typed_in(ws, &theirs)
+        },
+        |ws| {
+            format!(
+                "here {:?} ({:?}), there {:?}",
+                typed_in(ws, &id),
+                ws.thread(&id).map(|t| t.run_state),
+                typed_in(ws, &theirs)
+            )
+        },
+    )
+    .await;
+}
+
+/// What went back into a composer (`ComposeIn`), from now on: (thread, text, to edit).
+fn composed(
+    trek: &Trek,
+    cx: &mut TestAppContext,
+) -> (
+    Arc<Mutex<Vec<(String, String, bool)>>>,
+    gpui_kit::Subscription,
+) {
+    use trek_app::workspace::WorkspaceEvent;
+    let got = Arc::new(Mutex::new(vec![]));
+    let seen = got.clone();
+    let sub = trek.update(cx, |_, cx| {
+        cx.subscribe_self(move |_, e: &WorkspaceEvent, _| {
+            if let WorkspaceEvent::ComposeIn {
+                thread, text, edit, ..
+            } = e
+            {
+                seen.lock()
+                    .unwrap()
+                    .push((thread.clone(), text.clone(), edit.is_some()));
+            }
+        })
+    });
+    (got, sub)
+}
+
+/// His report: "I can't rewind, edit a sent message, or change things" on a thread that runs on
+/// the paired machine; each said "Do that in Trek on <machine>". Now each is asked of the
+/// machine, which does it to its own thread: a rewind takes the message and what followed it
+/// back there (and the message comes back into this composer), an edited message is sent in its
+/// place, a retry runs the turn again, a fork opens the machine's new thread here, Snooze and
+/// Wake reach it, and Delete deletes it there.
+#[test]
+fn rewind_edit_retry_fork_snooze_and_delete_of_a_thread_on_machine_b_happen_there() {
+    run(async |cx| {
+        use trek_app::workspace::ForkAt;
+        let trek = open(cx);
+        let link = serve_as_machine_b(&trek, cx);
+        pair(&trek, cx, link).await;
+        let (heard, _toasts) = listen(&trek, cx);
+        let (id, theirs) = start_on_b(&trek, cx, "first message").await;
+        settled(&trek, cx, &id, &theirs).await;
+        trek.type_text(cx, "second message");
+        trek.press(cx, "enter");
+        trek.wait(cx, "B to have the follow-up", |ws| {
+            ws.live
+                .get(&theirs)
+                .is_some_and(|l| said(&l.items, "second message"))
+        })
+        .await;
+        settled(&trek, cx, &id, &theirs).await;
+
+        // Rewind to before the second message: gone there and here, back in the composer.
+        let (back, _sub) = composed(&trek, cx);
+        let second = message_id(&trek, cx, &id, "second message");
+        let now = trek.update(cx, |ws, cx| ws.rewind(&id, &second, true, cx));
+        assert_eq!(now, None, "the machine takes it back; nothing is done here");
+        trek.wait_explained(
+            cx,
+            "B to have rewound",
+            REAL_TIME_LIMIT,
+            |ws| typed_in(ws, &theirs) == ["first message"],
+            |ws| {
+                format!(
+                    "{:?}, toasts {:?}",
+                    typed_in(ws, &theirs),
+                    heard.lock().unwrap().toasts
+                )
+            },
+        )
+        .await;
+        settled(&trek, cx, &id, &theirs).await;
+        trek.wait(cx, "the message back in a composer", |_| {
+            !back.lock().unwrap().is_empty()
+        })
+        .await;
+        assert_eq!(
+            back.lock().unwrap().as_slice(),
+            [(id.clone(), "second message".to_string(), false)]
+        );
+
+        // Edit the first message and send it again: B has the new words in place of the old.
+        let first = message_id(&trek, cx, &id, "first message");
+        let sent = trek.update(cx, |ws, cx| {
+            ws.edit_and_resend(
+                &id,
+                &first,
+                "first message, edited".into(),
+                vec![],
+                false,
+                cx,
+            )
+        });
+        assert!(sent, "asked of the machine");
+        trek.wait_explained(
+            cx,
+            "B to have the edited message alone",
+            REAL_TIME_LIMIT,
+            |ws| typed_in(ws, &theirs) == ["first message, edited"],
+            |ws| {
+                format!(
+                    "{:?}, toasts {:?}",
+                    typed_in(ws, &theirs),
+                    heard.lock().unwrap().toasts
+                )
+            },
+        )
+        .await;
+        settled(&trek, cx, &id, &theirs).await;
+
+        // Retry the turn: B runs it again (a new turn end follows the same message).
+        let end = last_turn_end(&trek, cx, &id);
+        let ended = |ws: &trek_app::workspace::Workspace, id: &str| {
+            ws.live.get(id).and_then(|l| {
+                l.items.iter().rev().find_map(|i| match i {
+                    Item::TurnEnd { at, .. } => Some(*at),
+                    _ => None,
+                })
+            })
+        };
+        let before = trek
+            .read(cx, |ws, _| ended(ws, &theirs))
+            .expect("a finished turn");
+        cx.background_executor.timer(Duration::from_millis(5)).await;
+        trek.update(cx, |ws, cx| ws.retry(&id, &end, None, false, cx));
+        trek.wait_explained(
+            cx,
+            "B to have run the turn again",
+            REAL_TIME_LIMIT,
+            |ws| {
+                ended(ws, &theirs).is_some_and(|at| at > before)
+                    && typed_in(ws, &theirs) == ["first message, edited"]
+            },
+            |ws| {
+                format!(
+                    "ended {:?} (was {before}), typed {:?}, toasts {:?}",
+                    ended(ws, &theirs),
+                    typed_in(ws, &theirs),
+                    heard.lock().unwrap().toasts
+                )
+            },
+        )
+        .await;
+        settled(&trek, cx, &id, &theirs).await;
+
+        // Fork the whole conversation: a new thread on B, open here.
+        let before: Vec<String> = trek.read(cx, |ws, _| {
+            ws.threads.iter().map(|t| t.id.clone()).collect()
+        });
+        let forked = trek.update(cx, |ws, cx| {
+            ws.fork_thread(&id, ForkAt::End, &Scope::Main, cx)
+        });
+        assert_eq!(forked, None, "it opens once the machine has made it");
+        trek.wait_explained(
+            cx,
+            "the fork to open here",
+            REAL_TIME_LIMIT,
+            |ws| matches!(&ws.route, Route::Thread(open) if is_remote(open) && *open != id),
+            |ws| {
+                format!(
+                    "route {:?}, toasts {:?}",
+                    ws.route,
+                    heard.lock().unwrap().toasts
+                )
+            },
+        )
+        .await;
+        let fork = trek.thread_id(cx);
+        let (_, fork_there) = machines::split_id(&fork).unwrap();
+        assert!(
+            !before.contains(&fork_there.to_string()),
+            "a new thread of B's"
+        );
+        trek.wait(cx, "the fork's conversation here", |ws| {
+            ws.live
+                .get(&fork)
+                .is_some_and(|l| said(&l.items, "first message, edited"))
+        })
+        .await;
+
+        // Snooze and wake, from the thread menu's items.
+        trek.update(cx, |ws, cx| ws.snooze(&id, 1, cx));
+        trek.wait(cx, "B's thread snoozed", |ws| {
+            ws.thread(&theirs)
+                .is_some_and(|t| t.snoozed_until.is_some())
+                && ws.thread(&id).is_some_and(|t| t.snoozed_until.is_some())
+        })
+        .await;
+        trek.update(cx, |ws, cx| ws.unsnooze(&id, cx));
+        trek.wait(cx, "B's thread awake", |ws| {
+            ws.thread(&id).is_some_and(|t| {
+                t.snoozed_until
+                    .is_none_or(|u| u <= trek_core::store::now_ms())
+            })
+        })
+        .await;
+
+        // Delete, once confirmed: gone from B, and from its list here.
+        trek.update(cx, |ws, cx| ws.delete_thread(&id, cx));
+        trek.wait_explained(
+            cx,
+            "the thread gone from B and from here",
+            REAL_TIME_LIMIT,
+            |ws| ws.thread(&theirs).is_none() && ws.thread(&id).is_none(),
+            |ws| {
+                format!(
+                    "there {}, here {}, toasts {:?}",
+                    ws.thread(&theirs).is_some(),
+                    ws.thread(&id).is_some(),
+                    heard.lock().unwrap().toasts
+                )
+            },
+        )
+        .await;
+        let toasts = heard.lock().unwrap().toasts.clone();
+        assert!(
+            !toasts.iter().any(|t| t.contains("Do that in Trek")),
+            "{toasts:?}"
+        );
+    });
+}
+
+/// The confirmation before a rewind on another machine lists the files that machine would put
+/// back, as it says (`turn_preview`): none of this computer's files are looked at.
+#[test]
+fn the_rewind_confirmation_of_a_machines_thread_says_what_the_machine_would_put_back() {
+    run(async |cx| {
+        let trek = open(cx);
+        let link = serve_as_machine_b(&trek, cx);
+        pair(&trek, cx, link).await;
+        let (id, theirs) = start_on_b(&trek, cx, "first message").await;
+        settled(&trek, cx, &id, &theirs).await;
+        let first = message_id(&trek, cx, &id, "first message");
+        let preview = trek
+            .read(cx, |ws, _| {
+                ws.machine_turn_preview(&id, &first, tr::TurnAction::Rewind)
+            })
+            .expect("a connected machine is asked");
+        let got = Arc::new(Mutex::new(None));
+        let put = got.clone();
+        cx.update(|cx| {
+            cx.spawn(async move |_| {
+                *put.lock().unwrap() = Some(preview.await.files.map(|f| f.len()));
+            })
+            .detach()
+        });
+        trek.wait(cx, "B's answer", |_| got.lock().unwrap().is_some())
+            .await;
+        let answer = got.lock().unwrap().take();
+        // The test's project is no git repository: B says so, in its own words.
+        let why = answer
+            .expect("B's answer")
+            .expect_err("no checkpoint there");
+        assert!(
+            !why.is_empty() && !why.contains("needs a newer Trek"),
+            "{why}"
+        );
+    });
+}
+
+/// A secret a thread on machine B asks for is given from here: its card is drawn in the thread
+/// here (in place of B's "Enter it on <B>" notice), its value goes to B's private file for the
+/// thread, and neither transcript holds it. Declined from here, B's agent is told so. A machine
+/// on a Trek before `secret_answer` keeps its notice, which says which Trek it needs.
+#[test]
+fn a_secret_asked_for_on_machine_b_is_given_from_here() {
+    use trek_app::ipc::Reply;
+    run(async |cx| {
+        let trek = open(cx);
+        let link = serve_as_machine_b(&trek, cx);
+        pair(&trek, cx, link).await;
+        let (id, theirs) = start_on_b(&trek, cx, "open the pull request").await;
+        settled(&trek, cx, &id, &theirs).await;
+        let value = "not-a-real-secret-0468";
+
+        let (tx, rx) = async_channel::bounded(1);
+        trek.update(cx, |ws, cx| {
+            ws.ask_for_secret(&theirs, "GITHUB_TOKEN", "To open the pull request.", tx, cx)
+        });
+        trek.wait_explained(
+            cx,
+            "the secret's card here",
+            REAL_TIME_LIMIT,
+            |ws| ws.asks_for_secret(&id),
+            |ws| format!("{:?}", ws.live.get(&id).map(|l| l.items.to_vec())),
+        )
+        .await;
+        let notices = |ws: &trek_app::workspace::Workspace| -> Vec<String> {
+            ws.live
+                .get(&id)
+                .map(|l| {
+                    l.items
+                        .iter()
+                        .filter_map(|i| match i {
+                            Item::Notice { text } => Some(text.clone()),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        assert!(
+            !trek
+                .read(cx, |ws, _| notices(ws))
+                .iter()
+                .any(|n| n.contains("Enter it on")),
+            "the card stands for B's notice"
+        );
+        trek.render(cx);
+        let request = trek.request(cx, &id);
+        trek.update(cx, |ws, cx| {
+            ws.answer(&id, &request, vec![(String::new(), value.to_string())], cx)
+        });
+        trek.wait(cx, "B's agent to be told", |_| !rx.is_empty())
+            .await;
+        let got = Some(rx.try_recv());
+        let Some(Ok(Reply::Done(Ok(told)))) = got else {
+            panic!("B's agent wasn't told the secret was saved");
+        };
+        // Its words, not their JSON (a Windows path's backslashes are doubled in that).
+        let told = told["text"].as_str().unwrap_or_default().to_string();
+        assert!(told.contains("GITHUB_TOKEN is saved in the file"), "{told}");
+        assert!(
+            !told.contains(value),
+            "the agent gets the path, not the value"
+        );
+        let kept = trek_core::paths::data_dir()
+            .join("session-secrets")
+            .join(&theirs)
+            .join("GITHUB_TOKEN");
+        assert_eq!(
+            std::fs::read_to_string(&kept).ok().as_deref(),
+            Some(value),
+            "saved in B's private file for the thread ({})",
+            kept.display()
+        );
+        assert!(
+            told.contains(&kept.display().to_string()),
+            "the agent is given that file's path: {told}"
+        );
+        trek.wait(cx, "the card gone here", |ws| !ws.asks_for_secret(&id))
+            .await;
+        for thread in [&id, &theirs] {
+            let items = format!("{:?}", trek.items(cx, thread));
+            assert!(!items.contains(value), "in a transcript: {items}");
+        }
+
+        // Declined from here: B's agent hears no.
+        let (tx, rx) = async_channel::bounded(1);
+        trek.update(cx, |ws, cx| {
+            ws.ask_for_secret(&theirs, "NPM_TOKEN", "To publish.", tx, cx)
+        });
+        trek.wait(cx, "the second card here", |ws| ws.asks_for_secret(&id))
+            .await;
+        let request = trek.request(cx, &id);
+        trek.update(cx, |ws, cx| {
+            ws.respond(&id, &request, trek_agents::Decision::Deny, cx)
+        });
+        trek.wait(cx, "B's card answered", |ws| !ws.asks_for_secret(&theirs))
+            .await;
+        assert!(matches!(rx.try_recv(), Ok(Reply::Done(Err(_)))), "declined");
+
+        // B on a Trek before `secret_answer`: no card here, and the notice says what B needs.
+        trek.update(cx, |ws, _| {
+            let m = ws
+                .machines
+                .list
+                .iter_mut()
+                .find(|m| m.id() == "machine-b")
+                .unwrap();
+            m.entry
+                .paired
+                .features
+                .retain(|f| f != tr::feature::SECRET_ANSWER);
+        });
+        let (tx, _rx) = async_channel::bounded(1);
+        trek.update(cx, |ws, cx| {
+            ws.ask_for_secret(&theirs, "FLY_TOKEN", "To deploy.", tx, cx)
+        });
+        trek.wait_explained(
+            cx,
+            "B's notice here, saying which Trek it needs",
+            REAL_TIME_LIMIT,
+            |ws| {
+                notices(ws).iter().any(|n| {
+                    n.starts_with("Needs FLY_TOKEN.")
+                        && n.ends_with("Machine B needs Trek 0.4.68 or later to take it from here.")
+                })
+            },
+            |ws| format!("{:?}", notices(ws)),
+        )
+        .await;
+        assert!(!trek.read(cx, |ws, _| ws.asks_for_secret(&id)));
+    });
+}
+
+/// A folder attached here goes to the machine as one zip of its files (0.4.67 refused it:
+/// "Folders can't go to Machine B yet"): what git ignores stays behind, B's agent is given B's
+/// path to `<folder> folder.zip`, and the message here still shows this computer's folder.
+#[test]
+fn a_folder_attached_here_goes_to_the_machine_as_a_zip_of_its_files() {
+    run(async |cx| {
+        let trek = open(cx);
+        let link = serve_as_machine_b(&trek, cx);
+        pair(&trek, cx, link).await;
+        let (id, theirs) = start_on_b(&trek, cx, "hello there").await;
+        settled(&trek, cx, &id, &theirs).await;
+        let dir = attachments_dir("folder").join("assets");
+        std::fs::create_dir_all(dir.join("icons")).unwrap();
+        std::fs::write(dir.join("readme.txt"), "what these are").unwrap();
+        std::fs::write(dir.join("icons/a.svg"), "<svg/>").unwrap();
+        std::fs::write(dir.join(".gitignore"), "build/\n").unwrap();
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::write(dir.join("build/out.bin"), vec![7u8; 4096]).unwrap();
+        let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+        composer.update(cx, |c, cx| c.add_files(std::slice::from_ref(&dir), cx));
+        trek.type_text(cx, "use these");
+        trek.press(cx, "enter");
+        let (heard, _sub) = listen(&trek, cx);
+        trek.wait_explained(
+            cx,
+            "B's thread to have the message with the folder",
+            REAL_TIME_LIMIT,
+            |ws| b_message(ws, &theirs, |t| t.starts_with("use these")).is_some(),
+            |_| format!("toasts {:?}", heard.lock().unwrap().toasts),
+        )
+        .await;
+        let (text, _) = trek.read(cx, |ws, _| {
+            b_message(ws, &theirs, |t| t.starts_with("use these")).unwrap()
+        });
+        let named = trek_core::media::mentioned_files(&text, None);
+        assert_eq!(named.len(), 1, "{text}");
+        assert!(
+            named[0].to_string_lossy().ends_with("assets folder.zip"),
+            "{text}"
+        );
+        assert_eq!(named[0].parent(), Some(kept_on_b().as_path()));
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&named[0]).unwrap()).unwrap();
+        let mut names: Vec<String> = (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().unwrap().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "assets/.gitignore",
+                "assets/icons/a.svg",
+                "assets/readme.txt"
+            ],
+            "its files under its own name; what git ignores stayed behind"
+        );
+        // Here, the message names this computer's folder.
+        trek.wait(cx, "the message here", |ws| {
+            ws.live.get(&id).is_some_and(|l| {
+                l.items
+                    .iter()
+                    .any(|i| matches!(i, Item::User { text, .. } if text.starts_with("use these")))
+            })
+        })
+        .await;
+        let here = trek.read(cx, |ws, _| {
+            ws.live
+                .get(&id)
+                .unwrap()
+                .items
+                .iter()
+                .find_map(|i| match i {
+                    Item::User { text, .. } if text.starts_with("use these") => Some(text.clone()),
+                    _ => None,
+                })
+        });
+        assert!(
+            here.as_deref()
+                .is_some_and(|t| t.contains(&dir.display().to_string())),
+            "{here:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    });
+}
+
+/// A long thread on another machine opens with its last items (as on a phone), and the ones
+/// before them are read from the machine in pages until its start is here too. Until 0.4.67 they
+/// never came: the thread began in the middle.
+#[test]
+fn a_long_thread_on_another_machine_reads_its_start_in_pages() {
+    run(async |cx| {
+        let trek = open(cx);
+        let asked = Arc::new(Mutex::new(Vec::<(String, u32)>::new()));
+        let pages = asked.clone();
+        let (link, machine) = scripted("Machine C", move |req, _| match req {
+            // The thread has 1,000 messages: opened, it sends the last 200.
+            tr::HostRequest::Transcript { reply, .. } => {
+                let _ = reply.send(Ok(tr::Transcript {
+                    seq: 1,
+                    items: (800..1000)
+                        .map(|i| typed(i, &format!("message {i}")))
+                        .collect(),
+                    base: 0,
+                    more: true,
+                }));
+            }
+            tr::HostRequest::TranscriptBefore {
+                before,
+                limit,
+                reply,
+                ..
+            } => {
+                pages.lock().unwrap().push((before.clone(), limit));
+                let end: usize = before[1..].parse().unwrap();
+                let start = end.saturating_sub(limit as usize);
+                let _ = reply.send(Ok(tr::TranscriptPage {
+                    items: (start..end)
+                        .map(|i| typed(i, &format!("message {i}")))
+                        .collect(),
+                    more: start > 0,
+                }));
+            }
+            tr::HostRequest::MarkSeen { reply, .. } => {
+                let _ = reply.send(Ok(()));
+            }
+            _ => {}
+        });
+        pair_scripted(&trek, cx, "machine-c", link).await;
+        machine.push(tr::HostEvent::Thread(tr::ThreadSummary {
+            id: "t-long".into(),
+            title: "A long one".into(),
+            ..Default::default()
+        }));
+        let id = local_id("machine-c", "t-long");
+        trek.wait(cx, "its row here", |ws| ws.thread(&id).is_some())
+            .await;
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
+        trek.wait_explained(
+            cx,
+            "the whole thread here",
+            REAL_TIME_LIMIT,
+            |ws| typed_in(ws, &id).len() == 1000,
+            |ws| {
+                format!(
+                    "{} here, asked {:?}",
+                    typed_in(ws, &id).len(),
+                    asked.lock().unwrap()
+                )
+            },
+        )
+        .await;
+        let all = trek.read(cx, |ws, _| typed_in(ws, &id));
+        assert_eq!(all.first().map(String::as_str), Some("message 0"));
+        assert_eq!(all.last().map(String::as_str), Some("message 999"));
+        assert!(all.windows(2).all(|w| w[0] != w[1]), "each once, in order");
+        assert_eq!(
+            asked.lock().unwrap().as_slice(),
+            [
+                ("i800".to_string(), tr::MAX_PAGE),
+                ("i300".to_string(), tr::MAX_PAGE)
+            ],
+            "a page at a time, each before what's here"
+        );
+    });
+}
+
+/// The composer of a thread on another machine lists that machine's agents and models, and
+/// offers Full access only when that machine has it unlocked: its lock is its own to lift.
+#[test]
+fn a_machines_thread_is_set_to_what_the_machine_has_and_its_own_full_access_lock() {
+    run(async |cx| {
+        let trek = open(cx);
+        let link = serve_as_machine_b(&trek, cx);
+        pair(&trek, cx, link).await;
+        let (id, theirs) = start_on_b(&trek, cx, "hello there").await;
+        settled(&trek, cx, &id, &theirs).await;
+        let scope = Scope::Main;
+        // B's own list (B is this workspace, so the same agents: what's read is B's snapshot).
+        let (here, there) = trek.read(cx, |ws, _| {
+            let m = ws.machines.get("machine-b").unwrap();
+            (ws.picker_agents_in(&scope), m.agent_ids())
+        });
+        assert!(!there.is_empty());
+        assert_eq!(here, there, "the rail lists the machine's agents");
+        // An agent B doesn't have offers no models here, whatever this computer has.
+        trek.update(cx, |ws, _| {
+            let m = ws
+                .machines
+                .list
+                .iter_mut()
+                .find(|m| m.id() == "machine-b")
+                .unwrap();
+            m.agents.clear();
+            m.full_access = false;
+        });
+        trek.read(cx, |ws, _| {
+            assert!(ws.models_for_in(&scope, &common::mock()).is_empty());
+            assert!(ws.picker_agents_in(&scope).is_empty());
+            assert_eq!(
+                ws.full_access_in(&scope),
+                Err("Machine B".to_string()),
+                "locked there: said with the machine's name"
+            );
+        });
+        trek.update(cx, |ws, _| {
+            ws.machines
+                .list
+                .iter_mut()
+                .find(|m| m.id() == "machine-b")
+                .unwrap()
+                .full_access = true;
+        });
+        assert_eq!(trek.read(cx, |ws, _| ws.full_access_in(&scope)), Ok(true));
+        // A thread of this computer still reads this computer's settings.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: None }, cx));
+        trek.update(cx, |ws, cx| ws.set_draft_machine(None, None, cx));
+        let unlocked = trek.read(cx, |ws, _| ws.settings.permissions.full_access_unlocked);
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.full_access_in(&scope)),
+            Ok(unlocked)
+        );
+    });
+}
+
+/// A thread on another machine that starts waiting on the user, finishes unseen or fails calls
+/// for them here, as one of this computer's does (0.4.67 raised nothing for a machine's thread).
+#[test]
+fn a_machines_thread_that_needs_you_finishes_or_fails_says_so_here() {
+    use trek_app::workspace::attention::Why;
+    let row = |state: tr::RunState, needs: Option<(tr::NeedsKind, &str)>, unseen: bool| {
+        tr::ThreadSummary {
+            id: "t".into(),
+            title: "Fix the build".into(),
+            run_state: state,
+            needs: needs.map(|(kind, text)| tr::Needs {
+                kind,
+                text: text.into(),
+            }),
+            unseen,
+            ..Default::default()
+        }
+    };
+    let working = row(tr::RunState::Working, None, false);
+    let asks = row(
+        tr::RunState::NeedsYou,
+        Some((tr::NeedsKind::Approval, "run cargo test")),
+        false,
+    );
+    assert_eq!(
+        machines::row_alert(Some(&working), &asks),
+        Some(Why::Waiting(Some("run cargo test".into())))
+    );
+    assert_eq!(machines::row_alert(Some(&asks), &asks), None, "said once");
+    assert_eq!(
+        machines::row_alert(None, &asks),
+        None,
+        "a row first heard of is old news"
+    );
+    assert_eq!(
+        machines::row_alert(Some(&working), &row(tr::RunState::Idle, None, true)),
+        Some(Why::Finished)
+    );
+    assert_eq!(
+        machines::row_alert(Some(&working), &row(tr::RunState::Idle, None, false)),
+        None,
+        "finished while being read"
+    );
+    assert_eq!(
+        machines::row_alert(Some(&working), &row(tr::RunState::Failed, None, true)),
+        Some(Why::Failed(None))
+    );
+    let limit = row(
+        tr::RunState::Idle,
+        Some((tr::NeedsKind::Limit, "Usage limit reached")),
+        true,
+    );
+    assert_eq!(machines::row_alert(Some(&working), &limit), None);
+}
+
+/// His long `/goal …` prompt, as it reads in his screenshot: four paragraphs and then some.
+const LONG_PROMPT: &str = "/goal keep patching and debugging until it fully works, also fixing the black screen from happening\nThe debugger I built earlier was broken. It told the game every exception was handled, so one normal, already-caught fault repeated about 770,000 times until the game died. The \"corrupted hook\" diagnosis came from that bug, not from the Live Editor.\nSome of my patches made things worse. The four functions I labelled DX12 installers actually install the Live Editor's game hooks, so returning early from them switches off editor features. The other patched function writes database fields, so editing would silently do nothing.\nThe earlier run may never have crashed. It reached Main Menu reached /frontend/boot and sat there with the hook thread parked, which looks exactly like a hang from outside but is the game waiting on a shader cache that never finishes compiling when the overlay is injected before the device exists.\nSo: first prove whether it crashes at all. Run it unpatched with the fixed debugger and log every first-chance exception with its module and offset, then stop at the first one nobody handles.\nThen put the patches back one at a time, each behind its own flag, and note which editor feature each one switches off.";
+
+/// How tall the text of the first message on screen is drawn, and how wide.
+fn message_text(trek: &Trek, cx: &mut TestAppContext) -> (f32, f32) {
+    use gpui_kit::test::TestWindowExt as _;
+    trek.render(cx);
+    trek.window(cx, |window, _| {
+        let b = window
+            .try_find(("user-text", 0usize))
+            .expect("the message's text")
+            .bounds();
+        (f32::from(b.size.height), f32::from(b.size.width))
+    })
+}
+
+/// His report: "Show more" on his long prompt showed no more (the bubble said "Show less" over
+/// the same cut text), and its last lines ran off the bubble's right edge. Closed, a long message
+/// is ten lines, all wrapped; open, it's all there, wrapped (taller by the lines that were cut).
+/// It read as a fault of threads on another machine because
+/// that's where he sent it: a thread here did the same, so both are checked.
+#[test]
+fn show_more_opens_a_long_message_whole_and_wrapped_here_and_on_a_machine() {
+    run(async |cx| {
+        let trek = open(cx);
+        let line = trek.read(cx, |ws, _| ws.settings.appearance.transcript_font_size()) * 1.5;
+        let check = |trek: &Trek, cx: &mut TestAppContext, what: &str| {
+            let (closed, width) = message_text(trek, cx);
+            // A line is drawn on whole device pixels, so ten of them are within half a line of
+            // ten times the font's own line height.
+            assert!(
+                (closed - line * 10.).abs() <= line / 2.,
+                "{what}: closed, ten lines ({closed} for lines of {line})"
+            );
+            trek.click(cx, ("user-more", 0usize));
+            let (open, open_width) = message_text(trek, cx);
+            assert!(
+                open >= closed + line * 4.,
+                "{what}: Show more shows more ({closed} closed, {open} open)"
+            );
+            assert_eq!(width, open_width, "{what}: as wide open as closed");
+        };
+        // A thread of this computer.
+        let id = trek.send(cx, LONG_PROMPT);
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        check(&trek, cx, "here");
+        // The same message to a thread on machine B, read back from it.
+        let link = serve_as_machine_b(&trek, cx);
+        pair(&trek, cx, link).await;
+        let (id, theirs) = start_on_b(&trek, cx, LONG_PROMPT).await;
+        settled(&trek, cx, &id, &theirs).await;
+        assert_eq!(
+            trek.read(cx, |ws, _| typed_in(ws, &id)),
+            [LONG_PROMPT],
+            "the whole message comes back from the machine, line ends and all"
+        );
+        check(&trek, cx, "on machine B");
+    });
+}
+
+/// A thread of the scripted machine `host`, listed and open here.
+async fn open_scripted_thread(
+    trek: &Trek,
+    cx: &mut TestAppContext,
+    machine: &tr::RemoteHandle,
+    host: &str,
+    thread: &str,
+) -> String {
+    machine.push(tr::HostEvent::Thread(tr::ThreadSummary {
+        id: thread.into(),
+        title: "A thread there".into(),
+        ..Default::default()
+    }));
+    let id = local_id(host, thread);
+    trek.wait(cx, "its row here", |ws| ws.thread(&id).is_some())
+        .await;
+    trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
+    trek.wait(cx, "its transcript here", |ws| {
+        ws.live
+            .get(&id)
+            .is_some_and(|l| l.loaded && !l.items.is_empty())
+    })
+    .await;
+    trek.render(cx);
+    id
+}
+
+/// What a review of the first cut found. A machine's item ids are positions, so once a thread is
+/// rewound there and goes another way, `i0` is another message. A long message opened here with
+/// "Show more" stayed "open" under that id, and a rewind confirmation left waiting would have
+/// asked the machine to rewind whatever now had its id. When the machine says the thread was
+/// rewritten, nothing kept by id stays: the new message under the id shows cut, and the
+/// confirmation is closed.
+#[test]
+fn a_machines_thread_rewritten_there_lets_go_of_what_was_open_by_its_item_ids_here() {
+    run(async |cx| {
+        // Another long message altogether, for the id the first one had.
+        let other = format!("On second thoughts, start over.\n{LONG_PROMPT}");
+        let trek = open(cx);
+        let said: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![LONG_PROMPT.to_string()]));
+        let now = said.clone();
+        let (link, machine) = scripted("Machine C", move |req, _| match req {
+            tr::HostRequest::Transcript { reply, .. } => {
+                let said = now.lock().unwrap();
+                let texts: Vec<&str> = said.iter().map(String::as_str).collect();
+                let _ = reply.send(Ok(transcript_of(&texts)));
+            }
+            tr::HostRequest::MarkSeen { reply, .. } => {
+                let _ = reply.send(Ok(()));
+            }
+            _ => {}
+        });
+        pair_scripted(&trek, cx, "machine-c", link).await;
+        let id = open_scripted_thread(&trek, cx, &machine, "machine-c", "t-rw").await;
+        let line = trek.read(cx, |ws, _| ws.settings.appearance.transcript_font_size()) * 1.5;
+
+        // Opened whole.
+        let (closed, _) = message_text(&trek, cx);
+        trek.click(cx, ("user-more", 0usize));
+        let (open, _) = message_text(&trek, cx);
+        assert!(open >= closed + line * 4., "{closed} closed, {open} open");
+
+        // Rewound there and gone another way: another long message is `i0` now.
+        *said.lock().unwrap() = vec![other.clone()];
+        machine.push(tr::HostEvent::TranscriptReset("t-rw".into()));
+        trek.wait_explained(
+            cx,
+            "the rewritten thread here",
+            REAL_TIME_LIMIT,
+            |ws| typed_in(ws, &id) == [other.as_str()],
+            |ws| format!("{:?}", typed_in(ws, &id)),
+        )
+        .await;
+        let (now_shown, _) = message_text(&trek, cx);
+        assert!(
+            (now_shown - line * 10.).abs() <= line / 2.,
+            "the message that took the id shows cut, not opened in the other's place ({now_shown})"
+        );
+
+        // A rewind of that message asked about, and the thread rewritten again before it's
+        // answered: the confirmation doesn't wait to act on whatever has the id next.
+        trek.click(cx, ("rewind-user", 0usize));
+        trek.render(cx);
+        let view = trek.thread_view(cx);
+        assert!(
+            view.read_with(cx, |v, _| v.confirm_files()).is_some(),
+            "the confirmation is up"
+        );
+        let before = trek.read(cx, |ws, _| ws.live.get(&id).map_or(0, |l| l.replaced));
+        *said.lock().unwrap() = vec!["a short one".to_string()];
+        machine.push(tr::HostEvent::TranscriptReset("t-rw".into()));
+        trek.wait(cx, "the thread rewritten again", |ws| {
+            typed_in(ws, &id) == ["a short one"]
+        })
+        .await;
+        trek.render(cx);
+        assert_eq!(
+            view.read_with(cx, |v, _| v.confirm_files()),
+            None,
+            "no confirmation waits to act on an id that names another message"
+        );
+        // An edit begun before a rewrite is refused by the same count (`Editing::replaced`).
+        assert!(trek.read(cx, |ws, _| ws.live.get(&id).map_or(0, |l| l.replaced)) > before);
+    });
+}
+
+/// What a review of the first cut found: an edited message is the machine's rewind followed by
+/// a send, and when the send then failed (the link dropped between the two, the machine refused
+/// it) the edited words were gone with only a toast to show for it. They go back into the
+/// composer, as a message that can't be sent to a machine out of reach does.
+#[test]
+fn an_edited_message_the_machine_then_doesnt_take_goes_back_into_the_composer() {
+    run(async |cx| {
+        let trek = open(cx);
+        let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = asked.clone();
+        let (link, machine) = scripted("Machine C", move |req, _| match req {
+            tr::HostRequest::Transcript { reply, .. } => {
+                let _ = reply.send(Ok(transcript_of(&["first message"])));
+            }
+            tr::HostRequest::MarkSeen { reply, .. } => {
+                let _ = reply.send(Ok(()));
+            }
+            // The rewind goes through.
+            tr::HostRequest::TurnAction { req, reply } => {
+                seen.lock()
+                    .unwrap()
+                    .push(format!("{:?} {}", req.action, req.item_id));
+                let _ = reply.send(Ok(tr::TurnActionDone::default()));
+            }
+            // The message that follows it doesn't.
+            tr::HostRequest::Send { req, reply } => {
+                seen.lock().unwrap().push(format!("send {}", req.text));
+                let _ = reply.send(Err(tr::HostError::conflict("The thread is busy")));
+            }
+            _ => {}
+        });
+        pair_scripted(&trek, cx, "machine-c", link).await;
+        let id = open_scripted_thread(&trek, cx, &machine, "machine-c", "t-edit").await;
+        let (heard, _sub) = listen(&trek, cx);
+        let first = message_id(&trek, cx, &id, "first message");
+        let sent = trek.update(cx, |ws, cx| {
+            ws.edit_and_resend(
+                &id,
+                &first,
+                "first message, edited".into(),
+                vec![],
+                false,
+                cx,
+            )
+        });
+        assert!(sent, "asked of the machine");
+        trek.wait_explained(
+            cx,
+            "the edited words back in the composer",
+            REAL_TIME_LIMIT,
+            |_| !heard.lock().unwrap().given_back.is_empty(),
+            |_| {
+                format!(
+                    "asked {:?}, toasts {:?}",
+                    asked.lock().unwrap(),
+                    heard.lock().unwrap().toasts
+                )
+            },
+        )
+        .await;
+        assert_eq!(
+            asked.lock().unwrap().as_slice(),
+            ["Rewind i0", "send first message, edited"]
+        );
+        let heard = heard.lock().unwrap();
+        assert_eq!(heard.given_back, ["first message, edited"]);
+        assert!(
+            heard
+                .toasts
+                .iter()
+                .any(|t| t == "Couldn't send the message on Machine C: The thread is busy"),
+            "{:?}",
+            heard.toasts
+        );
     });
 }

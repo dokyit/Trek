@@ -32,7 +32,8 @@ pub(super) struct MachineUpload {
 
 struct Meter {
     path: PathBuf,
-    total: u64,
+    /// Its size: a folder's is its zip's, known once it's packed (0 until then).
+    total: Arc<AtomicU64>,
     sent: Arc<AtomicU64>,
 }
 
@@ -40,10 +41,12 @@ impl MachineUpload {
     /// How far `path` is, 0 to 1 (`None`: it isn't one of these).
     pub(super) fn progress_of(&self, path: &Path) -> Option<f32> {
         self.meters.iter().find(|m| m.path == path).map(|m| {
-            if m.total == 0 {
-                1.
+            let total = m.total.load(Ordering::Relaxed);
+            if total == 0 {
+                // A folder still being packed has sent nothing; an empty file is all there.
+                if m.path.is_dir() { 0. } else { 1. }
             } else {
-                (m.sent.load(Ordering::Relaxed) as f64 / m.total as f64).min(1.) as f32
+                (m.sent.load(Ordering::Relaxed) as f64 / total as f64).min(1.) as f32
             }
         })
     }
@@ -58,12 +61,24 @@ impl MachineUpload {
 
     /// "Sending 2 files to T-Book · 1.2 MB of 2.6 MB".
     pub(super) fn words(&self) -> String {
-        let total: u64 = self.meters.iter().map(|m| m.total).sum();
+        let total: u64 = self
+            .meters
+            .iter()
+            .map(|m| m.total.load(Ordering::Relaxed))
+            .sum();
         let sent: u64 = self
             .meters
             .iter()
-            .map(|m| m.sent.load(Ordering::Relaxed).min(m.total))
+            .map(|m| {
+                m.sent
+                    .load(Ordering::Relaxed)
+                    .min(m.total.load(Ordering::Relaxed))
+            })
             .sum();
+        // Nothing sized yet: a folder is being packed.
+        if total == 0 && self.meters.iter().any(|m| m.path.is_dir()) {
+            return format!("Packing a folder to send to {}…", self.machine);
+        }
         let what = match self.meters.len() {
             1 => "1 file".to_string(),
             n => format!("{n} files"),
@@ -147,13 +162,19 @@ impl Composer {
             .iter()
             .map(|o| Meter {
                 path: o.path.clone(),
-                total: std::fs::metadata(&o.path).map_or(0, |m| m.len()),
+                total: Arc::new(AtomicU64::new(
+                    std::fs::metadata(&o.path)
+                        .ok()
+                        .filter(|m| !m.is_dir())
+                        .map_or(0, |m| m.len()),
+                )),
                 sent: Arc::default(),
             })
             .collect();
-        let jobs: Vec<(Outgoing, Arc<AtomicU64>)> = items
+        let jobs: Vec<(Outgoing, Arc<AtomicU64>, Arc<AtomicU64>)> = items
             .into_iter()
-            .zip(meters.iter().map(|m| m.sent.clone()))
+            .zip(meters.iter().map(|m| (m.sent.clone(), m.total.clone())))
+            .map(|(o, (sent, total))| (o, sent, total))
             .collect();
         let name = machine.clone();
         let send = cx.spawn_in(window, async move |this, cx| {
@@ -163,9 +184,52 @@ impl Composer {
                 .spawn(async { crate::machines::this_name() })
                 .await;
             let mut sent: Vec<(PathBuf, Sent)> = Vec::new();
-            for (item, meter) in jobs {
-                let (client, from, path, image) =
-                    (client.clone(), from.clone(), item.path.clone(), item.image);
+            for (item, meter, total) in jobs {
+                let label = item
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| item.path.display().to_string());
+                // A folder goes as one zip of its files, packed off the main thread and let go
+                // of once it's sent.
+                let mut packed: Option<PathBuf> = None;
+                if item.path.is_dir() {
+                    let dir = item.path.clone();
+                    let into = std::env::temp_dir().join(format!(
+                        "trek-folder-{}-{}",
+                        std::process::id(),
+                        trek_core::store::now_ms()
+                    ));
+                    let made = cx
+                        .background_executor()
+                        .spawn(async move { crate::machines::files::pack_folder(&dir, &into) })
+                        .await;
+                    match made {
+                        Ok(made) => {
+                            total.store(
+                                std::fs::metadata(&made.zip).map_or(0, |m| m.len()),
+                                Ordering::Relaxed,
+                            );
+                            // What couldn't be read isn't in the zip: said, and the rest goes.
+                            if made.skipped > 0 {
+                                let words =
+                                    crate::machines::files::skipped_words(made.skipped, &label);
+                                let _ = this.update(cx, |this, cx| this.toast(words, cx));
+                            }
+                            packed = Some(made.zip);
+                        }
+                        Err(e) => {
+                            let _ = this.update(cx, |this, cx| {
+                                this.machine_upload = None;
+                                this.toast(e.words(&label, &name), cx);
+                                cx.notify();
+                            });
+                            return;
+                        }
+                    }
+                }
+                let (client, from, image) = (client.clone(), from.clone(), item.image);
+                let path = packed.clone().unwrap_or_else(|| item.path.clone());
                 // Read and sent off the main thread, a piece at a time.
                 let done = cx
                     .background_executor()
@@ -177,6 +241,9 @@ impl Composer {
                             .await
                     })
                     .await;
+                if let Some(zip) = packed.as_ref().and_then(|z| z.parent()) {
+                    let _ = std::fs::remove_dir_all(zip);
+                }
                 match done {
                     Ok(up) => sent.push((
                         item.path.clone(),
@@ -187,11 +254,6 @@ impl Composer {
                         },
                     )),
                     Err(e) => {
-                        let label = item
-                            .path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| item.path.display().to_string());
                         tracing::info!(machine = name, file = label, "machine upload failed: {e}");
                         let _ = this.update(cx, |this, cx| {
                             this.machine_upload = None;

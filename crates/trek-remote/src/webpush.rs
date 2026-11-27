@@ -57,7 +57,65 @@ pub struct PushSubscription {
     pub auth: String,
 }
 
+/// Whether `ip` is an address on the public internet: not this computer, its network, a
+/// link-local or cloud metadata address (169.254.169.254), shared address space, multicast or the
+/// unspecified address. (`trek-mcp`'s video fetch keeps the same test.)
+pub fn is_public_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            !(v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || a == 0
+                || (a == 100 && (64..128).contains(&b))
+                || (a == 198 && (b == 18 || b == 19))
+                || a >= 240)
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_public_ip(IpAddr::V4(v4));
+            }
+            let first = v6.segments()[0];
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80)
+        }
+    }
+}
+
+/// Of the addresses a push service's name has, the one to send to: none when any of them isn't
+/// public (a name of the device's choosing can point at this computer, 127.0.0.1.nip.io, or at a
+/// cloud's metadata address), or when there are none.
+pub fn public_target(addrs: &[std::net::SocketAddr]) -> Result<std::net::SocketAddr, &'static str> {
+    let first = addrs
+        .first()
+        .ok_or("The push service's name has no address")?;
+    if addrs.iter().any(|a| !is_public_ip(a.ip())) {
+        return Err("The push service's name points at this computer or its network");
+    }
+    Ok(*first)
+}
+
 impl PushSubscription {
+    /// The endpoint's host and port (443 unless it names one), as `check` reads them.
+    pub fn host_port(&self) -> Option<(String, u16)> {
+        let rest = self.endpoint.strip_prefix("https://")?;
+        let authority = rest.split(['/', '?', '#']).next()?;
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((h, p)) => (h, p.parse().ok()?),
+            None => (authority, 443),
+        };
+        Some((host.trim_end_matches('.').to_ascii_lowercase(), port))
+    }
+
     /// Whether it's one the computer can send to: an `https://` endpoint of sensible length and
     /// keys of the right shape.
     pub fn check(&self) -> Result<(), &'static str> {
@@ -65,8 +123,27 @@ impl PushSubscription {
             .endpoint
             .strip_prefix("https://")
             .ok_or("A push endpoint must be an https:// address")?;
-        let host = rest.split('/').next().unwrap_or_default();
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        let host = authority
+            .rsplit_once(':')
+            .map_or(authority, |(h, _)| h)
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        // A push service is a public name: never this computer or its network (the computer
+        // posts to it, so a paired device naming `https://127.0.0.1:…` would have it post there).
+        // No top-level domain starts with a digit, and every IPv4 spelling does in its last part.
+        let last = host.rsplit('.').next().unwrap_or_default();
         if host.is_empty()
+            || authority.contains('@')
+            || host.starts_with('[')
+            || !host.contains('.')
+            || host == "localhost"
+            || host.ends_with(".localhost")
+            || host.ends_with(".local")
+            || host.ends_with(".internal")
+            || host.ends_with(".lan")
+            || host.ends_with(".home.arpa")
+            || last.starts_with(|c: char| c.is_ascii_digit())
             || self.endpoint.len() > MAX_ENDPOINT
             || self
                 .endpoint
@@ -416,7 +493,76 @@ mod tests {
         assert_eq!(body.len(), 86 + 41 + 1 + 16);
     }
 
-    /// What `encrypt` sends, a phone opens: the browser's side, with a key pair made for the test.
+    #[test]
+    fn a_push_service_is_reached_only_at_public_addresses() {
+        let at = |ip: &str| std::net::SocketAddr::new(ip.parse().unwrap(), 443);
+        // What a public name can point at: `x.169.254.169.254.nip.io`, a record of its own.
+        for ip in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+            "::1",
+            "fe80::1",
+            "fd00::1",
+            "::ffff:127.0.0.1",
+        ] {
+            assert!(!is_public_ip(ip.parse().unwrap()), "{ip}");
+            assert!(public_target(&[at("17.57.146.1"), at(ip)]).is_err(), "{ip}");
+        }
+        assert_eq!(public_target(&[at("17.57.146.1")]), Ok(at("17.57.146.1")));
+        assert!(public_target(&[]).is_err());
+        let sub = |endpoint: &str| PushSubscription {
+            endpoint: endpoint.into(),
+            p256dh: String::new(),
+            auth: String::new(),
+        };
+        assert_eq!(
+            sub("https://web.push.apple.com/QGu").host_port(),
+            Some(("web.push.apple.com".into(), 443))
+        );
+        assert_eq!(
+            sub("https://Push.Example.com.:8443/x").host_port(),
+            Some(("push.example.com".into(), 8443))
+        );
+    }
+
+    #[test]
+    fn a_push_endpoint_is_a_public_service() {
+        let sub = |endpoint: &str| PushSubscription {
+            endpoint: endpoint.into(),
+            p256dh: B64.encode([4u8; 65]),
+            auth: B64.encode([7u8; 16]),
+        };
+        for endpoint in [
+            "https://127.0.0.1:8443/x",
+            "https://127.1/x",
+            "https://10.0.0.2/x",
+            "https://169.254.169.254/latest/meta-data",
+            "https://[::1]/x",
+            "https://localhost:3000/x",
+            "https://router.local/x",
+            "https://intranet/x",
+            "https://user@web.push.apple.com/x",
+            "http://web.push.apple.com/x",
+        ] {
+            assert!(sub(endpoint).check().is_err(), "{endpoint}");
+        }
+        for endpoint in [
+            "https://web.push.apple.com/QGuQyavXutnMH",
+            "https://fcm.googleapis.com/fcm/send/abc:def",
+            "https://updates.push.services.mozilla.com:443/wpush/v2/gAAA",
+        ] {
+            assert_eq!(
+                sub(endpoint).check().map_err(|e| e.to_string()),
+                sub(endpoint).keys().map(|_| ()).map_err(|e| e.to_string()),
+                "{endpoint}"
+            );
+        }
+    }
+
     #[test]
     fn a_note_round_trips_to_the_phone() {
         let rng = SystemRandom::new();

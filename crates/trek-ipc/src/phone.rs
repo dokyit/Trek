@@ -415,6 +415,9 @@ pub enum Sensitive {
     Install,
     /// Writing or removing files.
     Files,
+    /// Writing a file on this computer (`phone_pull_file`): wherever the call says, over what's
+    /// there (`~/.zshrc`, a login item), so it asks below Full access.
+    LocalWrite,
 }
 
 /// Whether `method` changes what's on the phone (and so may need asking).
@@ -422,6 +425,7 @@ pub fn sensitive(method: &str) -> Option<Sensitive> {
     match method {
         "phone_install" => Some(Sensitive::Install),
         "phone_push_file" | "phone_remove_file" => Some(Sensitive::Files),
+        "phone_pull_file" => Some(Sensitive::LocalWrite),
         _ => None,
     }
 }
@@ -541,7 +545,9 @@ mod tests {
     fn what_changes_the_phone_is_sensitive() {
         assert_eq!(sensitive("phone_install"), Some(Sensitive::Install));
         assert_eq!(sensitive("phone_remove_file"), Some(Sensitive::Files));
-        assert_eq!(sensitive("phone_pull_file"), None);
+        // It writes a file on this computer, wherever it's told.
+        assert_eq!(sensitive("phone_pull_file"), Some(Sensitive::LocalWrite));
+        assert_eq!(sensitive("phone_files"), None);
         assert!(is_input("phone_open_app") && !is_input("phone_screenshot"));
     }
 }

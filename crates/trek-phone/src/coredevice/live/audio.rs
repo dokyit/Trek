@@ -15,7 +15,9 @@ use objc2_core_audio_types::{
 };
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU64, Ordering};
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 
 const SAMPLE_RATE: f64 = 48_000.0;
 const CHANNELS: u32 = 2;
@@ -34,6 +36,184 @@ fn codec_for_mode(mode: u32) -> Option<Codec> {
     (mode == 8).then_some(Codec::AacEld)
 }
 
+/// How the live view's sound stands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AudioState {
+    /// The stream hasn't got as far as its sound yet.
+    #[default]
+    Starting,
+    /// It was asked for without sound ([`super::LiveOptions::audio`]).
+    Off,
+    /// The phone offered nothing Trek can play (`AudioStats::negotiated` says what, and
+    /// `AudioStats::why` what's wrong with it); its packets are discarded as they arrive.
+    Unplayable,
+    /// Packets are decoded and played.
+    Playing,
+    /// It played, then the decoder, the output or the socket gave up; the picture carries on.
+    Stopped,
+}
+
+impl AudioState {
+    fn from_u8(n: u8) -> Self {
+        match n {
+            1 => Self::Off,
+            2 => Self::Unplayable,
+            3 => Self::Playing,
+            4 => Self::Stopped,
+            _ => Self::Starting,
+        }
+    }
+}
+
+/// What the live view's sound has done since the stream started: for a log line, a test on a
+/// real phone, or anyone who can't hear it. Counts only grow.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AudioStats {
+    pub state: AudioState,
+    /// What the phone's answer to the audio offer named (mode, payload type, port, SSRCs,
+    /// cipher), when it named anything.
+    pub negotiated: Option<String>,
+    /// Why it's `Unplayable` or `Stopped`.
+    pub why: Option<String>,
+    /// Datagrams read off the audio socket (RTP and the phone's RTCP alike).
+    pub datagrams: u64,
+    /// Those that were the negotiated stream's RTP, and the bytes of AAC-ELD they carried (a
+    /// frame of silence is 4 bytes; one with sound, a hundred or more).
+    pub packets: u64,
+    pub payload_bytes: u64,
+    /// Packets left out: a repeat, one out of order, or a timestamp that isn't whole frames on.
+    pub late: u64,
+    /// Packets decoded to a frame of PCM (10 ms each).
+    pub decoded: u64,
+    pub decode_errors: u64,
+    /// Frames handed to the output queue, and frames dropped because it was full.
+    pub queued: u64,
+    pub dropped: u64,
+    /// Samples decoded, the sum of their squares and the loudest one, for a level.
+    pub samples: u64,
+    pub squares: u64,
+    pub peak: u16,
+}
+
+impl AudioStats {
+    /// The level of what was decoded between `earlier` and this reading, in dB below full scale
+    /// (0 is as loud as 16 bits go; digital silence is `-inf`). None when nothing was decoded.
+    pub fn dbfs_since(&self, earlier: &AudioStats) -> Option<f32> {
+        let samples = self
+            .samples
+            .checked_sub(earlier.samples)
+            .filter(|n| *n > 0)?;
+        let squares = self.squares.wrapping_sub(earlier.squares);
+        let rms = (squares as f64 / samples as f64).sqrt();
+        Some((20.0 * (rms / 32768.0).log10()) as f32)
+    }
+}
+
+/// The counts behind [`AudioStats`], shared by the receive loop (which writes) and the `Live`
+/// (which reads).
+#[derive(Default)]
+pub(super) struct Meter {
+    state: AtomicU8,
+    negotiated: Mutex<Option<String>>,
+    why: Mutex<Option<String>>,
+    datagrams: AtomicU64,
+    packets: AtomicU64,
+    payload_bytes: AtomicU64,
+    late: AtomicU64,
+    decoded: AtomicU64,
+    decode_errors: AtomicU64,
+    queued: AtomicU64,
+    dropped: AtomicU64,
+    samples: AtomicU64,
+    squares: AtomicU64,
+    peak: AtomicU16,
+    /// Where each decoded frame also goes (16-bit little-endian stereo, 48 kHz), when someone
+    /// wants to look at it: `LiveOptions::pcm`.
+    tap: Mutex<Option<Sender<Vec<u8>>>>,
+}
+
+fn held<T>(lock: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+impl Meter {
+    pub(super) fn with_tap(tap: Option<Sender<Vec<u8>>>) -> Self {
+        Meter {
+            tap: Mutex::new(tap),
+            ..Meter::default()
+        }
+    }
+
+    pub(super) fn set(&self, state: AudioState, why: Option<&str>) {
+        self.state.store(state as u8, Ordering::Relaxed);
+        if let Some(why) = why {
+            *held(&self.why) = Some(why.to_string());
+        }
+    }
+
+    pub(super) fn negotiated(&self, config: Option<&AudioConfig>) {
+        *held(&self.negotiated) = config.map(describe);
+    }
+
+    fn heard(&self, pcm: &[u8]) {
+        let (mut squares, mut peak) = (0u64, 0u16);
+        for sample in pcm.chunks_exact(2) {
+            let level = i16::from_le_bytes([sample[0], sample[1]]).unsigned_abs();
+            squares += u64::from(level) * u64::from(level);
+            peak = peak.max(level);
+        }
+        self.samples
+            .fetch_add(pcm.len() as u64 / 2, Ordering::Relaxed);
+        self.squares.fetch_add(squares, Ordering::Relaxed);
+        self.peak.fetch_max(peak, Ordering::Relaxed);
+        let mut tap = held(&self.tap);
+        if tap
+            .as_ref()
+            .is_some_and(|tap| tap.send(pcm.to_vec()).is_err())
+        {
+            *tap = None;
+        }
+    }
+
+    pub(super) fn stats(&self) -> AudioStats {
+        let count = |n: &AtomicU64| n.load(Ordering::Relaxed);
+        AudioStats {
+            state: AudioState::from_u8(self.state.load(Ordering::Relaxed)),
+            negotiated: held(&self.negotiated).clone(),
+            why: held(&self.why).clone(),
+            datagrams: count(&self.datagrams),
+            packets: count(&self.packets),
+            payload_bytes: count(&self.payload_bytes),
+            late: count(&self.late),
+            decoded: count(&self.decoded),
+            decode_errors: count(&self.decode_errors),
+            queued: count(&self.queued),
+            dropped: count(&self.dropped),
+            samples: count(&self.samples),
+            squares: count(&self.squares),
+            peak: self.peak.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// The negotiated stream in a line, for a log: nothing in it is secret (ports and stream ids).
+fn describe(config: &AudioConfig) -> String {
+    let number = |n: Option<u32>| n.map_or("none".to_string(), |n| n.to_string());
+    let codec = match config.mode.and_then(codec_for_mode) {
+        Some(Codec::AacEld) => " (AAC-ELD, 48 kHz stereo, 480 samples a packet)",
+        None => " (not one Trek decodes)",
+    };
+    format!(
+        "mode {}{codec}, payload type {}, from port {}, stream {:08x} answered as {:08x}, cipher suite {}",
+        number(config.mode),
+        number(config.payload_type.map(u32::from)),
+        number(config.source_port.map(u32::from)),
+        config.local_ssrc.unwrap_or_default(),
+        config.remote_ssrc.unwrap_or_default(),
+        number(config.cipher_suite),
+    )
+}
+
 pub(super) struct AudioStream {
     config: AudioConfig,
     decoder: Decoder,
@@ -42,6 +222,7 @@ pub(super) struct AudioStream {
     last_sequence: Option<u16>,
     last_timestamp: Option<u32>,
     decode_errors: u8,
+    meter: Arc<Meter>,
 }
 
 // All converter/queue calls and destruction are owned by the single media receiver task. The
@@ -49,30 +230,49 @@ pub(super) struct AudioStream {
 unsafe impl Send for AudioStream {}
 
 impl AudioStream {
-    pub(super) fn new(config: AudioConfig) -> Option<Self> {
-        codec_for_mode(config.mode?)?;
-        config.payload_type?;
-        config.source_port?;
-        config.local_ssrc?;
-        config.remote_ssrc?;
-        (config.cipher_suite? == 0).then_some(())?;
-        Some(Self {
+    /// The player for a negotiated stream, or why Trek can't play it.
+    pub(super) fn new(config: AudioConfig, meter: Arc<Meter>) -> Result<Self, &'static str> {
+        config
+            .mode
+            .and_then(codec_for_mode)
+            .ok_or("its codec isn't one Trek decodes")?;
+        let whole = config.payload_type.is_some()
+            && config.source_port.is_some()
+            && config.local_ssrc.is_some()
+            && config.remote_ssrc.is_some();
+        if !whole {
+            return Err("the phone's answer left out a payload type, port or stream id");
+        }
+        if config.cipher_suite != Some(0) {
+            return Err("it's encrypted (or didn't say it isn't)");
+        }
+        Ok(Self {
             config,
-            decoder: Decoder::new().ok()?,
-            output: Output::new().ok()?,
+            decoder: Decoder::new().map_err(|()| "this Mac's AAC-ELD decoder didn't open")?,
+            output: Output::new().map_err(|()| "this Mac's audio output didn't open")?,
             highest_sequence: 0,
             last_sequence: None,
             last_timestamp: None,
             decode_errors: 0,
+            meter,
         })
     }
 
-    pub(super) fn push(&mut self, datagram: &[u8]) -> Result<(), ()> {
+    /// One datagram off the audio socket. An error ends the sound (never the picture), and says
+    /// why.
+    pub(super) fn push(&mut self, datagram: &[u8]) -> Result<(), &'static str> {
+        let count = |n: &AtomicU64| n.fetch_add(1, Ordering::Relaxed);
+        count(&self.meter.datagrams);
         let Some(packet) = audio_packet(&self.config, datagram) else {
             return Ok(());
         };
+        count(&self.meter.packets);
+        self.meter
+            .payload_bytes
+            .fetch_add(packet.payload.len() as u64, Ordering::Relaxed);
         self.note_sequence(packet.sequence_number);
         if !timestamp_follows(self.last_timestamp, packet.timestamp) {
+            count(&self.meter.late);
             return Ok(());
         }
         self.last_timestamp = Some(packet.timestamp);
@@ -82,15 +282,28 @@ impl AudioStream {
                 pcm
             }
             Err(()) => {
+                count(&self.meter.decode_errors);
                 self.decode_errors = self.decode_errors.saturating_add(1);
                 if self.decode_errors >= RESET_DECODER_AFTER {
-                    self.decoder = Decoder::new()?;
+                    self.decoder =
+                        Decoder::new().map_err(|()| "the AAC-ELD decoder didn't open again")?;
                     self.decode_errors = 0;
                 }
                 return Ok(());
             }
         };
-        self.output.enqueue(&pcm)
+        count(&self.meter.decoded);
+        self.meter.heard(&pcm);
+        if self
+            .output
+            .enqueue(&pcm)
+            .map_err(|()| "the audio output refused a frame")?
+        {
+            count(&self.meter.queued);
+        } else {
+            count(&self.meter.dropped);
+        }
+        Ok(())
     }
 
     fn note_sequence(&mut self, sequence: u16) {
@@ -366,7 +579,9 @@ impl Output {
         })
     }
 
-    fn enqueue(&mut self, pcm: &[u8]) -> Result<(), ()> {
+    /// Hand a frame to the queue: true when it took it, false when its fixed pool was full
+    /// (real-time audio drops rather than blocking the picture).
+    fn enqueue(&mut self, pcm: &[u8]) -> Result<bool, ()> {
         let Some(buffer) = self
             .state
             .free
@@ -374,7 +589,7 @@ impl Output {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .pop()
         else {
-            return Ok(()); // fixed pool full: real-time audio drops rather than blocking video
+            return Ok(false);
         };
         if pcm.len() > PCM_BYTES {
             self.state.free.lock().unwrap().push(buffer);
@@ -396,7 +611,7 @@ impl Output {
             status(unsafe { AudioQueueStart(self.queue, ptr::null()) })?;
             self.started = true;
         }
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -477,7 +692,7 @@ mod tests {
     fn encrypted_audio_is_not_opened() {
         let mut encrypted = config();
         encrypted.cipher_suite = Some(1);
-        assert!(AudioStream::new(encrypted).is_none());
+        assert!(AudioStream::new(encrypted, Arc::default()).is_err());
     }
 
     #[test]
@@ -495,6 +710,62 @@ mod tests {
             .unwrap()
             .decode(&[0x00, 0x68, 0x34, 0x00])
             .unwrap();
-        Output::new().unwrap().enqueue(&pcm).unwrap();
+        assert!(Output::new().unwrap().enqueue(&pcm).unwrap());
+    }
+
+    #[test]
+    fn the_meter_counts_what_was_decoded_and_how_loud() {
+        let (tap, tapped) = std::sync::mpsc::channel();
+        let meter = Meter::with_tap(Some(tap));
+        let before = meter.stats();
+        assert_eq!(before.dbfs_since(&before), None, "nothing decoded yet");
+        // A full-scale square wave is 0 dBFS; half scale about 6 dB under it.
+        let full: Vec<u8> = [i16::MAX, i16::MIN]
+            .iter()
+            .cycle()
+            .take(960)
+            .flat_map(|s| s.to_le_bytes())
+            .collect();
+        meter.heard(&full);
+        let loud = meter.stats();
+        assert_eq!(loud.samples, 960);
+        assert!(loud.dbfs_since(&before).unwrap().abs() < 0.01);
+        assert_eq!(loud.peak, 32768);
+        let half: Vec<u8> = std::iter::repeat_n(16384i16, 960)
+            .flat_map(|s| s.to_le_bytes())
+            .collect();
+        meter.heard(&half);
+        let quieter = meter.stats().dbfs_since(&loud).unwrap();
+        assert!((quieter + 6.02).abs() < 0.01, "{quieter}");
+        // Silence has no level to speak of, and the tap got every frame.
+        meter.heard(&[0u8; 1920]);
+        assert_eq!(
+            meter.stats().dbfs_since(&meter.stats()),
+            None,
+            "no new samples between two readings"
+        );
+        assert_eq!(tapped.try_iter().count(), 3);
+        // A tap nobody reads any more is let go, not filled.
+        drop(tapped);
+        meter.heard(&[0u8; 1920]);
+        assert!(held(&meter.tap).is_none());
+    }
+
+    #[test]
+    fn the_negotiated_stream_is_described_for_a_log() {
+        let line = describe(&config());
+        assert!(line.starts_with("mode 8 (AAC-ELD"), "{line}");
+        assert!(line.contains("payload type 101, from port 50000"), "{line}");
+        assert!(
+            line.contains("stream 11223344 answered as 55667788"),
+            "{line}"
+        );
+        let mut unknown = config();
+        unknown.mode = Some(7);
+        assert!(describe(&unknown).contains("not one Trek decodes"));
+        assert_eq!(
+            AudioStream::new(unknown, Arc::default()).err(),
+            Some("its codec isn't one Trek decodes")
+        );
     }
 }

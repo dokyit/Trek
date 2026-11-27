@@ -255,7 +255,8 @@ The rest are gaps. Each has a note in the ledger on what would close it.
   - `phone-app-install`: the iPhone app is built with Xcode.
 - **Partial on the Mac:**
   - `signed-builds`: builds are signed, not notarized.
-  - `timeline-thoughts`: whether the Mac shows them is a design decision.
+  - (`timeline-thoughts` was here: Windows' own timeline for a turn's tool calls. The owner chose
+    the Mac's design for every platform on 2026-11-26, and the feature is now `tool-activity`.)
 
 ## Keeping it this way
 

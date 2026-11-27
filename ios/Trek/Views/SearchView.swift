@@ -5,8 +5,10 @@ import SwiftUI
 /// thread the Mac has, settled long ago or a sub-agent's, and each one opens.
 struct SearchView: View {
     @Environment(AppModel.self) private var model
+    /// The threads opened from the results, kept by the tab view: it hides its "New thread" pill
+    /// while one is open, as on the other tabs.
+    @Binding var path: [String]
     @State private var query = ""
-    @State private var path: [String] = []
     /// The Mac's answer, and the text it answers.
     @State private var found: [SearchResult] = []
     @State private var foundFor = ""
@@ -77,7 +79,11 @@ struct SearchView: View {
             }
             .navigationTitle("Search")
             .toolbar { ToolbarItem(placement: .topBarTrailing) { MachinePicker() } }
-            .searchable(text: $query, prompt: onMac ? "Threads and messages" : "Threads, projects, agents, branches")
+            // In the bar and always there: left to itself the field sat in the navigation bar's
+            // drawer, which an iPhone with iOS 27.2 opened collapsed, out of sight until the list
+            // was pulled down: the tab came up with nothing to type in.
+            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always),
+                        prompt: onMac ? "Threads and messages" : "Threads, projects, agents, branches")
             .navigationDestination(for: String.self) { ThreadView(threadID: $0) }
             // Typed: the Mac is asked once the typing pauses (and again once it says it can).
             .task(id: "\(onMac) \(link?.id ?? "") \(trimmed)") { await askTheMac(trimmed) }

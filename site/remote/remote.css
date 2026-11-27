@@ -729,6 +729,15 @@ textarea.input {
   overflow-wrap: anywhere;
 }
 
+/* An answer draws inside its own box: what it says comes from the agent (and from whatever the
+   agent read), and a `position: fixed; inset: 0` in it would otherwise cover the whole remote
+   with a "Reconnect" of its own. Layout containment makes the box the containing block of
+   fixed and absolute descendants, and a stacking context for their z-index, without clipping. */
+.md {
+  contain: layout;
+  isolation: isolate;
+}
+
 .md > :first-child {
   margin-top: 0;
 }
