@@ -139,9 +139,11 @@ pub fn host_of(url: &str) -> Option<String> {
 /// for another scheme (a `mailto:` has no host to name) or an address with no authority.
 pub fn link_host(url: &str) -> Option<String> {
     let url = url.trim();
-    let rest = ["https://", "http://"]
-        .iter()
-        .find_map(|s| url.to_ascii_lowercase().starts_with(s).then(|| &url[s.len()..]))?;
+    let rest = ["https://", "http://"].iter().find_map(|s| {
+        url.to_ascii_lowercase()
+            .starts_with(s)
+            .then(|| &url[s.len()..])
+    })?;
     let authority = rest.split(['/', '?', '#']).next()?;
     let host = authority.rsplit('@').next()?.split(':').next()?;
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
@@ -752,8 +754,16 @@ mod tests {
             link_host("http://xn--mnchen-3ya.de/x").as_deref(),
             Some("xn--mnchen-3ya.de")
         );
-        assert_eq!(link_host("https://user@a.b.c.d:8443/x").as_deref(), Some("a.b.c.d"));
-        for none in ["mailto:a@b.c", "javascript:alert(1)", "https://", "about:blank"] {
+        assert_eq!(
+            link_host("https://user@a.b.c.d:8443/x").as_deref(),
+            Some("a.b.c.d")
+        );
+        for none in [
+            "mailto:a@b.c",
+            "javascript:alert(1)",
+            "https://",
+            "about:blank",
+        ] {
             assert_eq!(link_host(none), None, "{none}");
         }
         // The leak channels the ask strip warns about.

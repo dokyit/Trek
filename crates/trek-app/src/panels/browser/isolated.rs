@@ -116,8 +116,12 @@ pub fn eval(
     let done = Rc::new(Cell::new(Some(done)));
     // The page's own world, when Trek's can't be had: said once, since it isn't expected.
     let in_page = {
-        let (webview, done, page, untrusted) =
-            (webview.clone(), done.clone(), page.to_string(), untrusted.clone());
+        let (webview, done, page, untrusted) = (
+            webview.clone(),
+            done.clone(),
+            page.to_string(),
+            untrusted.clone(),
+        );
         Rc::new(move |why: &str| {
             // The probe ran in the page's own world: the caller marks the tab so every action
             // there asks (`agent.rs`).

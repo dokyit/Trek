@@ -419,9 +419,11 @@ mod platform {
         if WATCHING.replace(true) {
             return;
         }
-        let mask: u64 = [LEFT_DOWN, LEFT_UP, RIGHT_DOWN, RIGHT_UP, OTHER_DOWN, OTHER_UP]
-            .iter()
-            .fold(0, |m, t| m | (1u64 << t));
+        let mask: u64 = [
+            LEFT_DOWN, LEFT_UP, RIGHT_DOWN, RIGHT_UP, OTHER_DOWN, OTHER_UP,
+        ]
+        .iter()
+        .fold(0, |m, t| m | (1u64 << t));
         let note = block2::RcBlock::new(
             |event: NonNull<objc2_app_kit::NSEvent>| -> *mut objc2_app_kit::NSEvent {
                 // SAFETY: AppKit's own event, valid for the call.

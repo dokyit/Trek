@@ -237,10 +237,8 @@ pub fn hook(wv: &wry::WebView, tab: u64, tx: &async_channel::Sender<Msg>) {
         if let Ok(webview) = webview.cast::<ICoreWebView2_18>() {
             let _ = webview.add_LaunchingExternalUriScheme(&apps(tab, tx.clone()), &mut token);
         }
-        let _ = webview.add_NavigationStarting(
-            &no_app(tab, webview.clone(), tx.clone()),
-            &mut token,
-        );
+        let _ =
+            webview.add_NavigationStarting(&no_app(tab, webview.clone(), tx.clone()), &mut token);
         // A failed load gets Trek's page saying why, and a page whose process ended is reloaded
         // (then explained, if it ends again), as WebKit's do: the panel does both (`Msg`).
         let _ = webview.add_NavigationCompleted(&failed_loads(tab, tx.clone()), &mut token);

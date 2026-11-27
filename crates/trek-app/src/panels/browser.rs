@@ -876,9 +876,8 @@ struct Tab {
 /// Tabs where an agent's action that the user didn't approve as a form submission is under way:
 /// the page's navigation policy refuses a form submission to another site meanwhile, since the
 /// page's own handlers can still move the form after `agent.js` checked it.
-static FORM_GUARDS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashSet<u64>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+static FORM_GUARDS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<u64>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
 /// Whether tab `id`'s navigation policy should refuse a form submission to another site now.
 fn form_guarded(id: u64) -> bool {

@@ -947,9 +947,7 @@ impl Run<'_> {
                 Some(mut a) => {
                     a.detail = format!(
                         "Trek's check of this page ran in the page's own world, so it can't be trusted to say what {} does.\n\n{}",
-                        probe
-                            .and_then(|p| p["describe"].as_str())
-                            .unwrap_or("it"),
+                        probe.and_then(|p| p["describe"].as_str()).unwrap_or("it"),
                         a.detail
                     );
                     a
@@ -974,9 +972,11 @@ impl Run<'_> {
                 cx.notify();
                 (
                     !untrusted
-                        && p.agent
-                            .allowed
-                            .contains(&(thread.clone(), ask.kind.clone(), ask.site.clone())),
+                        && p.agent.allowed.contains(&(
+                            thread.clone(),
+                            ask.kind.clone(),
+                            ask.site.clone(),
+                        )),
                     p.workspace.clone(),
                 )
             })

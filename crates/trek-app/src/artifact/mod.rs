@@ -729,9 +729,7 @@ fn ask_strip(doc: &Doc, key: usize, look: &Look, cx: &App) -> Option<AnyElement>
                         // A host that publishes what was asked of it can be read back later:
                         // the path a page asks for can spell out what it knows.
                         if hosts.iter().any(|h| core::net::leak_host(h)) {
-                            text.push_str(
-                                " Anyone can see which files a page asks this host for.",
-                            );
+                            text.push_str(" Anyone can see which files a page asks this host for.");
                         }
                         text
                     }),
