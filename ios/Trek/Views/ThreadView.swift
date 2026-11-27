@@ -13,17 +13,23 @@ struct ThreadView: View {
 
     var body: some View {
         // One identity per thread: when a thread replaces another in the path (a fork, a
-        // notification), the screen is made anew, subscribes, and starts with its own composer.
-        ThreadScreen(store: model.store(threadID), side: side)
+        // notification), the screen is made anew, subscribes, and has its own composer: the one
+        // the model keeps for the thread, with what was typed there before.
+        ThreadScreen(store: model.store(threadID), side: side, composer: model.composer(threadID))
             .id(threadID)
     }
 }
 
 /// What's being written to the thread: read only by the composer area, so a keystroke redraws
-/// nothing else.
+/// nothing else. The model keeps one per thread (`AppModel.composer`), so it's there again when
+/// the thread is opened again, and its text is kept on disk as it changes (`onDraft`).
 @Observable
 final class ComposerState {
-    var draft = ""
+    var draft = "" {
+        didSet { if draft != oldValue { onDraft?(draft) } }
+    }
+    /// Told the text whenever it changes, to keep it (`DraftStore`).
+    @ObservationIgnored var onDraft: ((String) -> Void)?
     var photos: [PickedPhoto] = []
     /// Videos and files to send with it (`uploads`).
     var files: [PickedFile] = []
@@ -109,7 +115,8 @@ private struct ThreadScreen: View {
     /// The side chat beside this thread, asked for (`/side`, the menu): its sheet is up.
     @State private var sideChat: SideChatAsk?
     @Environment(AppModel.self) private var model
-    @State private var composer = ComposerState()
+    /// The thread's composer, kept by the model: leaving this screen doesn't lose what's in it.
+    let composer: ComposerState
     @State private var renaming = false
     @State private var newTitle = ""
     @State private var archiving = false
@@ -232,7 +239,6 @@ private struct ThreadScreen: View {
             }
             .onAppear {
                 composer.mode = model.followUpMode
-                if let draft = model.takeDraft(threadID) { composer.draft = draft }
                 model.subscribe(threadID)
                 let link = model.link(for: threadID)
                 if link?.usage == nil { model.loadUsage(quiet: true, on: link) }
@@ -240,7 +246,10 @@ private struct ThreadScreen: View {
                 guard side == nil else { return }
                 switch Launch.sheet {
                 case "git": showingGit = true
-                case "commands": composer.draft = "/"
+                case "commands":
+                    composer.draft = "/"
+                    // A screenshot's, not something typed: not kept for the next launch.
+                    model.drafts.clear(threadID)
                 case "snooze": snoozePicking = true
                 case "delete":
                     // Once the row is in.
@@ -480,12 +489,14 @@ private struct TranscriptList: View, nonisolated Equatable {
         rows.reserveCapacity(blocks.count + 3)
         rows.append(.header(store))
         if !store.loaded {
-            // Not in the cache, and the machine can't be asked: say so, rather than spin for ever.
+            // Not in the cache, and the machine can't be asked, or was and didn't send it: say so,
+            // rather than spin for ever.
             var waiting: LoadingWait?
             if let link = model.link(for: store.id) {
                 switch link.connection {
                 case .offline, .unauthorized, .identityChanged: waiting = LoadingWait(thread: store.id, machine: link.name)
-                default: break
+                default:
+                    if let why = store.failure { waiting = LoadingWait(thread: store.id, machine: link.name, failure: why) }
                 }
             }
             rows.append(.loading(waiting: waiting))
@@ -579,28 +590,43 @@ struct MissingThread: View {
 nonisolated struct LoadingWait: Hashable {
     var thread: String
     var machine: String
+    /// The machine is connected and the transcript still didn't come: why (it refused, or never
+    /// answered). Nil: the machine can't be reached.
+    var failure: String? = nil
 }
 
 /// Where the spinner would be when the transcript isn't on this iPhone and its machine can't be
-/// reached: what's wrong, and a way to try again.
+/// reached, or didn't send it: what's wrong, and a way to try again.
 struct TranscriptWaiting: View {
     var wait: LoadingWait
     @Environment(AppModel.self) private var model
 
     var body: some View {
         VStack(spacing: 10) {
-            Image(systemName: "wifi.exclamationmark")
+            Image(systemName: wait.failure == nil ? "wifi.exclamationmark" : "exclamationmark.bubble")
                 .font(.system(size: 28, weight: .regular))
                 .foregroundStyle(Trek.muted)
-            Text("Can't reach \(wait.machine)").font(.ui(.headline))
-            Text("This thread isn't kept on this iPhone yet. It opens as soon as \(wait.machine) is back.")
-                .font(.ui(.subheadline))
-                .foregroundStyle(Trek.muted)
-                .multilineTextAlignment(.center)
-            if let link = model.link(for: wait.thread) {
-                Button("Try now") { model.retryNow(link) }
+                .accessibilityHidden(true)
+            if let why = wait.failure {
+                Text("Couldn't load this thread").font(.ui(.headline))
+                Text(why)
+                    .font(.ui(.subheadline))
+                    .foregroundStyle(Trek.muted)
+                    .multilineTextAlignment(.center)
+                Button("Try again") { model.retryLoad(wait.thread) }
                     .buttonStyle(.glass)
                     .padding(.top, 4)
+            } else {
+                Text("Can't reach \(wait.machine)").font(.ui(.headline))
+                Text("This thread isn't kept on this iPhone yet. It opens as soon as \(wait.machine) is back.")
+                    .font(.ui(.subheadline))
+                    .foregroundStyle(Trek.muted)
+                    .multilineTextAlignment(.center)
+                if let link = model.link(for: wait.thread) {
+                    Button("Try now") { model.retryNow(link) }
+                        .buttonStyle(.glass)
+                        .padding(.top, 4)
+                }
             }
         }
         .padding(.horizontal, 32)
@@ -725,7 +751,7 @@ enum TranscriptRow: View, nonisolated Equatable, Identifiable {
                 h = row.expanded ? 24 + 30 * CGFloat(min(items.count, ToolGroupView.shownAtFirst)) : 22
             case .resolved: h = 90
             case .turnEnd: h = 24
-            case .notice, .handoff: h = 22
+            case .notice, .handoff, .unsupported: h = 22
             case .error(let text), .limit(let text, _): h = 24 + 20 * lines(text, per: perLine)
             case .threadLink: h = 44
             case .subAgent: h = 52
@@ -947,6 +973,11 @@ struct BlockRow: View, nonisolated Equatable {
             }
         case .notice(let text):
             Label(text, systemImage: "info.circle").font(.ui(.subheadline)).foregroundStyle(Trek.muted)
+        case .unsupported:
+            // Something a newer Mac sends that this app can't draw: said, not left out.
+            Label(Block.unsupportedText, systemImage: "arrow.down.circle")
+                .font(.ui(.subheadline))
+                .foregroundStyle(Trek.muted.opacity(0.8))
         case .error(let text):
             Label {
                 Text(text)
@@ -1324,13 +1355,13 @@ private struct ComposerArea: View {
         guard !files.isEmpty else {
             newPromptSent(prompt)
             // Cleared first, as it goes, and put back if the Mac doesn't take it: the failure may
-            // come back at once (not connected), so the clearing must already have happened.
-            let held = (text: composer.draft, photos: composer.photos)
-            composer.cleared(after: composer.draft)
+            // come back at once (not connected), so the clearing must already have happened. The
+            // model holds it meanwhile and puts it back into this thread's composer itself, so it
+            // comes back even when this screen has gone by then (its toast says where it is), and
+            // the kept draft isn't dropped before the Mac has the message.
+            let held = model.takeComposed(threadID)
             let box = composer
-            model.send(words, to: threadID, mode: mode, images: uploads, consult: consult, failed: { _ in
-                box.restore(text: held.text, photos: held.photos)
-            }, sent: {
+            model.send(words, to: threadID, mode: mode, images: uploads, consult: consult, held: held, sent: {
                 box.consult = nil
             })
             return
