@@ -5259,6 +5259,12 @@ fn secret_demo(ws: &Entity<Workspace>, cx: &mut App) -> anyhow::Result<()> {
         let Route::Thread(id) = ws.route.clone() else {
             anyhow::bail!("secret-demo: no thread on screen");
         };
+        // A thread on the machine `pair-self` made: that machine is this app, so its agent asks
+        // in the thread's own copy here, and the card on screen is the other computer's.
+        let id = match crate::machines::split_id(&id) {
+            Some((_, theirs)) => theirs.to_string(),
+            None => id,
+        };
         let (reply, _nobody) = async_channel::bounded(1);
         ws.ask_for_secret(
             &id,

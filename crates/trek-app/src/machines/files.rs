@@ -12,9 +12,13 @@
 //! (`shaped`). This computer remembers which copy there is which file here (`MachineEntry::sent`),
 //! so the transcript shows its own: a video plays from the file here, a picture shows (`shown_here`).
 //!
+//! A folder goes as one zip of its files (`pack_folder`: what git ignores and `.git` left out),
+//! named `<folder> folder.zip` so the agent there can tell what it is; here the message still
+//! shows the folder. Until 0.4.67 a folder was refused ("Folders can't go to T-Book yet").
+//!
 //! What can't go says why, before anything is sent (`refusal`): the machine runs an older Trek, a
-//! folder, a file over the limit or gone. A machine without `machine_files` still takes pictures
-//! the old way, inline in the message (JPEG or PNG).
+//! file over the limit or gone. A machine without `machine_files` still takes pictures the old
+//! way, inline in the message (JPEG or PNG).
 
 use super::{Machine, Workspace, split_id};
 use crate::workspace::Scope;
@@ -66,16 +70,182 @@ pub enum Plan {
     Refuse(String),
 }
 
+/// This computer's path that a mention names (absolute, or `~/`), whatever is there.
+fn mentioned_path(word: &str) -> Option<PathBuf> {
+    if let Some(rest) = word.strip_prefix("~/") {
+        Some(trek_core::paths::home().join(rest))
+    } else if Path::new(word).is_absolute() {
+        Some(PathBuf::from(word))
+    } else {
+        None
+    }
+}
+
 /// This computer's file that a mention names (absolute, or `~/`), when it's a file.
 pub fn mentioned_local(word: &str) -> Option<PathBuf> {
-    let path = if let Some(rest) = word.strip_prefix("~/") {
-        trek_core::paths::home().join(rest)
-    } else if Path::new(word).is_absolute() {
-        PathBuf::from(word)
-    } else {
-        return None;
-    };
-    path.is_file().then_some(path)
+    mentioned_path(word).filter(|p| p.is_file())
+}
+
+/// The most files of one folder that go in its zip.
+const FOLDER_FILES: usize = 20_000;
+
+/// Why a folder couldn't be packed to go to a machine, as a toast says it after the folder's name.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PackError {
+    /// It holds no file that would go (empty, or everything in it is ignored by git).
+    Empty,
+    /// Its files come to more than one upload may be.
+    TooBig(u64),
+    /// More files than a zip of it takes.
+    TooMany,
+    /// None of what's in it could be read (how many files and folders that was).
+    Unreadable(usize),
+    Io(String),
+}
+
+impl PackError {
+    pub fn words(&self, folder: &str, machine: &str) -> String {
+        match self {
+            PackError::Empty => format!(
+                "{folder} has no files to send to {machine} (what git ignores stays behind)."
+            ),
+            PackError::TooBig(bytes) => format!(
+                "{folder} is {}: folders of up to {} can go to {machine}.",
+                crate::attachments::size_label(*bytes),
+                tr::upload_size_words(tr::MAX_UPLOAD)
+            ),
+            PackError::TooMany => format!(
+                "{folder} has more than {FOLDER_FILES} files: too many to send to {machine} at once."
+            ),
+            PackError::Unreadable(_) => format!(
+                "Nothing in {folder} could be read, so it wasn't sent to {machine}. Check the folder's permissions."
+            ),
+            PackError::Io(why) => format!("Couldn't pack {folder} to send to {machine}: {why}"),
+        }
+    }
+}
+
+/// The name a folder's zip goes under: `assets folder.zip`, so what receives it can tell it's a
+/// folder to unpack.
+pub fn folder_zip_name(dir: &Path) -> String {
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "folder".to_string());
+    format!("{name} folder.zip")
+}
+
+/// A folder packed to go to a machine.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Packed {
+    pub zip: PathBuf,
+    /// Files and folders in it that couldn't be read (no permission, gone as they were read) and
+    /// so aren't in the zip: said in a toast, not passed over in silence.
+    pub skipped: usize,
+}
+
+/// What a toast says of what a folder's zip leaves out because it couldn't be read.
+pub fn skipped_words(skipped: usize, folder: &str) -> String {
+    match skipped {
+        1 => format!("1 file or folder in {folder} couldn't be read and was left out."),
+        n => format!("{n} files or folders in {folder} couldn't be read and were left out."),
+    }
+}
+
+/// Zip folder `dir` into a new folder under `into`, to go to a machine as one file: its files as
+/// git would list them (what `.gitignore` leaves out stays behind, and `.git` itself), under the
+/// folder's own name. Symbolic links aren't followed. What can't be read is left out and
+/// counted (`Packed::skipped`). Blocks on the disk.
+pub fn pack_folder(dir: &Path, into: &Path) -> Result<Packed, PackError> {
+    use std::io::Write as _;
+    let io = |e: std::io::Error| PackError::Io(e.to_string());
+    let top = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "folder".to_string());
+    let walk = ignore::WalkBuilder::new(dir)
+        .hidden(false)
+        .parents(true)
+        .ignore(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        // A `.gitignore` in the folder counts whether or not the folder is in a repository.
+        .require_git(false)
+        .follow_links(false)
+        .filter_entry(|e| e.file_name() != ".git")
+        .build();
+    let mut files: Vec<(PathBuf, String, u64)> = vec![];
+    let mut total = 0u64;
+    let mut skipped = 0usize;
+    for entry in walk {
+        // A folder that can't be listed, an entry that went as it was read.
+        let Ok(entry) = entry else {
+            skipped += 1;
+            continue;
+        };
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let Ok(rel) = entry.path().strip_prefix(dir) else {
+            continue;
+        };
+        let rel = crate::mentions::rel_string(rel);
+        if rel.is_empty() || rel.ends_with(".DS_Store") {
+            continue;
+        }
+        let len = entry.metadata().map_or(0, |m| m.len());
+        total += len;
+        if total > tr::MAX_UPLOAD {
+            return Err(PackError::TooBig(total));
+        }
+        if files.len() == FOLDER_FILES {
+            return Err(PackError::TooMany);
+        }
+        files.push((entry.path().to_path_buf(), format!("{top}/{rel}"), len));
+    }
+    if files.is_empty() && skipped == 0 {
+        return Err(PackError::Empty);
+    }
+    files.sort_by(|a, b| a.1.cmp(&b.1));
+    std::fs::create_dir_all(into).map_err(io)?;
+    let path = into.join(folder_zip_name(dir));
+    let mut packed_files = 0usize;
+    let made = (|| -> std::io::Result<()> {
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path)?);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .large_file(true);
+        for (file, name, _) in &files {
+            // A file that can't be opened (no permission) is left out and counted; one that
+            // fails part way would leave half a file in the zip, so that ends the packing.
+            let Ok(mut from) = std::fs::File::open(file) else {
+                skipped += 1;
+                continue;
+            };
+            zip.start_file(name.as_str(), options)
+                .map_err(std::io::Error::other)?;
+            std::io::copy(&mut from, &mut zip)?;
+            packed_files += 1;
+        }
+        zip.finish().map_err(std::io::Error::other)?.flush()
+    })();
+    if let Err(e) = made {
+        let _ = std::fs::remove_file(&path);
+        return Err(io(e));
+    }
+    if packed_files == 0 {
+        let _ = std::fs::remove_file(&path);
+        return Err(PackError::Unreadable(skipped));
+    }
+    let packed = std::fs::metadata(&path).map_err(io)?.len();
+    if packed > tr::MAX_UPLOAD {
+        let _ = std::fs::remove_file(&path);
+        return Err(PackError::TooBig(packed));
+    }
+    Ok(Packed { zip: path, skipped })
 }
 
 /// What goes with a message of `typed` words: the strip's `images` and `files`, then the files of
@@ -116,13 +286,6 @@ pub fn refusal(name: &str, serves: bool, items: &[Outgoing]) -> Option<String> {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| p.display().to_string())
     };
-    if let Some(folder) = items.iter().find(|o| o.path.is_dir()) {
-        return Some(format!(
-            "Folders can't go to {name} yet. Take {} off, or start the thread on {}.",
-            label(&folder.path),
-            crate::words::words().this_computer
-        ));
-    }
     if !serves && items.iter().any(|o| !o.image) {
         return Some(format!(
             "{name} needs Trek {} or later to receive files. Update Trek there, or start the thread on {}.",
@@ -132,6 +295,8 @@ pub fn refusal(name: &str, serves: bool, items: &[Outgoing]) -> Option<String> {
     }
     for o in items {
         match std::fs::metadata(&o.path) {
+            // A folder is sized as it's packed (`pack_folder`), off the main thread.
+            Ok(m) if m.is_dir() => {}
             Err(_) => {
                 return Some(format!(
                     "{} isn't there any more. Take it off and attach it again.",
@@ -164,8 +329,9 @@ pub fn shaped(
     let text = if pending.is_empty() || !text.contains('@') {
         text.to_string()
     } else {
+        // A folder's mention too: its zip there stands for it.
         trek_core::media::rewrite_mentions(text, |w| {
-            mentioned_local(w)
+            mentioned_path(w)
                 .and_then(|p| pending.get(&p))
                 .filter(|s| !s.image)
                 .map(|s| s.there.clone())
@@ -387,10 +553,13 @@ mod tests {
         );
         // Pictures alone still go to an older Trek, inline as they always did.
         assert_eq!(refusal("T-Book", false, &[pic(&png)]), None);
-        let folder = refusal("T-Book", true, &[file(&d)]).unwrap();
+        // A folder goes (packed as it's sent); to a Trek that takes no files it's said as a
+        // file is.
+        assert_eq!(refusal("T-Book", true, &[file(&d)]), None);
         assert!(
-            folder.starts_with("Folders can't go to T-Book yet."),
-            "{folder}"
+            refusal("T-Book", false, &[file(&d)])
+                .unwrap()
+                .starts_with("T-Book needs Trek 0.4.61 or later to receive files.")
         );
         let gone = refusal("T-Book", true, &[file(&d.join("gone.mov"))]).unwrap();
         assert!(gone.starts_with("gone.mov isn't there any more"), "{gone}");
@@ -402,6 +571,110 @@ mod tests {
             refusal("T-Book", true, &[file(&big)]).as_deref(),
             Some("big.mov is 2.0 GB: files of up to 2 GB can go to T-Book.")
         );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A folder packs into `<folder> folder.zip`: its files under its own name, what its
+    /// `.gitignore` leaves out left behind (in a repository or not), `.git` never; one with
+    /// nothing to send says so.
+    #[test]
+    fn a_folder_packs_into_a_zip_of_what_git_would_list() {
+        let d = dir("pack");
+        let assets = d.join("assets");
+        std::fs::create_dir_all(assets.join("icons")).unwrap();
+        std::fs::create_dir_all(assets.join("build")).unwrap();
+        std::fs::create_dir_all(assets.join(".git")).unwrap();
+        std::fs::write(assets.join("readme.txt"), "what these are").unwrap();
+        std::fs::write(assets.join("icons/a.svg"), "<svg/>").unwrap();
+        std::fs::write(assets.join(".gitignore"), "build/\n").unwrap();
+        std::fs::write(assets.join("build/out.bin"), [7u8; 64]).unwrap();
+        std::fs::write(assets.join(".git/HEAD"), "ref: refs/heads/main").unwrap();
+        let packed = pack_folder(&assets, &d.join("out")).unwrap();
+        assert_eq!(packed.skipped, 0);
+        let zip = packed.zip;
+        assert_eq!(
+            zip.file_name().and_then(|n| n.to_str()),
+            Some("assets folder.zip")
+        );
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&zip).unwrap()).unwrap();
+        let mut names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().unwrap().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "assets/.gitignore",
+                "assets/icons/a.svg",
+                "assets/readme.txt"
+            ]
+        );
+        let mut read = String::new();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("assets/readme.txt").unwrap(),
+            &mut read,
+        )
+        .unwrap();
+        assert_eq!(read, "what these are");
+        let empty = d.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert_eq!(pack_folder(&empty, &d.join("out")), Err(PackError::Empty));
+        assert_eq!(
+            PackError::Empty.words("empty", "T-Book"),
+            "empty has no files to send to T-Book (what git ignores stays behind)."
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// What a folder holds that can't be read is left out of its zip and counted, for a toast
+    /// to say (it was passed over in silence); a folder with nothing readable isn't sent.
+    #[cfg(unix)]
+    #[test]
+    fn what_cant_be_read_in_a_folder_is_left_out_and_counted() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let d = dir("unreadable");
+        let assets = d.join("assets");
+        std::fs::create_dir_all(assets.join("locked")).unwrap();
+        std::fs::write(assets.join("readme.txt"), "what these are").unwrap();
+        std::fs::write(assets.join("secret.key"), "no").unwrap();
+        std::fs::write(assets.join("locked/inside.txt"), "no").unwrap();
+        let lock = |p: &Path| std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o000));
+        let unlock = |p: &Path| std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755));
+        lock(&assets.join("secret.key")).unwrap();
+        lock(&assets.join("locked")).unwrap();
+        // Root reads anything: nothing to check as root.
+        if std::fs::File::open(assets.join("secret.key")).is_ok() {
+            unlock(&assets.join("locked")).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+        let packed = pack_folder(&assets, &d.join("out")).unwrap();
+        assert_eq!(
+            packed.skipped, 2,
+            "the file, and the folder that couldn't be listed"
+        );
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&packed.zip).unwrap()).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().unwrap().to_string())
+            .collect();
+        assert_eq!(names, ["assets/readme.txt"]);
+        assert_eq!(
+            skipped_words(2, "assets"),
+            "2 files or folders in assets couldn't be read and were left out."
+        );
+        assert_eq!(
+            skipped_words(1, "assets"),
+            "1 file or folder in assets couldn't be read and was left out."
+        );
+        // Nothing readable at all: not sent, and said.
+        lock(&assets.join("readme.txt")).unwrap();
+        assert_eq!(
+            pack_folder(&assets, &d.join("out2")),
+            Err(PackError::Unreadable(3))
+        );
+        for p in ["secret.key", "readme.txt", "locked"] {
+            unlock(&assets.join(p)).unwrap();
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 mod cards;
 mod composer_bars;
+mod from_here;
 mod look;
 mod machines;
 mod parity;
@@ -20,6 +21,7 @@ mod uploads;
 mod viewed;
 pub use cards::*;
 pub use composer_bars::*;
+pub use from_here::*;
 pub use look::*;
 pub use machines::*;
 pub use parity::*;
@@ -738,6 +740,12 @@ pub mod feature {
     /// as an image, and user items' `image_paths` (`uploads.rs`). A machine without it can't be
     /// sent files: the sender says which Trek it needs ([`super::MACHINE_FILES_SINCE`]).
     pub const MACHINE_FILES: &str = "machine_files";
+    /// A secret given from another computer (Trek 0.4.68): rows carry
+    /// [`super::ThreadSummary::secret`] while a thread waits for one, and `answer` takes a
+    /// `secret` response with its value, or none to decline (`from_here.rs`). A machine without
+    /// it shows the request as a notice, and the other computer says which Trek it needs
+    /// ([`super::FROM_HERE_SINCE`]).
+    pub const SECRET_ANSWER: &str = "secret_answer";
 
     /// Every feature above, for a Mac that serves them all.
     pub const ALL: &[&str] = &[
@@ -774,6 +782,7 @@ pub mod feature {
         SWITCH_PREVIEW,
         DIFF_VIEWED,
         MACHINE_FILES,
+        SECRET_ANSWER,
     ];
 }
 
@@ -997,6 +1006,13 @@ pub enum AnswerResponse {
         approve: bool,
         #[serde(default)]
         feedback: Option<String>,
+    },
+    /// A secret the thread's agent asked for (feature `secret_answer`): its value, or none to
+    /// decline. It goes to the thread's private file on the computer that asked, never into the
+    /// conversation, and is in no reply, item or log.
+    Secret {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<SecretValue>,
     },
 }
 
@@ -1398,6 +1414,10 @@ pub struct ThreadSummary {
     /// A move to another agent waits for its next message (feature `switch_preview`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_switch: Option<PendingSwitch>,
+    /// It waits for a secret its agent asked for (feature `secret_answer`): what a `secret`
+    /// answer takes. `needs` says so in words too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<SecretAsk>,
 }
 
 /// A context window's use.

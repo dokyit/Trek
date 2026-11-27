@@ -329,6 +329,10 @@ pub struct LiveThread {
     /// For a thread on another machine (`machines`): its sub-agents' rows as that machine reads
     /// them, by the row each stands for (`SubAgentRow::read` takes them from here).
     pub machine_subs: HashMap<String, trek_remote::SubAgentLink>,
+    /// For a thread on another machine: how often its transcript was rewritten there (a rewind,
+    /// an edit) since it was opened here. Its item ids are positions, so what a view keeps by id
+    /// (a long message opened, a confirmation waiting) is let go of when this moves.
+    pub replaced: u64,
     /// When the user last stopped its agent's own sub-agents between turns. Claude Code takes a
     /// turn of its own to say they were stopped; that turn is no news (`quiet_turn`).
     stopped_out: Option<Instant>,
@@ -8078,6 +8082,29 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if crate::machines::is_remote(id) {
+            // A secret's card: its value goes to the machine that asked, over its own pinned
+            // connection, as a secret (never as a question's answer, which a transcript keeps).
+            let secret = self
+                .live
+                .get(id)
+                .and_then(|l| l.permissions.iter().find(|p| p.request_id == request_id))
+                .is_some_and(|p| matches!(p.prompt, Some(trek_agents::Prompt::Secret { .. })));
+            if secret {
+                let value = answers
+                    .into_iter()
+                    .next()
+                    .map(|(_, value)| value.trim().to_string())
+                    .filter(|v| !v.is_empty());
+                let Some(value) = value else { return };
+                return self.machine_answer(
+                    id,
+                    request_id,
+                    trek_remote::AnswerResponse::Secret {
+                        value: Some(trek_remote::SecretValue::new(value)),
+                    },
+                    cx,
+                );
+            }
             let answers = answers
                 .into_iter()
                 .map(|(question, answer)| trek_remote::QA { question, answer })
@@ -8701,7 +8728,13 @@ impl Workspace {
     /// A turn is under way on `id` (working, or waiting on the user). Sub-agents still out after
     /// it don't count: the thread is free for a message (`waiting` says it waits on them).
     pub fn turn_running(&self, id: &str) -> bool {
-        self.live.get(id).is_some_and(|l| l.turn_started.is_some())
+        self.live.get(id).is_some_and(|l| {
+            l.turn_started.is_some()
+                // A thread on another machine that waits on a card: its machine's row says it
+                // needs the user, not that it works, but its turn is under way there all the
+                // same (nothing can be taken back until it's answered or stopped).
+                || (crate::machines::is_remote(id) && !l.permissions.is_empty())
+        })
     }
 
     /// Take `id` back to just before message `item`: it and everything after it leave the
@@ -8715,7 +8748,10 @@ impl Workspace {
         restore: bool,
         cx: &mut Context<Self>,
     ) -> Option<(String, Vec<PathBuf>)> {
-        if self.machine_refuses(id, cx) {
+        // On another machine: it rewinds its thread, and the message comes back into the
+        // composer once it has (`machines::turns`). Nothing is taken back here and now.
+        if crate::machines::is_remote(id) {
+            self.machine_take_back(id, item, false, restore, Scope::Main, cx);
             return None;
         }
         if self.turn_running(id) {
@@ -8940,8 +8976,8 @@ impl Workspace {
         restore: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.machine_refuses(id, cx) {
-            return;
+        if crate::machines::is_remote(id) {
+            return self.machine_retry(id, end, model, restore, cx);
         }
         let Some((text, images)) = self.undo_turn(id, end, restore, cx) else {
             return;
@@ -8965,8 +9001,8 @@ impl Workspace {
         restore: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.machine_refuses(id, cx) {
-            return false;
+        if crate::machines::is_remote(id) {
+            return self.machine_edit_and_resend(id, item, text, images, restore, cx);
         }
         if self.rewind(id, item, restore, cx).is_none() {
             return false;
@@ -8987,7 +9023,9 @@ impl Workspace {
         scope: &Scope,
         cx: &mut Context<Self>,
     ) -> Option<String> {
-        if self.machine_refuses(id, cx) {
+        // On another machine: the fork is that machine's thread too, and opens once it's made.
+        if crate::machines::is_remote(id) {
+            self.machine_fork(id, at, scope, cx);
             return None;
         }
         if at == ForkAt::End && self.turn_running(id) {
@@ -9262,6 +9300,9 @@ impl Workspace {
 
     /// Wake it now, as if its snooze had just run out: auto-settle gives it the full wait again.
     pub fn unsnooze(&mut self, id: &str, cx: &mut Context<Self>) {
+        if crate::machines::is_remote(id) {
+            return self.machine_snooze(id, None, cx);
+        }
         self.mutate_thread(id, cx, |t| t.snoozed_until = Some(now_ms()));
     }
 
@@ -9410,8 +9451,9 @@ impl Workspace {
 
     /// `snooze_until`, with what the toast says (none: until when).
     fn snooze_at(&mut self, id: &str, at: i64, said: Option<String>, cx: &mut Context<Self>) {
-        if self.machine_refuses(id, cx) {
-            return;
+        // On another machine: it snoozes its thread (its row says so when it has).
+        if crate::machines::is_remote(id) {
+            return self.machine_snooze(id, Some(at), cx);
         }
         let Some(before) = self.thread(id).map(|t| (t.snoozed_until, t.settled_at)) else {
             return;
@@ -9451,8 +9493,14 @@ impl Workspace {
     /// Delete a thread from Trek. A thread imported from another agent stays in that agent's own
     /// history, so here it's archived and its copy of the transcript dropped (it won't come back).
     pub fn delete_thread(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.machine_refuses(id, cx) {
-            return;
+        // On another machine: asked for after its own confirmation (`machines::turns::
+        // confirm_delete`), so it deletes now.
+        if crate::machines::is_remote(id) {
+            return self.machine_thread_action(
+                id,
+                trek_remote::ThreadAction::Delete { confirmed: true },
+                cx,
+            );
         }
         let Some(thread) = self.thread(id).cloned() else {
             return;
