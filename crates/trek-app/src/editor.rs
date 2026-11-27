@@ -882,7 +882,11 @@ impl EditorView {
             tracing::info!(
                 "format: {name} answered in {} ms ({})",
                 started.elapsed().as_millis(),
-                if result.is_ok() { "formatted" } else { "failed" }
+                if result.is_ok() {
+                    "formatted"
+                } else {
+                    "failed"
+                }
             );
             let _ = this.update_in(cx, |this, window, cx| {
                 this.formatted(&text, caret, scrolled, result, window, cx)
