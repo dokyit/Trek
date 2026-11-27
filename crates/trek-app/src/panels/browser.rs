@@ -2322,8 +2322,7 @@ impl BrowserPanel {
     ) -> Option<objc2::rc::Retained<objc2_web_kit::WKWebView>> {
         let id = next_tab_id();
         webkit::own_scripts(&config);
-        let built =
-            Self::build_view(id, &url, dark, parent, tx.clone(), vars, Some(config), None)?;
+        let built = Self::build_view(id, &url, dark, parent, tx.clone(), vars, Some(config), None)?;
         let view = webkit::web_view(&built);
         POPUPS.with(|p| p.borrow_mut().insert(id, built));
         let _ = tx.try_send(Msg::Popup {
@@ -2471,24 +2470,29 @@ impl BrowserPanel {
         if popup.is_some_and(|(opener, _)| self.agent_unseen.contains(&opener)) {
             self.agent_unseen.insert(id);
         }
-        self.tabs.insert(at, Tab {
-            id,
-            view,
-            zoom: 1.0,
-            zoom_applied: 1.0,
-            page: Page::new(url),
-            frame: Rc::default(),
-            dark: Some(dark),
-            scheme_reloads: 1,
-            opener: popup.map(|(opener, _)| opener),
-            sheet: popup.and_then(|(_, size)| size),
-            crashed: None,
-            untrusted_probe: false,
-        });
+        self.tabs.insert(
+            at,
+            Tab {
+                id,
+                view,
+                zoom: 1.0,
+                zoom_applied: 1.0,
+                page: Page::new(url),
+                frame: Rc::default(),
+                dark: Some(dark),
+                scheme_reloads: 1,
+                opener: popup.map(|(opener, _)| opener),
+                sheet: popup.and_then(|(_, size)| size),
+                crashed: None,
+                untrusted_probe: false,
+            },
+        );
         if let Some(kept) = kept {
             let tab = &mut self.tabs[at];
             tab.page.title = kept.title;
-            tab.zoom = kept.zoom.clamp(ZOOM_STEPS[0], ZOOM_STEPS[ZOOM_STEPS.len() - 1]);
+            tab.zoom = kept
+                .zoom
+                .clamp(ZOOM_STEPS[0], ZOOM_STEPS[ZOOM_STEPS.len() - 1]);
             self.apply_zoom(cx);
         }
         #[cfg(target_os = "macos")]
@@ -2660,7 +2664,9 @@ impl BrowserPanel {
                 waking: false,
             });
         }
-        let Some(&front) = self.order.get(kept.active.min(self.order.len().saturating_sub(1)))
+        let Some(&front) = self
+            .order
+            .get(kept.active.min(self.order.len().saturating_sub(1)))
         else {
             return;
         };
@@ -3134,7 +3140,8 @@ impl BrowserPanel {
                 let id = if id != 0 {
                     id
                 } else {
-                    let waiting = |t: &&Tab| t.page.loading && t.page.committed_seq < t.page.nav_seq;
+                    let waiting =
+                        |t: &&Tab| t.page.loading && t.page.committed_seq < t.page.nav_seq;
                     self.active_tab()
                         .filter(waiting)
                         .or_else(|| self.tabs.iter().find(waiting))

@@ -87,7 +87,9 @@ mod b64 {
 
     pub fn serialize<S: Serializer>(v: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
         match v {
-            Some(bytes) => s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes)),
+            Some(bytes) => {
+                s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+            }
             None => s.serialize_none(),
         }
     }
@@ -208,10 +210,10 @@ pub fn clean_webkit_history(state: &[u8]) -> Option<Vec<u8>> {
     let current = history
         .get("SessionHistoryCurrentIndex")?
         .as_signed_integer()?;
-    let entries = history
-        .get_mut("SessionHistoryEntries")?
-        .as_array_mut()?;
-    let current = usize::try_from(current).ok().filter(|c| *c < entries.len())?;
+    let entries = history.get_mut("SessionHistoryEntries")?.as_array_mut()?;
+    let current = usize::try_from(current)
+        .ok()
+        .filter(|c| *c < entries.len())?;
     let mut kept = Vec::with_capacity(entries.len());
     let mut new_current = None;
     for (ix, entry) in std::mem::take(entries).into_iter().enumerate() {
@@ -475,7 +477,10 @@ mod tests {
     fn webkit_history_never_keeps_what_a_form_sent() {
         // The raw state does hold the form's body, password and all.
         for secret in ["ZQXTYPEDSECRET", "ZQXPASSWORD", "ZQXTEXTAREA"] {
-            assert!(contains(GET_THEN_POST, secret), "{secret} in WebKit's own state");
+            assert!(
+                contains(GET_THEN_POST, secret),
+                "{secret} in WebKit's own state"
+            );
         }
         // The page in front came from the POST: no history is kept, the tab is its address.
         assert_eq!(clean_webkit_history(GET_THEN_POST), None);
