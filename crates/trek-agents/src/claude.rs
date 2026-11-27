@@ -168,6 +168,40 @@ fn deny_message(tool: &str) -> &'static str {
     }
 }
 
+/// What of Claude's suggested permission updates "allow for the session" applies: for this
+/// session only (Claude suggests `localSettings` for a command, which would write the rule into
+/// the project's `.claude/settings.local.json` and outlive the thread, at any level), and no
+/// change of mode past `mode`, the thread's own (the level is Trek's to set: `acceptEdits` from a
+/// Supervised thread's "allow this command for the session" would have every edit after it go
+/// ahead unasked with Trek still showing Supervised, `bypassPermissions` would be Full access).
+fn session_suggestions(suggested: &Value, mode: &str) -> Vec<Value> {
+    // Claude's modes, from the one that asks most.
+    let rank = |m: &str| {
+        ["default", "acceptEdits", "auto", "bypassPermissions"]
+            .iter()
+            .position(|x| *x == m)
+    };
+    let ceiling = rank(mode).unwrap_or(0);
+    suggested
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|s| match s["type"].as_str() {
+            Some("addRules") => true,
+            Some("setMode") => s["mode"]
+                .as_str()
+                .and_then(rank)
+                .is_some_and(|r| r <= ceiling.min(1)),
+            _ => false,
+        })
+        .map(|s| {
+            let mut s = s.clone();
+            s["destination"] = json!("session");
+            s
+        })
+        .collect()
+}
+
 /// Messages answering the permission prompt `request`. Approving a plan also leaves plan mode
 /// for `mode` (the thread's own level): on its own, Claude would drop to "default".
 fn respond(
@@ -185,11 +219,9 @@ fn respond(
             let mut ok = json!({ "behavior": "allow", "updatedInput": input });
             // Claude's own suggested rules (e.g. allow `gh issue list:*` in this
             // session); applying them stops the same prompt from coming back.
-            if let Some(sug) = request["permission_suggestions"]
-                .as_array()
-                .filter(|a| !a.is_empty())
-            {
-                ok["updatedPermissions"] = Value::Array(sug.clone());
+            let sug = session_suggestions(&request["permission_suggestions"], mode);
+            if !sug.is_empty() {
+                ok["updatedPermissions"] = Value::Array(sug);
             }
             ok
         }
@@ -2788,12 +2820,25 @@ mod tests {
             "w",
             request,
             Decision::AllowForSession,
-            "default",
+            "acceptEdits",
         );
         assert_eq!(msgs.len(), 1);
         assert_eq!(
             msgs[0]["response"]["response"]["updatedPermissions"],
             json!([{"type":"setMode","mode":"acceptEdits","destination":"session"}])
+        );
+        // A Supervised thread's "allow for the session" doesn't switch its edits to unasked.
+        let supervised = respond(
+            &mut Control { next_id: 0 },
+            "w",
+            request,
+            Decision::AllowForSession,
+            "default",
+        );
+        assert!(
+            supervised[0]["response"]["response"]["updatedPermissions"].is_null(),
+            "{}",
+            supervised[0]
         );
         let denied = respond(
             &mut Control { next_id: 0 },
@@ -2806,6 +2851,57 @@ mod tests {
             denied[0]["response"]["response"]["message"],
             "The user declined this action."
         );
+    }
+
+    #[test]
+    fn allow_for_the_session_stays_in_the_session() {
+        let request = json!({
+            "tool_name": "Bash",
+            "input": { "command": "npm test" },
+            "permission_suggestions": [
+                { "type": "addRules", "rules": [{ "toolName": "Bash", "ruleContent": "npm test:*" }], "behavior": "allow", "destination": "localSettings" },
+                { "type": "setMode", "mode": "bypassPermissions", "destination": "session" },
+                { "type": "setMode", "mode": "acceptEdits", "destination": "userSettings" },
+                { "type": "addDirectories", "directories": ["/"], "destination": "session" },
+            ],
+        });
+        let msgs = respond(
+            &mut Control { next_id: 0 },
+            "r",
+            &request,
+            Decision::AllowForSession,
+            "default",
+        );
+        // Supervised: the command's rule, for the session, and no change of mode.
+        assert_eq!(
+            msgs[0]["response"]["response"]["updatedPermissions"],
+            json!([
+                { "type": "addRules", "rules": [{ "toolName": "Bash", "ruleContent": "npm test:*" }], "behavior": "allow", "destination": "session" },
+            ])
+        );
+        // At Auto-accept edits, Auto or Full access: accepting edits is no more than the level.
+        for mode in ["acceptEdits", "auto", "bypassPermissions"] {
+            let msgs = respond(
+                &mut Control { next_id: 0 },
+                "r",
+                &request,
+                Decision::AllowForSession,
+                mode,
+            );
+            assert_eq!(
+                msgs[0]["response"]["response"]["updatedPermissions"][1],
+                json!({ "type": "setMode", "mode": "acceptEdits", "destination": "session" }),
+                "{mode}"
+            );
+            assert_eq!(
+                msgs[0]["response"]["response"]["updatedPermissions"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                2,
+                "{mode}: never bypassPermissions"
+            );
+        }
     }
 
     #[test]

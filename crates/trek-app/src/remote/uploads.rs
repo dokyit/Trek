@@ -180,7 +180,7 @@ fn take(dir: &Path, piece: tr::UploadPiece) -> tr::HostResult<tr::UploadProgress
                 }
                 std::fs::create_dir_all(dir)
                     .map_err(|e| tr::HostError::other(format!("Couldn't keep that file: {e}")))?;
-                room_for(dir, piece.total)?;
+                room_for(dir, room_needed(piece.total, t.partial.values()))?;
                 let part = dir.join(format!("{id}.part"));
                 t.partial.insert(
                     id.clone(),
@@ -293,6 +293,15 @@ fn keep(dir: &Path, part: &Path, from: &str, name: &str) -> std::io::Result<Path
 }
 
 /// Refuses a file the disk hasn't room for (with [`HEADROOM`] to spare).
+/// The room a new upload of `total` bytes needs: its own, and what the uploads still on their way
+/// will take yet. Each checked alone, 16 of them could each find the room the others then fill.
+fn room_needed<'a>(total: u64, partial: impl IntoIterator<Item = &'a Partial>) -> u64 {
+    partial
+        .into_iter()
+        .map(|p| p.total.saturating_sub(p.received))
+        .fold(total, u64::saturating_add)
+}
+
 fn room_for(dir: &Path, total: u64) -> tr::HostResult<()> {
     match free_bytes(dir) {
         Some(free) if free < total.saturating_add(HEADROOM) => {
@@ -450,5 +459,23 @@ mod tests {
         // One that isn't there says nothing: the upload isn't held back on a guess.
         let gone = std::env::temp_dir().join(format!("trek-no-such-folder-{}", std::process::id()));
         assert_eq!(super::free_bytes(&gone), None);
+    }
+
+    #[test]
+    fn a_new_upload_needs_the_room_the_others_will_still_take() {
+        let partial = |total: u64, received: u64| super::Partial {
+            name: "a".into(),
+            from: "iPhone".into(),
+            image: false,
+            total,
+            received,
+            part: std::path::PathBuf::new(),
+            touched: std::time::Instant::now(),
+            writing: false,
+        };
+        assert_eq!(super::room_needed(5, []), 5);
+        let others = [partial(100, 40), partial(10, 10), partial(u64::MAX, 0)];
+        assert_eq!(super::room_needed(5, &others[..2]), 65);
+        assert_eq!(super::room_needed(5, &others), u64::MAX);
     }
 }

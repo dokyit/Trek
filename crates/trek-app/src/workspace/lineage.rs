@@ -262,10 +262,12 @@ impl Workspace {
         }
         // Another project Trek knows, by name or folder; else this thread's (its main checkout,
         // for a thread in a worktree: the new thread gets a worktree of its own, or none).
+        let own = self.draft_folder(&parent);
         let folder = match text("project") {
             Some(p) => Some(self.find_project(p)?),
-            None => self.draft_folder(&parent),
+            None => own.clone(),
         };
+        let elsewhere = folder != own;
         let worktree = params.get("worktree").and_then(Value::as_bool) == Some(true);
         // Its starter hears when it's done unless it asked not to.
         let notify = params.get("notify").and_then(Value::as_bool) != Some(false);
@@ -282,8 +284,9 @@ impl Workspace {
             agent,
             model,
             effort,
-            // Never more access than the thread that starts it has.
-            hand_holding: parent.hand_holding,
+            // Never more access than the thread that starts it has, and in another project,
+            // asking first (`started_level`).
+            hand_holding: started_level(parent.hand_holding, elsewhere),
             // In plan mode, it plans too: nothing it does goes past what its starter may do.
             plan: self.live.get(caller).is_some_and(|l| l.plan),
             fast: false,
@@ -917,5 +920,42 @@ impl LineageRow {
         } else {
             ws.open_thread_here(thread, cx)
         }
+    }
+}
+
+/// The access level of a thread an agent starts at `parent`'s: the same in its own project. In
+/// another project, Supervised unless the starter has Full access: an agent whose own edits
+/// outside its project ask (Auto-accept edits, Auto) would otherwise get them made there unasked
+/// by a thread it started.
+fn started_level(parent: trek_core::HandHolding, elsewhere: bool) -> trek_core::HandHolding {
+    use trek_core::HandHolding;
+    if elsewhere && parent != HandHolding::FullAccess {
+        HandHolding::Supervised
+    } else {
+        parent
+    }
+}
+
+#[cfg(test)]
+mod started_level_tests {
+    use super::started_level;
+    use trek_core::HandHolding;
+
+    #[test]
+    fn a_thread_started_in_another_project_asks_first() {
+        for level in HandHolding::ALL {
+            assert_eq!(started_level(level, false), level);
+        }
+        for level in [
+            HandHolding::Supervised,
+            HandHolding::AutoAcceptEdits,
+            HandHolding::Auto,
+        ] {
+            assert_eq!(started_level(level, true), HandHolding::Supervised);
+        }
+        assert_eq!(
+            started_level(HandHolding::FullAccess, true),
+            HandHolding::FullAccess
+        );
     }
 }

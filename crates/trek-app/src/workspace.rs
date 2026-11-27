@@ -2926,6 +2926,8 @@ impl Workspace {
         session: &trek_core::import::ImportedThread,
         cx: &mut Context<Self>,
     ) {
+        self.store
+            .set_import_level(self.settings.general.hand_holding);
         match self.store.keep_imported(session) {
             Ok(t) => {
                 if let Some(summary) = self.import_summary.as_mut() {
@@ -10975,6 +10977,8 @@ impl Workspace {
         cx.notify();
         let store = self.store.clone();
         let settings = self.settings.import.clone();
+        // A session brought in starts at the user's level for new threads, whatever it ran at.
+        store.set_import_level(self.settings.general.hand_holding);
         let task = cx.spawn(async move |this, cx| {
             let summary = cx
                 .background_executor()

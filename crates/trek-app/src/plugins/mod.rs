@@ -839,8 +839,52 @@ pub fn update_state(ws: &Entity<Workspace>, cx: &mut App, f: impl FnOnce(&mut St
     contributions_changed(ws, cx);
 }
 
-/// Turn plugin `id` on (the user, in Settings: they've seen and allow what it asks for) or off.
+/// What the user was shown when asked to allow a plugin: its files' hash then, and what it asked
+/// for that it hadn't been given.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Shown {
+    pub hash: Option<String>,
+    pub asks: Vec<core::Permission>,
+}
+
+impl Shown {
+    /// What plugin `id` would ask the user to allow now.
+    pub fn now(id: &str, cx: &App) -> Option<Shown> {
+        let p = cx.try_global::<Plugins>()?;
+        let pl = p.find(id)?;
+        Some(Shown {
+            hash: pl.hash.clone(),
+            asks: p.state.missing(&pl.manifest),
+        })
+    }
+
+    /// Whether allowing `now` is allowing what was shown: the same files, and nothing asked that
+    /// wasn't on the card. A plugin rewritten while the dialog was open (an agent can write its
+    /// folder) would otherwise be sealed with permissions the user never read.
+    pub fn covers(&self, now: &Shown) -> bool {
+        self.hash == now.hash && now.asks.iter().all(|p| self.asks.contains(p))
+    }
+}
+
+/// Turn plugin `id` off, or on when that allows nothing new (the palette's switch).
 pub fn set_on(id: &str, on: bool, ws: &Entity<Workspace>, cx: &mut App) {
+    if on && Shown::now(id, cx).is_some_and(|now| !now.asks.is_empty()) {
+        core::log(id, "not turned on: it asks for more than it was allowed");
+        return;
+    }
+    turn(id, on, ws, cx);
+}
+
+/// Turn plugin `id` on, allowing what it asks for, as long as that's what the user was `shown`.
+pub fn allow_shown(id: &str, shown: &Shown, ws: &Entity<Workspace>, cx: &mut App) {
+    if !Shown::now(id, cx).is_some_and(|now| shown.covers(&now)) {
+        core::log(id, "not turned on: it changed while it was being allowed");
+        return;
+    }
+    turn(id, true, ws, cx);
+}
+
+fn turn(id: &str, on: bool, ws: &Entity<Workspace>, cx: &mut App) {
     let Some(plugin) = cx.try_global::<Plugins>().and_then(|p| p.find(id)).cloned() else {
         return;
     };
@@ -914,16 +958,18 @@ pub fn cant_allow(plugin: &Plugin) -> String {
 /// asks, read out in words in a dialog.
 pub fn switch(id: &str, on: bool, ws: &Entity<Workspace>, window: &mut Window, cx: &mut App) {
     use gpui_kit::component::{WindowExt as _, v_flex};
-    let Some((name, asks)) = cx.try_global::<Plugins>().and_then(|p| {
-        p.find(id)
-            .map(|pl| (pl.manifest.name.clone(), p.state.missing(&pl.manifest)))
-    }) else {
+    let Some((name, shown)) = cx
+        .try_global::<Plugins>()
+        .and_then(|p| p.find(id).map(|pl| pl.manifest.name.clone()))
+        .zip(Shown::now(id, cx))
+    else {
         return;
     };
-    if !on || asks.is_empty() {
+    if !on || shown.asks.is_empty() {
         set_on(id, on, ws, cx);
         return;
     }
+    let asks = shown.asks.clone();
     let (id, ws) = (id.to_string(), ws.clone());
     window.open_alert_dialog(cx, move |alert, _, cx| {
         let (id, ws) = (id.clone(), ws.clone());
@@ -937,9 +983,12 @@ pub fn switch(id: &str, on: bool, ws: &Entity<Workspace>, window: &mut Window, c
             )
             .confirm()
             .ok_text("Allow and turn on")
-            .on_ok(move |_, _, cx| {
-                set_on(&id, true, &ws, cx);
-                true
+            .on_ok({
+                let shown = shown.clone();
+                move |_, _, cx| {
+                    allow_shown(&id, &shown, &ws, cx);
+                    true
+                }
             })
     });
 }
@@ -1306,5 +1355,35 @@ pub fn icon_path(name: &str) -> SharedString {
 pub fn show_log(id: Option<&str>, cx: &mut App) {
     if cx.has_global::<Plugins>() {
         cx.global_mut::<Plugins>().log = id.map(|id| (id.to_string(), core::log_tail(id, 12)));
+    }
+}
+
+#[cfg(test)]
+mod shown_tests {
+    use super::Shown;
+    use trek_core::plugins::Permission;
+
+    #[test]
+    fn allowing_covers_only_what_was_shown() {
+        let perm = |k: &str| Permission::parse(k).unwrap();
+        let shown = Shown {
+            hash: Some("a".into()),
+            asks: vec![perm("usage:read")],
+        };
+        assert!(shown.covers(&shown.clone()));
+        // Less asked than shown (one was allowed meanwhile): fine.
+        assert!(shown.covers(&Shown {
+            hash: Some("a".into()),
+            asks: vec![],
+        }));
+        // Rewritten while the dialog was open: more asked, or other files.
+        assert!(!shown.covers(&Shown {
+            hash: Some("a".into()),
+            asks: vec![perm("usage:read"), perm("threads:send")],
+        }));
+        assert!(!shown.covers(&Shown {
+            hash: Some("b".into()),
+            asks: vec![perm("usage:read")],
+        }));
     }
 }

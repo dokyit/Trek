@@ -2450,12 +2450,25 @@ fn push_tool_results(
 /// as it is. No builds: `cargo check` runs the project's `build.rs` and takes `--config`, and
 /// Auto lets an agent write both unasked, so a build is the agent's own code run without a card. The shell runs whatever else the line holds, so anything that chains, substitutes or
 /// redirects is out, and so are the flags that make a listed tool write, delete or run commands.
+#[cfg(test)]
 fn is_safe_command(cmd: &str) -> bool {
+    safe_line(cmd, &|| true)
+}
+
+/// `is_safe_command`, where `dashed` says whether the folder the command runs in holds a name
+/// that starts with `-` (asked only for a word that starts with a glob, which can expand into one).
+fn safe_line(cmd: &str, dashed: &dyn Fn() -> bool) -> bool {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
         return true;
     }
     if trimmed.contains([';', '&', '|', '>', '<', '`', '\n', '\r']) || trimmed.contains("$(") {
+        return false;
+    }
+    // cmd.exe drops `^` and expands `%VAR%` (and `%VAR:~0,0%` to nothing) before the program
+    // sees its arguments: `rg --p^re=sh x` reaches rg as `--pre=sh`. Git Bash takes both as they
+    // are, but which shell runs the line isn't this check's to know.
+    if cfg!(windows) && trimmed.contains(['^', '%']) {
         return false;
     }
     let safe_prefixes = [
@@ -2485,72 +2498,294 @@ fn is_safe_command(cmd: &str) -> bool {
     else {
         return false;
     };
-    // The arguments as the shell will see them, near enough: quotes and backslashes go, so
+    let words = shell_words(&trimmed[prefix.len()..]);
+    // A glob the shell expands into names the agent chose: `rg x *` beside a file called
+    // `--pre=sh` runs `sh`, `find . -d*` beside one called `-delete` deletes. A pattern that
+    // starts with something fixed other than `-` (`src/*.rs`, `'*.rs'`) can't become a flag; one
+    // that starts with the glob can only where a name in the folder starts with `-` (the agent's
+    // calls run one at a time, so none is made between this look and the command).
+    if words
+        .iter()
+        .any(|w| w.glob && (w.text.starts_with('-') || (w.glob_first && dashed())))
+    {
+        return false;
+    }
+    // The arguments as the program will see them, near enough: quotes and backslashes gone, so
     // `'-delete'` or `-de''lete` reads as `-delete`.
-    let args: Vec<String> = trimmed[prefix.len()..]
-        .split_whitespace()
-        .map(|a| a.replace(['\'', '"', '\\'], ""))
-        .collect();
+    let args: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
     // A cluster of short flags (`-df`) holding any of `letters`.
     let short = |a: &str, letters: &str| {
         a.starts_with('-') && !a.starts_with("--") && a.chars().skip(1).any(|c| letters.contains(c))
     };
-    // The shell expands these into flags the checks below never see: `find . ${x:--delete}`.
-    if *prefix != "echo" && args.iter().any(|a| a.contains(['$', '{'])) {
+    // A long flag, whole (`--output=x`) or as the abbreviation git takes for it (`--outp`,
+    // `--unset` for `--unset-upstream`).
+    let long = |a: &str, flags: &[&str]| {
+        let name = a.split('=').next().unwrap_or(a);
+        flags
+            .iter()
+            .any(|f| a.starts_with(f) || (name.len() > 3 && f.starts_with(name)))
+    };
+    if *prefix == "echo" {
+        // Only `$NAME`: `${…}`, `$[…]` and `$'…'` evaluate what's in them, and
+        // `${a:=x[$(cmd)]} $[a]` runs `cmd` with no `$(` in sight.
+        if args.iter().any(|a| {
+            let b = a.as_bytes();
+            b.iter().enumerate().any(|(i, c)| {
+                *c == b'$'
+                    && !b
+                        .get(i + 1)
+                        .is_some_and(|n| n.is_ascii_alphabetic() || *n == b'_')
+            })
+        }) {
+            return false;
+        }
+    } else if args.iter().any(|a| a.contains(['$', '{'])) {
+        // The shell expands these into flags the checks below never see: `find . ${x:--delete}`.
         return false;
     }
-    !args.iter().any(|a| {
-        let a = a.as_str();
-        match *prefix {
-            "find" => matches!(
-                a,
-                "-delete"
-                    | "-exec"
-                    | "-execdir"
-                    | "-ok"
-                    | "-okdir"
-                    | "-fprint"
-                    | "-fprint0"
-                    | "-fprintf"
-                    | "-fls"
-            ),
-            "fd" => short(a, "xX") || a.starts_with("--exec"),
-            // Listing only: a name creates a branch, and these flags delete, move, copy or
-            // retarget one.
-            "git branch" => {
-                !a.starts_with('-')
-                    || short(a, "dDmMcCfu")
-                    || [
+    !args.iter().any(|a| match *prefix {
+        "find" => matches!(
+            *a,
+            "-delete"
+                | "-exec"
+                | "-execdir"
+                | "-ok"
+                | "-okdir"
+                | "-fprint"
+                | "-fprint0"
+                | "-fprintf"
+                | "-fls"
+        ),
+        "fd" => short(a, "xX") || long(a, &["--exec", "--exec-batch"]),
+        // Listing only: a name creates a branch, and these flags delete, move, copy or
+        // retarget one.
+        "git branch" => {
+            !a.starts_with('-')
+                || short(a, "dDmMcCfu")
+                || long(
+                    a,
+                    &[
                         "--delete",
                         "--move",
                         "--copy",
                         "--force",
                         "--set-upstream",
+                        "--set-upstream-to",
                         "--unset-upstream",
                         "--edit-description",
                         "--track",
                         "--no-track",
-                    ]
-                    .iter()
-                    .any(|f| a.starts_with(f))
-            }
-            // Writes a file, or runs the programs the repository's config names for diffs.
-            "git diff" | "git log" | "git show" => {
-                a.starts_with("--output") || a == "--ext-diff" || a == "--textconv"
-            }
-            // Programs of the caller's choosing: a preprocessor, and the one asked for a name.
-            "rg" => a.starts_with("--pre") || a.starts_with("--hostname-bin"),
-            // Follows forever.
-            "tail" => short(a, "fF") || a.starts_with("--follow") || a == "--retry",
-            _ => false,
+                    ],
+                )
         }
+        // Writes a file, or runs the programs the repository's config names for diffs.
+        "git diff" | "git log" | "git show" => long(a, &["--output", "--ext-diff", "--textconv"]),
+        // Programs of the caller's choosing: a preprocessor, and the one asked for a name.
+        "rg" => long(a, &["--pre", "--hostname-bin"]),
+        // Follows forever.
+        "tail" => short(a, "fF") || long(a, &["--follow", "--retry"]),
+        _ => false,
+    })
+}
+
+/// A word of a command line, as a POSIX shell splits it.
+struct Word {
+    /// With its quotes and backslashes gone.
+    text: String,
+    /// It holds a `*`, `?` or `[` the shell expands (one not quoted or escaped).
+    glob: bool,
+    /// Its first character is one of those.
+    glob_first: bool,
+}
+
+/// `line` split into words the way the shell does: whitespace outside quotes ends a word,
+/// single quotes keep everything, double quotes and a backslash keep the next character.
+fn shell_words(line: &str) -> Vec<Word> {
+    let mut words = Vec::new();
+    let mut cur: Option<Word> = None;
+    let mut chars = line.chars();
+    let mut quote: Option<char> = None;
+    while let Some(c) = chars.next() {
+        let word = || Word {
+            text: String::new(),
+            glob: false,
+            glob_first: false,
+        };
+        match (quote, c) {
+            (None, c) if c.is_whitespace() => words.extend(cur.take()),
+            (None, '\\') => {
+                let w = cur.get_or_insert_with(word);
+                w.text.extend(chars.next());
+            }
+            (None, '\'' | '"') => {
+                cur.get_or_insert_with(word);
+                quote = Some(c);
+            }
+            (Some(q), c) if c == q => quote = None,
+            (Some('"'), '\\') => {
+                let w = cur.get_or_insert_with(word);
+                w.text.extend(chars.next());
+            }
+            (None, '*' | '?' | '[') => {
+                let w = cur.get_or_insert_with(word);
+                w.glob = true;
+                w.glob_first |= w.text.is_empty();
+                w.text.push(c);
+            }
+            (_, c) => cur.get_or_insert_with(word).text.push(c),
+        }
+    }
+    words.extend(cur);
+    words
+}
+
+/// `is_safe_command`, for a command run in `cwd`: and nothing it names is a private file of the
+/// user's (a key, a token) or a folder holding them, and git won't find a repository the agent
+/// could have written itself.
+fn is_safe_here(cmd: &str, cwd: &Path) -> bool {
+    if !safe_line(cmd, &|| dashed_names(cwd)) {
+        return false;
+    }
+    let trimmed = cmd.trim();
+    // Git takes a folder holding `HEAD`, `objects` and `refs` for a repository (a bare one),
+    // and runs the programs its `config` names (`core.fsmonitor` on `git status`). Outside a
+    // `.git` folder those are ordinary files Auto writes without asking.
+    if trimmed.starts_with("git ") && agent_made_repo(cwd) {
+        return false;
+    }
+    // The words as a POSIX shell reads them, and as cmd.exe does (backslashes kept: on Windows
+    // `C:\Users\me\.ssh\id_rsa` is a path, which the first reading turns into `C:Usersme.sshid_rsa`).
+    // `echo`, `which` and `pwd` read no file: what they name is only printed.
+    if ["echo", "which", "pwd"]
+        .iter()
+        .any(|p| trimmed == *p || trimmed.starts_with(&format!("{p} ")))
+    {
+        return true;
+    }
+    let posix = shell_words(trimmed).into_iter().skip(1).map(|w| w.text);
+    let cmd = trimmed
+        .split_whitespace()
+        .skip(1)
+        .map(|w| w.replace(['\'', '"'], ""));
+    !posix.chain(cmd).any(|text| {
+        let a = text.as_str();
+        let value = match a.strip_prefix('-') {
+            Some(flag) => match flag.split_once('=') {
+                Some((_, v)) => v,
+                None => return false,
+            },
+            None => a,
+        };
+        !value.is_empty() && private_path(&shell_path(glob_root(value), cwd))
+    })
+}
+
+/// The folder a glob starts in, spelled as it is (`~/.ss?/id_rsa` is `~`, `../.*` is `..`,
+/// `*.rs` is ``, the folder the command runs in): its fixed part, up to its last separator. A
+/// word with no glob is itself. What the glob reaches is judged by that folder: one that holds a
+/// private place or is in one (`private_path`) can expand into keys.
+fn glob_root(word: &str) -> &str {
+    match word.find(['*', '?', '[']) {
+        None => word,
+        Some(i) => match word[..i].rfind(['/', '\\']) {
+            Some(0) => &word[..1],
+            Some(sep) => &word[..sep],
+            None => "",
+        },
+    }
+}
+
+/// Whether a name in `dir` starts with `-` (one a glob there could expand into a flag). A folder
+/// that can't be read counts as one.
+fn dashed_names(dir: &Path) -> bool {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => entries
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with('-')),
+        Err(_) => true,
+    }
+}
+
+/// The path a shell word names, run in `cwd`: `~` is the home folder (`~user` another's, whose
+/// parent is above this home).
+fn shell_path(word: &str, cwd: &Path) -> PathBuf {
+    let home = trek_core::paths::home();
+    match word.strip_prefix('~') {
+        Some("") => home,
+        Some(rest) if rest.starts_with('/') || rest.starts_with('\\') => {
+            home.join(rest.trim_start_matches(['/', '\\']))
+        }
+        Some(_) => home.parent().map_or(home.clone(), Path::to_path_buf),
+        None => tool_path(word, cwd),
+    }
+}
+
+/// Whether git, run in `cwd`, would take a folder that isn't a `.git` one for its repository.
+fn agent_made_repo(cwd: &Path) -> bool {
+    for dir in cwd.ancestors() {
+        if dir.join(".git").exists() {
+            return false;
+        }
+        if dir.join("HEAD").is_file() && dir.join("objects").is_dir() && dir.join("refs").is_dir() {
+            return dir
+                .file_name()
+                .is_none_or(|n| !n.to_string_lossy().eq_ignore_ascii_case(".git"));
+        }
+    }
+    false
+}
+
+/// Where people keep keys and tokens, from the home folder.
+const PRIVATE_IN_HOME: [&str; 24] = [
+    ".ssh",
+    ".aws",
+    ".azure",
+    ".gnupg",
+    ".kube",
+    ".docker",
+    ".netrc",
+    ".git-credentials",
+    ".npmrc",
+    ".pypirc",
+    ".password-store",
+    ".cargo/credentials",
+    ".cargo/credentials.toml",
+    ".config/gh",
+    ".config/hub",
+    ".config/gcloud",
+    ".config/op",
+    ".config/github-copilot",
+    ".terraform.d",
+    ".claude/.credentials.json",
+    ".codex/auth.json",
+    ".local/share/opencode/auth.json",
+    "Library/Keychains",
+    "Library/Cookies",
+];
+
+/// Whether reading `path` could read the user's keys or tokens: it's in one of the places they
+/// keep them, or it holds one (`~/.config`, which holds `~/.config/gh`; the home folder and
+/// above), so a search or a glob from there goes into them. The secrets a thread was handed
+/// (`request_secret`) are its own to read.
+fn private_path(path: &Path) -> bool {
+    let path = crate::acp::resolve(path);
+    let home = crate::acp::resolve(&trek_core::paths::home());
+    PRIVATE_IN_HOME.iter().any(|p| {
+        let place = crate::acp::resolve(&home.join(p));
+        path.starts_with(&place) || place.starts_with(&path)
     })
 }
 
 /// Whether a read-only session may run `cmd`: what Auto would run unasked, less the builds, which
 /// run the project's own code.
+#[cfg(test)]
 fn is_read_only_command(cmd: &str) -> bool {
     !cmd.trim_start().starts_with("cargo") && is_safe_command(cmd)
+}
+
+/// `is_read_only_command`, run in `cwd` (a leading glob is fine where no name starts with `-`).
+fn is_read_only_here(cmd: &str, cwd: &Path) -> bool {
+    !cmd.trim_start().starts_with("cargo") && safe_line(cmd, &|| dashed_names(cwd))
 }
 
 fn tool_display(name: &str, args_json: &str) -> (&'static str, String) {
@@ -2737,16 +2972,31 @@ fn edit_permission(
 }
 
 /// Whether `path`, in the project `cwd`, is inside a `.git` folder (the project's or a nested
-/// repository's), whatever the case of its name (the Mac's and Windows' disks don't care).
-fn in_git_dir(path: &Path, cwd: &Path) -> bool {
-    path.strip_prefix(cwd)
-        .unwrap_or(path)
-        .components()
-        .any(|c| {
-            c.as_os_str()
-                .to_str()
-                .is_some_and(|name| name.eq_ignore_ascii_case(".git"))
-        })
+/// repository's), however it's written: in any case (the Mac's and Windows' disks don't care),
+/// as Windows also reads it (`.git.`, `.git `, `.git::$INDEX_ALLOCATION`, the short name
+/// `GIT~1`), or through a link in the project that leads into one.
+pub(crate) fn in_git_dir(path: &Path, cwd: &Path) -> bool {
+    let named = |path: &Path, cwd: &Path| {
+        path.strip_prefix(cwd)
+            .unwrap_or(path)
+            .components()
+            .any(|c| c.as_os_str().to_str().is_some_and(git_dir_name))
+    };
+    named(path, cwd) || named(&crate::acp::resolve(path), &crate::acp::resolve(cwd))
+}
+
+/// Whether a file name is `.git` to Windows or to a disk that ignores case.
+fn git_dir_name(name: &str) -> bool {
+    let name = name.split(':').next().unwrap_or(name);
+    let name = name.trim_end_matches(['.', ' ']);
+    if name.eq_ignore_ascii_case(".git") {
+        return true;
+    }
+    // 8.3 short names: `GIT~1`, `GIT~12`.
+    name.get(..4)
+        .is_some_and(|h| h.eq_ignore_ascii_case("git~"))
+        && name.len() > 4
+        && name[4..].bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Whether a thread's level, by itself, asks before `tool` (`bash`, `mcp`, `web_fetch`,
@@ -2764,7 +3014,7 @@ fn level_asks(
             let need_ask = match hand_holding {
                 HandHolding::FullAccess => false,
                 HandHolding::Auto => {
-                    !is_safe_command(target) && !allowed_for_session.contains(target)
+                    !is_safe_here(target, cwd) && !allowed_for_session.contains(target)
                 }
                 HandHolding::AutoAcceptEdits | HandHolding::Supervised => {
                     !allowed_for_session.contains(target)
@@ -2799,6 +3049,13 @@ fn level_asks(
                 }
             };
             (need_ask, "Fetch page", target.to_string())
+        }
+        // Only reads of the user's keys and tokens come here (`private_read`).
+        "read" => {
+            let key = format!("read:{target}");
+            let need_ask =
+                hand_holding != HandHolding::FullAccess && !allowed_for_session.contains(&key);
+            (need_ask, "Read file", key)
         }
         _ => {
             let (need_ask, key) =
@@ -2915,6 +3172,43 @@ async fn permitted_under(
     )
 }
 
+/// A read of `path` (`read_file`, or a search from it) that would reach the user's keys or
+/// tokens (`private_path`) asks below Full access: with `web_fetch` unasked, a read is all it
+/// takes to send them off. `Some`: what to tell the model, not permitted.
+#[allow(clippy::too_many_arguments)]
+async fn private_read(
+    path: &str,
+    cwd: &Path,
+    hand_holding: HandHolding,
+    allowed_for_session: &mut HashSet<String>,
+    events: &async_channel::Sender<AgentEvent>,
+    commands: &async_channel::Receiver<Command>,
+    kept: &mut VecDeque<Command>,
+    shutdown: &mut bool,
+) -> Result<Option<String>> {
+    if hand_holding == HandHolding::FullAccess || !private_path(&tool_path(path, cwd)) {
+        return Ok(None);
+    }
+    Ok(
+        match permitted(
+            "read",
+            path,
+            cwd,
+            hand_holding,
+            allowed_for_session,
+            events,
+            commands,
+            kept,
+            shutdown,
+        )
+        .await?
+        {
+            Permit::Go => None,
+            Permit::No(why) => Some(why),
+        },
+    )
+}
+
 async fn execute_tool(
     name: &str,
     args_json: &str,
@@ -2942,15 +3236,18 @@ async fn execute_tool(
                 return Ok(("Error: empty command".into(), false, None));
             }
             // Read-only sessions can still look around: what can't change anything runs.
-            if read_only && !is_read_only_command(command) {
+            if read_only && !is_read_only_here(command, cwd) {
                 return Ok((
                     "Not run: this session is read-only, so bash only runs single commands that just read (git status, git log, git diff, git show, ls, cat, head, tail, grep, rg, find, wc, stat, file, which, pwd, echo), with no pipes or redirects. Use read_file, grep, glob and list_dir for the rest.".into(),
                     false,
                     None,
                 ));
             }
+            // A read-only session's reads don't ask, unless one names the user's keys or git
+            // would read a repository the agent could have made.
             let asks = !read_only
                 || hand_holding == HandHolding::Supervised
+                || !is_safe_here(command, cwd)
                 || rule_speaks("bash", command, cwd);
             if asks
                 && let Permit::No(why) = permitted(
@@ -2990,6 +3287,20 @@ async fn execute_tool(
             Ok((out, ok, None))
         }
         "read_file" => {
+            if let Some(why) = private_read(
+                text_of("path"),
+                cwd,
+                hand_holding,
+                allowed_for_session,
+                events,
+                commands,
+                kept,
+                shutdown,
+            )
+            .await?
+            {
+                return Ok((why, false, None));
+            }
             let start = parsed["start_line"].as_u64().map(|s| s as usize);
             let end = parsed["end_line"].as_u64().map(|e| e as usize);
             let (out, ok) = run_read_file(
@@ -3091,6 +3402,20 @@ async fn execute_tool(
             .await
         }
         "grep" | "glob" | "list_dir" => {
+            if let Some(why) = private_read(
+                parsed["path"].as_str().unwrap_or("."),
+                cwd,
+                hand_holding,
+                allowed_for_session,
+                events,
+                commands,
+                kept,
+                shutdown,
+            )
+            .await?
+            {
+                return Ok((why, false, None));
+            }
             let mut waiting = Waiting {
                 commands,
                 kept: &mut *kept,
@@ -9827,6 +10152,301 @@ print(`line 2: ${text}; lines: ${stdout.trim()}; exit ${exit_code}`);
             !names.contains(&"write_file".to_string()) && !names.contains(&"edit_file".to_string())
         );
         s.finish().await;
+    }
+
+    /// A new empty folder for one test.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "trek_test_{name}_{}_{}",
+            std::process::id(),
+            trek_core::store::now_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn echo_cant_evaluate_what_it_prints() {
+        // Reproduced on macOS's bash 3.2: the arithmetic runs `touch pwn`, with no `$(` in the line.
+        for command in [
+            "echo ${d:=$} ${a:=x[${d}\\(touch pwn\\)]} $[a]",
+            "echo ${b@P}",
+            "echo $[1+1]",
+            "echo $'\\x41'",
+        ] {
+            assert!(!is_safe_command(command), "{command}");
+            assert!(!is_read_only_command(command), "{command}");
+        }
+        assert!(is_safe_command("echo $HOME"));
+        assert!(is_safe_command("echo $PATH and $_x"));
+        assert!(is_safe_command("echo hello world"));
+    }
+
+    #[test]
+    fn a_glob_cant_bring_in_a_flag() {
+        // Beside a file the agent wrote called `--pre=sh`, `rg x *` runs `sh`.
+        for command in [
+            "rg x *",
+            "rg x ?pre*",
+            "find . -d*",
+            "find *",
+            "fd . [-]*",
+            "git diff *",
+            "grep -r x -*",
+            "ls *",
+        ] {
+            assert!(!is_safe_command(command), "{command}");
+        }
+        for command in [
+            "find . -name '*.rs' -type f",
+            "find . -name \"*.rs\"",
+            "ls src/*.rs",
+            "rg x ./*",
+            "grep -n foo '*'",
+            "rg 'a.*b' src",
+        ] {
+            assert!(is_safe_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_leading_glob_runs_where_no_name_could_become_a_flag() {
+        let cwd = scratch("glob_dash");
+        std::fs::write(cwd.join("a.rs"), "").unwrap();
+        for command in ["ls *", "ls *.rs", "rg x *", "git diff *", "wc -l *.rs"] {
+            assert!(is_safe_here(command, &cwd), "{command}");
+            assert!(is_read_only_here(command, &cwd), "{command}");
+        }
+        // A name the agent could have written that the glob turns into a flag.
+        std::fs::write(cwd.join("--pre=sh"), "").unwrap();
+        for command in ["ls *", "rg x *", "git diff *", "rg x */a"] {
+            assert!(!is_safe_here(command, &cwd), "{command}");
+            assert!(!is_read_only_here(command, &cwd), "{command}");
+        }
+        // A pattern starting with `-` is a flag whatever the folder holds.
+        std::fs::remove_file(cwd.join("--pre=sh")).unwrap();
+        assert!(!is_safe_here("find . -d*", &cwd));
+        assert!(is_safe_here("ls src/*.rs", &cwd));
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn a_glob_into_the_users_keys_asks() {
+        let home = trek_core::paths::home();
+        let cwd = home.join("trek-no-such-project").join("sub");
+        // Each expands into `~/.netrc`, `~/.ssh/id_rsa`, `~/.aws/credentials`…, which the word
+        // as written isn't under.
+        for command in [
+            "cat ~/.*",
+            "cat ~/.ss?/id_rsa",
+            "cat ~/.[a-z]*/credentials",
+            "cat ~/.*/*",
+            "cat ../../.ssh/*",
+            "cat ../../.*",
+            "grep -r token ~/.config/*",
+            "head ~other/.ssh/*",
+        ] {
+            assert!(is_safe_command(command), "{command}: fine as a line");
+            assert!(!is_safe_here(command, &cwd), "{command}");
+        }
+        // Every user's folder, from the one that holds them (`/Users`, `/home`).
+        let users = home.parent().unwrap().display().to_string();
+        assert!(!is_safe_here(&format!("cat {users}/*/.ssh/id_rsa"), &cwd));
+        // A folder that holds a private place is one: a search from it goes in.
+        assert!(private_path(&home.join(".config")));
+        assert!(private_path(&home.join("Library")));
+        assert!(!private_path(
+            &home.join(".config").join("nvim").join("init.lua")
+        ));
+        assert!(!is_safe_here("grep -r token ~/.config", &cwd));
+        assert!(is_safe_here("cat src/*.rs", &cwd));
+        assert!(is_safe_here("cat ~/.config/nvim/init.lua", &cwd));
+        // Printing a path reads nothing.
+        for command in ["echo ~", "echo ~/.ssh", "which ls", "pwd"] {
+            assert!(is_safe_here(command, &cwd), "{command}");
+        }
+        assert_eq!(glob_root("~/.ss?/id_rsa"), "~");
+        assert_eq!(glob_root("../../.ssh/*"), "../../.ssh");
+        assert_eq!(glob_root("*.rs"), "");
+        assert_eq!(glob_root("/*"), "/");
+        assert_eq!(glob_root("src/main.rs"), "src/main.rs");
+    }
+
+    #[test]
+    fn abbreviated_flags_are_the_flags() {
+        for command in [
+            "git branch --unset",
+            "git branch --edit-desc",
+            "git branch --del main",
+            "git log --ext",
+            "git diff --textcon",
+            "git diff --outp=x.rs",
+            "tail --fol x",
+            "fd --exe rm",
+        ] {
+            assert!(!is_safe_command(command), "{command}");
+        }
+        assert!(is_safe_command("git log --oneline"));
+        assert!(is_safe_command("git diff --stat"));
+        assert!(is_safe_command("git branch --show-current"));
+        assert!(is_safe_command("git branch -a --list"));
+    }
+
+    #[test]
+    fn the_words_of_a_line_are_the_shells() {
+        let w = shell_words(r#"a 'b c' "d\"e" f\ g *x 'h*' "-*" -*"#);
+        let texts: Vec<&str> = w.iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(texts, ["a", "b c", "d\"e", "f g", "*x", "h*", "-*", "-*"]);
+        let globs: Vec<bool> = w.iter().map(|w| w.glob).collect();
+        assert_eq!(
+            globs,
+            [false, false, false, false, true, false, false, true]
+        );
+        assert!(w[4].glob_first);
+    }
+
+    #[test]
+    fn a_safe_command_stays_out_of_the_users_keys() {
+        let home = trek_core::paths::home();
+        let cwd = home.join("some-project-that-isnt-there");
+        for command in [
+            "cat ~/.ssh/id_ed25519",
+            "cat ~/.aws/credentials",
+            "grep -r BEGIN ~",
+            "ls ~",
+            "rg --files /",
+            "cat ../.netrc",
+            "find ~other",
+        ] {
+            assert!(is_safe_command(command), "{command}: fine as a line");
+            assert!(!is_safe_here(command, &cwd), "{command}");
+            assert!(
+                level_asks("bash", command, &cwd, HandHolding::Auto, &HashSet::new()).0,
+                "{command}"
+            );
+        }
+        let ssh = home.join(".ssh").join("id_rsa");
+        assert!(!is_safe_here(&format!("cat {}", ssh.display()), &cwd));
+        assert!(!is_safe_here(
+            &format!("rg --file={} x", ssh.display()),
+            &cwd
+        ));
+        assert!(is_safe_here("cat src/main.rs", &cwd));
+        assert!(is_safe_here("rg -n 'fn main' src", &cwd));
+        assert!(is_safe_here("git status", &cwd));
+    }
+
+    #[test]
+    fn reads_of_keys_ask_below_full_access() {
+        let home = trek_core::paths::home();
+        let cwd = home.join("p");
+        assert!(private_path(&home.join(".ssh").join("id_rsa")));
+        assert!(private_path(
+            &home.join(".config").join("gh").join("hosts.yml")
+        ));
+        assert!(private_path(&home));
+        assert!(!private_path(&cwd.join("src").join("main.rs")));
+        for level in [
+            HandHolding::Supervised,
+            HandHolding::AutoAcceptEdits,
+            HandHolding::Auto,
+        ] {
+            assert!(level_asks("read", "~/.ssh/id_rsa", &cwd, level, &HashSet::new()).0);
+        }
+        assert!(!level_asks("read", "/x", &cwd, HandHolding::FullAccess, &HashSet::new()).0);
+        let allowed = HashSet::from(["read:/x".to_string()]);
+        assert!(!level_asks("read", "/x", &cwd, HandHolding::Auto, &allowed).0);
+    }
+
+    #[test]
+    fn git_never_reads_a_repository_the_agent_wrote() {
+        let dir = scratch("agent_repo");
+        let cwd = dir.join("work");
+        std::fs::create_dir_all(cwd.join("objects")).unwrap();
+        std::fs::create_dir_all(cwd.join("refs")).unwrap();
+        assert!(
+            is_safe_here("git status", &cwd),
+            "no HEAD: not a repository"
+        );
+        // What `edit_permission` lets Auto write unasked, in a folder that isn't a repository.
+        std::fs::write(cwd.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert!(
+            !edit_permission(
+                "write_file",
+                HandHolding::Auto,
+                "HEAD",
+                &cwd,
+                &HashSet::new()
+            )
+            .0
+        );
+        assert!(agent_made_repo(&cwd));
+        assert!(!is_safe_here("git status", &cwd));
+        assert!(!is_safe_here("git log", &cwd.join("sub")));
+        assert!(
+            level_asks(
+                "bash",
+                "git status",
+                &cwd,
+                HandHolding::Auto,
+                &HashSet::new()
+            )
+            .0
+        );
+        assert!(is_safe_here("ls", &cwd), "only git reads it");
+        // A real repository's `.git` is git's own, and found first.
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        assert!(!agent_made_repo(&repo));
+        assert!(!agent_made_repo(&repo.join(".git").join("..")));
+    }
+
+    #[test]
+    fn git_folders_as_windows_names_them_ask() {
+        let cwd = Path::new("/p");
+        for path in [
+            "/p/.git./config",
+            "/p/.git /hooks/pre-commit",
+            "/p/GIT~1/config",
+            "/p/git~12/hooks/x",
+            "/p/.git::$INDEX_ALLOCATION/config",
+            "/p/sub/.GiT/config",
+        ] {
+            assert!(in_git_dir(Path::new(path), cwd), "{path}");
+            assert!(
+                edit_permission("write_file", HandHolding::Auto, path, cwd, &HashSet::new()).0,
+                "{path}"
+            );
+        }
+        for path in [
+            "/p/.github/workflows/x.yml",
+            "/p/git~x/a",
+            "/p/.gitignore",
+            "/p/git/x",
+        ] {
+            assert!(!in_git_dir(Path::new(path), cwd), "{path}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_into_git_folder_is_the_git_folder() {
+        let cwd = scratch("git_link").canonicalize().unwrap();
+        std::fs::create_dir_all(cwd.join(".git").join("hooks")).unwrap();
+        std::os::unix::fs::symlink(cwd.join(".git"), cwd.join("g")).unwrap();
+        assert!(in_git_dir(&cwd.join("g").join("config"), &cwd));
+        assert!(
+            edit_permission(
+                "write_file",
+                HandHolding::Auto,
+                "g/hooks/pre-commit",
+                &cwd,
+                &HashSet::new()
+            )
+            .0
+        );
+        assert!(!in_git_dir(&cwd.join("src").join("a.rs"), &cwd));
     }
 
     #[test]

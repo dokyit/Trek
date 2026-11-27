@@ -302,7 +302,12 @@ impl SettingsView {
                             .label("Allow and turn on")
                             .on_click({
                                 let (id, ws) = (id.clone(), ws.clone());
-                                move |_, _, cx| plugins::set_on(&id, true, &ws, cx)
+                                // What this card reads out, and nothing the plugin asks after.
+                                let shown = plugins::Shown {
+                                    hash: pl.hash.clone(),
+                                    asks: missing.to_vec(),
+                                };
+                                move |_, _, cx| plugins::allow_shown(&id, &shown, &ws, cx)
                             }),
                     )
                     .child(

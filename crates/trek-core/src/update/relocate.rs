@@ -527,7 +527,15 @@ pub enum Removal {
 /// whole; one that holds more (Trek unzipped into Downloads) loses only Trek's files. Anything
 /// that isn't Trek's, or is where Trek runs, stays.
 pub fn remove_old_copy(old: &Path, here: &Path) -> Removal {
-    if inside(here, old) || inside(old, here) {
+    // As written and as the disk has them: a link or junction in a folder above (`old` reached
+    // through one, or Trek launched through one) makes two spellings of one folder.
+    let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (old_real, here_real) = (real(old), real(here));
+    if inside(here, old)
+        || inside(old, here)
+        || inside(&here_real, &old_real)
+        || inside(&old_real, &here_real)
+    {
         return Removal::Kept(format!(
             "{} is where Trek runs from now, so Trek left it alone.",
             old.display()
@@ -1265,6 +1273,22 @@ mod tests {
         assert_eq!(remove_old_copy(&shared, &here), Removal::Removed);
         assert!(!shared.exists());
         assert_eq!(names(&here).len(), 3, "where Trek runs is never touched");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn where_trek_runs_is_left_alone_through_a_link_above_it() {
+        let dir = scratch("keep_link");
+        let here = dir.join("Programs").join("Trek");
+        trek_folder(&here, "new");
+        std::os::unix::fs::symlink(dir.join("Programs"), dir.join("Link")).unwrap();
+        let old = dir.join("Link").join("Trek");
+        assert!(
+            matches!(remove_old_copy(&old, &here), Removal::Kept(_)),
+            "the same folder, through a link in a folder above it"
+        );
+        assert_eq!(names(&here).len(), 3);
         let _ = std::fs::remove_dir_all(dir);
     }
 

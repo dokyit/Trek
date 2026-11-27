@@ -314,8 +314,19 @@ pub fn send_web_push(
     trek_core::runtime().spawn(async move {
         let key = vapid_key().ok_or("there's no push key")?;
         let body = webpush::encrypt(&sub, &note.to_bytes()).map_err(|e| e.to_string())?;
+        // The service's name is looked up here, once, and every address it has must be public;
+        // the POST goes to the address checked (no second lookup that could answer otherwise),
+        // and isn't sent on elsewhere.
+        let (host, port) = sub.host_port().ok_or("that isn't a push endpoint")?;
+        let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
+            .await
+            .map_err(|e| format!("{host} couldn't be looked up: {e}"))?
+            .collect();
+        let addr = webpush::public_target(&addrs).map_err(str::to_string)?;
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve(&host, addr)
             .build()
             .map_err(|e| e.to_string())?;
         let service = sub.audience();
