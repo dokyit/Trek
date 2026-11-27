@@ -283,6 +283,7 @@ final class ThreadStore {
     /// continues it, and the earlier pages stay, with the reader's place; only a transcript that
     /// was rewritten replaces everything and is drawn afresh.
     func applyReply(reset: Bool, seq: Int64, items new: [TItem], more: Bool) {
+        Self.parseAhead(new)
         flushQueued()
         if failure != nil { failure = nil }
         if !reset {
@@ -411,6 +412,14 @@ final class ThreadStore {
         onArrived?()
     }
 
+    /// A page's finished answers are parsed in the background, so opening a thread (or paging
+    /// back in it) doesn't parse them on the main thread at first draw.
+    private static func parseAhead(_ items: [TItem]) {
+        Markdown.prewarm(items.compactMap {
+            if case .assistant(let text, false) = $0.body { text } else { nil }
+        })
+    }
+
     /// A page of earlier items, put before the ones loaded. `asked`: `paging` as it was when the
     /// page was asked for. A page from before the transcript was rewritten (or trimmed) holds
     /// items of a transcript that isn't this one any more, or ones that no longer meet the
@@ -418,6 +427,7 @@ final class ThreadStore {
     @discardableResult
     func prepend(_ page: [TItem], more: Bool, asked: Int? = nil) -> Bool {
         if let asked, asked != paging { return false }
+        Self.parseAhead(page)
         let fresh = page.filter { index[$0.id] == nil }
         loadingEarlier = false
         if self.more != more { self.more = more }
