@@ -407,6 +407,14 @@ pub struct SettingsView {
 /// again is pressed, or `STARTED_FOR` has passed; then it can be tried again.
 type Started = std::rc::Rc<std::cell::RefCell<HashMap<String, std::time::Instant>>>;
 
+/// Tools & MCP › Browser › Keep tabs between launches: what it keeps on this platform
+/// (`trek_core::browser_tabs`).
+const KEEP_TABS_ABOUT: &str = if cfg!(target_os = "macos") {
+    "After Trek quits, crashes or restarts to update, the Browser opens again with its tabs, each with its Back and Forward history. Only the tab in front loads; the others load when you open them. Not kept: local files, what you typed into forms, and pages an agent opened that you haven't looked at. Turning this off deletes the tabs it kept. Sign-ins stay either way: ⋯ › Clear cookies and site data signs you out."
+} else {
+    "After Trek quits, crashes or restarts to update, the Browser opens again with its tabs, each on the page it showed (Back and Forward start over). Only the tab in front loads; the others load when you open them. Not kept: local files, what you typed into forms, and pages an agent opened that you haven't looked at. Turning this off deletes the tabs it kept. Sign-ins stay either way: ⋯ › Clear cookies and site data signs you out."
+};
+
 const STARTED_FOR: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Whether `key`'s `command` is still going: started a moment ago, and not seen to end since
@@ -2501,6 +2509,17 @@ impl SettingsView {
                     "Browser tools",
                     "Agents use Trek's Browser as you would: open pages, read them, click, type and take screenshots, while you watch. Typing a password, sending a form to another site, downloads and running scripts follow the thread's access level. Applies to new sessions.",
                     self.switch("browser-tools", s.tools.browser, |s, v| s.tools.browser = v),
+                    cx,
+                ),
+                Self::row(
+                    "Keep tabs between launches",
+                    KEEP_TABS_ABOUT,
+                    self.switch("browser-keep-tabs", !s.browser.keep_tabs_off, |s, v| {
+                        s.browser.keep_tabs_off = !v;
+                        if !v {
+                            crate::panels::browser::forget_kept_tabs();
+                        }
+                    }),
                     cx,
                 ),
                 Self::row(

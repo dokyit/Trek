@@ -546,6 +546,24 @@ pub fn web_view(wv: &wry::WebView) -> Retained<WKWebView> {
     Retained::into_super(wv.webview())
 }
 
+/// A view's back and forward list as WebKit hands it out (`interactionState`, macOS 12 and
+/// later), raw: `browser_tabs::clean_webkit_history` takes out what forms sent before it's kept.
+pub fn history(wv: &wry::WebView) -> Option<Vec<u8>> {
+    // SAFETY: main thread (the panel's); the view is live.
+    let state = unsafe { wv.webview().interactionState() }?;
+    let data = state.downcast_ref::<objc2_foundation::NSData>()?;
+    Some(data.to_vec())
+}
+
+/// Put a kept back and forward list into a view that hasn't loaded anything: WebKit loads its
+/// page in front, and Back and Forward go where they went.
+pub fn restore_history(wv: &wry::WebView, state: &[u8]) {
+    let data = objc2_foundation::NSData::with_bytes(state);
+    // SAFETY: main thread; the view is new and live, and WebKit checks the state it's given (one
+    // it can't read leaves the view as it was, and the caller loads the address instead).
+    unsafe { wv.webview().setInteractionState(Some(&data)) };
+}
+
 /// The app that opens `url` on this Mac, by its name.
 pub fn app_for(url: &str) -> Option<String> {
     use objc2_app_kit::NSWorkspace;

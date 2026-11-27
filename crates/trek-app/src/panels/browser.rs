@@ -21,11 +21,12 @@ use gpui_kit::*;
 use gpui_wry::WebView;
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use trek_core::browser_tabs::{self, Kept, KeptTab};
 
 // Browser use: agents drive this tool's page (`trek-mcp browser`).
 mod agent;
@@ -1076,6 +1077,39 @@ impl Captures {
     }
 }
 
+/// A tab kept from the last launch (`browser_tabs`) that hasn't come to the front since: in the
+/// strip by its title, its view made the first time it's shown (`wake`), so a launch with many
+/// tabs kept loads one page, not all of them.
+struct Waiting {
+    id: u64,
+    kept: KeptTab,
+    /// Its view is being made (it's in front): the tab joins `tabs` in its place shortly.
+    waking: bool,
+}
+
+/// How long the Browser waits after a change before keeping its tabs (`tabs_changed`): a page
+/// loading says so several times.
+const SAVE_AFTER: Duration = Duration::from_millis(800);
+
+/// Whether the Browser keeps its tabs between launches (Settings › Tools & MCP › Browser).
+pub fn keeps_tabs(ws: &Workspace) -> bool {
+    !ws.settings.browser.keep_tabs_off
+}
+
+/// The switch was turned off (Settings, or the Browser's ⋯ menu): what was kept goes now, though
+/// no Browser is open to see it.
+pub fn forget_kept_tabs() {
+    if let Err(e) = browser_tabs::forget(&browser_tabs::path()) {
+        tracing::warn!("browser tabs: couldn't delete what was kept: {e}");
+    }
+}
+
+/// Whether the next Browser of the main window should open at launch: it was the tool on show
+/// when Trek last ran, with the switch on.
+pub fn shown_at_launch(ws: &Workspace) -> bool {
+    keeps_tabs(ws) && browser_tabs::load(&browser_tabs::path()).is_some_and(|k| k.shown)
+}
+
 pub struct BrowserPanel {
     workspace: Entity<Workspace>,
     tabs: Vec<Tab>,
@@ -1125,6 +1159,23 @@ pub struct BrowserPanel {
     area: Rc<std::cell::Cell<Bounds<Pixels>>>,
     /// Downloads under way: where each is saved, by its URL (the same file twice: in order).
     downloads: HashMap<String, std::collections::VecDeque<PathBuf>>,
+    /// Tabs kept from the last launch, not shown since (`Waiting`).
+    waiting: Vec<Waiting>,
+    /// The strip's order while tabs wait: every tab's id, made or waiting, as they were kept.
+    /// Tabs opened since go after them.
+    order: Vec<u64>,
+    /// This Browser keeps its tabs between launches: the main window's, outside tests.
+    keeper: bool,
+    /// The switch as last seen: turned on, the tabs are kept at once.
+    keeping: bool,
+    /// The Browser is the tool in front of the open panel (`set_shown`): kept, so the next
+    /// launch opens it.
+    shown: bool,
+    /// Tabs whose page an agent opened or moved while the user wasn't looking at it: not kept
+    /// until the user has seen it (an agent's thread is gone by the next launch).
+    agent_unseen: HashSet<u64>,
+    /// A save of the tabs is due (`tabs_changed`).
+    save_due: bool,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -1688,6 +1739,77 @@ pub fn webview_data_dir() -> PathBuf {
     crate::logging::log_dir().with_file_name("WebView2")
 }
 
+/// Where WebKitGTK keeps the Browser's cookies and site data (Linux): `WebKitGTK` in the data
+/// folder, so "Delete all Trek data" takes it with the rest.
+#[cfg(target_os = "linux")]
+pub fn webview_data_dir() -> PathBuf {
+    trek_core::paths::data_dir().join("WebKitGTK")
+}
+
+/// Linux: the one WebKitGTK context every Browser view is made on. Left to itself wry gives each
+/// view a context of its own with its cookies in memory: a sign-in lasted until Trek quit, and
+/// held in that tab alone. On one context with a data folder (`webview_data_dir`), cookies are
+/// written to it and every tab has them.
+///
+/// What wry registers on a context rather than a view goes on it once, with the first view:
+/// Trek's page scheme (a second registration fails the view) and the download handlers (a second
+/// would answer every download again, once per tab ever opened).
+#[cfg(target_os = "linux")]
+mod gtk_context {
+    use super::Msg;
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    thread_local! {
+        /// Made on first use and kept for the app's life. GTK's: the main thread's alone.
+        static CONTEXT: Cell<*mut wry::WebContext> = const { Cell::new(std::ptr::null_mut()) };
+        /// The newest Browser's channel, for the context's download handlers.
+        static SENDER: RefCell<Option<async_channel::Sender<Msg>>> = const { RefCell::new(None) };
+        /// The colours of Trek's pages, which the context's scheme handler serves.
+        static VARS: Rc<RefCell<String>> = Rc::default();
+    }
+
+    /// The context, and whether no view has been made on it yet (so this one registers what the
+    /// context holds).
+    pub fn get() -> (&'static mut wry::WebContext, bool) {
+        CONTEXT.with(|c| {
+            let first = c.get().is_null();
+            if first {
+                let dir = super::webview_data_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                c.set(Box::into_raw(Box::new(wry::WebContext::new(Some(dir)))));
+            }
+            // SAFETY: the context is leaked, so it lives as long as the app; only `build_view`
+            // takes it, on the main thread, for the one builder it makes and builds right away
+            // (it isn't called again meanwhile: a Linux popup is a tab made later), so no two of
+            // these borrows are ever alive at once.
+            (unsafe { &mut *c.get() }, first)
+        })
+    }
+
+    /// The colours every Browser's pages share.
+    pub fn vars() -> Rc<RefCell<String>> {
+        VARS.with(Rc::clone)
+    }
+
+    /// The context's download handlers' end: whichever Browser was made last.
+    #[derive(Clone, Copy)]
+    pub struct Downloads;
+
+    impl Downloads {
+        pub fn send_to(tx: async_channel::Sender<Msg>) {
+            SENDER.with(|s| *s.borrow_mut() = Some(tx));
+        }
+
+        pub fn try_send(&self, msg: Msg) -> Result<(), async_channel::TrySendError<Msg>> {
+            match SENDER.with(|s| s.borrow().clone()) {
+                Some(tx) => tx.try_send(msg),
+                None => Err(async_channel::TrySendError::Closed(msg)),
+            }
+        }
+    }
+}
+
 /// Capture `rect` (window points) of a window by number into a PNG at `dest`.
 #[cfg(not(windows))]
 fn capture_window_rect(
@@ -1783,6 +1905,27 @@ impl BrowserPanel {
                 _ => {}
             },
         ));
+        // The main window's Browser keeps its tabs (tests' don't: each starts on a new tab).
+        let keeper = !cfg!(any(test, feature = "test-support"))
+            && workspace.read(cx).main_window == Some(window.window_handle());
+        let keeping = keeps_tabs(workspace.read(cx));
+        subscriptions.push(cx.observe(&workspace, |this: &mut Self, ws, cx| {
+            // Turned on in Settings: the tabs are kept from now (turned off, Settings deleted
+            // them already).
+            let on = keeps_tabs(ws.read(cx));
+            if std::mem::replace(&mut this.keeping, on) != on && on {
+                this.tabs_changed(cx);
+            }
+        }));
+        // The last of them, on the way out: a quit, or the window or the tool closing (on
+        // Windows a quit closes the windows first).
+        subscriptions.push(cx.on_app_quit(|this: &mut Self, cx| {
+            this.save_now(cx);
+            async {}
+        }));
+        subscriptions.push(cx.on_release(|this: &mut Self, cx| this.save_now(cx)));
+        #[cfg(target_os = "linux")]
+        gtk_context::Downloads::send_to(tx.clone());
         let mut this = Self {
             workspace,
             tabs: vec![],
@@ -1806,7 +1949,16 @@ impl BrowserPanel {
             unavailable: false,
             forced_dark: false,
             tx,
-            page_vars: Rc::new(RefCell::new(page_vars(cx))),
+            page_vars: {
+                // Linux: one set for every Browser, as the scheme's handler is the shared
+                // context's (`gtk_context`).
+                #[cfg(target_os = "linux")]
+                let vars = gtk_context::vars();
+                #[cfg(not(target_os = "linux"))]
+                let vars = Rc::new(RefCell::new(String::new()));
+                *vars.borrow_mut() = page_vars(cx);
+                vars
+            },
             favicons: HashMap::new(),
             agent: Default::default(),
             asks: vec![],
@@ -1815,10 +1967,28 @@ impl BrowserPanel {
             passkeys: Vec::new(),
             area: Rc::default(),
             downloads: HashMap::new(),
+            waiting: vec![],
+            order: vec![],
+            keeper,
+            keeping,
+            shown: false,
+            agent_unseen: HashSet::new(),
+            save_due: false,
             _tasks: vec![pump],
             _subscriptions: subscriptions,
         };
-        this.new_tab(START_URL, window, cx);
+        // The tabs kept from the last launch come back (the one in front loads), else a new tab.
+        match keeper
+            .then(|| browser_tabs::load(&browser_tabs::path()))
+            .flatten()
+            .filter(|_| keeping)
+            .filter(|kept| !kept.tabs.is_empty())
+        {
+            Some(kept) => this.restore(kept, window, cx),
+            None => {
+                this.new_tab(START_URL, window, cx);
+            }
+        }
         this.compile_adblock(cx);
         this
     }
@@ -1856,6 +2026,10 @@ impl BrowserPanel {
             );
         }
         let show_active = self.visible && !self.menu_open && self.extensions.is_none();
+        // The user has seen the page in front: an agent's is kept from now.
+        if show_active {
+            self.agent_unseen.remove(&self.active);
+        }
         for tab in &self.tabs {
             let show = show_active && tab.page.ready && tab.id == self.active;
             tab.view.update(cx, |v, _| {
@@ -1886,6 +2060,8 @@ impl BrowserPanel {
     /// `dark`: the scheme pages are asked for, set before the first page loads. `popup`: the
     /// view is one a page opened, made from WebKit's configuration for it (macOS) or its opener's
     /// WebView2 environment (Windows), and the web view loads its page itself (`open_popup`).
+    /// `history`: a kept back and forward list to put back in place of loading `url` (macOS).
+    #[allow(clippy::too_many_arguments)]
     fn build_view(
         id: u64,
         url: &str,
@@ -1894,6 +2070,7 @@ impl BrowserPanel {
         tx: async_channel::Sender<Msg>,
         vars: Rc<RefCell<String>>,
         popup: Option<PopupConfig>,
+        history: Option<Vec<u8>>,
     ) -> Option<wry::WebView> {
         #[cfg(target_os = "macos")]
         let (is_popup, popup_vars) = (popup.is_some(), vars.clone());
@@ -1920,7 +2097,15 @@ impl BrowserPanel {
                     // must ask the same (the editor's preview does), or WebView2 makes none.
                     .with_browser_extensions_enabled(true)
             };
-            #[cfg(not(windows))]
+            #[cfg(target_os = "macos")]
+            let builder = wry::WebViewBuilder::new();
+            // Linux: every view on one context with a data folder (`gtk_context`), so sign-ins
+            // last past a restart and are the same in every tab.
+            #[cfg(target_os = "linux")]
+            let (context, first_on_context) = gtk_context::get();
+            #[cfg(target_os = "linux")]
+            let builder = wry::WebViewBuilder::new_with_web_context(context);
+            #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
             let builder = wry::WebViewBuilder::new();
             #[cfg(target_os = "macos")]
             let builder = builder.with_user_agent(user_agent());
@@ -1954,9 +2139,23 @@ impl BrowserPanel {
             // file) go to Downloads, as wry would put them, and the panel says so. On Windows,
             // taking them hides WebView2's own download flyout: Trek's toasts say it instead.
             // WebKitGTK's go through the same handlers.
+            // Linux: wry connects these to the context, which every view shares, so they go on
+            // the first view only and reach the newest Browser (`gtk_context::Downloads`), not
+            // once per tab ever opened.
+            #[cfg(target_os = "linux")]
+            let hook_downloads = first_on_context;
+            #[cfg(not(target_os = "linux"))]
+            let hook_downloads = true;
             #[cfg(any(target_os = "macos", target_os = "linux", windows))]
-            let builder = {
+            let builder = if !hook_downloads {
+                builder
+            } else {
+                #[cfg(target_os = "linux")]
+                let (t5, t6) = (gtk_context::Downloads, gtk_context::Downloads);
+                #[cfg(not(target_os = "linux"))]
                 let (t5, t6) = (tx.clone(), tx.clone());
+                // Linux: which tab a download came from isn't said; the panel works it out.
+                let id = if cfg!(target_os = "linux") { 0 } else { id };
                 builder
                     .with_download_started_handler(move |url, path| {
                         // An isolated run (tests, the capture build) keeps what it downloads in
@@ -1988,6 +2187,8 @@ impl BrowserPanel {
                         let _ = t6.try_send(Msg::Downloaded { url, path, ok });
                     })
             };
+            #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+            let _ = hook_downloads;
             // WKWebView takes its scheme from its appearance, which is set once it's made: so it
             // loads its first page after that (below), not as it's made.
             #[cfg(not(any(target_os = "macos", windows)))]
@@ -1997,8 +2198,16 @@ impl BrowserPanel {
                 .with_devtools(true)
                 .with_accept_first_mouse(true)
                 .with_back_forward_navigation_gestures(true)
-                .with_initialization_script_for_main_only(INIT_JS, true)
-                .with_custom_protocol(PAGES_SCHEME.into(), move |_, request| {
+                .with_initialization_script_for_main_only(INIT_JS, true);
+            // Trek's own pages. On Linux the scheme is the shared context's, given once (a second
+            // time fails the view), and serves every Browser's pages from the one set of colours
+            // they share (`gtk_context::vars`).
+            #[cfg(target_os = "linux")]
+            let serve_pages = first_on_context;
+            #[cfg(not(target_os = "linux"))]
+            let serve_pages = true;
+            let builder = if serve_pages {
+                builder.with_custom_protocol(PAGES_SCHEME.into(), move |_, request| {
                     let (mime, body) = internal_page(request.uri().path(), &vars.borrow());
                     wry::http::Response::builder()
                         .header("Content-Type", mime)
@@ -2006,6 +2215,10 @@ impl BrowserPanel {
                         .body(body)
                         .unwrap_or_default()
                 })
+            } else {
+                builder
+            };
+            let builder = builder
                 .with_ipc_handler(move |request| {
                     let origin = request.uri().to_string();
                     let _ = t1.try_send(Msg::Ipc {
@@ -2071,9 +2284,18 @@ impl BrowserPanel {
             browser_adblock::page::install(&built, id);
             webkit::hook(&built, id, tx, Some(make));
             if !is_popup {
-                let _ = built.load_url(&to_view(url));
+                // A kept tab's history, its page in front loading with it; one WebKit can't take
+                // leaves the view empty, and the address loads instead.
+                if let Some(state) = history.as_deref() {
+                    webkit::restore_history(&built, state);
+                }
+                if built.url().map_or(true, |u| u.is_empty()) {
+                    let _ = built.load_url(&to_view(url));
+                }
             }
         }
+        #[cfg(not(target_os = "macos"))]
+        let _ = history;
         // Linux: the page's dialogs, failed loads and crashes (`webkitgtk.rs`).
         #[cfg(target_os = "linux")]
         webkitgtk::hook(&built, id, tx);
@@ -2100,7 +2322,8 @@ impl BrowserPanel {
     ) -> Option<objc2::rc::Retained<objc2_web_kit::WKWebView>> {
         let id = next_tab_id();
         webkit::own_scripts(&config);
-        let built = Self::build_view(id, &url, dark, parent, tx.clone(), vars, Some(config))?;
+        let built =
+            Self::build_view(id, &url, dark, parent, tx.clone(), vars, Some(config), None)?;
         let view = webkit::web_view(&built);
         POPUPS.with(|p| p.borrow_mut().insert(id, built));
         let _ = tx.try_send(Msg::Popup {
@@ -2154,7 +2377,8 @@ impl BrowserPanel {
         let (tx, vars) = (self.tx.clone(), self.page_vars.clone());
         let environment = from.environment;
         self._tasks.push(cx.spawn_in(window, async move |this, cx| {
-            let built = Self::build_view(id, &url, dark, &parent, tx, vars, Some(environment));
+            let built =
+                Self::build_view(id, &url, dark, &parent, tx, vars, Some(environment), None);
             let Some(built) = built else {
                 let _ = made.send(None);
                 return;
@@ -2177,10 +2401,23 @@ impl BrowserPanel {
     /// Returns the tab's id.
     fn new_tab(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) -> u64 {
         let id = next_tab_id();
+        self.open_tab(id, url, None, window, cx);
+        id
+    }
+
+    /// Make tab `id`'s view on `url` (or on a kept `history`, macOS), as `new_tab` does.
+    fn open_tab(
+        &mut self,
+        id: u64,
+        url: &str,
+        history: Option<Vec<u8>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(parent) = ParentWindow::of(window) else {
             self.unavailable = true;
             cx.notify();
-            return id;
+            return;
         };
         let url = url.to_string();
         let (tx, vars) = (self.tx.clone(), self.page_vars.clone());
@@ -2189,7 +2426,7 @@ impl BrowserPanel {
         #[cfg(target_os = "macos")]
         passkeys::set_enabled(!self.workspace.read(cx).settings.browser.passkeys_off);
         self._tasks.push(cx.spawn_in(window, async move |this, cx| {
-            let built = Self::build_view(id, &url, dark, &parent, tx, vars, None);
+            let built = Self::build_view(id, &url, dark, &parent, tx, vars, None, history);
             let _ = this.update_in(cx, |this, window, cx| match built {
                 Some(built) => {
                     let view = cx.new(|cx| WebView::new(built, window, cx));
@@ -2201,7 +2438,6 @@ impl BrowserPanel {
                 }
             });
         }));
-        id
     }
 
     /// `dark`: the scheme the view was made with (see `build_view`). `popup`: the tab whose page
@@ -2221,7 +2457,21 @@ impl BrowserPanel {
         // A new Browser's own start tab arrives after its view is built, which can be after the
         // Extensions page was asked for (Settings' Extensions… opens both at once): it stays.
         let first = self.tabs.is_empty() && url == START_URL;
-        self.tabs.push(Tab {
+        // A kept tab goes back in its place in the strip, with its title until the page says
+        // its own, and its zoom.
+        let at = self.slot_for(id);
+        let kept = self
+            .waiting
+            .iter()
+            .position(|w| w.id == id)
+            .map(|ix| self.waiting.remove(ix).kept);
+        if self.waiting.is_empty() {
+            self.order.clear();
+        }
+        if popup.is_some_and(|(opener, _)| self.agent_unseen.contains(&opener)) {
+            self.agent_unseen.insert(id);
+        }
+        self.tabs.insert(at, Tab {
             id,
             view,
             zoom: 1.0,
@@ -2235,20 +2485,26 @@ impl BrowserPanel {
             crashed: None,
             untrusted_probe: false,
         });
+        if let Some(kept) = kept {
+            let tab = &mut self.tabs[at];
+            tab.page.title = kept.title;
+            tab.zoom = kept.zoom.clamp(ZOOM_STEPS[0], ZOOM_STEPS[ZOOM_STEPS.len() - 1]);
+            self.apply_zoom(cx);
+        }
         #[cfg(target_os = "macos")]
         if self.workspace.read(cx).settings.browser.block_trackers
-            && let Some(tab) = self.tabs.last()
+            && let Some(tab) = self.tabs.get(at)
         {
             browser_extensions::blocker::set(tab.view.read(cx).raw(), true);
         }
         #[cfg(windows)]
         if self.workspace.read(cx).settings.browser.block_trackers
-            && let Some(tab) = self.tabs.last()
+            && let Some(tab) = self.tabs.get(at)
         {
             native::block_trackers(tab.view.read(cx).raw(), true);
         }
         #[cfg(target_os = "macos")]
-        if let Some(tab) = self.tabs.last() {
+        if let Some(tab) = self.tabs.get(at) {
             browser_adblock::webkit::apply(tab.view.read(cx).raw(), &[], &self.adblock_applied);
         }
         self.sync_scheme(cx);
@@ -2283,6 +2539,7 @@ impl BrowserPanel {
             self.editing = false;
         }
         self.sync_views(cx);
+        self.tabs_changed(cx);
     }
 
     fn activate(&mut self, id: u64, cx: &mut Context<Self>) {
@@ -2295,9 +2552,35 @@ impl BrowserPanel {
         // Going to a page leaves the Extensions page.
         self.extensions = None;
         self.sync_views(cx);
+        self.tabs_changed(cx);
     }
 
     fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        // The strip as it was: the tab after the one going (else the one before) comes to the
+        // front, kept or made.
+        let strip = self.strip_ids();
+        let next = strip.iter().position(|t| *t == id).and_then(|p| {
+            strip
+                .get(p + 1)
+                .or_else(|| p.checked_sub(1).and_then(|b| strip.get(b)))
+                .copied()
+        });
+        self.agent_unseen.remove(&id);
+        if let Some(ix) = self.waiting.iter().position(|w| w.id == id) {
+            self.waiting.remove(ix);
+            self.order.retain(|t| *t != id);
+            if self.active == id {
+                match next {
+                    Some(next) => self.show_tab(next, window, cx),
+                    None => {
+                        self.new_tab(START_URL, window, cx);
+                    }
+                }
+            }
+            self.tabs_changed(cx);
+            cx.notify();
+            return;
+        }
         let Some(ix) = self.tabs.iter().position(|t| t.id == id) else {
             return;
         };
@@ -2305,6 +2588,7 @@ impl BrowserPanel {
             self.stop_picking(cx);
         }
         let tab = self.tabs.remove(ix);
+        self.order.retain(|t| *t != id);
         tab.view.update(cx, |v, _| v.hide());
         self.forget_asks(id);
         #[cfg(target_os = "macos")]
@@ -2315,17 +2599,232 @@ impl BrowserPanel {
         }
         #[cfg(windows)]
         webview2::unhook(id);
-        if self.tabs.is_empty() {
+        self.tabs_changed(cx);
+        if self.tabs.is_empty() && self.waiting.is_empty() {
             self.new_tab(START_URL, window, cx);
             return;
         }
         if self.active == id {
             // A popup gives the front back to the page that opened it.
             let opener = tab.opener.filter(|o| self.tabs.iter().any(|t| t.id == *o));
-            self.active = opener.unwrap_or(self.tabs[ix.min(self.tabs.len() - 1)].id);
+            match opener.or(next) {
+                Some(next) if self.waiting.iter().any(|w| w.id == next) => {
+                    self.show_tab(next, window, cx);
+                    return;
+                }
+                Some(next) => self.active = next,
+                None => self.active = self.tabs[ix.min(self.tabs.len().saturating_sub(1))].id,
+            }
             self.editing = false;
         }
         self.sync_views(cx);
+    }
+
+    /// Bring tab `id` to the front: a kept one waiting has its view made now.
+    fn show_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.waiting.iter().any(|w| w.id == id) {
+            return self.activate(id, cx);
+        }
+        self.stop_picking(cx);
+        self.active = id;
+        self.editing = false;
+        self.extensions = None;
+        self.wake(id, window, cx);
+        self.sync_views(cx);
+        self.tabs_changed(cx);
+    }
+
+    /// Make waiting tab `id`'s view, on its kept history (macOS) or address. It stays in
+    /// `waiting` until the view is made (`add_tab` takes it out), so a view that can't be made
+    /// loses no tab.
+    fn wake(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(w) = self.waiting.iter_mut().find(|w| w.id == id) else {
+            return;
+        };
+        if std::mem::replace(&mut w.waking, true) {
+            return;
+        }
+        let (url, history) = (w.kept.url.clone(), w.kept.history.clone());
+        self.open_tab(id, &url, history, window, cx);
+    }
+
+    /// Put back the tabs kept from the last launch: in the strip as they were, the one in front
+    /// made now and the rest when first shown.
+    fn restore(&mut self, kept: Kept, window: &mut Window, cx: &mut Context<Self>) {
+        for tab in kept.tabs {
+            let id = next_tab_id();
+            self.order.push(id);
+            self.waiting.push(Waiting {
+                id,
+                kept: tab,
+                waking: false,
+            });
+        }
+        let Some(&front) = self.order.get(kept.active.min(self.order.len().saturating_sub(1)))
+        else {
+            return;
+        };
+        self.active = front;
+        self.wake(front, window, cx);
+        cx.notify();
+    }
+
+    /// Every tab's id, made or waiting, in the strip's order.
+    fn strip_ids(&self) -> Vec<u64> {
+        if self.waiting.is_empty() {
+            return self.tabs.iter().map(|t| t.id).collect();
+        }
+        let mut ids: Vec<u64> = self
+            .order
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.tabs.iter().any(|t| t.id == *id) || self.waiting.iter().any(|w| w.id == *id)
+            })
+            .collect();
+        ids.extend(
+            self.tabs
+                .iter()
+                .map(|t| t.id)
+                .filter(|id| !self.order.contains(id)),
+        );
+        ids
+    }
+
+    /// Where tab `id` goes in `tabs`: after the made tabs before it in the kept order, and at
+    /// the end when it wasn't kept.
+    fn slot_for(&self, id: u64) -> usize {
+        let Some(rank) = self.order.iter().position(|t| *t == id) else {
+            return self.tabs.len();
+        };
+        self.tabs
+            .iter()
+            .filter(|t| self.order[..rank].contains(&t.id))
+            .count()
+    }
+
+    /// The Browser is the tool in front of the open panel (`RightPanel::sync_native`), or not:
+    /// kept, so the next launch opens it as it was left.
+    pub fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.shown, shown) != shown {
+            self.tabs_changed(cx);
+        }
+    }
+
+    /// An agent opened or moved tab `id`'s page: unless the user is looking at it, it isn't kept
+    /// until they have (`sync_views`).
+    pub(super) fn agent_touched(&mut self, id: u64) {
+        let seen = self.visible && !self.menu_open && self.active == id;
+        if !seen {
+            self.agent_unseen.insert(id);
+        }
+    }
+
+    /// What the tabs are now, as the file keeps them.
+    fn kept(&self, cx: &App) -> Kept {
+        let mut tabs = vec![];
+        let mut active = 0;
+        for id in self.strip_ids() {
+            if id == self.active {
+                active = tabs.len();
+            }
+            let tab = match self.waiting.iter().find(|w| w.id == id) {
+                Some(w) => Some(w.kept.clone()),
+                None => self
+                    .tabs
+                    .iter()
+                    .find(|t| t.id == id)
+                    .and_then(|t| self.keep_tab(t, cx)),
+            };
+            tabs.extend(tab);
+        }
+        browser_tabs::tidy(Kept {
+            tabs,
+            active,
+            shown: self.shown,
+            ..Kept::default()
+        })
+    }
+
+    /// Tab `t` as it's kept, if it is: a web page (its address, the failed one while the error
+    /// page shows), not a sign-in sheet over its opener, not an agent's page the user hasn't
+    /// seen. Its history on macOS, cleaned of what forms sent.
+    fn keep_tab(&self, t: &Tab, cx: &App) -> Option<KeptTab> {
+        if t.sheet.is_some() || self.agent_unseen.contains(&t.id) {
+            return None;
+        }
+        let url = t.page.address();
+        if !browser_tabs::keepable(&url) {
+            return None;
+        }
+        #[cfg(target_os = "macos")]
+        let history = webkit::history(t.view.read(cx).raw())
+            .and_then(|state| browser_tabs::clean_webkit_history(&state));
+        #[cfg(not(target_os = "macos"))]
+        let history = {
+            let _ = cx;
+            None
+        };
+        Some(KeptTab {
+            url,
+            title: t.page.title.trim().to_string(),
+            zoom: t.zoom,
+            history,
+        })
+    }
+
+    /// The tabs changed: keep them in a moment, the file written off the main thread. Nothing
+    /// is written while the switch is off.
+    fn tabs_changed(&mut self, cx: &mut Context<Self>) {
+        if !self.keeper || self.save_due || !keeps_tabs(self.workspace.read(cx)) {
+            return;
+        }
+        self.save_due = true;
+        // The path is resolved here: an isolated run's data folder can be the main thread's own.
+        let path = browser_tabs::path();
+        self._tasks.retain(|t| !t.is_ready());
+        self._tasks.push(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SAVE_AFTER).await;
+            let Ok((keep, kept)) = this.update(cx, |this, cx| {
+                this.save_due = false;
+                (keeps_tabs(this.workspace.read(cx)), this.kept(cx))
+            }) else {
+                return;
+            };
+            let stored = cx
+                .background_spawn(async move { browser_tabs::store(&path, keep, &kept) })
+                .await;
+            if let Err(e) = stored {
+                tracing::warn!("browser tabs: couldn't keep them: {e}");
+            }
+        }));
+    }
+
+    /// Keep the tabs now, on the way out (a quit, the window or the tool closing).
+    fn save_now(&mut self, cx: &App) {
+        if !self.keeper || !keeps_tabs(self.workspace.read(cx)) {
+            return;
+        }
+        self.save_due = false;
+        if let Err(e) = browser_tabs::store(&browser_tabs::path(), true, &self.kept(cx)) {
+            tracing::warn!("browser tabs: couldn't keep them: {e}");
+        }
+    }
+
+    /// The ⋯ menu's **Keep tabs between launches**: as Settings' switch.
+    fn toggle_keep_tabs(&mut self, cx: &mut Context<Self>) {
+        let on = !keeps_tabs(self.workspace.read(cx));
+        self.workspace.update(cx, |ws, cx| {
+            ws.settings.browser.keep_tabs_off = !on;
+            ws.save_settings(cx);
+        });
+        self.keeping = on;
+        if on {
+            self.tabs_changed(cx);
+        } else {
+            forget_kept_tabs();
+        }
+        cx.notify();
     }
 
     /// Tab `id`'s page is going: what it asked goes unanswered ("no" to WebKit).
@@ -2470,6 +2969,7 @@ impl BrowserPanel {
                 if let Some(tab) = self.tab_mut(id) {
                     tab.page.title = title;
                 }
+                self.tabs_changed(cx);
             }
             Msg::Load {
                 tab: id,
@@ -2492,6 +2992,7 @@ impl BrowserPanel {
                 }
                 self.refresh_nav(id, cx);
                 self.sync_views(cx);
+                self.tabs_changed(cx);
             }
             Msg::NewWindow(url) => {
                 let url = from_view(url);
@@ -2627,6 +3128,18 @@ impl BrowserPanel {
                 }
             }
             Msg::Download { tab: id, url, path } => {
+                // Linux doesn't say which tab (`gtk_context::Downloads`): the one whose load
+                // hasn't shown anything yet became the download, the one in front first.
+                #[cfg(target_os = "linux")]
+                let id = if id != 0 {
+                    id
+                } else {
+                    let waiting = |t: &&Tab| t.page.loading && t.page.committed_seq < t.page.nav_seq;
+                    self.active_tab()
+                        .filter(waiting)
+                        .or_else(|| self.tabs.iter().find(waiting))
+                        .map_or(0, |t| t.id)
+                };
                 let name = asks::file_name(&path);
                 self.downloads.entry(url).or_default().push_back(path);
                 let mut close = false;
@@ -3887,6 +4400,20 @@ impl BrowserPanel {
             })
             .on_click(cx.listener(|this, _, _, cx| this.toggle_force_dark(cx)))
             .into_any_element();
+        let keeping = keeps_tabs(self.workspace.read(cx));
+        let keep_row = ui::menu_row("browser-keep-tabs", false, cx)
+            .test_support()
+            .child(Icon::new(Lucide::ArchiveRestore).small().text_color(muted))
+            .child(div().flex_1().child("Keep tabs between launches"))
+            .when(keeping, |el| {
+                el.child(
+                    Icon::new(IconName::Check)
+                        .small()
+                        .text_color(theme.foreground),
+                )
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_keep_tabs(cx)))
+            .into_any_element();
 
         #[cfg(any(target_os = "macos", windows))]
         let block_row = {
@@ -3924,6 +4451,7 @@ impl BrowserPanel {
             .child(force_row)
             .children(block_row)
             .children(adblock_rows)
+            .child(keep_row)
             .child(separator())
             .child(row(
                 "browser-copy-url",
@@ -4067,8 +4595,6 @@ impl BrowserPanel {
 
     fn render_tab(&self, tab: &Tab, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let id = tab.id;
-        let active = id == self.active;
         let muted = theme.muted_foreground;
         let page = &tab.page;
         let icon: AnyElement = if page.loading && !page.is_start() {
@@ -4096,6 +4622,40 @@ impl BrowserPanel {
                 .text_color(muted)
                 .into_any_element()
         };
+        self.tab_chip(tab.id, icon, page.label(), cx)
+    }
+
+    /// A tab kept from the last launch, not shown yet: its title (else its site), a globe until
+    /// its page loads, and the same click and close as any tab.
+    fn render_waiting_tab(&self, w: &Waiting, cx: &mut Context<Self>) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let icon = if w.waking {
+            Spinner::new().xsmall().color(muted).into_any_element()
+        } else {
+            Icon::new(Lucide::Globe)
+                .xsmall()
+                .text_color(muted)
+                .into_any_element()
+        };
+        let label = match w.kept.title.trim() {
+            "" => host_of(&w.kept.url).unwrap_or_else(|| w.kept.url.clone()),
+            title => title.to_string(),
+        };
+        self.tab_chip(w.id, icon, label, cx)
+    }
+
+    /// One tab in the strip: `icon`, `label`, its close button, and a click that brings it to
+    /// the front.
+    fn tab_chip(
+        &self,
+        id: u64,
+        icon: AnyElement,
+        label: String,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let active = id == self.active;
+        let muted = theme.muted_foreground;
         h_flex()
             .id(("browser-tab", id as usize))
             .group("browser-tab")
@@ -4134,7 +4694,7 @@ impl BrowserPanel {
                     .justify_center()
                     .child(icon),
             )
-            .child(div().flex_1().min_w_0().truncate().child(page.label()))
+            .child(div().flex_1().min_w_0().truncate().child(label))
             .when(!active && self.asks.iter().any(|a| a.tab == id), |el| {
                 el.child(
                     div()
@@ -4163,7 +4723,7 @@ impl BrowserPanel {
                         this.close_tab(id, window, cx);
                     })),
             )
-            .on_click(cx.listener(move |this, _, _, cx| this.activate(id, cx)))
+            .on_click(cx.listener(move |this, _, window, cx| this.show_tab(id, window, cx)))
             // Counted by the capture build's checks (a page's popup is a tab of its own on Linux).
             .test_support()
             .into_any_element()
@@ -4550,6 +5110,19 @@ impl BrowserPanel {
                 "opener": t.opener,
                 "sheet": t.sheet.map(|(w, h)| [w, h]),
             })).collect::<Vec<_>>(),
+            // Tabs kept from the last launch not shown yet, and the strip's order of every tab.
+            "waiting": self.waiting.iter().map(|w| serde_json::json!({
+                "id": w.id,
+                "url": w.kept.url,
+                "title": w.kept.title,
+                "history": w.kept.history.is_some(),
+                "waking": w.waking,
+            })).collect::<Vec<_>>(),
+            "strip": self.strip_ids(),
+            // Keeping the tabs between launches: this Browser does, and the switch is on.
+            "keeper": self.keeper,
+            "keeping": keeps_tabs(self.workspace.read(cx)),
+            "shown": self.shown,
             // What pages wait on the user for; the front tab's first is on the bar.
             "asks": self.asks.iter().map(|a| serde_json::json!({
                 "tab": a.tab,
@@ -4908,9 +5481,16 @@ impl Render for BrowserPanel {
                 .gap(px(4.))
                 .overflow_x_scroll()
                 .children(
-                    self.tabs
-                        .iter()
-                        .map(|t| self.render_tab(t, cx))
+                    self.strip_ids()
+                        .into_iter()
+                        .filter_map(|id| match self.tabs.iter().find(|t| t.id == id) {
+                            Some(t) => Some(self.render_tab(t, cx)),
+                            None => self
+                                .waiting
+                                .iter()
+                                .find(|w| w.id == id)
+                                .map(|w| self.render_waiting_tab(w, cx)),
+                        })
                         .collect::<Vec<_>>(),
                 )
                 .child(

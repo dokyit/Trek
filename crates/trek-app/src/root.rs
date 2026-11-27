@@ -248,6 +248,17 @@ impl TrekWindow {
             p.width = saved_width.max(crate::panels::MIN_PANEL);
             p
         });
+        // The Browser was the tool on show when Trek last ran, with its tabs kept: it opens again,
+        // its tabs back (`browser_tabs`), once the window is up. Its width is the panel's, kept
+        // in the settings' layout.
+        if crate::panels::browser::shown_at_launch(workspace.read(cx)) {
+            let panel = right_panel.clone();
+            cx.defer_in(window, move |_, window, cx| {
+                panel.update(cx, |p, cx| {
+                    p.open_tool(crate::workspace::PanelTool::Browser, window, cx)
+                });
+            });
+        }
         let terminal_dock =
             cx.new(|cx| crate::terminal_dock::TerminalDock::new(workspace.clone(), cx));
         let palette = cx.new(|cx| {
