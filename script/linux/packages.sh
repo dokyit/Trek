@@ -27,7 +27,8 @@ build="build-essential pkg-config cmake clang libclang-dev git curl ca-certifica
 
 run="xvfb xauth x11-utils x11-xserver-utils xdotool imagemagick weston mesa-vulkan-drivers
   vulkan-tools libgl1-mesa-dri dbus dbus-x11 gnome-keyring libsecret-tools xdg-utils
-  fonts-dejavu-core fonts-noto-color-emoji fonts-wqy-microhei python3 procps psmisc zsh"
+  fonts-dejavu-core fonts-noto-color-emoji fonts-wqy-microhei python3 procps psmisc zsh
+  at-spi2-core python3-gi gir1.2-gtk-3.0"
 
 packaging="desktop-file-utils dpkg-dev librsvg2-bin"
 
