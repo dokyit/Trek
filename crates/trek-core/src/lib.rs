@@ -81,3 +81,5 @@ pub fn runtime() -> &'static tokio::runtime::Runtime {
 
 pub const APP_NAME: &str = "Trek";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// Probe: a one-line change to measure CI (not for merge).
