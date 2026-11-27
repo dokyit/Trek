@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Trek API Fixture",
+  "description": "Calls each Chrome API Trek adds to WebKit's extensions, for fixtures/check.py.",
+  "version": "1.0",
+  "key": "dHJlay1hcGktZml4dHVyZS1rZXktZm9yLXRlc3Rz",
+  "background": { "service_worker": "bg.js" },
+  "options_page": "options.html",
+  "permissions": ["storage", "tabs", "notifications", "offscreen", "identity", "idle", "downloads", "nativeMessaging", "scripting", "webNavigation"],
+  "host_permissions": ["<all_urls>"]
+}

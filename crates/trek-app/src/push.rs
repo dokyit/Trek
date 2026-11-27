@@ -136,7 +136,7 @@ pub fn phone_handoff_note(
 
 /// Seconds since the last keyboard or mouse input anywhere on the Mac.
 #[cfg(target_os = "macos")]
-fn idle_seconds() -> f64 {
+pub(crate) fn idle_seconds() -> f64 {
     #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {
         fn CGEventSourceSecondsSinceLastEventType(state: i32, event_type: u32) -> f64;
@@ -159,7 +159,7 @@ fn idle_seconds() -> f64 {
 }
 
 #[cfg(target_os = "macos")]
-fn screen_locked() -> bool {
+pub(crate) fn screen_locked() -> bool {
     use std::ffi::{c_char, c_void};
     #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {

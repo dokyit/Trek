@@ -62,6 +62,8 @@ async-channel.workspace = true
 chrono.workspace = true
 # Interactive artifacts: each web view's secret (`artifact::nonce`).
 uuid.workspace = true
+# Extensions' packages: their CRX3 signatures, checked before Trek installs or updates one.
+ring = "0.17"
 serde.workspace = true
 serde_json.workspace = true
 # Browser extensions: an unpacked extension's id from its manifest key or folder (as Chromium makes it).
@@ -130,10 +132,10 @@ trek-passkeys = { path = "../trek-passkeys" }
 core-graphics = { version = "0.24", features = ["highsierra"] }
 # Same versions tray-icon already pulls in; used for the Dock badge.
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSFileManager", "NSURL", "NSError", "NSBundle", "NSData", "NSGeometry", "NSArray", "NSDictionary", "NSValue", "NSSet", "NSDate", "NSEnumerator", "NSURLRequest", "NSUUID", "objc2-core-foundation"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSFileManager", "NSURL", "NSError", "NSBundle", "NSData", "NSGeometry", "NSArray", "NSDictionary", "NSValue", "NSSet", "NSDate", "NSEnumerator", "NSURLRequest", "NSUUID", "NSJSONSerialization", "NSNotification", "objc2-core-foundation"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSDockTile", "NSWorkspace", "NSAccessibility", "NSImage", "NSView", "NSWindow", "NSAppearance", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSEvent", "NSPasteboard", "NSPopover", "NSGraphics", "objc2-core-foundation"] }
 # Interactive artifacts: a snapshot of the page stands in while it's covered (`takeSnapshot`).
-objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "block2", "WKWebView", "WKSnapshotConfiguration", "WKWebViewConfiguration", "WKUserContentController", "WKContentRuleList", "WKContentRuleListStore", "objc2-core-foundation", "WKWebExtension", "WKWebExtensionAction", "WKWebExtensionContext", "WKWebExtensionController", "WKWebExtensionControllerConfiguration", "WKWebExtensionControllerDelegate", "WKWebExtensionMatchPattern", "WKWebExtensionPermission", "WKWebExtensionTab", "WKWebExtensionTabConfiguration", "WKWebExtensionWindow", "WKWebExtensionWindowConfiguration", "WKWebExtensionDataRecord", "WKWebExtensionDataType", "WKNavigation", "WKUIDelegate", "WKNavigationDelegate", "WKNavigationAction", "WKFrameInfo", "WKSecurityOrigin", "WKWindowFeatures", "WKContentWorld", "WKUserScript", "WKScriptMessage", "WKScriptMessageHandlerWithReply", "WKWebsiteDataStore"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "block2", "WKWebView", "WKSnapshotConfiguration", "WKWebViewConfiguration", "WKUserContentController", "WKContentRuleList", "WKContentRuleListStore", "objc2-core-foundation", "WKWebExtension", "WKWebExtensionAction", "WKWebExtensionContext", "WKWebExtensionController", "WKWebExtensionControllerConfiguration", "WKWebExtensionControllerDelegate", "WKWebExtensionMatchPattern", "WKWebExtensionPermission", "WKWebExtensionTab", "WKWebExtensionTabConfiguration", "WKWebExtensionWindow", "WKWebExtensionWindowConfiguration", "WKWebExtensionDataRecord", "WKWebExtensionDataType", "WKNavigation", "WKUIDelegate", "WKNavigationDelegate", "WKNavigationAction", "WKFrameInfo", "WKSecurityOrigin", "WKWindowFeatures", "WKContentWorld", "WKUserScript", "WKScriptMessage", "WKScriptMessageHandlerWithReply", "WKWebsiteDataStore", "WKWebExtensionMessagePort"] }
 # Dictation: AVAudioRecorder takes the mic, Speech transcribes the take (src/dictate.rs).
 objc2-avf-audio = "0.3"
 objc2-speech = "0.3"

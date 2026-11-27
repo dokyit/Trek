@@ -4025,6 +4025,22 @@ impl BrowserPanel {
                     this.with_active(cx, |wv| wv.open_devtools());
                 },
             ))
+            // Extensions' own DevTools panels (React Developer Tools' Components and Profiler),
+            // for the page in front, in a window of Trek's: WebKit's inspector takes none.
+            .children(
+                browser_extensions::devtools_extensions()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (id, name))| {
+                        ui::menu_row(("browser-extension-devtools", i), false, cx)
+                            .child(Icon::new(Lucide::CodeXml).small().text_color(muted))
+                            .child(div().flex_1().child(format!("{name} panels")))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_menu_open(false, cx);
+                                browser_extensions::open_devtools(&id);
+                            }))
+                    }),
+            )
             .child(separator())
             .child(zoom_row)
             .child(separator())

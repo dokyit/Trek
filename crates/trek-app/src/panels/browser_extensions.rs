@@ -15,12 +15,20 @@
 //! page's starter list (`catalog`) says which well-known ones work here. Nothing ships with Trek.
 //! Before anything installs, the page shows what it may do (`manifest`), and waits for Install.
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // Only WebKit's extensions use it.
+pub mod bridge;
 pub mod catalog;
+#[cfg(target_os = "macos")]
+pub mod channel;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // Only WebKit's extensions need it.
 pub mod compat;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // Only the Mac's updates check it.
+pub mod crx;
 pub mod manifest;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // WebView2 keeps its own list.
 pub mod registry;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // WebView2 updates its own.
+pub mod updates;
 #[cfg(target_os = "macos")]
 pub mod webkit;
 
@@ -40,6 +48,10 @@ use gpui_kit::*;
 use gpui_wry::WebView;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// The Chrome release extensions are told they run in, and the store's update service is asked
+/// as (one current when this was written).
+pub const CHROME_MAJOR: u32 = 142;
 
 /// The Extensions page's address: the Browser opens the page for it (Settings links here).
 pub const PAGE_URL: &str = "trek://extensions";
@@ -202,12 +214,19 @@ fn download(store: Store, id: String) -> async_channel::Receiver<Result<PathBuf,
                 .await
                 .and_then(|r| r.error_for_status())
                 .map_err(|e| format!("The store didn't send the extension ({e})."))?;
-            let bytes = response.bytes().await.map_err(|e| e.to_string())?;
-            if bytes.len() > MAX_BYTES {
-                return Err("The extension is too large.".to_string());
-            }
+            let bytes = updates::read_capped(response, MAX_BYTES)
+                .await
+                .map_err(|e| format!("The extension couldn't be downloaded: {e}."))?;
+            // The store's package for this id, signed as Chrome checks it (by the extension's
+            // own key, and from the Chrome Web Store by the store's too).
+            let zip = crx::verified(&bytes, &id, store == Store::Chrome)
+                .map_err(|e| format!("The store's package was refused: {e}"))?;
             let dest = incoming_dir().join(&id);
-            unpack_crx(&bytes, &dest)?;
+            unpack_crx(zip, &dest)?;
+            // From the Chrome Web Store: Trek keeps it up to date.
+            if store == Store::Chrome {
+                let _ = std::fs::write(dest.join(updates::STORE_MARK), "");
+            }
             Ok(dest)
         }
         .await;
@@ -566,14 +585,88 @@ fn wake_on_change(cx: &mut App) {
         return;
     }
     let (tx, rx) = async_channel::unbounded();
+    channel::set_wake(tx.clone());
     webkit::set_waker(tx);
+    // Once a day, the store's newer versions of what Trek installed from it.
+    drop(webkit::check_updates(false));
     cx.spawn(async move |cx| {
         while rx.recv().await.is_ok() {
             while rx.try_recv().is_ok() {}
-            cx.update(|cx| cx.refresh_windows());
+            cx.update(|cx| {
+                channel::run_jobs();
+                post_banners(cx);
+                cx.refresh_windows()
+            });
         }
     })
     .detach();
+}
+
+/// Post (or take down) the banners extensions asked for (`chrome.notifications`), as Trek's own.
+#[cfg(target_os = "macos")]
+fn post_banners(cx: &mut App) {
+    for banner in channel::take_banners() {
+        match banner {
+            channel::Banner::Show(notice) => {
+                // An isolated run posts none (the driver reads `ext-notifications` instead).
+                if trek_core::paths::isolated() {
+                    continue;
+                }
+                cx.show_system_notification(SystemNotification {
+                    tag: notice.tag().into(),
+                    title: notice.headline().into(),
+                    body: notice.message.clone().into(),
+                    actions: notice
+                        .buttons
+                        .iter()
+                        .enumerate()
+                        .map(|(i, label)| SystemNotificationAction {
+                            id: bridge::button_id(i).into(),
+                            label: label.clone().into(),
+                        })
+                        .collect(),
+                });
+            }
+            channel::Banner::Hide(tag) => cx.dismiss_system_notification(&tag),
+        }
+    }
+}
+
+/// Running extensions with DevTools panels of their own (id, name), for the Browser's menu.
+pub fn devtools_extensions() -> Vec<(String, String)> {
+    #[cfg(target_os = "macos")]
+    {
+        webkit::devtools_extensions()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        vec![]
+    }
+}
+
+/// Open extension `id`'s DevTools panels for the page in front (macOS: a window of Trek's,
+/// `compat::DEVTOOLS_FILE`).
+pub fn open_devtools(id: &str) {
+    #[cfg(target_os = "macos")]
+    if let Err(e) = webkit::open_devtools(id) {
+        tracing::warn!("browser extensions: {id}: no DevTools panels: {e}");
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = id;
+}
+
+/// A click on one of Trek's banners: whether it was an extension's (then the extension hears of
+/// it: `notifications.onClicked` / `onButtonClicked`).
+pub fn banner_clicked(tag: &str, action: Option<&str>) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        channel::clicked(tag, action)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (tag, action);
+        false
+    }
 }
 
 /// The toolbar's room for extensions' buttons: past it the address field gets too narrow in a

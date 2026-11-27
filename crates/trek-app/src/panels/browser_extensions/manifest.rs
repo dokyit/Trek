@@ -54,6 +54,9 @@ pub fn read(folder: &Path) -> Result<Manifest, String> {
         hosts.extend(strings(&script["matches"]));
     }
     permissions.dedup();
+    // What Trek added for its own channel (`compat`) isn't the extension's to answer for.
+    let added = strings(&json[super::compat::ADDED_KEY]);
+    permissions.retain(|p| !added.contains(p));
     let mut seen = std::collections::HashSet::new();
     hosts.retain(|h| seen.insert(h.clone()));
     let action = if json["action"].is_object() {

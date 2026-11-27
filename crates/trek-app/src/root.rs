@@ -1550,6 +1550,14 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     let ws = workspace.downgrade();
     cx.on_system_notification_response(move |response, cx| {
         let Some(ws) = ws.upgrade() else { return };
+        // A browser extension's own (`chrome.notifications`): the extension hears of the click.
+        if crate::panels::browser_extensions::banner_clicked(
+            &response.tag,
+            response.action_id.as_deref(),
+        ) {
+            crate::system::activate(cx);
+            return;
+        }
         // The banner that said Trek went to the tray brings its window back.
         if response.tag.as_ref() == TRAY_TAG {
             show_main(ws, cx);
