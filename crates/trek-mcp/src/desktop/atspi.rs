@@ -818,6 +818,34 @@ impl<T: Tree> Scan<'_, T> {
     }
 }
 
+/// Whether `pid` is one of Trek's own processes: its name is `trek`, or it's a descendant of a
+/// `trek` that no `trek-mcp` stands between (Trek's web content processes are on the
+/// accessibility bus under pids of their own). What `trek-mcp` itself starts — the apps
+/// `open_app` launches — is a descendant of `trek` too, but through `trek-mcp`, and those are
+/// exactly the windows an agent is to work in. `proc` reads a process's name and its parent's
+/// id — `/proc` in `bus`; the tests hand it a table. Computer use never reads or acts on Trek.
+pub fn is_trek(pid: u32, proc: &dyn Fn(u32) -> Option<(String, u32)>) -> bool {
+    let mut pid = pid;
+    // An ancestor chain can't be longer than this; a cycle ends it too.
+    for _ in 0..64 {
+        let Some((name, ppid)) = proc(pid) else {
+            return false;
+        };
+        let name = name.trim();
+        if name.eq_ignore_ascii_case("trek-mcp") {
+            return false;
+        }
+        if name.eq_ignore_ascii_case("trek") {
+            return true;
+        }
+        if ppid == 0 || ppid == pid {
+            return false;
+        }
+        pid = ppid;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -1390,5 +1418,40 @@ mod tests {
         assert!(!wants_range(role::PUSH_BUTTON));
         // What a window with nothing on the bus is told names the way to get it there.
         assert!(NOT_ON_BUS.contains("accessibility bus") && NOT_ON_BUS.contains("screenshots"));
+    }
+
+    #[test]
+    fn trek_and_what_it_started_are_treks_but_not_what_trek_mcp_started() {
+        // (name, ppid) by pid: Trek 100, its web process 101, trek-mcp 102, the app it opened
+        // 103 (and that app's own child 104), a user's app 105.
+        let table: &[(&str, u32, u32)] = &[
+            ("trek", 100, 1),
+            ("WebKitWebProcess", 101, 100),
+            ("trek-mcp", 102, 100),
+            ("gedit", 103, 102),
+            ("gedit-worker", 104, 103),
+            ("firefox", 105, 1),
+        ];
+        let proc = |pid: u32| {
+            table
+                .iter()
+                .find(|(_, p, _)| *p == pid)
+                .map(|(name, _, ppid)| (name.to_string(), *ppid))
+        };
+        assert!(is_trek(100, &proc), "Trek itself");
+        assert!(is_trek(101, &proc), "its web content process");
+        assert!(
+            !is_trek(102, &proc),
+            "trek-mcp is Trek's, but has no elements to guard"
+        );
+        assert!(
+            !is_trek(103, &proc) && !is_trek(104, &proc),
+            "what open_app started is the agent's to drive"
+        );
+        assert!(!is_trek(105, &proc), "and so is any other app");
+        assert!(!is_trek(999, &proc), "a pid /proc doesn't have");
+        // A cycle ends the walk rather than looping.
+        let looped = |_: u32| Some(("x".to_string(), 7));
+        assert!(!is_trek(3, &looped));
     }
 }

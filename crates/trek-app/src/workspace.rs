@@ -10870,9 +10870,9 @@ impl Workspace {
             // The simulator's tools only where there's a simulator to drive (Xcode, not just its
             // command line tools): elsewhere they're tool names and words in every request.
             let sim_tools = tools.simulator && trek_core::detect::has_simulator();
-            // Linux has no computer use or video watcher (`trek-mcp` has neither there).
+            // Linux has no video watcher (`trek-mcp` has none there).
             let linux = crate::words::is_linux();
-            let computer_use = tools.computer_use && !linux;
+            let computer_use = tools.computer_use;
             for family in trek_mcp_families(computer_use, sim_tools, windows) {
                 let mut env = trek_mcp_env(family, tools.computer_background, windows);
                 // The simulator's `sim_test` writes its run where the Simulator tool reads it,

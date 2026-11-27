@@ -518,6 +518,9 @@ const WINDOW_WAIT: Duration = Duration::from_millis(if cfg!(test) { 0 } else { 8
 /// Said when an agent points at Trek itself.
 const OWN_WINDOW: &str = "That's in Trek's own window. Agents don't operate Trek itself: its approvals, questions and settings are the user's to answer. Ask the user, or work in another app's window.";
 
+/// Said when the agent asks to open Trek itself.
+const OWN_OPEN: &str = "That's Trek itself. Agents don't operate Trek: its approvals, questions and settings are the user's to answer. Ask the user, or work in another app.";
+
 /// Said when the agent picks one of Trek's windows to work in, in the background.
 const OWN_WINDOW_BEHIND: &str = "That's one of Trek's own windows. Agents don't operate Trek itself: its approvals, questions and settings are the user's to answer. Ask the user, or work in another app's window.";
 
@@ -534,6 +537,16 @@ const OWN_KEYS: &str = "Trek's own window is in front, so the keys would go to T
 /// the repository.
 fn is_trek_app(owner: &str) -> bool {
     owner.eq_ignore_ascii_case("trek")
+}
+
+/// Whether `open_app`'s `name` asks for Trek itself: `Trek` in any case, `trek.exe`, or a path
+/// whose last part is one of those or `Trek.app`.
+fn names_trek(name: &str) -> bool {
+    let name = name.trim().trim_end_matches(['/', '\\']);
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let lower = base.to_ascii_lowercase();
+    let stem = lower.strip_suffix(".app").unwrap_or(&lower);
+    stem == "trek" || lower == "trek.exe"
 }
 
 fn is_trek(w: &WindowInfo) -> bool {
@@ -827,6 +840,9 @@ impl Computer {
         let name = arg_str(args, "name")?.trim();
         if name.is_empty() {
             return Err("name is empty".into());
+        }
+        if names_trek(name) {
+            return Err(OWN_OPEN.into());
         }
         self.desktop
             .open_app(name)
@@ -1736,7 +1752,7 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         if name.is_empty() {
             return Err("name is empty".into());
         }
-        if is_trek_app(name) || name.trim_end_matches('/').ends_with("/Trek.app") {
+        if names_trek(name) {
             return Err(OWN_WINDOW_BEHIND.into());
         }
         let new_window = args
@@ -3938,6 +3954,41 @@ mod tests {
                 .is_none(),
             "in front, there's no window to pick"
         );
+    }
+
+    #[test]
+    fn in_front_trek_itself_is_never_opened() {
+        let fake = Recording::new();
+        let mut c = on(&fake);
+        for name in [
+            "Trek",
+            "trek",
+            "/Applications/Trek.app",
+            "/Applications/Trek.app/",
+            "/Applications/TREK.APP",
+            "trek.exe",
+            r"C:\Tools\trek.exe",
+        ] {
+            assert_eq!(
+                c.call("open_app", &json!({"name": name})),
+                Err(OWN_OPEN.to_string()),
+                "{name}"
+            );
+        }
+        assert!(
+            fake.events()
+                .iter()
+                .all(|e| !matches!(e, Event::OpenApp(_))),
+            "the desktop was never asked: {:?}",
+            fake.events()
+        );
+        // Another app's name that only starts like Trek's still opens.
+        c.call("open_app", &json!({"name": "Trekking Maps"}))
+            .unwrap();
+        assert!(matches!(
+            fake.events().last(),
+            Some(Event::OpenApp(n)) if n == "Trekking Maps"
+        ));
     }
 
     #[test]

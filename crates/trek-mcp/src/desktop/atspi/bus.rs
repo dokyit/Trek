@@ -45,6 +45,28 @@ const FRAMES_MAX: usize = 50;
 /// the next reading gives them again.
 const KNOWN_MAX: usize = 20_000;
 
+/// Said when an element of Trek's own app is asked for or acted on.
+const OWN: &str = "That's one of Trek's own windows: agents don't operate Trek itself, so its elements aren't read or acted on.";
+
+/// `/proc`'s word on `pid`: its command name and its parent's id.
+fn proc(pid: u32) -> Option<(String, u32)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, rest) = stat.rsplit_once(')')?;
+    let mut fields = rest.split_whitespace();
+    let _state = fields.next()?;
+    let ppid: u32 = fields.next()?.parse().ok()?;
+    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    Some((comm.trim().to_string(), ppid))
+}
+
+/// Whether `pid` has GTK3 mapped (`/proc/pid/maps`): its AT-SPI bridge is the one that aborts
+/// the app on GetActions, so it's never asked that.
+fn gtk3(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/maps"))
+        .map(|maps| maps.contains("libgtk-3"))
+        .unwrap_or(false)
+}
+
 /// An element: its app's name on the accessibility bus, and its path there.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct El {
@@ -84,6 +106,10 @@ pub struct Bus {
     known: RefCell<HashMap<u64, El>>,
     /// Each window's own element, as last found, by the window's id.
     roots: RefCell<HashMap<i64, El>>,
+    /// Each process found to be or not be Trek's own (`atspi::is_trek`), by pid.
+    treks: RefCell<HashMap<u32, bool>>,
+    /// Each process found to have GTK3 mapped or not, by pid.
+    gtk3s: RefCell<HashMap<u32, bool>>,
 }
 
 impl Bus {
@@ -110,6 +136,8 @@ impl Bus {
             conn,
             known: RefCell::default(),
             roots: RefCell::default(),
+            treks: RefCell::default(),
+            gtk3s: RefCell::default(),
         })
     }
 
@@ -177,16 +205,22 @@ impl Bus {
         // (at-spi2-core on Ubuntu 22.04) aborts the whole app writing the a(sss) reply — the
         // check window died mid-reading, its button never read. The names are all a reading
         // keeps of them; GetActions' descriptions and keybindings go unread anyway.
-        if let Some(n) = self.count(el, ACTION, "NActions") {
-            return (0..n.clamp(0, 32))
-                .map(|i| {
-                    self.call(el, ACTION, "GetName", &i)
-                        .and_then(|reply| out!(reply, String))
-                        .unwrap_or_default()
-                })
-                .collect();
+        match self.get(el, ACTION, "NActions") {
+            Ok(n) => {
+                let n = i32::try_from(n).unwrap_or(0).clamp(0, 32);
+                return (0..n)
+                    .map(|i| {
+                        self.call(el, ACTION, "GetName", &i)
+                            .and_then(|reply| out!(reply, String))
+                            .unwrap_or_default()
+                    })
+                    .collect();
+            }
+            // GetActions only where the app has no NActions at all: a slow answer is no reason
+            // to ask the question that can kill a GTK3 app, and a GTK3 app is never asked it.
+            Err(Fault::Unsupported) if !self.gtk3_app(&el.bus) => {}
+            Err(_) => return vec![],
         }
-        // An app without NActions: GetActions is the only way to learn them.
         self.call(el, ACTION, "GetActions", &())
             .and_then(|reply| out!(reply, Vec<(String, String, String)>))
             .map(|all| all.into_iter().map(|(name, _, _)| name).collect())
@@ -303,6 +337,52 @@ impl Bus {
         out!(reply, u32).ok()
     }
 
+    /// Whether `pid` is one of Trek's own processes (`atspi::is_trek`, `/proc`).
+    fn trek(&self, pid: u32) -> bool {
+        let mut treks = self.treks.borrow_mut();
+        if treks.len() > 1000 {
+            treks.clear();
+        }
+        *treks
+            .entry(pid)
+            .or_insert_with(|| super::is_trek(pid, &proc))
+    }
+
+    /// Whether the app on `bus` is one of Trek's own processes.
+    fn trek_app(&self, bus: &str) -> bool {
+        self.pid_of(bus).is_some_and(|pid| self.trek(pid))
+    }
+
+    /// Whether the app on `bus` has GTK3 mapped: its AT-SPI bridge aborts the app on
+    /// GetActions, so it's never asked that.
+    fn gtk3_app(&self, bus: &str) -> bool {
+        let Some(pid) = self.pid_of(bus) else {
+            return false;
+        };
+        let mut gtk3s = self.gtk3s.borrow_mut();
+        if gtk3s.len() > 1000 {
+            gtk3s.clear();
+        }
+        *gtk3s.entry(pid).or_insert_with(|| gtk3(pid))
+    }
+
+    /// Trek's own apps are off limits whatever element is named, checked again here at the
+    /// lowest layer that acts (as `uia`'s `refuse_trek` does).
+    fn refuse_trek(&self, el: &El) -> Result<(), String> {
+        if self.trek_app(&el.bus) {
+            return Err(OWN.into());
+        }
+        Ok(())
+    }
+
+    /// Window `w` is never one of Trek's own: its elements aren't read or acted on.
+    fn refuse_window(&self, w: &WindowInfo) -> Result<(), String> {
+        if w.pid > 0 && u32::try_from(w.pid).is_ok_and(|pid| self.trek(pid)) {
+            return Err(OWN.into());
+        }
+        Ok(())
+    }
+
     /// Window `w`'s own element: among the top-level elements of its app (the app of its
     /// process; of any app when none is, as one in a sandbox counts its processes its own way),
     /// the one with its title, or where it is.
@@ -323,12 +403,20 @@ impl Bus {
             .map_err(|f| format!("{NO_BUS} ({})", unread(&f, "The registry")))?;
         let of_process: Vec<&El> = apps
             .iter()
-            .filter(|app| w.pid > 0 && self.pid_of(&app.bus).map(i64::from) == Some(w.pid))
+            .filter(|app| {
+                w.pid > 0
+                    && self
+                        .pid_of(&app.bus)
+                        .is_some_and(|pid| i64::from(pid) == w.pid && !self.trek(pid))
+            })
             .collect();
-        let apps: Vec<&El> = if of_process.is_empty() {
-            apps.iter().collect()
-        } else {
+        // Its app only when the window's process is known — falling back to every app could
+        // pick another app's frame that happens to be nearest. Trek's own apps are left out
+        // either way: they're never a window's elements to read.
+        let apps: Vec<&El> = if w.pid > 0 {
             of_process
+        } else {
+            apps.iter().filter(|app| !self.trek_app(&app.bus)).collect()
         };
         let mut frames: Vec<El> = vec![];
         let mut candidates: Vec<Candidate> = vec![];
@@ -358,6 +446,7 @@ impl Bus {
     }
 
     pub fn elements(&self, w: &WindowInfo, reading: &Reading) -> Result<Elements, String> {
+        self.refuse_window(w)?;
         let root = self.root(w)?;
         let read =
             read(&mut Walk(self), root, (w.x, w.y), reading).map_err(|f| unread(&f, &w.owner))?;
@@ -368,6 +457,7 @@ impl Bus {
     }
 
     pub fn element_at(&self, w: &WindowInfo, place: &[usize]) -> Result<Option<Node>, String> {
+        self.refuse_window(w)?;
         let root = self.root(w)?;
         match find(&mut Walk(self), root, place) {
             Ok(Some((el, p, parent))) => {
@@ -383,6 +473,7 @@ impl Bus {
     /// the reply.
     pub fn perform(&self, identity: u64, action: Action, owner: &str) -> Result<Performed, String> {
         let el = self.known(identity)?;
+        self.refuse_trek(&el)?;
         let p = self.props(&el).map_err(|f| refused(&f, action))?;
         let step = plan(&p, action).ok_or_else(|| refused(&Fault::Unsupported, action))?;
         let done = match step {
@@ -410,6 +501,7 @@ impl Bus {
     /// Ask the element to take the keyboard focus; whether it says it has it a moment later.
     pub fn focus(&self, identity: u64) -> Result<bool, String> {
         let el = self.known(identity)?;
+        self.refuse_trek(&el)?;
         let asked = self
             .call(&el, COMPONENT, "GrabFocus", &())
             .and_then(|reply| out!(reply, bool))
@@ -426,6 +518,7 @@ impl Bus {
     /// Put `text` after what the element holds, through its EditableText interface.
     pub fn add_text(&self, identity: u64, text: &str) -> Result<(), String> {
         let el = self.known(identity)?;
+        self.refuse_trek(&el)?;
         let interfaces = self
             .call(&el, ACCESSIBLE, "GetInterfaces", &())
             .and_then(|reply| out!(reply, Vec<String>))
@@ -454,6 +547,9 @@ impl Bus {
         let Ok(el) = self.known(identity) else {
             return false;
         };
+        if self.refuse_trek(&el).is_err() {
+            return false;
+        }
         // 6: anywhere in view.
         self.call(&el, COMPONENT, "ScrollTo", &6u32)
             .and_then(|reply| out!(reply, bool))
