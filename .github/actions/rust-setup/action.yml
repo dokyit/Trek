@@ -70,6 +70,8 @@ runs:
           Windows-*) platform=windows-tar ;;
         esac
         bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+        # Git Bash's tar takes C:\… for a remote host named C: give it /c/….
+        if [ "$RUNNER_OS" = Windows ]; then bin=$(cygpath -u "$bin"); fi
         curl -LsSf --retry 5 --retry-all-errors "https://get.nexte.st/0.9.151/$platform" | tar zxf - -C "$bin"
         cargo nextest --version
 
