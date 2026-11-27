@@ -368,7 +368,14 @@ pub fn tap(udid: &str, x: f32, y: f32) -> Result<(), String> {
 /// VideoToolbox's. One at a time per phone; dropping the `Live` stops the stream.
 #[cfg(target_os = "macos")]
 pub fn live(udid: &str) -> Result<live::Live, String> {
-    ask(udid, |reply| Ask::Live(reply))
+    live_with(udid, live::LiveOptions::default())
+}
+
+/// [`live`], asked for another way: without the phone's sound, or with each decoded frame of it
+/// sent somewhere too (`live::LiveOptions`).
+#[cfg(target_os = "macos")]
+pub fn live_with(udid: &str, options: live::LiveOptions) -> Result<live::Live, String> {
+    ask(udid, |reply| Ask::Live(options, reply))
 }
 
 /// A touch on phone `udid`: a tap, a swipe, typing, or the Home Screen.
@@ -418,7 +425,7 @@ enum Ask {
     Open(String, Reply<String>),
     Apps(Reply<Vec<(String, String)>>),
     #[cfg(target_os = "macos")]
-    Live(Reply<live::Live>),
+    Live(live::LiveOptions, Reply<live::Live>),
     #[cfg(target_os = "macos")]
     LiveStop(u64, Reply<()>),
 }
@@ -583,8 +590,8 @@ async fn answer(udid: &str, session: &mut Option<Session>, ask: Ask) {
             let _ = reply.send(opened);
         }
         #[cfg(target_os = "macos")]
-        Ask::Live(reply) => {
-            let live = live::start(udid, session).await;
+        Ask::Live(options, reply) => {
+            let live = live::start(udid, session, options).await;
             if live.is_err() && !session.as_ref().is_some_and(Session::media_held) {
                 // A stream that couldn't start may have left the session's services askew; the
                 // next call opens the tunnel again.

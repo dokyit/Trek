@@ -421,14 +421,61 @@ struct Line<'a> {
     id: &'a str,
 }
 
-/// The roles and names of `siblings`, as one number.
+/// The roles and names of `siblings`, as one number (a running clock in a name doesn't change
+/// it: `steady`).
 fn around(siblings: &[Node]) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     for s in siblings {
         s.role.hash(&mut h);
-        s.name.hash(&mut h);
+        steady(&s.name).hash(&mut h);
     }
     h.finish()
+}
+
+/// `name` with the numbers of any running time in it set to 0: "Working 21m 38s" a second later
+/// says "Working 21m 39s" and is the same element, which a ref must outlive (seen on a real
+/// iPhone: a thread row with its elapsed time in its label could never be tapped by its ref).
+/// Only a number with a unit of time straight after it counts (`s`, `sec`, `m`, `min`, `h`, `hr`,
+/// `d`, with their plurals); "Item 2", "14" and "7:00" stay what they are, since another element
+/// may differ from this one by just that.
+pub fn steady(name: &str) -> std::borrow::Cow<'_, str> {
+    const UNITS: [&str; 12] = [
+        "secs", "sec", "mins", "min", "hrs", "hr", "days", "day", "s", "m", "h", "d",
+    ];
+    let bytes = name.as_bytes();
+    let mut out: Option<String> = None;
+    let mut i = 0;
+    let mut copied = 0;
+    while i < bytes.len() {
+        let starts_number = bytes[i].is_ascii_digit()
+            && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'.'));
+        if !starts_number {
+            i += 1;
+            continue;
+        }
+        let digits = bytes[i..].iter().take_while(|b| b.is_ascii_digit()).count();
+        let after = i + digits;
+        let unit_at = after + usize::from(bytes.get(after) == Some(&b' '));
+        let rest = &name[unit_at.min(name.len())..];
+        let timed = UNITS.iter().any(|unit| {
+            rest.strip_prefix(unit)
+                .is_some_and(|tail| !tail.chars().next().is_some_and(|c| c.is_alphanumeric()))
+        });
+        if timed {
+            let out = out.get_or_insert_with(String::new);
+            out.push_str(&name[copied..i]);
+            out.push('0');
+            copied = after;
+        }
+        i = after;
+    }
+    match out {
+        Some(mut out) => {
+            out.push_str(&name[copied..]);
+            std::borrow::Cow::Owned(out)
+        }
+        None => std::borrow::Cow::Borrowed(name),
+    }
 }
 
 fn collect<'a>(
@@ -657,7 +704,14 @@ impl Refs {
 
     /// The ref of `n`: the one it had, brought up to date, or a new one.
     fn give(&mut self, n: &Node, around: u64) -> u32 {
-        let key = || (n.role.clone(), n.name.clone(), n.place.clone(), around);
+        let key = || {
+            (
+                n.role.clone(),
+                steady(&n.name).into_owned(),
+                n.place.clone(),
+                around,
+            )
+        };
         let had = match n.identity {
             Some(identity) => self.by_identity.get(&identity).copied(),
             None => self.by_place.get(&key()).copied(),
@@ -737,7 +791,7 @@ impl Refs {
                 "{what} isn't where it was any more: what's there has changed. {again}"
             ));
         };
-        if now.role != seen.role || now.name != seen.name {
+        if now.role != seen.role || steady(&now.name) != steady(&seen.name) {
             return Err(format!(
                 "Where {what} was there's now {}. {again}",
                 now.describe()
@@ -790,7 +844,7 @@ impl Refs {
             Some(identity) => any(roots, &|n| n.identity == Some(identity)),
             None => at(roots, &seen.place).is_some_and(|now| {
                 now.role == seen.role
-                    && now.name == seen.name
+                    && steady(&now.name) == steady(&seen.name)
                     && seen.around == Some(around(siblings(roots, &seen.place)))
             }),
         })
@@ -1111,6 +1165,83 @@ mod tests {
         twin.identity = Some(78);
         let err = refs.prove("e6", Some(&twin)).unwrap_err();
         assert!(err.contains("Another button \"Signing in…\""), "{err}");
+    }
+
+    #[test]
+    fn a_running_clock_in_a_name_doesnt_change_the_element() {
+        assert_eq!(steady("Working 21m 38s"), "Working 0m 0s");
+        assert_eq!(
+            steady("Ship it, 2 sub-agents at work, Working 1h 2m"),
+            "Ship it, 2 sub-agents at work, Working 0h 0m"
+        );
+        assert_eq!(steady("On the Mac, 8m"), steady("On the Mac, 9m"));
+        assert_eq!(steady("Running 3 min"), "Running 0 min");
+        assert_eq!(steady("12 secs left"), "0 secs left");
+        // Not a time: another element may differ by just this.
+        for same in [
+            "Item 2",
+            "14",
+            "7:00",
+            "v0.4.67",
+            "3 more",
+            "5 stars",
+            "H2s",
+            "2 sub-agents",
+        ] {
+            assert_eq!(steady(same), same, "{same}");
+        }
+        assert!(matches!(steady("Settings"), std::borrow::Cow::Borrowed(_)));
+
+        // A thread row whose label counts the seconds keeps its ref and can be acted on.
+        let row = |elapsed: &str| {
+            vec![with(
+                node("list", ""),
+                vec![
+                    control(
+                        "button",
+                        &format!("Fix the build, Working {elapsed}"),
+                        0.,
+                        100.,
+                        300.,
+                        40.,
+                    ),
+                    control(
+                        "button",
+                        &format!("Write the docs, Working {elapsed}"),
+                        0.,
+                        140.,
+                        300.,
+                        40.,
+                    ),
+                    control("button", "Item 2", 0., 180., 300., 40.),
+                ],
+            )]
+        };
+        let mut refs = Refs::new("elements");
+        let mut first = row("21m 38s");
+        number(&mut first);
+        let listed = refs.outline(&first, &View::default()).text;
+        assert!(
+            listed.contains("button \"Fix the build, Working 21m 38s\" [ref=e1]"),
+            "{listed}"
+        );
+        let mut later = row("21m 44s");
+        number(&mut later);
+        let (seen, now) = refs
+            .find("e1", &later)
+            .expect("the same row, six seconds on");
+        assert_eq!(seen.name, "Fix the build, Working 21m 38s");
+        assert_eq!(now.name, "Fix the build, Working 21m 44s");
+        assert!(refs.has("e1", &later).unwrap());
+        let again = refs.outline(&later, &View::default()).text;
+        assert!(again.contains("Working 21m 44s\" [ref=e1]"), "{again}");
+        // A different row there is still refused, and so is a name that differs by a plain number.
+        let mut other = row("21m 50s");
+        other[0].children[0].name = "Ship the fix, Working 21m 50s".into();
+        other[0].children[2].name = "Item 3".into();
+        number(&mut other);
+        assert!(refs.find("e1", &other).unwrap_err().contains("there's now"));
+        assert!(refs.find("e3", &other).unwrap_err().contains("there's now"));
     }
 
     #[test]

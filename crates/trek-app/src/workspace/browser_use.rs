@@ -32,6 +32,16 @@ pub(super) fn server(bin: String, env: Vec<(String, String)>) -> McpServer {
     }
 }
 
+/// Those of them that are asked every time, whatever the thread's access (a passkey): no
+/// change of level answers one for the user.
+const EACH_TIME_PREFIX: &str = "trek-browser-ask-each-time-";
+
+/// Whether approval `request_id` is one of the Browser's that only the user's own answer
+/// settles, at any access level.
+pub(super) fn asks_each_time(request_id: &str) -> bool {
+    request_id.starts_with(EACH_TIME_PREFIX)
+}
+
 /// Whether approval `request_id` is the Browser's own (typing a password, sending a form
 /// elsewhere…), which only the user answers.
 pub(super) fn is_ask(request_id: &str) -> bool {
@@ -110,8 +120,38 @@ impl Workspace {
         detail: String,
         cx: &mut Context<Self>,
     ) -> (String, async_channel::Receiver<Decision>) {
+        self.browser_ask_as(ASK_PREFIX, thread, title, detail, cx)
+    }
+
+    /// `browser_ask` for what is asked every time (a passkey): raising the thread to Full
+    /// access with the card up doesn't answer it.
+    pub fn browser_ask_each_time(
+        &mut self,
+        thread: &str,
+        title: String,
+        detail: String,
+        cx: &mut Context<Self>,
+    ) -> (String, async_channel::Receiver<Decision>) {
+        self.browser_ask_as(EACH_TIME_PREFIX, thread, title, detail, cx)
+    }
+
+    /// Whether `thread`'s agent is in a turn now.
+    pub fn browser_turn_running(&self, thread: &str) -> bool {
+        self.live
+            .get(thread)
+            .is_some_and(|l| l.turn_started.is_some())
+    }
+
+    fn browser_ask_as(
+        &mut self,
+        prefix: &str,
+        thread: &str,
+        title: String,
+        detail: String,
+        cx: &mut Context<Self>,
+    ) -> (String, async_channel::Receiver<Decision>) {
         static N: AtomicU64 = AtomicU64::new(0);
-        let id = format!("{ASK_PREFIX}{}", N.fetch_add(1, Ordering::Relaxed) + 1);
+        let id = format!("{prefix}{}", N.fetch_add(1, Ordering::Relaxed) + 1);
         let (tx, rx) = async_channel::bounded(1);
         let Some(live) = self.live.get_mut(thread) else {
             let _ = tx.try_send(Decision::Deny);
@@ -188,6 +228,15 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), Decision::AllowForSession);
         // Withdrawn already: still the Browser's, nothing to send.
         assert!(answered(&id, Decision::Deny));
+    }
+
+    #[test]
+    fn what_is_asked_every_time_is_the_browsers_own_and_marked() {
+        let id = format!("{EACH_TIME_PREFIX}7");
+        assert!(is_ask(&id), "answered in Trek, like the rest");
+        assert!(asks_each_time(&id));
+        assert!(!asks_each_time(&format!("{ASK_PREFIX}7")));
+        assert!(!asks_each_time("toolu_123"));
     }
 
     #[test]

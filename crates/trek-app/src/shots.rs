@@ -2486,6 +2486,39 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         cx.refresh_windows();
         return Ok(());
     }
+    // A real iPhone pairs with this isolated Trek: the phone server on the local network at the
+    // port given (never the owner's 7420), a pairing code offered, and what to type on the phone
+    // written to `pair-device.txt` in the shot folder (address, code, short fingerprint, and the
+    // link). The phone lists it as "Trek test (isolated)", one more machine beside the owner's;
+    // its threads are this run's mock ones. `pair-device <port>`.
+    if verb == "pair-device" {
+        let port: u16 = arg
+            .parse()
+            .map_err(|_| anyhow::anyhow!("pair-device: a port, e.g. 7437"))?;
+        let offer = ws.update(cx, |ws, cx| -> anyhow::Result<trek_remote::PairingOffer> {
+            ws.start_device_remote(port, cx)?;
+            ws.offer_pairing(cx);
+            ws.remote
+                .as_ref()
+                .and_then(|r| r.offer.clone())
+                .ok_or_else(|| anyhow::anyhow!("pair-device: no pairing code"))
+        })?;
+        let link = crate::machines::PairLink::parse(&offer.url).map_err(anyhow::Error::msg)?;
+        if let Some(dir) = std::env::var_os("TREK_SHOT_DIR") {
+            std::fs::write(
+                Path::new(&dir).join("pair-device.txt"),
+                format!(
+                    "address {}\ncode {}\nfingerprint {}\nlink {}\n",
+                    link.routes.first().cloned().unwrap_or_default(),
+                    offer.code,
+                    offer.fingerprint.clone().unwrap_or_default(),
+                    offer.url,
+                ),
+            )?;
+        }
+        cx.refresh_windows();
+        return Ok(());
+    }
     if verb == "pair-phone" {
         static STAND_IN: std::sync::Mutex<Option<Arc<trek_remote::client::Client>>> =
             std::sync::Mutex::new(None);
@@ -5442,7 +5475,17 @@ fn pointer(window: &mut Window, verb: &str, id: &str, cx: &mut App) -> anyhow::R
     );
     POINTER_SCRIPTED.store(true, Ordering::Relaxed);
     window.render_frame(cx);
-    let id = element_id(id);
+    // `tool-group#*`: the first element on screen whose id starts so, for a row whose index
+    // depends on what came before it in the thread.
+    let id = match id.strip_suffix('*') {
+        Some(prefix) => gpui_kit::base::test_support::snapshots(window)
+            .into_iter()
+            .filter(|s| s.visible())
+            .filter_map(|s| s.path().last().cloned())
+            .find(|last| id_text(last).starts_with(prefix))
+            .ok_or_else(|| anyhow::anyhow!("{verb}: nothing on screen starts with {prefix}"))?,
+        None => element_id(id),
+    };
     let found: Vec<_> = gpui_kit::base::test_support::snapshots(window)
         .into_iter()
         .filter(|s| s.path().last() == Some(&id))
