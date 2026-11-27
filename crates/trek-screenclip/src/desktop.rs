@@ -75,7 +75,7 @@ impl Session {
     /// The sentence Settings › App Snapshots says about how snapshots are taken here.
     pub fn note(self) -> &'static str {
         if self.portal {
-            "Your desktop's own screenshot tool does the picking: a window, an area or the screen. It may keep a copy of its own where it saves screenshots."
+            "Your desktop's own screenshot tool does the picking: a window, an area or the screen. It keeps a copy of its own where it saves screenshots (GNOME's in ~/Pictures, KDE's a temporary file in /tmp), which the portal has no way to ask it not to keep; Trek leaves it."
         } else if self.x11 {
             "No screenshot portal answers in this session, so a snapshot takes the whole screen, as the X server has it. Picking a window or an area needs the desktop's portal (xdg-desktop-portal with a backend that takes screenshots, as GNOME and KDE have)."
         } else {
@@ -162,6 +162,11 @@ pub trait Capture: Send + Sync {
     fn step_aside(&self, cx: &mut App);
     /// And back, with `front` the one in front.
     fn come_back(&self, front: AnyWindowHandle, cx: &mut App);
+    /// Whether the session's first look is still out: `session` answers at once with what it has
+    /// (none until the look answers), so a surface that needs the whole answer waits on this.
+    fn looking(&self) -> bool {
+        false
+    }
     /// How long the windows are given to go.
     fn settle(&self) -> Duration {
         SETTLE
@@ -403,6 +408,34 @@ pub fn warm() {
     }
 }
 
+/// Whether a desktop's first look at the session is still out (the real one on Linux; a pretend
+/// desktop answers at once, and there is none on a Mac or Windows).
+pub fn looking() -> bool {
+    capture().is_some_and(|desktop| desktop.looking())
+}
+
+/// `entity` is notified once the session's first look has answered, for a surface that drew
+/// without it (the settings page, the palette). Does nothing where no look is out.
+pub fn refresh_when_known<T: 'static>(cx: &mut gpui_kit::Context<T>) {
+    if !looking() {
+        return;
+    }
+    cx.spawn(async move |this, cx| {
+        // The portal's first answer can take a moment (it may have to be started); give it
+        // a reasonable while, then let the surface be until the next render.
+        for _ in 0..150 {
+            cx.background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
+            if !looking() {
+                break;
+            }
+        }
+        let _ = this.update(cx, |_, cx| cx.notify());
+    })
+    .detach();
+}
+
 /// Until the guard drops, snapshots on this thread go through `capture`, on any platform.
 #[cfg(any(test, feature = "test-support"))]
 pub fn pretend(capture: Arc<dyn Capture>) -> impl Drop {
@@ -429,18 +462,26 @@ mod real {
 
     static PORTAL: AtomicBool = AtomicBool::new(false);
     static X11: AtomicBool = AtomicBool::new(false);
+    /// The look was asked for, and has answered (`looking`).
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    static ANSWERED: AtomicBool = AtomicBool::new(false);
     static ASKED: Once = Once::new();
+    /// The X windows `step_aside` minimized that were on screen before: `come_back` maps back
+    /// only these, never one the user had already minimized.
+    static ASIDE: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
 
     /// Ask the X server and the session bus what they have, once, on a thread of its own: the
     /// portal is started by the bus the first time it's asked for, which can take seconds. Until
     /// they've answered, the session has neither.
     fn find_out() {
         ASKED.call_once(|| {
+            STARTED.store(true, Ordering::Relaxed);
             let _ = std::thread::Builder::new()
                 .name("trek-snapshots".into())
                 .spawn(|| {
                     X11.store(x_server_is_the_screens(), Ordering::Relaxed);
                     PORTAL.store(portal_answers(), Ordering::Relaxed);
+                    ANSWERED.store(true, Ordering::Relaxed);
                 });
         });
     }
@@ -509,6 +550,10 @@ mod real {
             }
         }
 
+        fn looking(&self) -> bool {
+            STARTED.load(Ordering::Relaxed) && !ANSWERED.load(Ordering::Relaxed)
+        }
+
         fn ask_portal(&self, interactive: bool) -> Asked {
             use ashpd::desktop::ResponseError;
             use ashpd::desktop::screenshot::Screenshot;
@@ -557,28 +602,52 @@ mod real {
             )
         }
 
-        /// Minimized: GPUI's `hide` does nothing on Linux.
+        /// Minimized: GPUI's `hide` does nothing on Linux. Only a window on screen is remembered
+        /// (`ASIDE`): one the user already minimized stays minimized when Trek comes back.
         fn step_aside(&self, cx: &mut App) {
+            use x11rb::connection::Connection as _;
+            use x11rb::protocol::xproto::{ConnectionExt as _, MapState};
+            let conn = x11rb::connect(None).ok().map(|(conn, _)| conn);
+            let mut aside = Vec::new();
             for handle in cx.windows() {
-                let _ = handle.update(cx, |_, window, _| window.minimize_window());
+                let _ = handle.update(cx, |_, window, _| {
+                    // On screen now, or can't be asked (kept, so it comes back either way).
+                    let mapped = match (&conn, x_window(window)) {
+                        (Some(conn), Some(id)) => conn
+                            .get_window_attributes(id)
+                            .ok()
+                            .and_then(|cookie| cookie.reply().ok())
+                            .is_none_or(|attrs| attrs.map_state == MapState::VIEWABLE),
+                        _ => true,
+                    };
+                    if mapped && let Some(id) = x_window(window) {
+                        aside.push(id);
+                    }
+                    window.minimize_window();
+                });
             }
+            *ASIDE.lock().unwrap() = aside;
         }
 
         /// Mapping a minimized window is how X11 asks for it back (ICCCM 4.1.4), from any
         /// connection; a window manager may then leave it behind others, so `front` asks for the
-        /// focus too.
+        /// focus too — only the windows `step_aside` found on screen are mapped back.
         fn come_back(&self, front: AnyWindowHandle, cx: &mut App) {
             use x11rb::connection::Connection as _;
             use x11rb::protocol::xproto::ConnectionExt as _;
+            let aside: Vec<u32> = std::mem::take(&mut *ASIDE.lock().unwrap());
             let conn = x11rb::connect(None).ok().map(|(conn, _)| conn);
             for handle in cx.windows() {
                 let _ = handle.update(cx, |_, window, _| {
-                    if let (Some(conn), Some(id)) = (&conn, x_window(window)) {
+                    let id = x_window(window);
+                    if let (Some(conn), Some(id)) = (&conn, id)
+                        && aside.contains(&id)
+                    {
                         let _ = conn.map_window(id);
                         let _ = conn.flush();
-                    }
-                    if handle == front {
-                        window.activate_window();
+                        if handle == front {
+                            window.activate_window();
+                        }
                     }
                 });
             }
@@ -782,6 +851,7 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         session: Session,
+        looking: bool,
         portal: Mutex<Option<Asked>>,
         screen: Option<Frame>,
         asked: Mutex<Vec<&'static str>>,
@@ -790,6 +860,9 @@ mod tests {
     impl Capture for Fake {
         fn session(&self) -> Session {
             self.session
+        }
+        fn looking(&self) -> bool {
+            self.looking
         }
         fn ask_portal(&self, interactive: bool) -> Asked {
             self.asked
@@ -972,6 +1045,23 @@ mod tests {
             other => panic!("{other:?}"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_look_still_out_is_seen_until_the_desktop_answers() {
+        assert!(!looking(), "no desktop under a test");
+        {
+            let _desktop = pretend(Arc::new(Fake::default()));
+            assert!(!looking(), "a pretend desktop answers at once");
+        }
+        {
+            let _desktop = pretend(Arc::new(Fake {
+                looking: true,
+                ..Fake::default()
+            }));
+            assert!(looking());
+        }
+        assert!(!looking());
     }
 
     #[test]

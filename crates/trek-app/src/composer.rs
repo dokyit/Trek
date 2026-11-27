@@ -305,9 +305,9 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> Self {
         let cmd_enter = workspace.read(cx).settings.general.send_with_cmd_enter;
-        // Linux: what the session can take a snapshot through is asked for now, off this thread,
-        // so the + menu knows by the time it's opened.
-        screenclip::desktop::warm();
+        // Linux: what the session can take a snapshot through is asked for lazily, the first
+        // time it's needed (the + menu, the shortcut, Settings) — `session` starts the look
+        // itself, so opening Trek doesn't start the desktop's portal.
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(2, 12)
@@ -4557,13 +4557,13 @@ const MIC_ROOM: f32 = 35.;
 /// Past the narrow form, what the model pill needs to name the account too ("Default", "Work").
 const ACCOUNT_ROOM: f32 = 130.;
 
-/// A + menu row that names a key typed in the prompt, the key in the quiet text to its right (as
-/// the thread menu shows its shortcuts).
 /// A menu row that answers to an id of its own.
 fn named(label: &'static str, id: &'static str) -> PopupMenuItem {
     PopupMenuItem::element(move |_, _| h_flex().id(id).test_support().w_full().child(label))
 }
 
+/// A + menu row that names a key typed in the prompt, the key in the quiet text to its right (as
+/// the thread menu shows its shortcuts).
 fn hinted(label: &'static str, key: &'static str, id: &'static str) -> PopupMenuItem {
     PopupMenuItem::element(move |_, cx| {
         h_flex()
