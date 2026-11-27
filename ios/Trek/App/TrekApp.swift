@@ -91,6 +91,8 @@ struct TrekApp: App {
                         }
                         return
                     }
+                    // A thread's link from an answer (`trek://thread/<id>`).
+                    if model.open(link: url) { return }
                     // Never pairs by itself: the link waits in a confirmation sheet.
                     if let link = PairingLink(url.absoluteString) {
                         model.offer(link)

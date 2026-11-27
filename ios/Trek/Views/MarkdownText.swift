@@ -1,17 +1,19 @@
 import Synchronization
 import SwiftUI
 
-/// Agent Markdown, block by block: headings, paragraphs, bullet and numbered lists, quotes, fenced
-/// code, tables and display maths. Inline styling (bold, italics, links, `code` and file chips) is
-/// `RichText`, with maths typeset in the line by `RichMathText`.
-/// The text is parsed once (and may already be, in the background, as the transcript arrived).
+/// Agent Markdown, block by block, as the Mac's transcript reads it: headings, paragraphs, rules,
+/// bullet, numbered and task lists (nested, with the number they start at), quotes, fenced code,
+/// tables, display maths and pictures. Inline styling (bold, italics, links, `code` and file
+/// chips) is `RichText`, with maths typeset in the line by `RichMathText`.
+/// The text is parsed once and kept (`Markdown.blocks`): a transcript's finished answers are
+/// parsed in the background as they arrive (`Markdown.prewarm`, from `ThreadStore`).
 struct MarkdownText: View, nonisolated Equatable {
     // Read by `==`, which SwiftUI may call off the main thread (as `BlockRow`'s): a conformance
     // left to the target's default isolation stops the app there.
     nonisolated(unsafe) var text: String
     nonisolated(unsafe) var size: CGFloat = 16
-    /// The answer is still being written: a visualization whose fence is still open is on its
-    /// way, not one that was never finished.
+    /// The answer is still being written: a visualization or page whose fence is still open is
+    /// on its way, not one that was never finished.
     nonisolated(unsafe) var live = false
 
     nonisolated static func == (a: MarkdownText, b: MarkdownText) -> Bool {
@@ -22,52 +24,67 @@ struct MarkdownText: View, nonisolated Equatable {
     typealias Block = Markdown.Block
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(Markdown.blocks(text).enumerated()), id: \.offset) { _, block in
-                view(for: block)
+        MarkdownBlocks(blocks: Markdown.blocks(text), size: size, live: live)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // Answers, thoughts and notes are the conversation: set in the theme's face for it.
+            .environment(\.trekConversation, true)
+    }
+}
+
+/// Blocks one under the other: an answer's, a list item's or a quote's.
+struct MarkdownBlocks: View {
+    var blocks: [Markdown.Block]
+    var size: CGFloat
+    var live: Bool
+    var spacing: CGFloat = 10
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: spacing) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                MarkdownBlockView(block: block, size: size, live: live)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        // Answers, thoughts and notes are the conversation: set in the theme's face for it.
-        .environment(\.trekConversation, true)
     }
+}
 
-    @ViewBuilder
-    private func view(for block: Block) -> some View {
+struct MarkdownBlockView: View {
+    var block: Markdown.Block
+    var size: CGFloat
+    var live: Bool
+
+    var body: some View {
         switch block {
         case .heading(let level, let s):
             RichMathText(markdown: s, size: level <= 1 ? size * 1.3 : size * 1.12, weight: .semibold)
                 .padding(.top, 4)
+                .accessibilityAddTraits(.isHeader)
         case .paragraph(let s):
             RichMathText(markdown: s, size: size).lineSpacing(3)
-        case .bullet(let items):
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                    HStack(alignment: .firstTextBaseline, spacing: 9) {
-                        Circle().fill(Trek.muted.opacity(0.8)).frame(width: 4.5, height: 4.5).alignmentGuide(.firstTextBaseline) { $0[.bottom] + 4 }
-                        RichMathText(markdown: item, size: size).lineSpacing(3)
-                    }
-                }
-            }
-        case .numbered(let items):
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(Array(items.enumerated()), id: \.offset) { i, item in
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text("\(i + 1).").scaledFont(size).monospacedDigit().foregroundStyle(Trek.muted)
-                        RichMathText(markdown: item, size: size).lineSpacing(3)
-                    }
-                }
-            }
-        case .quote(let s):
+        case .rule:
+            Rectangle().fill(Trek.border).frame(height: 1)
+                .padding(.vertical, 4)
+                .accessibilityHidden(true)
+        case .list(let list):
+            MarkdownListView(list: list, size: size, live: live)
+        case .quote(let blocks):
             HStack(spacing: 10) {
                 RoundedRectangle(cornerRadius: Trek.corner(1)).fill(Trek.border).frame(width: 3)
-                RichMathText(markdown: s, size: size).foregroundStyle(Trek.muted)
+                MarkdownBlocks(blocks: blocks, size: size, live: live, spacing: 8)
+                    .foregroundStyle(Trek.muted)
             }
         case .math(let tex, let source):
             MathBlock(tex: tex, source: source, size: size)
-        case .code(let lang, let code) where Markdown.isArtifact(lang):
-            LivePageCard(title: Markdown.artifactTitle(code), html: code, size: size)
-        case .code(let lang, let code):
+        case .code(let lang, let code, let closed) where Markdown.isArtifact(lang):
+            // The page runs only once it's whole, and only if it's one the Mac would run.
+            if !closed, live {
+                LivePageBuilding(title: Markdown.artifactTitle(code), bytes: code.utf8.count, size: size)
+            } else {
+                LivePageCard(title: Markdown.artifactTitle(code), html: code, size: size)
+            }
+        case .code(let lang, let code, false) where live && Markdown.isStudy(lang):
+            // A tutor's question on its way: its JSON isn't something to read.
+            LivePageBuilding(title: "Study", bytes: code.utf8.count, size: size, interactive: false)
+        case .code(let lang, let code, _):
             CodeBlockView(lang: lang, code: code, size: size)
         case .table(let header, let align, let rows):
             MarkdownTable(header: header, align: align, rows: rows, size: size)
@@ -79,15 +96,58 @@ struct MarkdownText: View, nonisolated Equatable {
             AnswerVideo(link: link, size: size)
         }
     }
+}
 
+/// A list: each item's marker (a dot, its number, or a task's box) beside what the item holds,
+/// which may be more lists, code or pictures. A list inside an item sits under the item's text,
+/// so nesting indents by itself.
+struct MarkdownListView: View {
+    var list: Markdown.List
+    var size: CGFloat
+    var live: Bool
+
+    var body: some View {
+        // A list written with blank lines between its items is set with the same air.
+        VStack(alignment: .leading, spacing: list.loose ? 10 : 6) {
+            ForEach(Array(list.items.enumerated()), id: \.offset) { i, item in
+                HStack(alignment: .firstTextBaseline, spacing: list.ordered && item.task == nil ? 8 : 9) {
+                    marker(i, item)
+                    MarkdownBlocks(blocks: item.blocks, size: size, live: live, spacing: 8)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func marker(_ i: Int, _ item: Markdown.Item) -> some View {
+        if let done = item.task {
+            // Read-only: an answer's boxes say what's done, they don't take taps.
+            Image(systemName: done ? "checkmark.square.fill" : "square")
+                .scaledFont(size * 0.95)
+                .foregroundStyle(done ? Trek.done : Trek.muted)
+                .accessibilityLabel(done ? "done" : "to do")
+        } else if list.ordered {
+            Text(verbatim: "\(list.start + i).").scaledFont(size).monospacedDigit().foregroundStyle(Trek.muted)
+        } else {
+            Circle().fill(Trek.muted.opacity(0.8)).frame(width: 4.5, height: 4.5).alignmentGuide(.firstTextBaseline) { $0[.bottom] + 4 }
+        }
+    }
 }
 
 /// The Markdown parser behind `MarkdownText`, with a cache: safe off the main thread, so a
-/// transcript's answers can be parsed in the background before they're drawn.
+/// transcript's answers are parsed in the background before they're drawn (`prewarm`).
 nonisolated enum Markdown {
     /// A fence's language says it's an interactive artifact (`trek-html`).
     static func isArtifact(_ lang: String) -> Bool {
         lang.trimmingCharacters(in: .whitespaces).lowercased() == "trek-html"
+    }
+
+    /// A fence's language says it's a tutor's question (`trek-study`, as models write it: the
+    /// Mac's `study::is_question_fence`).
+    static func isStudy(_ lang: String) -> Bool {
+        let word = lang.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? ""
+        let name = word.trimmingCharacters(in: CharacterSet(charactersIn: "{}.")).lowercased().replacingOccurrences(of: "_", with: "-")
+        return name == "trek-study" || name == "trekstudy"
     }
 
     /// An artifact's title, as the Mac shows it: its `<title>`, else its first `<h1>`–`<h3>`, as
@@ -114,16 +174,21 @@ nonisolated enum Markdown {
     enum Block: Equatable, Sendable {
         case heading(Int, String)
         case paragraph(String)
-        case bullet([String])
-        case numbered([String])
-        case quote(String)
-        case code(String, String)
+        /// `---`, `***` or `___` on a line of its own.
+        case rule
+        case list(List)
+        /// Consecutive `>` lines: one quote, holding blocks of its own.
+        case quote([Block])
+        /// A fenced block: what follows its fence, its text, and whether its closing fence is
+        /// written (an answer still streaming, or one cut short, leaves it open).
+        case code(lang: String, code: String, closed: Bool)
         case table(header: [String], align: [Align], rows: [[String]])
         /// A ```trek-viz fence: drawn natively.
         case viz(VizBlock)
         /// Display maths (`$$…$$`, `\[…\]`): its TeX, and its source as written.
         case math(tex: String, source: String)
-        /// A line of nothing but pictures (`![shot](docs/shot.png)`): drawn, as the Mac does.
+        /// Pictures (`![shot](docs/shot.png)`), on a line of their own or under the text they
+        /// were written in: drawn, as the Mac does.
         case images([MediaLink])
         /// A line that's one link to a video file (`[demo](clip.mp4)`): a player, as the Mac's.
         case video(MediaLink)
@@ -131,12 +196,29 @@ nonisolated enum Markdown {
         /// The inline Markdown in it, for `RichText` (code isn't).
         var inlines: [String] {
             switch self {
-            case .heading(_, let s), .paragraph(let s), .quote(let s): [s]
-            case .bullet(let items), .numbered(let items): items
-            case .code, .viz, .math, .images, .video: []
+            case .heading(_, let s), .paragraph(let s): [s]
+            case .list(let list): list.items.flatMap { $0.blocks.flatMap(\.inlines) }
+            case .quote(let blocks): blocks.flatMap(\.inlines)
+            case .rule, .code, .viz, .math, .images, .video: []
             case .table(let header, _, let rows): header + rows.flatMap { $0 }
             }
         }
+    }
+
+    /// A bullet or numbered list. `start`: the number its first item was written with.
+    /// `loose`: blank lines between its items, or inside one.
+    struct List: Equatable, Sendable {
+        var ordered: Bool
+        var start = 1
+        var loose = false
+        var items: [Item]
+    }
+
+    /// One item: its blocks (text, and whatever is nested under it), and for a task
+    /// (`- [x]`) whether it's done.
+    struct Item: Equatable, Sendable {
+        var task: Bool?
+        var blocks: [Block]
     }
 
     /// Parsed answers kept: 8 MiB by what they cost, twice their text (the key, and the blocks
@@ -165,130 +247,24 @@ nonisolated enum Markdown {
     /// Whether `text`'s blocks are kept (for tests).
     static func isCached(_ text: String) -> Bool { cache.withLock { $0.contains(text) } }
 
-    /// Parses `texts` (and their inline Markdown) in the background, so they draw at once.
+    /// Parses `texts` (and their inline Markdown) in the background, so they draw at once: the
+    /// answers of a transcript as it arrives. A long answer is drawn in parts (`AnswerPart`), so
+    /// it's parsed in those.
     static func prewarm(_ texts: [String]) {
         guard !texts.isEmpty else { return }
         Task.detached(priority: .userInitiated) {
             for text in texts {
-                for block in blocks(text) {
-                    for inline in block.inlines { _ = Inline.parsed(inline) }
-                }
-            }
-        }
-    }
-
-    static func parse(_ text: String) -> [Block] {
-        var out: [Block] = []
-        var para: [String] = []
-        var bullets: [String] = []
-        var numbers: [String] = []
-        var table: [String] = []
-        var code: [String]? = nil
-        var lang = ""
-
-        /// A fenced block as it ends: a ```trek-viz one is a visualization (`closed`: its fence is).
-        func fence(_ lines: [String], closed: Bool) -> Block {
-            lang.split(separator: " ").first == "trek-viz"
-                ? .viz(VizBlock.make(payload: lines.joined(separator: "\n"), closed: closed))
-                : .code(lang, lines.joined(separator: "\n"))
-        }
-
-        func flushTable() {
-            guard !table.isEmpty else { return }
-            if table.count >= 2, isSeparator(table[1]) {
-                let header = cells(table[0])
-                let align = cells(table[1]).map { c -> Align in
-                    let c = c.trimmingCharacters(in: .whitespaces)
-                    if c.hasPrefix(":") && c.hasSuffix(":") { return .center }
-                    return c.hasSuffix(":") ? .trailing : .leading
-                }
-                let width = header.count
-                let rows = table.dropFirst(2).map { line -> [String] in
-                    let c = cells(line)
-                    return Array((c + Array(repeating: "", count: max(0, width - c.count))).prefix(width))
-                }
-                out.append(.table(header: header, align: Array((align + Array(repeating: .leading, count: width)).prefix(width)), rows: rows))
-            } else {
-                // Pipes, but not a table: keep the lines as text.
-                out.append(.paragraph(table.joined(separator: " ")))
-            }
-            table = []
-        }
-
-        func flush() {
-            if !para.isEmpty {
-                let text = para.joined(separator: " ")
-                // Display maths in a paragraph is set on its own, between the text around it.
-                if let parts = MathDetect.splitDisplay(text) {
-                    for part in parts {
-                        switch part {
-                        case .text(let t): out.append(.paragraph(t))
-                        case .formula(let tex, let source): out.append(.math(tex: tex, source: source))
-                        }
+                for part in text.utf8.count >= AnswerPart.threshold ? AnswerPart.cut(text) : [text] {
+                    for block in blocks(part) {
+                        for inline in block.inlines { _ = Inline.parsed(inline) }
                     }
-                } else if para.count == 1, let pictures = MediaLink.images(text) {
-                    out.append(.images(pictures))
-                } else if para.count == 1, let video = MediaLink.video(text) {
-                    out.append(.video(video))
-                } else {
-                    out.append(.paragraph(text))
                 }
-                para = []
-            }
-            if !bullets.isEmpty { out.append(.bullet(bullets)); bullets = [] }
-            if !numbers.isEmpty { out.append(.numbered(numbers)); numbers = [] }
-            flushTable()
-        }
-
-        // A formula over several lines is read as one line: `$$`, the formula, `$$` stays whole.
-        for raw in MathDetect.joinLines(text).components(separatedBy: "\n") {
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            if var c = code {
-                if line.hasPrefix("```") {
-                    out.append(fence(c, closed: true))
-                    code = nil
-                } else {
-                    c.append(raw)
-                    code = c
-                }
-                continue
-            }
-            if line.hasPrefix("|") {
-                if table.isEmpty { flush() }
-                table.append(line)
-                continue
-            } else if !table.isEmpty {
-                flushTable()
-            }
-            if line.hasPrefix("```") {
-                flush()
-                lang = line.dropFirst(3).trimmingCharacters(in: .whitespaces)
-                code = []
-            } else if line.isEmpty {
-                flush()
-            } else if line.hasPrefix("#") {
-                flush()
-                let level = line.prefix { $0 == "#" }.count
-                out.append(.heading(level, line.dropFirst(level).trimmingCharacters(in: .whitespaces)))
-            } else if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("• ") {
-                if !para.isEmpty || !numbers.isEmpty { flush() }
-                bullets.append(String(line.dropFirst(2)))
-            } else if let dot = line.firstIndex(of: "."), line[..<dot].allSatisfy(\.isNumber), !line[..<dot].isEmpty,
-                      line[line.index(after: dot)...].hasPrefix(" ") {
-                if !para.isEmpty || !bullets.isEmpty { flush() }
-                numbers.append(line[line.index(after: dot)...].trimmingCharacters(in: .whitespaces))
-            } else if line.hasPrefix(">") {
-                flush()
-                out.append(.quote(line.dropFirst().trimmingCharacters(in: .whitespaces)))
-            } else {
-                if !bullets.isEmpty || !numbers.isEmpty { flush() }
-                para.append(line)
             }
         }
-        if let c = code { out.append(fence(c, closed: false)) }
-        flush()
-        return out
     }
+
+    /// `text`'s blocks.
+    static func parse(_ text: String) -> [Block] { read(text).blocks }
 
     /// `|---|:--:|`: the line under a table's header.
     static func isSeparator(_ line: String) -> Bool {
