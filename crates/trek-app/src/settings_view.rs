@@ -144,8 +144,8 @@ pub fn pages() -> impl Iterator<Item = SettingsPage> {
         .filter(|p| offered(*p))
 }
 
-/// Whether this platform has page `p`: Linux has no App Snapshots (no capture tool Trek drives
-/// there; see `Composer::snapshots_offered`).
+/// Whether this computer has page `p`: no App Snapshots on a Linux session that can take none
+/// (neither a screenshot portal nor an X server of its own; see `Composer::snapshots_offered`).
 pub fn offered(p: SettingsPage) -> bool {
     p != SettingsPage::Snapshots || crate::composer::Composer::snapshots_offered()
 }
@@ -198,6 +198,9 @@ pub fn page_blurb(p: SettingsPage) -> std::borrow::Cow<'static, str> {
 /// The settings navigation column, shown in place of the thread sidebar.
 pub struct SettingsNav {
     workspace: Entity<Workspace>,
+    /// The desktop's first look at what it can snapshot is out: redraw when it answers, so the
+    /// App Snapshots page appears without waiting for another change.
+    desktop_check: bool,
     _subscription: Subscription,
 }
 
@@ -206,6 +209,7 @@ impl SettingsNav {
         let sub = cx.observe(&workspace, |_, _, cx| cx.notify());
         Self {
             workspace,
+            desktop_check: false,
             _subscription: sub,
         }
     }
@@ -218,7 +222,7 @@ impl Render for SettingsNav {
             _ => SettingsPage::General,
         };
         let theme = cx.theme().clone();
-        v_flex()
+        let nav = v_flex()
             .w(px(self
                 .workspace
                 .read(cx)
@@ -292,7 +296,13 @@ impl Render for SettingsNav {
                                     .update(cx, |ws, cx| ws.navigate(Route::Settings(p), cx))
                             }))
                     }))
-            }))
+            }));
+        // The page list was drawn while the desktop's look was still out: redraw when it lands.
+        if !self.desktop_check && crate::screenclip::desktop::looking() {
+            self.desktop_check = true;
+            crate::screenclip::desktop::refresh_when_known(cx);
+        }
+        nav
     }
 }
 

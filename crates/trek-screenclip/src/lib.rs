@@ -1,5 +1,8 @@
-//! App Snapshots on Windows. macOS hands the picking to `screencapture`, which writes a file;
-//! Windows' own picker, Snipping Tool's overlay (`ms-screenclip:`), puts what was picked on the
+//! App Snapshots where Trek doesn't run `screencapture`: Windows here, a Linux desktop in
+//! `desktop`. `Tool` is which of the three a platform's snapshots go through, and what the
+//! composer's + menu offers with it.
+//!
+//! macOS hands the picking to `screencapture`, which writes a file; Windows' own picker, Snipping Tool's overlay (`ms-screenclip:`), puts what was picked on the
 //! clipboard instead. So a snapshot here is: note the clipboard's sequence number, open the overlay,
 //! and look at the clipboard every quarter of a second for up to a minute until a new image shows
 //! up. A snip that is cancelled changes nothing, so the wait ends by the user pressing the shortcut
@@ -12,10 +15,59 @@
 // run everywhere, so on a Mac the parts only the real backend builds are unused.
 #![cfg_attr(not(any(windows, test)), allow(dead_code))]
 
+pub mod desktop;
+
 use anyhow::{Result, bail, ensure};
 use gpui_kit::{App, Global};
 use std::sync::Arc;
 use std::time::Duration;
+
+/// What takes a platform's snapshots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tool {
+    /// macOS: `screencapture`, which takes a window, an area or the screen as it's asked.
+    Screencapture,
+    /// Windows: Snipping Tool's overlay, which has that choice in its own toolbar.
+    Snipping,
+    /// Linux: the desktop's screenshot portal and the X server, as far as this session has them.
+    Desktop(desktop::Session),
+}
+
+/// A snapshot row of the composer's + menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Row {
+    /// "Take a snapshot": the tool's own picker decides between a window, an area and the screen.
+    Any,
+    Window,
+    Area,
+    Screen,
+}
+
+impl Tool {
+    /// The rows the + menu offers, in order. None: this session can't take a snapshot at all, so
+    /// the menu and Settings have nothing about them.
+    pub fn rows(self) -> &'static [Row] {
+        match self {
+            Tool::Screencapture => &[Row::Window, Row::Area, Row::Screen],
+            Tool::Snipping => &[Row::Any],
+            Tool::Desktop(session) => match (
+                session.route(desktop::Mode::Pick).is_some(),
+                session.route(desktop::Mode::Screen).is_some(),
+            ) {
+                (true, true) => &[Row::Any, Row::Screen],
+                (true, false) => &[Row::Any],
+                (false, true) => &[Row::Screen],
+                (false, false) => &[],
+            },
+        }
+    }
+
+    /// Whether snapshots are there at all: the + menu's rows, the shortcut, Settings › App
+    /// Snapshots.
+    pub fn offered(self) -> bool {
+        !self.rows().is_empty()
+    }
+}
 
 /// How often the clipboard is looked at.
 pub const INTERVAL: Duration = Duration::from_millis(250);
@@ -563,6 +615,26 @@ mod real {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+
+    #[test]
+    fn each_tool_offers_what_it_can_take() {
+        use desktop::Session;
+        assert_eq!(
+            Tool::Screencapture.rows(),
+            [Row::Window, Row::Area, Row::Screen]
+        );
+        assert_eq!(Tool::Snipping.rows(), [Row::Any]);
+        let desktop = |portal, x11| Tool::Desktop(Session { portal, x11 });
+        // The desktop's own picker, and the whole screen beside it.
+        assert_eq!(desktop(true, true).rows(), [Row::Any, Row::Screen]);
+        assert_eq!(desktop(true, false).rows(), [Row::Any, Row::Screen]);
+        // A bare X11 session: the screen as the X server has it, and no picking.
+        assert_eq!(desktop(false, true).rows(), [Row::Screen]);
+        // Neither: nothing is offered, in the menu or in Settings.
+        assert!(desktop(false, false).rows().is_empty());
+        assert!(!desktop(false, false).offered());
+        assert!(desktop(false, true).offered() && Tool::Snipping.offered());
+    }
 
     /// A clipboard that changes as scripted: each look at `sequence` takes the next step.
     struct Fake {
