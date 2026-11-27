@@ -72,7 +72,7 @@ info in CI builds; `cargo nextest` runs each job's binaries side by side (`.conf
 tests run on Linux except on full runs; and a typical pull request starts three or four macOS jobs instead
 of six.
 
-The numbers per job, before and after, are in the pull request that made this change (#98).
+The numbers per job, before and after, are in the pull request that made this change.
 
 ## Runners
 
