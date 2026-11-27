@@ -40,6 +40,14 @@ final class MockHost: Backend {
     private let host: HostInfo
     /// What it says it runs on (`machine_info`).
     private let platform: String
+    /// Threads whose transcript it doesn't send the first time it's asked (`-TrekDemoNoAnswer
+    /// <thread id>` in debug builds, and tests): the phone's wait for a reply runs out, the thread
+    /// says it couldn't be loaded, and Try again gets it.
+    var unanswered: Set<String> = Launch.demoNoAnswer.map { [$0] } ?? []
+    /// The launch argument's thread is held back for a reply's whole wait, however often it's
+    /// asked for: the app asks again by itself when its connection settles, and the first ask
+    /// alone was answered a moment later.
+    private let heldUntil = Date().addingTimeInterval(Launch.demoNoAnswer == nil ? 0 : 22)
 
     /// The demo's Mac; `-TrekDemoPC` adds a Windows machine beside it (the same threads, on a
     /// machine of another name), for the machine tags and filter.
@@ -187,6 +195,12 @@ final class MockHost: Backend {
         case .pair, .hello:
             break
         case .subscribe(let tid, let afterSeq, let limit):
+            // A Mac whose host call hangs: the first ask for this thread gets no answer.
+            if unanswered.contains(tid) {
+                if Date() < heldUntil { return }
+                unanswered.remove(tid)
+                if Launch.demoNoAnswer != tid { return }
+            }
             subscribed.insert(tid)
             if vizStream?.tid == tid { later(0.8) { [weak self] in self?.streamViz() } }
             let all = items[tid] ?? []
@@ -624,9 +638,17 @@ final class MockHost: Backend {
             $0.runState = .idle
             $0.activity = nil
             $0.workingSince = nil
-            $0.unseen = !self.subscribed.contains(tid)
+            // As a real Mac: a turn that ends leaves its thread unread unless it's on the Mac's
+            // own screen, whoever is subscribed. A phone reading it says so again (`mark_seen`).
+            $0.unseen = true
             if $0.section == .working { $0.section = .inbox }
         }
+    }
+
+    /// The phone fell behind on `tid`'s events: it's told to read the transcript again, as a Mac
+    /// does after dropping events for a slow connection (nothing was rewritten).
+    func fallBehind(_ tid: String) {
+        deliver(.transcriptReset(tid))
     }
 
     private func startAnswer(in tid: String) {

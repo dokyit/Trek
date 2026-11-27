@@ -196,6 +196,10 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
             generation = g
             rows = new
             reindex()
+            // Heights are kept by row id, and the Mac's ids are positions (`i<n>`): after a
+            // rewrite the same ids are other items, so what was measured for them isn't theirs.
+            measured.removeAll()
+            estimates.removeAll()
             heights = new.map { measured[$0.id] ?? estimate($0) }
             pinned = true
             if !first { userScrolled = false }

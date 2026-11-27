@@ -75,7 +75,10 @@ sh ios/scripts/embed-activity.sh /tmp/trek-ios-dd/Build/Products/Debug-iphonesim
 Tap **Explore the demo** on the pairing screen (or launch with `-TrekDemo YES`). `MockHost` plays a
 Mac with 13 realistic threads across four projects and five agents: pending approval, question and
 plan, a failed build, threads that keep working, and replies to whatever you send. It answers the
-same protocol messages a Mac does, so everything in the app works without one.
+same protocol messages a Mac does, so everything in the app works without one. Like a Mac, it
+leaves a thread unread when its turn ends, and the app says it's seen while you're reading it.
+What you type and don't send is kept per thread, across launches too (`Application
+Support/drafts.json`), in the demo as with a Mac.
 
 Launch arguments for screenshots: `-TrekOpen <thread id>` (e.g. `t-flaky`, `t-inbox`,
 `t-ratelimit`, `t-settings`; `t-background` is done with its turn while its dev server still runs,
@@ -99,6 +102,9 @@ its files, one ticked viewed; `t-limit`: Continue on Work; `t-worktree`: the Com
 approval's Always allow; `-TrekTab settings -TrekSheet rules`: the permission rules), `-TrekDemoRelease newer` (the update card),
 `-TrekDemoOffline demo-pc` (debug builds: that machine can't be reached, its banner over the threads),
 `-TrekDemoConnection identity|refused|connecting|local-network|offline` (debug builds: the demo Mac's own banner),
+`-TrekDemoNoAnswer <thread id>` (debug builds, with `-TrekOpen` of the same thread: the demo Mac doesn't send that
+thread's transcript the first time it's asked, so after the 20 s a reply may take the thread says "Couldn't load
+this thread"; Try again gets it),
 `-TrekDemoEmpty none|quiet` (a Mac with no threads and no notes, or with everything settled),
 `-TrekGallery YES` (debug builds: chips, tables, status pills, the hiker and the effort picker on
 one page), `-TrekSheet sharing` (the question asked before the first message goes to an agent, for

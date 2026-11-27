@@ -354,9 +354,12 @@ extension AppModel {
     func learnIcons() {
         let store = IconStore.shared
         if store.fetch == nil {
-            store.fetch = { [weak self] agent, project, done in
+            store.fetch = { [weak self] hash, agent, project, done in
                 guard let self else { return done(nil) }
-                self.request(.icon(agent: agent, projectId: project)) { reply in
+                // A project's icon is its machine's (its id says which). An agent's is asked of
+                // a machine that has that agent, not of whichever is picked.
+                let host = project == nil ? agent.flatMap { self.iconHost(agent: $0, hash: hash) } : nil
+                self.request(.icon(agent: agent, projectId: project), on: host) { reply in
                     if case .icon(_, let icon) = reply { done(icon) } else { done(nil) }
                 }
             }
@@ -446,7 +449,7 @@ final class IconStore {
     var agentIcons: [String: String] = [:]
     @ObservationIgnored private var images: [String: Icon] = [:]
     @ObservationIgnored private var loading: [String: Task<Icon?, Never>] = [:]
-    @ObservationIgnored var fetch: ((_ agent: String?, _ project: String?, _ done: @escaping (IconReply?) -> Void) -> Void)?
+    @ObservationIgnored var fetch: ((_ hash: String, _ agent: String?, _ project: String?, _ done: @escaping (IconReply?) -> Void) -> Void)?
 
     private static let folder: URL = {
         let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("icons", isDirectory: true)
@@ -467,7 +470,7 @@ final class IconStore {
                 if let data = try? Data(contentsOf: file), let image = UIImage(data: data) { return Icon(image: image, template: template) }
             }
             guard let fetch = self?.fetch else { return nil }
-            let reply: IconReply? = await withCheckedContinuation { c in fetch(agent, project) { c.resume(returning: $0) } }
+            let reply: IconReply? = await withCheckedContinuation { c in fetch(hash, agent, project) { c.resume(returning: $0) } }
             guard let reply, let data = Data(base64Encoded: reply.png), let image = UIImage(data: data, scale: 3) else { return nil }
             let template = reply.template ?? false
             try? data.write(to: template ? files.1 : files.0)

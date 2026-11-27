@@ -142,6 +142,15 @@ enum Launch {
         nil
         #endif
     }
+    /// A demo thread whose transcript the demo Mac doesn't send the first time it's opened (debug
+    /// builds): the reply's wait runs out and the thread says it couldn't be loaded.
+    static var demoNoAnswer: String? {
+        #if DEBUG
+        UserDefaults.standard.string(forKey: "TrekDemoNoAnswer")
+        #else
+        nil
+        #endif
+    }
     /// How the demo's machine can't be used, with its banner (debug builds).
     static var demoConnection: String? {
         #if DEBUG
@@ -200,8 +209,13 @@ struct RootView: View {
                 // An icon picked in an earlier version that this one no longer ships.
                 AppIconChoice.dropRetired()
             }
+            // Under the app switcher, a call or Control Centre: nothing is being read meanwhile.
+            if phase == .inactive { model.resignedActive() }
             if phase == .background { model.backgrounded() }
         }
+        // Started by iOS in the background (a Live Activity's button): no change of phase says
+        // so, and nothing is being read.
+        .onAppear { if scenePhase == .background { model.sceneActive = false } }
         .overlay(alignment: .top) { ToastOverlay() }
         .tint(Trek.foreground)
         .font(.ui(.body))

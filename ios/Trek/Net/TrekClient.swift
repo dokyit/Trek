@@ -685,6 +685,10 @@ final class TrekClient: Backend {
             onMessage?(message)
             setState(.connected)
             return
+        case .error(_, let code, _) where !authenticated && code.isLocal:
+            // A message that didn't decode before the Mac said welcome: left out, as it always was
+            // (the dial's own timeout says what became of the connection).
+            return
         case .error(_, let code, let text) where !authenticated:
             switch code {
             case .unauthorized:

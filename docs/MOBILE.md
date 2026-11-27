@@ -459,7 +459,18 @@ streaming text growing, a tool finishing, an approval resolving):
 {"type":"transcript_reset","thread_id":"01J…"}
 ```
 
-`transcript_reset` tells the phone to `subscribe` again (the thread was rewound or rewritten).
+`transcript_reset` tells the phone to `subscribe` again. The Mac sends it for two reasons and
+doesn't say which: the thread was rewound or rewritten (its transcript got shorter), or the phone
+fell behind on events and missed some (a slow connection: every subscribed thread gets one, with a
+fresh `snapshot`). The phone tells them apart from the page that comes back
+(`ThreadStore.fit`, `ios/Trek/Model/ThreadStore.swift`): it compares the items that stand in order
+on both sides (not requests, which the Mac puts at a page's end, nor `changes`), and where they
+overlap each pair must be the same item, not only the same id, since ids are positions and a
+rewind hands the old ids to new items (a message's text and time, a tool's `call_id`, a turn end's
+time, how an answer starts). A page that lines up and reaches at least as far as what the phone
+holds continues it: the earlier pages the reader scrolled back to stay, and so does their place.
+Anything else is a rewrite: everything is replaced and the list is drawn at the latest. The same
+goes for a `transcript` reply with `reset: true` to a `subscribe` with `after_seq`.
 
 Earlier items come in pages, oldest last-asked first; a read, so it never waits behind an action:
 
@@ -471,7 +482,8 @@ Earlier items come in pages, oldest last-asked first; a read, so it never waits 
 `before` is an item id (`i<n>`, or `c<n>`: up to and with `i<n>`); the page holds the `limit` (at
 most 500) items just before it, in order, with their turns' changed files, and `more` says whether
 still earlier ones exist. Unknown ids answer `not_found`. Items in a page are as they are now, with
-the seq they were last sent with. The Mac only follows items some phone was sent: an `item` may
+the seq they were last sent with. A page that arrives after the transcript was rewritten is for a
+transcript that no longer is: the phone drops it and asks afresh at the next scroll to the top. The Mac only follows items some phone was sent: an `item` may
 still arrive for an id earlier than the phone's first (another phone paged further back); a phone
 that doesn't hold it can drop it (paging it in brings it as it is).
 
@@ -588,6 +600,27 @@ All are acknowledged with `{"type":"ack","re":"<id>"}` or answered with an `erro
   `thread` message. `model` null = the project's or agent's default. `worktree` is a request; a
   project that isn't a git repo runs locally.
 - `decision`: `allow` · `allow_for_session` · `deny`.
+- `mark_seen` has no `id` and no answer worth waiting for. The Mac counts a thread unread when it
+  changed after it was last seen, and a turn that ends is a change unless the thread is on the
+  Mac's own screen, so once when the thread opens isn't enough: a thread being read on the phone
+  turned unread as its turn ended. The phone sends it again while the thread's screen is the one in
+  view and the app is in front: when its row arrives unread, when its turn ends, when items come in
+  outside a running turn, and once when the app comes back to the front on it or a sheet over it
+  closes. At most one every 2 s for a thread, with one more at the end of that gap for what
+  happened meanwhile (`SeenPolicy`, `ios/Trek/Model/SeenPolicy.swift`). Never from the background,
+  nor for a thread under another's screen.
+- The phone waits for an answer to what it sends with an `id`, and not for ever
+  (`ReplyTimeout`, `ios/Trek/Model/Protocol.swift`): 20 s for something read (`subscribe`,
+  `transcript_before`, the lists and statuses), 60 s for an action's ack, 180 s where bytes move
+  (`upload_part`, `media`, `attachment`, a note's files and pictures, a message with pictures or
+  files) or the Mac may work for minutes (`git_push`, `git_commit`, `git_switch`, the worktree
+  actions, `turn_action`, `new_thread`, `update_phone`). After that whoever asked hears an error
+  made on the phone ("<Mac> didn't answer.", with "Check that it went through before trying
+  again." for anything that isn't a read); the request isn't sent again by itself. A reply that
+  arrives later finds no one waiting, except a `transcript`, which is applied whenever it comes.
+  A reply the phone can't decode fails its request at once with the same kind of error. A
+  `subscribe` that fails, or isn't answered, for a thread the phone has nothing of shows "Couldn't
+  load this thread" with the reason and Try again, where it used to spin.
 - `thread_action`: what the sidebar's thread menu does.
 
   ```json
@@ -1647,14 +1680,31 @@ Where the phone was paired doesn't matter: it looks for the Mac afresh wherever 
   it was.
 - A transcript has more than one reader on the phone (`AppModel.subscribe(_:as:)`): the thread's
   own screen, and a parent showing its sub-agent's request. The Mac hears `unsubscribe` when the
-  last of them lets go, and `mark_seen` only for the thread's own screen.
+  last of them lets go, and `mark_seen` only for the thread's own screen, while it's the one in
+  view (see `mark_seen` under Actions).
+- Drafts are the phone's own; nothing of them is on the wire. Each thread's composer belongs to
+  the model (`AppModel.composer`), keyed by the thread's qualified id (`host:thread`), so its text,
+  photos and files are there again when the thread is opened again in the same run. The text is
+  also written to `Application Support/drafts.json` as it changes and when the app leaves the
+  front (`DraftStore`, `ios/Trek/Model/Drafts.swift`), so it survives iOS ending the app; the
+  new-thread sheet's text has a key of its own. Kept: the newest 50, 20,000 characters each, for 30
+  days; a draft goes when its message is acked, when the Mac says `thread_removed`, and with its
+  machine's pairing. A message is taken out of the composer as it's sent and put back if the Mac
+  doesn't ack it, also when the thread's screen has gone by then (the toast then says "Not sent.
+  Your message is back in the thread's draft."). Nothing is sent while the Mac is out of reach,
+  and nothing is queued on the phone: the text stays in the composer.
+- An item whose `kind` the phone doesn't know isn't left out without a word: a run of them is one
+  muted row, "Update Trek on this iPhone to see this".
+- The new-thread sheet starts from the machine's `settings` (`default_agent`, `default_model`,
+  `default_effort`) as far as its agents offer them, else its first agent. An agent's icon is
+  asked (`icon`) of a machine that lists the agent, not of whichever machine is picked.
 
 ## Phases and milestones
 
 | Phase | Mac | Phone | Exit |
 |---|---|---|---|
 | **1a. LAN remote** (this branch) | `trek-remote` crate, protocol v1, pairing, tests | App with demo mode, live client, all screens | Fake host ↔ simulator round trip |
-| **1b. Wire it up** | Implement `RemoteHost` in trek-app over Workspace/Store; Settings › Mobile (toggle, QR, devices); stable item seqs; TLS (done in `trek-remote`) | QR scanner, reconnect/backoff, offline banner with queued sends; certificate pinning (done) | Approve a real Claude Code request from the phone |
+| **1b. Wire it up** | Implement `RemoteHost` in trek-app over Workspace/Store; Settings › Mobile (toggle, QR, devices); stable item seqs; TLS (done in `trek-remote`) | QR scanner, reconnect/backoff, offline banner (sends are refused while the Mac is out of reach, not queued: what was typed stays in the thread's draft, see below); certificate pinning (done) | Approve a real Claude Code request from the phone |
 | **2. Away from the network** | iroh/Noise transport; Trek push + mailbox service; presence-aware alerts; Mac-side step-up for "Allow for session" | APNs + Notification Service Extension with Approve/Deny/Reply; Live Activity; diff view | Approval round trip on cellular in seconds; nothing readable on Trek servers |
 | **3. Always on** | `trek-hostd` LaunchAgent; multiple Macs | Multi-host inbox, widgets, Watch | Sessions survive quitting Trek |
 
