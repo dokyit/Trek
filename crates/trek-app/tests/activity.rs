@@ -475,6 +475,89 @@ fn the_live_group_opens_in_the_transcript_from_the_bar() {
     });
 }
 
+/// One design for a turn's tool calls on every platform: the bar's summary line over a row per
+/// call, and in the transcript a summary line that opens to a row per call. Windows drew a
+/// timeline of its own until 2026-11-26 ("Thinking" on a rail, a step per call 33 px apart, the
+/// streaming thought as a step, "Finished thinking" at the foot); this runs on all three CIs and
+/// fails if a platform draws anything but the Mac's again.
+#[test]
+fn a_turn_s_tool_calls_are_drawn_the_same_on_every_platform() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        feed(
+            &trek,
+            cx,
+            &id,
+            vec![
+                AgentEvent::ReasoningDelta("**Looking around**\n\nWhere does it start?".into()),
+                start("t1", "Read", "src/main.rs"),
+                done("t1"),
+                start("t2", "Run command", "cargo test"),
+                done("t2"),
+                // A thought streaming after the calls: it gets no row or step of its own.
+                AgentEvent::ReasoningDelta("**Planning the change**\n\nA flag.".into()),
+            ],
+        );
+        let group = trek.live_group(cx).expect("a live group");
+        assert_eq!(
+            group.len(),
+            3,
+            "its summary line and a row per call: {group:?}"
+        );
+        assert!(
+            group[0].contains(" · "),
+            "counts, then what it's about: {group:?}"
+        );
+        let summary = trek.bounds(cx, "live-summary").expect("the summary line");
+        assert_eq!(summary.size.height, gpui_kit::px(28.));
+        let call = |trek: &Trek, cx: &mut TestAppContext, tool: &str| {
+            let ix = trek.item_ix(
+                cx,
+                &id,
+                |i| matches!(i, trek_core::store::Item::Tool { id, .. } if id == tool),
+            );
+            (ix, item_id(trek, cx, &id, ix))
+        };
+        let (first, first_id) = call(&trek, cx, "t1");
+        let (second, second_id) = call(&trek, cx, "t2");
+        let rows = [first_id, second_id].map(|c| {
+            trek.bounds(cx, format!("live-row-{c}"))
+                .expect("a row per call")
+        });
+        assert_eq!(rows[0].size.height, gpui_kit::px(22.));
+        assert_eq!(
+            rows[1].origin.y - rows[0].origin.y,
+            gpui_kit::px(22.),
+            "rows 22 px apart, not a timeline's 33"
+        );
+        assert!(!trek.visible(cx, "live-thought"), "no step for the thought");
+
+        // Opened in the transcript: the summary line with its rows under it, and once the agent
+        // has moved on nothing is added at its foot.
+        trek.click(cx, "live-summary");
+        feed(
+            &trek,
+            cx,
+            &id,
+            vec![AgentEvent::TextDelta("It starts in main.".into())],
+        );
+        let rows = trek.rows(cx);
+        assert!(
+            rows.iter().any(|r| r.starts_with("group: ")) && rows.iter().any(|r| r == "  tool"),
+            "{rows:?}"
+        );
+        for ix in 0..=second {
+            assert!(
+                !trek.visible(cx, ("tool-group-finished", ix))
+                    && !trek.visible(cx, ("live-thought", ix)),
+                "no timeline foot or thought step"
+            );
+        }
+        assert!(trek.visible(cx, ("tool", first)) && trek.visible(cx, ("tool", second)));
+    });
+}
+
 #[test]
 fn a_window_in_the_background_keeps_walking_at_half_pace() {
     run(async |cx| {

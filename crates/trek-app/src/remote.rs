@@ -1016,16 +1016,50 @@ impl Workspace {
     /// firewall has nothing to ask about. On the settings' port.
     #[cfg(feature = "shots")]
     pub fn start_loopback_remote(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        self.start_harness_remote(None, cx)
+    }
+
+    /// The same server for a real iPhone to pair with (`pair-device <port>`): on every interface
+    /// at `port`, advertised at this Mac's own address on the local network, under a name that
+    /// says what it is (the isolated app has an id of its own, so the phone lists it as one more
+    /// machine beside the owner's Trek, whose port and pairing it never touches). Only someone at
+    /// the keyboard asks for this: nothing an isolated run does by itself opens it.
+    #[cfg(feature = "shots")]
+    pub fn start_device_remote(&mut self, port: u16, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        self.start_harness_remote(Some(port), cx)
+    }
+
+    #[cfg(feature = "shots")]
+    fn start_harness_remote(
+        &mut self,
+        device_port: Option<u16>,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
         if self.remote.is_some() {
             return Ok(());
         }
-        let port = self.settings.mobile.port;
+        let port = device_port.unwrap_or(self.settings.mobile.port);
         let reach = self.settings.mobile.reach;
-        let host = host_info();
+        let mut host = host_info();
+        let (bind, address) = match device_port {
+            None => (
+                SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+                SocketAddr::from((Ipv4Addr::LOCALHOST, port)).to_string(),
+            ),
+            Some(_) => {
+                host.name = "Trek test (isolated)".into();
+                let lan = Addresses::find_in(&AddressInputs::read())
+                    .lan
+                    .ok_or_else(|| anyhow::anyhow!("no address on a local network to pair over"))?;
+                (
+                    SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
+                    SocketAddr::from((lan, port)).to_string(),
+                )
+            }
+        };
         let identity = tr::TlsIdentity::load_or_create(&mobile_dir(), &host.name)?;
-        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port)).to_string();
         let mut config = tr::ServerConfig::new(host);
-        config.bind = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        config.bind = bind;
         config.advertise = Some(address.clone());
         config.routes = vec![address.clone()];
         config.devices_path = Some(devices_file());
@@ -1037,7 +1071,7 @@ impl Workspace {
         let (host, requests) = tr::ChannelHost::new();
         let handle =
             trek_core::runtime().block_on(tr::RemoteServer::start(config, Arc::new(host)))?;
-        tracing::info!("phone server (loopback, for the capture harness): {address}");
+        tracing::info!("phone server (for the capture harness): {address}");
         let tasks = vec![
             serve_requests(cx.weak_entity(), requests, cx),
             push_changes(cx.weak_entity(), cx),
@@ -3169,7 +3203,13 @@ fn item_body(
                 tool: tr::ToolKind::from_title(title),
                 title: clip_text_to(if op.verb.is_empty() { title } else { &op.verb }, 64 << 10),
                 detail: clip_text_to(
-                    if op.text.is_empty() { detail } else { &op.text },
+                    // A row that says what it did in words has no more to show than `op` made
+                    // of it, which for a call without arguments is nothing.
+                    if op.text.is_empty() && !crate::activity::labelled(title) {
+                        detail
+                    } else {
+                        &op.text
+                    },
                     256 << 10,
                 ),
                 status: match status {
