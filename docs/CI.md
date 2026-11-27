@@ -80,3 +80,5 @@ The numbers per job, before and after, are in the pull request that made this ch
 Every job names its runner in its own `runs-on` (`macos-15`, `windows-2022`, `ubuntu-22.04`,
 `ubuntu-22.04-arm`); the setup every Rust job shares is `.github/actions/rust-setup`. Moving to another
 runner provider is one line per job.
+
+<!-- probe: a docs-only change (not for merge) -->
