@@ -12187,8 +12187,15 @@ pub fn update_task_name() -> &'static str {
     }
 }
 
-/// The bundled `trek-mcp` server: next to the app binary, else a dev build.
+/// The bundled `trek-mcp` server: `TREK_MCP_BIN` where it's set (CI's capture build isn't beside
+/// the `trek-mcp` it builds), else next to the app binary, else a dev build.
 pub fn trek_mcp_binary() -> Option<PathBuf> {
+    if let Some(bin) = std::env::var_os("TREK_MCP_BIN")
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+    {
+        return Some(bin);
+    }
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     let name = format!("trek-mcp{}", std::env::consts::EXE_SUFFIX);

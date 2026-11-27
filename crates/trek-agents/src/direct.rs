@@ -9456,8 +9456,16 @@ print(`line 2: ${text}; lines: ${stdout.trim()}; exit ${exit_code}`);
             .and_then(|g| g.parse().ok())
             .expect("a group");
         s.finish().await;
-        // Ended with the session.
-        let alive = unsafe { libc::kill(-group, 0) } == 0;
+        // Ended with the session. The group goes as its members are reaped, which lags the
+        // signal by a moment (a member orphaned mid-kill is init's to collect): give it a second.
+        let mut alive = unsafe { libc::kill(-group, 0) } == 0;
+        for _ in 0..100 {
+            if !alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            alive = unsafe { libc::kill(-group, 0) } == 0;
+        }
         assert!(!alive, "group {group} outlived the session");
         let _ = std::fs::remove_file(&log);
     }
