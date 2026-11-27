@@ -31,6 +31,17 @@ window.connect("destroy", Gtk.main_quit)
 window.show_all()
 window.present()
 # No window manager on Xvfb: take the input focus itself, so `elements` (which reads the
-# window in front) finds this one and not Trek's.
-window.get_window().focus(0)
+# window in front) finds this one and not Trek's. Once the main loop runs, the GdkWindow
+# exists for sure (asking for it earlier can answer None on a slow start).
+from gi.repository import GLib
+
+
+def take_focus():
+    gdk_window = window.get_window()
+    if gdk_window is not None:
+        gdk_window.focus(0)
+    return False
+
+
+GLib.idle_add(take_focus)
 Gtk.main()

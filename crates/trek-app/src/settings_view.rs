@@ -2380,67 +2380,64 @@ impl SettingsView {
         let ax = probe.as_ref().map(|p| p.accessibility);
         let sr = probe.as_ref().map(|p| p.screen_recording);
         out.extend(self.connections(cx));
-        // Linux has no computer use: no screenshots or input of other apps' windows to give.
         let linux = crate::words::is_linux();
-        if !linux {
-            out.push(Self::heading("Computer use", cx));
-            let mut computer_use = vec![Self::row(
-                "Computer use tools",
-                "Off until you turn it on. Agents can then see the screen, click, type and switch apps through Trek's MCP tools, following your hand-holding level.",
-                self.switch("computer-use", s.tools.computer_use, |s, v| {
-                    s.tools.computer_use = v
-                }),
-                cx,
-            )];
-            let permissions_note = crate::words::words().computer_use_note;
-            // Where the system asks for no permission, a sentence says so instead of two rows that could only say Allowed.
-            if permissions_note.is_none() {
-                computer_use.push(Self::row(
+        out.push(Self::heading("Computer use", cx));
+        let mut computer_use = vec![Self::row(
+            "Computer use tools",
+            "Off until you turn it on. Agents can then see the screen, click, type and switch apps through Trek's MCP tools, following your hand-holding level.",
+            self.switch("computer-use", s.tools.computer_use, |s, v| {
+                s.tools.computer_use = v
+            }),
+            cx,
+        )];
+        let permissions_note = crate::words::words().computer_use_note;
+        // Where the system asks for no permission, a sentence says so instead of two rows that could only say Allowed.
+        if permissions_note.is_none() {
+            computer_use.push(Self::row(
+                "Accessibility",
+                with_note("Lets Trek click and type for the agent.", ax),
+                permission(
+                    "ax-perm",
                     "Accessibility",
-                    with_note("Lets Trek click and type for the agent.", ax),
-                    permission(
-                        "ax-perm",
-                        "Accessibility",
-                        ax,
-                        crate::integrations::ACCESSIBILITY_PANE,
-                        cx,
-                    ),
+                    ax,
+                    crate::integrations::ACCESSIBILITY_PANE,
                     cx,
-                ));
-                computer_use.push(Self::row(
-                    "Screen Recording",
-                    with_note("Lets Trek take screenshots of other apps.", sr),
-                    permission(
-                        "sr-perm",
-                        "Screen Recording",
-                        sr,
-                        crate::integrations::SCREEN_RECORDING_PANE,
-                        cx,
-                    ),
-                    cx,
-                ));
-            }
-            // The Mac's agents can work behind the user's windows; Windows' work in front.
-            if !crate::words::is_windows() {
-                computer_use.push(Self::row(
-                "Work in the background",
-                "Agents click and type in an app's window behind yours, so you keep the pointer and keyboard, and what they open stays behind. The app in front is yours while you're at the Mac, even if you're only reading: if they need it, they wait and ask you instead of taking it over. They use an app that's already open rather than open a second copy. Off: they use the real pointer and keyboard, in front. Applies to new sessions.",
-                self.switch("computer-background", s.tools.computer_background, |s, v| s.tools.computer_background = v),
+                ),
                 cx,
             ));
-                if s.tools.computer_background {
-                    computer_use.push(Self::row(
-                    "Show what they're doing",
-                    &format!("A small floating picture of the window an agent works in, live, with Stop. Fold it to a pill or put it away; bring it back from the {}.", crate::words::words().tray_label.to_lowercase()),
-                    self.switch("background-pip", s.tools.background_pip, |s, v| s.tools.background_pip = v),
+            computer_use.push(Self::row(
+                "Screen Recording",
+                with_note("Lets Trek take screenshots of other apps.", sr),
+                permission(
+                    "sr-perm",
+                    "Screen Recording",
+                    sr,
+                    crate::integrations::SCREEN_RECORDING_PANE,
                     cx,
-                ));
-                }
+                ),
+                cx,
+            ));
+        }
+        // Only the Mac's agents can work behind the user's windows; Windows' and Linux' work in front.
+        if crate::words::is_mac() {
+            computer_use.push(Self::row(
+            "Work in the background",
+            "Agents click and type in an app's window behind yours, so you keep the pointer and keyboard, and what they open stays behind. The app in front is yours while you're at the Mac, even if you're only reading: if they need it, they wait and ask you instead of taking it over. They use an app that's already open rather than open a second copy. Off: they use the real pointer and keyboard, in front. Applies to new sessions.",
+            self.switch("computer-background", s.tools.computer_background, |s, v| s.tools.computer_background = v),
+            cx,
+        ));
+            if s.tools.computer_background {
+                computer_use.push(Self::row(
+                "Show what they're doing",
+                &format!("A small floating picture of the window an agent works in, live, with Stop. Fold it to a pill or put it away; bring it back from the {}.", crate::words::words().tray_label.to_lowercase()),
+                self.switch("background-pip", s.tools.background_pip, |s, v| s.tools.background_pip = v),
+                cx,
+            ));
             }
-            out.push(ui::group(computer_use, cx));
-            if let Some(note) = permissions_note {
-                out.push(div().pt_3().child(Self::note(note, cx)).into_any_element());
-            }
+        }
+        out.push(ui::group(computer_use, cx));
+        if let Some(note) = permissions_note {
+            out.push(div().pt_3().child(Self::note(note, cx)).into_any_element());
         }
         out.push(Self::heading("iOS Simulator", cx));
         if !crate::words::is_mac() {

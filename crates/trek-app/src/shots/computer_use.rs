@@ -11,7 +11,8 @@ use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// The app opened for the check.
@@ -25,8 +26,19 @@ static WINDOW: Mutex<Option<String>> = Mutex::new(None);
 const ANSWER_WITHIN: Duration = Duration::from_secs(45);
 
 /// Open `app` (a program: `notepad.exe`, or a path on Linux) for the check, kept to close after.
+/// Its stderr goes to `computer-open-<n>.log` in the shot folder, so a fixture's own complaints
+/// (a traceback, a missing library) are in the run's artifacts.
 pub fn open(app: &str) -> Result<()> {
-    let child = trek_core::procs::command(app)
+    let mut command = trek_core::procs::command(app);
+    if let Some(dir) = std::env::var_os("TREK_SHOT_DIR") {
+        static OPEN_LOGS: AtomicU64 = AtomicU64::new(0);
+        let n = OPEN_LOGS.fetch_add(1, Ordering::Relaxed);
+        let path = PathBuf::from(dir).join(format!("computer-open-{n}.log"));
+        if let Ok(file) = std::fs::File::create(&path) {
+            command.stderr(Stdio::from(file));
+        }
+    }
+    let child = command
         .spawn()
         .with_context(|| format!("computer open {app}"))?;
     *OPENED.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
@@ -59,8 +71,18 @@ struct Session {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next: u64,
-    /// Held for the session's life: dropped with it, which ends the watchdog before it can fire.
-    _watchdog: std::sync::mpsc::Sender<()>,
+    /// When the last call began, in milliseconds: the watchdog kills trek-mcp only after
+    /// `ANSWER_WITHIN` with no call started, so a long check isn't cut off mid-way.
+    last_call: Arc<AtomicU64>,
+    /// Ends the watchdog thread.
+    _watchdog_stop: Arc<AtomicBool>,
+}
+
+/// Now, in milliseconds since the epoch (0 before it, which only makes the watchdog sooner).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 impl Session {
@@ -73,27 +95,37 @@ impl Session {
             .stderr(Stdio::null())
             .spawn()
             .context("computer: trek-mcp computer")?;
-        // A server that stops answering is ended, so the check fails instead of waiting for ever
-        // (and only then: done, the watchdog goes without touching what may by then be another
-        // process).
+        // A server that stops answering is ended, so the check fails instead of waiting for ever:
+        // `ANSWER_WITHIN` with no call begun. Each call stamps `last_call`, so only a hung one —
+        // never a check that simply takes a while — trips it.
         let pid = child.id();
-        let (done, ended) = std::sync::mpsc::channel::<()>();
-        std::thread::spawn(move || {
-            if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
-                ended.recv_timeout(ANSWER_WITHIN)
-            {
-                #[cfg(windows)]
-                let _ = trek_core::procs::command("taskkill")
-                    .args(["/F", "/PID", &pid.to_string()])
-                    .output();
-                #[cfg(not(windows))]
-                let _ = trek_core::procs::command("kill")
-                    .args(["-9", &pid.to_string()])
-                    .output();
-            }
-        });
-        // The watchdog's `done` goes when the session does; held here it would kill a later
-        // process only if this one never ended, which is what it's for.
+        let last_call = Arc::new(AtomicU64::new(now_ms()));
+        let stop = Arc::new(AtomicBool::new(false));
+        {
+            let last_call = Arc::clone(&last_call);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(Duration::from_millis(500));
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if now_ms().saturating_sub(last_call.load(Ordering::Relaxed))
+                        >= ANSWER_WITHIN.as_millis() as u64
+                    {
+                        #[cfg(windows)]
+                        let _ = trek_core::procs::command("taskkill")
+                            .args(["/F", "/PID", &pid.to_string()])
+                            .output();
+                        #[cfg(not(windows))]
+                        let _ = trek_core::procs::command("kill")
+                            .args(["-9", &pid.to_string()])
+                            .output();
+                        break;
+                    }
+                }
+            });
+        }
         let stdin = child.stdin.take().context("trek-mcp's stdin")?;
         let stdout = BufReader::new(child.stdout.take().context("trek-mcp's stdout")?);
         let mut session = Session {
@@ -101,7 +133,8 @@ impl Session {
             stdin,
             stdout,
             next: 0,
-            _watchdog: done,
+            last_call,
+            _watchdog_stop: stop,
         };
         session.call_raw(
             "initialize",
@@ -112,6 +145,7 @@ impl Session {
 
     /// One JSON-RPC call, answered with its `result`.
     fn call_raw(&mut self, method: &str, params: Value) -> Result<Value> {
+        self.last_call.store(now_ms(), Ordering::Relaxed);
         self.next += 1;
         let id = self.next;
         writeln!(
@@ -163,6 +197,7 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        self._watchdog_stop.store(true, Ordering::Relaxed);
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

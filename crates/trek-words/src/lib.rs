@@ -276,7 +276,9 @@ const LINUX: Words = Words {
     screen_recording: None,
     snipping_tool_note: None,
 
-    computer_use_note: None,
+    computer_use_note: Some(
+        "Linux asks for no permission: once computer use is on, agents can see the screen, read apps' controls, click and type. It works on X11 sessions.",
+    ),
 
     trash: "Trash can",
 
