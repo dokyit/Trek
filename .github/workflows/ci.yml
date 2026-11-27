@@ -71,7 +71,7 @@ jobs:
       rust: ${{ steps.plan.outputs.rust }}
       phone: ${{ contains(format(' {0} ', steps.plan.outputs.packages), ' trek-phone ') }}
       # The one job of each kind that saves its cache: main's runs.
-      save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows-port' }}
+      save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows-port' || github.event_name == 'workflow_dispatch' }}
     steps:
       # Two deep: a pull request's merge commit and its parents (what it brings is HEAD^1..HEAD).
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
