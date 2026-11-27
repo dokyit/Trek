@@ -74,7 +74,9 @@ runs:
         esac
         url="https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$version/cargo-nextest-$version-$asset.tar.gz"
         curl -fLsS --connect-timeout 20 --max-time 120 --retry 5 --retry-all-errors -o "$RUNNER_TEMP/nextest.tar.gz" "$url"
-        got=$( (sha256sum "$RUNNER_TEMP/nextest.tar.gz" 2>/dev/null || shasum -a 256 "$RUNNER_TEMP/nextest.tar.gz") | cut -d' ' -f1)
+        # From stdin: given a path with backslashes, Git Bash's sha256sum prefixes the hash with one.
+        if command -v sha256sum > /dev/null; then got=$(sha256sum < "$RUNNER_TEMP/nextest.tar.gz"); else got=$(shasum -a 256 < "$RUNNER_TEMP/nextest.tar.gz"); fi
+        got=${got%% *}
         [ "$got" = "$sum" ] || { echo "::error::cargo-nextest $version $asset: SHA-256 $got, not $sum"; exit 1; }
         bin="${CARGO_HOME:-$HOME/.cargo}/bin"
         # Git Bash's tar takes C:\… for a remote host named C: give it /c/….
