@@ -774,6 +774,15 @@ impl Driver {
         }
     }
 
+    /// A start that failed is forgotten, so the next look tries again: what it failed on (the
+    /// driver's build, its signing) was put right outside Trek, by a new install.
+    pub fn forgive(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        if matches!(inner.state, State::Failed(_)) {
+            inner.state = State::Off;
+        }
+    }
+
     fn fail(&self, why: String) -> String {
         self.stop_now();
         self.inner.lock().unwrap().state = State::Failed(why.clone());
