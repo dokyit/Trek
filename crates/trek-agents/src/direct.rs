@@ -9456,9 +9456,16 @@ print(`line 2: ${text}; lines: ${stdout.trim()}; exit ${exit_code}`);
             .and_then(|g| g.parse().ok())
             .expect("a group");
         s.finish().await;
-        // Ended with the session.
-        let alive = unsafe { libc::kill(-group, 0) } == 0;
-        assert!(!alive, "group {group} outlived the session");
+        // Ended with the session. Signalled, they can take a moment to go (a zombie still
+        // answers `kill` until it's reaped), so wait a little rather than look once.
+        let started = Instant::now();
+        while unsafe { libc::kill(-group, 0) } == 0 {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "group {group} outlived the session"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         let _ = std::fs::remove_file(&log);
     }
 
