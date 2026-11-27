@@ -605,7 +605,6 @@ mod real {
         /// Minimized: GPUI's `hide` does nothing on Linux. Only a window on screen is remembered
         /// (`ASIDE`): one the user already minimized stays minimized when Trek comes back.
         fn step_aside(&self, cx: &mut App) {
-            use x11rb::connection::Connection as _;
             use x11rb::protocol::xproto::{ConnectionExt as _, MapState};
             let conn = x11rb::connect(None).ok().map(|(conn, _)| conn);
             let mut aside = Vec::new();
