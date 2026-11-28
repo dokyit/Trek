@@ -13039,3 +13039,5 @@ mod tests {
         assert!(!viewing(false, thread_win, main, other));
     }
 }
+
+// Probe: a one-line change to show what the plan reaches (not for merge).
