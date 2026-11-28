@@ -286,8 +286,10 @@ jobs:
           echo "targets: $targets"
           cargo nextest run --config "$CI_PROFILE" -p trek-app --locked --profile ci --no-tests=warn $targets
 
-      # Every shard builds the same dependencies; the 1st saves them.
+      # Every shard builds the same dependencies; the 1st saves them, whether its tests passed or
+      # not (a failing test leaves the build as good as a passing one; a cancelled job doesn't save).
       - uses: ./.github/actions/rust-cache-save
+        if: ${{ !cancelled() }}
         with:
           key: ${{ steps.setup.outputs.key }}
           cache-hit: ${{ steps.setup.outputs.cache-hit }}
@@ -366,6 +368,7 @@ jobs:
           TREK_QUIET_SPAWNS_CONTROL: "1"
 
       - uses: ./.github/actions/rust-cache-save
+        if: ${{ !cancelled() }}
         with:
           key: ${{ steps.setup.outputs.key }}
           cache-hit: ${{ steps.setup.outputs.cache-hit }}
@@ -448,6 +451,7 @@ jobs:
           desktop-file-validate squashfs-root/dev.trek.Trek.desktop
 
       - uses: ./.github/actions/rust-cache-save
+        if: ${{ !cancelled() }}
         with:
           key: ${{ steps.setup.outputs.key }}
           cache-hit: ${{ steps.setup.outputs.cache-hit }}
