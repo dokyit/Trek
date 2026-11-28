@@ -106,3 +106,5 @@ whatever got in the way.
 
 Finish with a short report: where the skill lives, the CLI's commands, what `check` covers, and
 anything you couldn't automate (and why).
+
+<!-- probe (not for merge) -->
