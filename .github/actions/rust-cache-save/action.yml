@@ -1,0 +1,32 @@
+name: Save the Rust build cache
+description: >-
+  Saves a job's build cache (pruned of executables and trek-app, script/ci-cache.py "prune") when
+  the job is the one that keeps its kind's cache and the exact key wasn't found. Only a passing job
+  gets here, so a cache always holds what a passing build made.
+inputs:
+  key:
+    description: The key from ./.github/actions/rust-setup
+    required: true
+  cache-hit:
+    description: rust-setup's cache-hit
+    required: true
+  save:
+    description: Whether this job keeps the cache (main's runs, and one job of each kind)
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Cache contents
+      if: inputs.save == 'true' && inputs.cache-hit != 'true'
+      shell: bash
+      run: $(command -v python3 || command -v python) script/ci-cache.py prune
+
+    - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      if: inputs.save == 'true' && inputs.cache-hit != 'true'
+      with:
+        path: |
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ inputs.key }}
