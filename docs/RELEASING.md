@@ -306,10 +306,18 @@ tested exactly the code being released, and passed. Two kinds of run count:
   moved after the pull request's run, the merge's tree is different code, and the run doesn't
   count: the push's own run must pass.
 
-A run with no record (from before the gate read them), a record of another run or head, or a run
-that tested only what its change touched (`scope` other than `full`) never counts for a pull
-request. The record is written by the run's own workflow, from the tree it tested: a run whose
-tree is the release's ran the release's own `ci.yml` and `ci-gate.py`. Tests:
+A run with no record (from before the gate read them), a record of another run or head, a record
+that names no job that had to pass, or a run that tested only what its change touched (`scope`
+other than `full`) never counts for a pull request. Nor does a run where a job the record names
+(the one that wrote it, and CI result) didn't succeed, and on every run each platform's group needs
+at least one job that succeeded: a run whose first job failed skips everything after it, and a
+group of skipped jobs ran nothing.
+
+**What the gate trusts.** The record is written by the run's own workflow, from the tree it tested:
+a run whose tree is the release's ran the release's own `ci.yml` and `ci-gate.py`. The gate can't
+check that workflow did what it says. A pull request that changes `.github/workflows/ci.yml` or
+`script/ci-*` changes what its own record means, so such a diff needs a reviewer's eyes before it
+merges, as any change to what CI runs does. Tests:
 `python3 script/tests/ci-gate.py` (throwaway repositories; a `main` that moved after the pull
 request's run among them), run by CI's macOS job with the other script tests.
 

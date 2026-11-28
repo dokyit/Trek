@@ -20,10 +20,12 @@ spec.loader.exec_module(gate)
 os.environ['TREK_GATE_LOG'] = '0'
 
 PASSED = [
+    {'name': 'Plan', 'conclusion': 'success'},
     {'name': 'Test (macOS)', 'conclusion': 'success'},
     {'name': 'Test (Windows, trek-app 1/9)', 'conclusion': 'success'},
     {'name': 'Clippy', 'conclusion': 'success'},
     {'name': 'Test (Linux)', 'conclusion': 'success'},
+    {'name': 'CI result', 'conclusion': 'success'},
 ]
 
 
@@ -90,8 +92,14 @@ class Repo:
         return sha
 
 
-def record(run_id, head, tree, event='pull_request', scope='full'):
-    return {'version': 1, 'run_id': run_id, 'event': event, 'sha': 'merge', 'head': head, 'tree': tree, 'scope': scope}
+def record(run_id, head, tree, event='pull_request', scope='full', required=('Plan', 'CI result')):
+    return {'version': 1, 'run_id': run_id, 'event': event, 'sha': 'merge', 'head': head, 'tree': tree,
+            'scope': scope, 'required': list(required)}
+
+
+def skipped_after_plan(plan='failure'):
+    """What a run looks like when its Plan job failed: everything after it skipped."""
+    return [dict(j, conclusion=plan if j['name'] == 'Plan' else 'skipped') for j in PASSED]
 
 
 class Gate(unittest.TestCase):
@@ -140,12 +148,67 @@ class Gate(unittest.TestCase):
         self.gh.run(1, landed, 'push', jobs=failed(PASSED, 'Test (Linux)'))
         self.assertEqual(self.judge(landed), (True, False))
 
-    def test_skipped_jobs_pass_but_a_run_without_jobs_does_not(self):
+    def test_skipped_jobs_pass_beside_one_that_succeeded(self):
+        landed = self.landed_on_unmoved_main()
+        jobs = [dict(j, conclusion='skipped') if j['name'] == 'Test (macOS)' else j for j in PASSED]
+        self.gh.run(1, landed, 'push', jobs=jobs)
+        self.assertEqual(self.judge(landed), (True, True))
+
+    def test_a_group_of_nothing_but_skipped_jobs_ran_nothing(self):
         landed = self.landed_on_unmoved_main()
         self.gh.run(1, landed, 'push', jobs=[dict(j, conclusion='skipped') for j in PASSED])
-        self.assertEqual(self.judge(landed), (True, True))
+        self.assertEqual(self.judge(landed), (False, False))
+        # Linux's jobs all skipped while the others ran: Linux hasn't passed.
         self.gh = FakeGh()
-        self.gh.run(2, landed, 'push', jobs=[])
+        jobs = [dict(j, conclusion='skipped') if 'Linux' in j['name'] else j for j in PASSED]
+        self.gh.run(2, landed, 'push', jobs=jobs)
+        self.assertEqual(self.judge(landed), (True, False))
+        self.gh = FakeGh()
+        self.gh.run(3, landed, 'push', jobs=[])
+        self.assertEqual(self.judge(landed), (False, False))
+
+    def test_a_failed_plan_that_left_a_full_record_does_not_count(self):
+        # Plan wrote and uploaded its record, then failed: every other job was skipped.
+        landed = self.landed_on_unmoved_main()
+        self.gh.run(7, self.head, 'pull_request', jobs=skipped_after_plan(),
+                    rec=record(7, self.head, self.repo.tree(self.tested)))
+        self.assertEqual(self.judge(landed), (False, False))
+        # Nor does it lend Linux to a push run whose Linux job failed.
+        self.gh.run(8, landed, 'push', jobs=failed(PASSED, 'Test (Linux)'))
+        self.assertEqual(self.judge(landed), (True, False))
+
+    def test_a_job_the_record_names_must_have_succeeded(self):
+        landed = self.landed_on_unmoved_main()
+        tree = self.repo.tree(self.tested)
+        for conclusion in ('failure', 'cancelled', 'skipped'):
+            self.gh = FakeGh()
+            self.gh.run(7, self.head, 'pull_request', jobs=failed(PASSED, 'CI result') if conclusion == 'failure'
+                        else [dict(j, conclusion=conclusion) if j['name'] == 'CI result' else j for j in PASSED],
+                        rec=record(7, self.head, tree))
+            self.assertEqual(self.judge(landed), (False, False), conclusion)
+        # A job the record names that isn't in the run at all.
+        self.gh = FakeGh()
+        self.gh.run(7, self.head, 'pull_request', rec=record(7, self.head, tree, required=['Tested tree']))
+        self.assertEqual(self.judge(landed), (False, False))
+        # A record that names none (from before the gate read them).
+        self.gh = FakeGh()
+        self.gh.run(7, self.head, 'pull_request', rec=record(7, self.head, tree, required=()))
+        self.assertEqual(self.judge(landed), (False, False))
+
+    def test_plan_and_ci_result_must_succeed_even_without_a_record(self):
+        landed = self.landed_on_unmoved_main()
+        self.gh.run(1, landed, 'push', jobs=[dict(j, conclusion='skipped') if j['name'] == 'CI result' else j
+                                             for j in PASSED])
+        self.assertEqual(self.judge(landed), (False, False))
+
+    def test_a_cancelled_run_does_not_count(self):
+        landed = self.landed_on_unmoved_main()
+        jobs = [dict(j, conclusion='cancelled') if j['name'] not in ('Plan',) else j for j in PASSED]
+        self.gh.run(1, landed, 'push', jobs=jobs, conclusion='cancelled')
+        self.assertEqual(self.judge(landed), (False, False))
+        self.gh = FakeGh()
+        self.gh.run(7, self.head, 'pull_request', jobs=jobs, conclusion='cancelled',
+                    rec=record(7, self.head, self.repo.tree(self.tested)))
         self.assertEqual(self.judge(landed), (False, False))
 
     def test_a_push_run_whose_record_says_partial_does_not_count(self):
@@ -246,13 +309,17 @@ class Record(unittest.TestCase):
             env = dict(os.environ, GITHUB_SHA=sha, GITHUB_EVENT_NAME='pull_request', GITHUB_EVENT_PATH=event,
                        GITHUB_RUN_ID='42')
             env.pop('GITHUB_STEP_SUMMARY', None)
-            subprocess.run([sys.executable, os.path.join(ROOT, 'script', 'ci-gate.py'), 'record', out, '--scope', 'full'],
+            subprocess.run([sys.executable, os.path.join(ROOT, 'script', 'ci-gate.py'), 'record', out, '--scope', 'full', '--require', 'Plan'],
                            cwd=repo.path, env=env, check=True, capture_output=True)
             with open(out) as f:
                 rec = json.load(f)
             self.assertEqual(rec['tree'], repo.tree(sha))
-            self.assertEqual((rec['run_id'], rec['event'], rec['head'], rec['sha'], rec['scope']),
-                             (42, 'pull_request', 'abc123', sha, 'full'))
+            self.assertEqual((rec['run_id'], rec['event'], rec['head'], rec['sha'], rec['scope'], rec['required']),
+                             (42, 'pull_request', 'abc123', sha, 'full', ['Plan']))
+            # It won't write a record that names no job that has to pass.
+            p = subprocess.run([sys.executable, os.path.join(ROOT, 'script', 'ci-gate.py'), 'record', out],
+                               cwd=repo.path, env=env, capture_output=True)
+            self.assertNotEqual(p.returncode, 0)
             # A checkout that isn't the run's commit refuses to record.
             env['GITHUB_SHA'] = '0' * 40
             p = subprocess.run([sys.executable, os.path.join(ROOT, 'script', 'ci-gate.py'), 'record', out],

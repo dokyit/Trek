@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Did CI pass on the code a release is built from? The release workflow's gate (`ci-passed`).
 
-    python3 script/ci-gate.py record OUT [--scope full|partial]
+    python3 script/ci-gate.py record OUT --require JOB... [--scope full|partial]
         In a CI run (.github/workflows/ci.yml): write the tested-tree record, the run's own account of
-        the code it tested, to OUT (the run keeps it as its `tested-tree` artifact).
+        the code it tested and the jobs that must have succeeded for it to count, to OUT (the run
+        keeps it as its `tested-tree` artifact).
     python3 script/ci-gate.py judge COMMIT
         For the release (.github/workflows/release.yml): print "<others> <linux>", each yes or no:
         whether some completed CI run tested exactly COMMIT's code and passed every job without
-        "Linux" in its name (others) and every job with it (linux). Passed means success or skipped,
-        and a group with no jobs hasn't passed. What it found goes to stderr.
+        "Linux" in its name (others) and every job with it (linux). Passed means every job succeeded
+        or was skipped and at least one succeeded: a group of nothing but skipped jobs ran nothing.
+        A run with a record also needs the jobs it names (and Plan and CI result, where it has them)
+        to have succeeded. What it found goes to stderr.
 
 Which runs count:
 - A run of COMMIT itself (a push to main, a dispatch): as before. Its record, when it has one, must
@@ -91,11 +94,27 @@ class Gh:
 
 
 def groups(jobs):
-    """(others, linux): each True when that group has jobs and all of them succeeded or were skipped."""
+    """(others, linux): each True when every job of that group succeeded or was skipped and at least
+    one of them succeeded. A group of skipped jobs ran nothing: a run whose first job failed skips
+    every job after it, and that is no pass."""
     def passed(linux):
         group = [j for j in jobs if ('Linux' in j['name']) == linux]
-        return bool(group) and all(j.get('conclusion') in ('success', 'skipped') for j in group)
+        return (all(j.get('conclusion') in ('success', 'skipped') for j in group)
+                and any(j.get('conclusion') == 'success' for j in group))
     return passed(False), passed(True)
+
+
+# Jobs that decide or sum up a run: wherever a run has one, it must have succeeded, whatever its
+# record says (ci.yml's Plan, whose failure skips everything after it, and CI result).
+ALWAYS_REQUIRED = ('Plan', 'CI result')
+
+
+def required_missing(rec, jobs):
+    """The jobs this run's record (and ALWAYS_REQUIRED) need to have succeeded that didn't."""
+    names = list(rec.get('required') or []) if isinstance(rec, dict) else []
+    names += [n for n in ALWAYS_REQUIRED if any(j['name'] == n for j in jobs) and n not in names]
+    ok = {j['name'] for j in jobs if j.get('conclusion') == 'success'}
+    return [n for n in names if n not in ok]
 
 
 def record_says(rec, run, tree):
@@ -108,6 +127,8 @@ def record_says(rec, run, tree):
         return f"its record is of a {rec.get('event')} event, the run of a {run.get('event')}"
     if rec.get('head') != run.get('head_sha'):
         return f"its record is of head {str(rec.get('head'))[:8]}, the run of {run.get('head_sha', '')[:8]}"
+    if not rec.get('required'):
+        return "its record names no job that had to pass (a record from before the gate read them)"
     if rec.get('scope') != 'full':
         return f"it tested only what the change touched ({rec.get('scope')}), not the full suite"
     if rec.get('tree') != tree:
@@ -157,13 +178,18 @@ def judge(commit, api, cwd=None):
             if wrong:
                 log(f'{name}: {wrong}; not counted')
                 continue
-        o, l = groups(api.jobs(run['id']))
+        jobs = api.jobs(run['id'])
+        missing = required_missing(rec, jobs)
+        if missing:
+            log(f"{name}: {', '.join(missing)} didn't succeed; not counted")
+            continue
+        o, l = groups(jobs)
         log(f"{name}: tested this tree; macOS and Windows {'yes' if o else 'no'}, Linux {'yes' if l else 'no'}")
         others, linux = others or o, linux or l
     return others, linux
 
 
-def record(out, scope):
+def record(out, scope, required):
     sha = os.environ['GITHUB_SHA']
     head_now = git('rev-parse', 'HEAD')
     if head_now != sha:
@@ -181,6 +207,9 @@ def record(out, scope):
         'head': head,
         'tree': git('rev-parse', 'HEAD^{tree}'),
         'scope': scope,
+        # The jobs that must have succeeded for this run to count: the one writing this record (it
+        # decides what the run tests) and the one that sums the run up.
+        'required': required,
     }
     with open(out, 'w', encoding='utf-8') as f:
         json.dump(rec, f, indent=1)
@@ -197,7 +226,10 @@ def main(argv):
         scope = 'full'
         if '--scope' in argv:
             scope = argv[argv.index('--scope') + 1]
-        record(argv[1], scope)
+        required = [argv[i + 1] for i, a in enumerate(argv) if a == '--require' and i + 1 < len(argv)]
+        if not required:
+            sys.exit('ci-gate: record needs --require JOB, the jobs that must pass for the run to count')
+        record(argv[1], scope, required)
         return 0
     if len(argv) == 2 and argv[0] == 'judge':
         others, linux = judge(argv[1], Gh(os.environ.get('GITHUB_REPOSITORY', 'dokyit/Trek')))
