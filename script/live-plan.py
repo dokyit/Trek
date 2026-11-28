@@ -5,7 +5,8 @@
 
 Prints `true` or `false`. App code is anything but what no build of Trek reads: the docs (but
 docs/parity/, the ledger the live checks run), the site, the iPhone app, media, the brand files,
-the workflows other than live.yml, CI's own scripts and the scripts' tests, Markdown and the
+the workflows other than live.yml, CI's own scripts and test-runner config, the scripts' tests,
+Markdown and the
 licence files. And even those count when a
 crate names the file, or a folder of it two levels deep or more, in a string that ends there:
 crates/trek-core/skills/*/SKILL.md (inside a crate), ios/scripts/phone-update.sh and
@@ -21,8 +22,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 ALWAYS = ('crates/', 'vendor/', 'docs/parity/', '.github/workflows/live.yml', '.agents/skills/verify-trek/')
 # Never built into Trek, whatever a crate's example strings say (file_kind's tests name ci.yml).
-NEVER = ('.github/', 'script/ci-', 'script/tests/')
-NOT_APP = re.compile(r'^(docs/|site/|ios/|media/|evidence/|assets/brand/|\.github/|script/(ci-|tests/|site/))|\.md$|'
+NEVER = ('.github/', 'script/ci-', 'script/tests/', '.config/nextest.toml')
+NOT_APP = re.compile(r'^(docs/|site/|ios/|media/|evidence/|assets/brand/|\.github/|script/(ci-|tests/|site/)|\.config/nextest\.toml$)|\.md$|'
                      r'^(LICENSE|NOTICE|\.gitignore|\.gitattributes)$')
 
 

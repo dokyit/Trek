@@ -47,7 +47,8 @@ class AppCode(unittest.TestCase):
     def test_docs_the_site_and_the_iphone_app_are_not_app_code(self):
         self.assertFalse(self.app('docs/CI.md', 'README.md', 'site/index.html', 'ios/Trek/App.swift',
                                   '.github/workflows/ci.yml', 'media/x.mp4', 'LICENSE',
-                                  'script/ci-gate.py', 'script/tests/ci-gate.py', 'script/site/stamp.py'))
+                                  'script/ci-gate.py', 'script/tests/ci-gate.py', 'script/site/stamp.py',
+                                  '.config/nextest.toml', '.github/actions/rust-setup/action.yml'))
 
     def test_anything_in_a_crate_is_app_code_markdown_too(self):
         self.assertTrue(self.app('crates/trek-core/skills/create-verification-skill/SKILL.md'))
