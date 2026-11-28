@@ -30,8 +30,9 @@ Cargo rebuilds what it would from scratch. The registry's sources aren't cached 
 are): Cargo unpacks them again with the time of the unpacking, and a build script that watches its
 own sources (ring's, and so rustls, reqwest, quinn and the rest on top of it) ran again on every
 job. So restore unpacks them first (`cargo fetch`) and stamps them too: a registry crate's files
-are fixed by its checksum. Then it writes the list for this checkout, which the cache saves with
-the artifacts. That holds because each key belongs to one kind of job, every such job builds all
+are fixed by its checksum. Then it writes the list for this checkout beside the old one, pending:
+prune makes it the list once the job's build and tests passed, so a job that stopped early never
+leaves a list vouching for files it didn't rebuild (script/tests/ci-cache.py). That holds because each key belongs to one kind of job, every such job builds all
 of its vendored units, and a cache is saved only after the job passed. With no list (a cold
 cache) every vendored file is stamped, and any vendored fingerprints dropped, so what compiles now
 is reusable next time: a build script that doesn't name its inputs makes Cargo record the newest
@@ -52,6 +53,7 @@ import sys
 
 OLD = 946684800  # 2000-01-01T00:00:00Z
 MANIFEST = os.path.join('trek-ci', 'vendor-blobs')
+PENDING = '.pending'
 STAMPED = ('.',)
 NEVER_KEPT = {'trek-app'}
 
@@ -79,10 +81,15 @@ def key(kind):
     env = digest(*sorted(f'{k}={v}' for k, v in os.environ.items()
                          if (k.startswith('CARGO') or k.startswith('RUST'))
                          and k not in ('CARGO_HOME', 'RUSTUP_HOME', 'CARGO_TERM_COLOR')))
+    # The crates there are and how CI builds them: a cache of another set (a crate added, renamed
+    # or gone, another profile) can hold units no job builds any more but the list still vouches for.
+    members = sorted(d for d in os.listdir('crates') if os.path.isfile(os.path.join('crates', d, 'Cargo.toml')))
+    profile = open('.github/ci-profile.toml', 'rb').read() if os.path.exists('.github/ci-profile.toml') else b''
+    layout = digest(*members, profile)
     version = re.search(r'^\[workspace\.package\][^\[]*?^version\s*=\s*"([^"]+)"',
                         open('Cargo.toml', encoding='utf-8').read(), re.M | re.S)
     prefix = f'rust-{kind}-{runner}-{rustc}-'
-    lines = [f'key={prefix}{digest(deps, vendor, env)}-{version.group(1) if version else "0"}', f'restore={prefix}']
+    lines = [f'key={prefix}{digest(deps, vendor, env, layout)}-{version.group(1) if version else "0"}', f'restore={prefix}']
     out = os.environ.get('GITHUB_OUTPUT')
     if out:
         with open(out, 'a', encoding='utf-8') as f:
@@ -179,8 +186,12 @@ def restore(target):
                 same += 1
             except OSError:
                 pass  # left with the checkout's time: a rebuild, never a stale artifact
+    # The list for this checkout waits beside the old one until the job's build and tests passed
+    # (prune, right before the save, makes it the list). A job that failed saves nothing, but the
+    # list must never say a file matches what was built when the build may have stopped before
+    # rebuilding it: a later run would date that file old and take the stale unit as fresh.
     os.makedirs(os.path.dirname(manifest), exist_ok=True)
-    with open(manifest, 'w', encoding='utf-8', errors='surrogateescape', newline='\n') as f:
+    with open(manifest + PENDING, 'w', encoding='utf-8', errors='surrogateescape', newline='\n') as f:
         for path, sha in sorted(now.items()):
             f.write(f'{sha} {path}\n')
     if forgotten is None:
@@ -233,6 +244,12 @@ def executables(target, packages):
 
 
 def prune(target):
+    """After a job that passed, before its cache is saved: what the cache keeps (below), and the
+    list of what its artifacts were built from (restore's pending one) made the list."""
+    manifest = os.path.join(target, MANIFEST)
+    if not os.path.exists(manifest + PENDING):
+        sys.exit('ci-cache: no pending list of what this build was made from (run restore first); not saving a cache without one')
+    os.replace(manifest + PENDING, manifest)
     meta = json.loads(run('cargo', 'metadata', '--no-deps', '--format-version', '1'))
     packages = {p['name'] for p in meta['packages']}
     removed = forget(target, NEVER_KEPT)

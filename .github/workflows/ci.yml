@@ -1,11 +1,11 @@
 name: CI
 
+# Every push and pull request, whatever it touches: the Plan job decides what that needs (a change
+# to the docs alone runs nothing but it, half a minute), so every job always reports under its own
+# name, and a file a crate reads from docs/ or ios/ is never left out by a path filter.
 on:
   push:
     branches: [main, windows-port]
-    paths-ignore: ['docs/**', 'media/**', '**.md', 'ios/**', 'assets/brand/**']
-  # Every pull request, whatever it touches: the Plan job decides what that needs (a change to the
-  # docs alone runs nothing but it), so every job always reports under its own name.
   pull_request:
   workflow_dispatch:
 
@@ -157,6 +157,7 @@ jobs:
           bash script/tests/release-finish.sh
           python3 script/tests/ci-gate.py
           python3 script/tests/ci-plan.py
+          python3 script/tests/ci-cache.py
           zsh ios/scripts/tests/phone-update.sh
           zsh script/capture.sh check
           node script/site/test/run.mjs
@@ -204,6 +205,7 @@ jobs:
           bash script/tests/merge-manifest.sh
           bash script/tests/release-manifests.sh
           python3 script/tests/ci-plan.py
+          python3 script/tests/ci-cache.py
           node script/site/test/run.mjs
 
   # Every crate but the app that the change reaches: trek-remote (the phone server's protocol, TLS
@@ -230,6 +232,7 @@ jobs:
           bash script/tests/release-finish.sh
           python3 script/tests/ci-gate.py
           python3 script/tests/ci-plan.py
+          python3 script/tests/ci-cache.py
           zsh ios/scripts/tests/phone-update.sh
           zsh script/capture.sh check
           node script/site/test/run.mjs
@@ -246,7 +249,6 @@ jobs:
       # Saved before the builds below: their graphs (an example's features, the doc tests' own)
       # would make the cache twice the size, and the cache's limit is the whole repository's.
       - uses: ./.github/actions/rust-cache-save
-        if: ${{ !cancelled() }}
         with:
           key: ${{ steps.setup.outputs.key }}
           cache-hit: ${{ steps.setup.outputs.cache-hit }}
@@ -258,9 +260,10 @@ jobs:
         if: needs.plan.outputs.phone == 'true'
         run: cargo build --config "$CI_PROFILE" -p trek-phone --features coredevice --example pc_screen --locked
 
+      # Doc tests (nextest doesn't run them) of the crates this job tests; trek-app's are in its
+      # first shard.
       - name: Doc tests
-        if: needs.plan.outputs.full == 'true'
-        run: cargo test --config "$CI_PROFILE" --locked --doc --workspace
+        run: cargo test --config "$CI_PROFILE" --locked --doc ${{ needs.plan.outputs.full == 'true' && '--workspace --exclude trek-app' || needs.plan.outputs.others }}
 
   # trek-app's targets split across jobs (script/ci-shard.py): the 1st also runs the unit tests in
   # src/. Each job compiles the app once and only its own test binaries.
@@ -289,14 +292,19 @@ jobs:
           echo "targets: $targets"
           cargo nextest run --config "$CI_PROFILE" -p trek-app --locked --profile ci --no-tests=warn $targets
 
-      # Every shard builds the same dependencies; the 1st saves them, whether its tests passed or
-      # not (a failing test leaves the build as good as a passing one; a cancelled job doesn't save).
+      # Every shard builds the same dependencies; the 1st saves them, and only when its build and
+      # tests passed: a job that stopped early may not have rebuilt what changed.
       - uses: ./.github/actions/rust-cache-save
-        if: ${{ !cancelled() }}
         with:
           key: ${{ steps.setup.outputs.key }}
           cache-hit: ${{ steps.setup.outputs.cache-hit }}
           save: ${{ needs.plan.outputs.save == 'true' && matrix.shard == 1 }}
+
+      # trek-app's doc tests, after the save: a `--doc` run resolves features apart from the test
+      # targets, a graph of its own the cache needn't carry.
+      - name: Doc tests (trek-app)
+        if: matrix.shard == 1
+        run: cargo test --config "$CI_PROFILE" -p trek-app --locked --doc
 
   # The Windows port runs the same suite as the Mac: the runner's Git for Windows, PowerShell 7 and
   # Windows PowerShell cover what the tests spawn.
@@ -329,7 +337,6 @@ jobs:
           TREK_QUIET_SPAWNS_CONTROL: "1"
 
       - uses: ./.github/actions/rust-cache-save
-        if: ${{ !cancelled() }}
         with:
           key: ${{ steps.setup.outputs.key }}
           cache-hit: ${{ steps.setup.outputs.cache-hit }}
@@ -338,6 +345,11 @@ jobs:
       - name: Build the CoreDevice example (trek-phone)
         if: needs.plan.outputs.phone == 'true'
         run: cargo build --config $env:CI_PROFILE -p trek-phone --features coredevice --example pc_screen --locked
+
+      - name: Doc tests
+        run: cargo test --config $env:CI_PROFILE --locked --doc ${{ needs.plan.outputs.full == 'true' && '--workspace --exclude trek-app' || needs.plan.outputs.others }}
+        env:
+          TREK_QUIET_SPAWNS_CONTROL: "1"
 
   test-windows-app:
     name: Test (Windows, trek-app ${{ matrix.shard }}/9)
@@ -372,11 +384,16 @@ jobs:
           TREK_QUIET_SPAWNS_CONTROL: "1"
 
       - uses: ./.github/actions/rust-cache-save
-        if: ${{ !cancelled() }}
         with:
           key: ${{ steps.setup.outputs.key }}
           cache-hit: ${{ steps.setup.outputs.cache-hit }}
           save: ${{ needs.plan.outputs.save == 'true' && matrix.shard == 1 }}
+
+      - name: Doc tests (trek-app)
+        if: matrix.shard == 1
+        run: cargo test --config $env:CI_PROFILE -p trek-app --locked --doc
+        env:
+          TREK_QUIET_SPAWNS_CONTROL: "1"
 
   # Linux, on Ubuntu 22.04: the oldest glibc (2.35) Trek's Linux builds support, so what passes here
   # runs on it and everything newer. The same suite as the other two, with the system libraries
@@ -406,7 +423,6 @@ jobs:
         run: cargo nextest run --config "$CI_PROFILE" --locked --profile ci --no-tests=warn ${{ needs.plan.outputs.full == 'true' && '--workspace --exclude trek-app' || needs.plan.outputs.others }}
 
       - uses: ./.github/actions/rust-cache-save
-        if: ${{ !cancelled() }}
         with:
           key: ${{ steps.setup.outputs.key }}
           cache-hit: ${{ steps.setup.outputs.cache-hit }}
@@ -440,7 +456,6 @@ jobs:
           cargo nextest run --config "$CI_PROFILE" -p trek-app --locked --profile ci --no-tests=warn $targets
 
       - uses: ./.github/actions/rust-cache-save
-        if: ${{ !cancelled() }}
         with:
           key: ${{ steps.setup.outputs.key }}
           cache-hit: ${{ steps.setup.outputs.cache-hit }}
@@ -478,9 +493,9 @@ jobs:
           desktop-file-validate squashfs-root/dev.trek.Trek.desktop
 
 
-  # Doc tests (nextest doesn't run them) of every crate the change reaches, trek-app's too: on
-  # Linux, which has runners to spare, for every run; on Windows (here) and the Mac (in Test
-  # (macOS)) too for a full run (every push to main, and what a release is gated on). A `--doc` run resolves features apart
+  # Doc tests (nextest doesn't run them) of every crate the change reaches, trek-app's too, on
+  # Linux. The Mac and Windows run theirs in the jobs that test those crates (the workspace job,
+  # and trek-app's first shard). A `--doc` run resolves features apart
   # from the test targets (it compiles a graph of its own).
   doc-linux:
     name: Doc tests (Linux)
@@ -497,26 +512,6 @@ jobs:
           kind: test-workspace
       - name: Doc tests
         run: cargo test --config "$CI_PROFILE" --locked --doc ${{ needs.plan.outputs.full == 'true' && '--workspace' || needs.plan.outputs.selected }}
-
-  doc-windows:
-    name: Doc tests (Windows)
-    needs: plan
-    if: needs.plan.outputs.full == 'true'
-    runs-on: windows-2022
-    timeout-minutes: 60
-    env:
-      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld.exe
-    steps:
-      - name: Long paths
-        run: git config --system core.longpaths true
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - uses: ./.github/actions/rust-setup
-        with:
-          kind: test-workspace
-      - name: Doc tests
-        run: cargo test --config $env:CI_PROFILE --locked --doc --workspace
-        env:
-          TREK_QUIET_SPAWNS_CONTROL: "1"
 
   # Clippy in its own job, parallel with the tests: run after them in the same job it redoes the
   # whole graph anyway (clippy's RUSTC_WORKSPACE_WRAPPER changes every fingerprint), so it might as
@@ -674,7 +669,7 @@ jobs:
     name: CI result
     if: always()
     needs: [plan, audit, scripts-macos, scripts-windows, scripts-linux, test, test-app, test-windows,
-            test-windows-app, test-linux, test-linux-app, packages-linux, doc-linux, doc-windows, lint, lint-windows, lint-linux,
+            test-windows-app, test-linux, test-linux-app, packages-linux, doc-linux, lint, lint-windows, lint-linux,
             check-linux-arm]
     runs-on: ubuntu-latest
     timeout-minutes: 5

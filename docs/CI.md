@@ -22,7 +22,17 @@ The first job, **Plan** (`script/ci-plan.py`, tests in `script/tests/ci-plan.py`
 - **Platforms**: a platform is left out only when every changed crate file is a module whose `mod` line
   (or an enclosing module's) carries a `#[cfg(...)]` that is false there (`#[cfg(windows)] mod win;`).
   Anything the check can't follow counts for every platform.
-- Docs, the site, `ios/` and the like build nothing; scripts run the script tests (`Scripts (…)`).
+- **Files a crate reads.** A file any crate names in a string that ends with its path (`include_str!`,
+  `include_bytes!`, rust-embed's folder, a `CARGO_MANIFEST_DIR` join, `../` in a test), in or out of
+  `crates/`, reaches that crate: trek-words' test reads trek-app's sources, trek-palette includes
+  trek-assets' theme, trek-core reads the iPhone app's `LivePage.swift`. One embedded is compiled in,
+  so what depends on the crate runs too; one read at run time runs that crate alone. Tests that build
+  their paths piece by piece are listed in `WALKERS` (a plan test fails when a new one isn't), and
+  programs a crate starts without depending on them in `LAUNCHES` (trek-app starts trek-mcp).
+- **Moved files** count at both paths (`git diff --no-renames`).
+- Docs, the site, `ios/` and the like that no crate reads build nothing; scripts run the script tests
+  (`Scripts (…)`). There are no path filters on the triggers: a push to main of the docs alone runs
+  the Plan job and nothing else.
 
 Jobs the plan leaves out are skipped and report as passed under their own names. **CI result** is the
 one check that sums the run up: it fails when any job failed or was cancelled. It is the check to require
@@ -30,7 +40,9 @@ on `main` and the one an agent waits for before merging (`gh pr checks <n> --wat
 
 A partial run doesn't count for the release gate (its record's scope is `partial`): after the merge,
 `main`'s own run (full) does, or label the pull request `ci:full` before merging so the gate can take
-its run when nothing else reached `main` in between.
+its run when nothing else reached `main` in between. **The label is read from the push's event**:
+add it, then push (an empty commit will do, `git commit --allow-empty`); re-running a run reuses its
+old event and its old labels.
 
 ## The jobs
 
@@ -40,7 +52,7 @@ its run when nothing else reached `main` in between.
 | Test (macOS / Windows / Linux) | `cargo nextest` over the affected crates but trek-app | a crate other than trek-app is affected |
 | Test (…, trek-app N/M) | trek-app's test targets, split by `script/ci-shard.py` | trek-app is affected |
 | Doc tests (Linux) | `cargo test --doc` of the affected crates | any crate is affected |
-| Doc tests (Windows), and in Test (macOS) | every crate's doc tests | full runs |
+| (macOS, Windows) | the same, in the jobs that test those crates: the workspace job, and trek-app's first shard | those crates are affected |
 | Clippy (macOS / Windows / Linux) | correctness and suspicious lints of the affected crates, the capture build | any crate is affected on that platform |
 | Packages (Linux) | the debug build packaged as AppImage, .deb and tarball, and opened | trek-app is affected |
 | Check (Linux, Arm) | `cargo check` of trek-app and trek-mcp on Arm | either is affected |
