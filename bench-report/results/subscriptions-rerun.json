@@ -1,0 +1,282 @@
+{
+ "started": "2026-11-27T23:30:50",
+ "tasks": [
+  "book-store",
+  "bowling",
+  "dominoes",
+  "forth",
+  "go-counting",
+  "poker",
+  "react",
+  "rest-api",
+  "sgf-parsing",
+  "zebra-puzzle"
+ ],
+ "limit_s": 600,
+ "Codex": {
+  "runs": [
+   {
+    "task": "book-store",
+    "secs": 63.2,
+    "rc": 0,
+    "model": null,
+    "tests_total": 20,
+    "tests_passed": 20,
+    "passed": true,
+    "grader": "....................\n----------------------------------------------------------------------\nRan 20 tests in 0.001s\n\nOK\n",
+    "tail": "ask example: **5120 cents ($51.20)**. No test file created.\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":112740,\"cached_input_tokens\":89600,\"cache_write_input_tokens\":0,\"output_tokens\":1623,\"reasoning_output_tokens\":309}}\n\nReading additional input from stdin...\n2026-11-28T04:30:50.864191Z ERROR codex_api::endpoint::responses_websocket: failed to connect to Responses WebSocket stage=Unknown\n",
+    "usage_limit": false
+   },
+   {
+    "task": "bowling",
+    "secs": 58.2,
+    "rc": 0,
+    "model": null,
+    "tests_total": 31,
+    "tests_passed": 31,
+    "passed": true,
+    "grader": "...............................\n----------------------------------------------------------------------\nRan 31 tests in 0.000s\n\nOK\n",
+    "tail": "rame combinations. All checks passed; no test file created.\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":139387,\"cached_input_tokens\":122624,\"cache_write_input_tokens\":0,\"output_tokens\":2047,\"reasoning_output_tokens\":46}}\n\nReading additional input from stdin...\n2026-11-28T04:31:53.824062Z ERROR codex_api::endpoint::responses_websocket: failed to connect to Responses WebSocket stage=Unknown\n",
+    "usage_limit": false
+   },
+   {
+    "task": "dominoes",
+    "secs": 42.9,
+    "rc": 0,
+    "model": null,
+    "tests_total": 13,
+    "tests_passed": 13,
+    "passed": true,
+    "grader": ".............\n----------------------------------------------------------------------\nRan 13 tests in 0.000s\n\nOK\n",
+    "tail": "stive cases and a 10,000-stone chain. No test file created.\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":110549,\"cached_input_tokens\":102144,\"cache_write_input_tokens\":0,\"output_tokens\":1422,\"reasoning_output_tokens\":22}}\n\nReading additional input from stdin...\n2026-11-28T04:32:52.124107Z ERROR codex_api::endpoint::responses_websocket: failed to connect to Responses WebSocket stage=Unknown\n",
+    "usage_limit": false
+   },
+   {
+    "task": "forth",
+    "secs": 66.5,
+    "rc": 0,
+    "model": null,
+    "tests_total": 54,
+    "tests_passed": 50,
+    "passed": false,
+    "grader": "^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 'undefined operation: foo' != 'undefined operation'\n- undefined operation: foo\n?                    -----\n+ undefined operation\n\n\n----------------------------------------------------------------------\nRan 54 tests in 0.002s\n\nFAILED (failures=3, errors=1)\n",
+    "tail": "nAll 32 validation checks passed. No test file was created.\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":113814,\"cached_input_tokens\":97792,\"cache_write_input_tokens\":0,\"output_tokens\":2149,\"reasoning_output_tokens\":108}}\n\nReading additional input from stdin...\n2026-11-28T04:33:35.277286Z ERROR codex_api::endpoint::responses_websocket: failed to connect to Responses WebSocket stage=Unknown\n",
+    "usage_limit": false
+   },
+   {
+    "task": "go-counting",
+    "secs": 39.0,
+    "rc": 0,
+    "model": null,
+    "tests_total": 11,
+    "tests_passed": 0,
+    "passed": false,
+    "grader": "ias-Library-Application-Support-dev-trek-Trek-worktrees-Trek-benchmark-trek-vs-its-competitor/bca08e80-0a0d-4477-b407-3f618906569d/scratchpad/subs-work2/codex/go-counting/go_counting.py)\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (errors=1)\n",
+    "tail": " large-region cases. All checks passed. No test file created.\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":89231,\"cached_input_tokens\":73216,\"cache_write_input_tokens\":0,\"output_tokens\":1176,\"reasoning_output_tokens\":15}}\n\nReading additional input from stdin...\n2026-11-28T04:34:41.826233Z ERROR codex_api::endpoint::responses_websocket: failed to connect to Responses WebSocket stage=Unknown\n",
+    "usage_limit": false
+   },
+   {
+    "task": "poker",
+    "secs": 53.8,
+    "rc": 0,
+    "model": null,
+    "tests_total": 37,
+    "tests_passed": 37,
+    "passed": true,
+    "grader": ".....................................\n----------------------------------------------------------------------\nRan 37 tests in 0.001s\n\nOK\n",
+    "tail": "ut order.\\n\\nValidation passed. No test files were created.\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":144118,\"cached_input_tokens\":124288,\"cache_write_input_tokens\":0,\"output_tokens\":1819,\"reasoning_output_tokens\":17}}\n\nReading additional input from stdin...\n2026-11-28T04:35:21.031944Z ERROR codex_api::endpoint::responses_websocket: failed to connect to Responses WebSocket stage=Unknown\n",
+    "usage_limit": false
+   },
+   {
+    "task": "react",
+    "secs": 56.8,
+    "rc": 0,
+    "model": null,
+    "tests_total": 14,
+    "tests_passed": 14,
+    "passed": true,
+    "grader": "..............\n----------------------------------------------------------------------\nRan 14 tests in 0.000s\n\nOK\n",
+    "tail": "ate callbacks. All checks passed; no test file was created.\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":156960,\"cached_input_tokens\":140032,\"cache_write_input_tokens\":0,\"output_tokens\":1598,\"reasoning_output_tokens\":83}}\n\nReading additional input from stdin...\n2026-11-28T04:36:14.741113Z ERROR codex_api::endpoint::responses_websocket: failed to connect to Responses WebSocket stage=Unknown\n",
+    "usage_limit": false
+   },
+   {
+    "task": "rest-api",
+    "secs": 60.4,
+    "rc": 0,
+    "model": null,
+    "tests_total": 9,
+    "tests_passed": 9,
+    "passed": true,
+    "grader": ".........\n----------------------------------------------------------------------\nRan 9 tests in 0.000s\n\nOK\n",
+    "tail": "ion using Python 3. All checks passed. No test file created.\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":113471,\"cached_input_tokens\":87680,\"cache_write_input_tokens\":0,\"output_tokens\":2354,\"reasoning_output_tokens\":29}}\n\nReading additional input from stdin...\n2026-11-28T04:37:11.643456Z ERROR codex_api::endpoint::responses_websocket: failed to connect to Responses WebSocket stage=Unknown\n",
+    "usage_limit": false
+   },
+   {
+    "task": "sgf-parsing",
+    "secs": 73.7,
+    "rc": 0,
+    "model": null,
+    "tests_total": 23,
+    "tests_passed": 23,
+    "passed": true,
+    "grader": ".......................\n----------------------------------------------------------------------\nRan 23 tests in 0.000s\n\nOK\n",
+    "tail": "ions. `git diff --check` passed. No test file was created.\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":117869,\"cached_input_tokens\":108160,\"cache_write_input_tokens\":0,\"output_tokens\":2684,\"reasoning_output_tokens\":148}}\n\nReading additional input from stdin...\n2026-11-28T04:38:12.156947Z ERROR codex_api::endpoint::responses_websocket: failed to connect to Responses WebSocket stage=Unknown\n",
+    "usage_limit": false
+   },
+   {
+    "task": "zebra-puzzle",
+    "secs": 33.7,
+    "rc": 0,
+    "model": null,
+    "tests_total": 2,
+    "tests_passed": 2,
+    "passed": true,
+    "grader": "..\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+    "tail": "panese resident owns the zebra.\\n\\nNo test file was created.\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":131759,\"cached_input_tokens\":100480,\"cache_write_input_tokens\":0,\"output_tokens\":995,\"reasoning_output_tokens\":26}}\n\nReading additional input from stdin...\n2026-11-28T04:39:25.966817Z ERROR codex_api::endpoint::responses_websocket: failed to connect to Responses WebSocket stage=Unknown\n",
+    "usage_limit": false
+   }
+  ]
+ },
+ "Gemini CLI": {
+  "runs": [
+   {
+    "task": "book-store",
+    "secs": 1.9,
+    "rc": 1,
+    "model": null,
+    "tests_total": 20,
+    "tests_passed": 0,
+    "passed": false,
+    "grader": "book-store/book_store_test.py\", line 19, in test_two_of_the_same_book\n    self.assertEqual(total(basket), 1600)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^\nAssertionError: None != 1600\n\n----------------------------------------------------------------------\nRan 20 tests in 0.002s\n\nFAILED (failures=20)\n",
+    "tail": "\nWarning: 256-color support not detected. Using a terminal with at least 256-color support is recommended for a better visual experience.\nYOLO mode is enabled. All tool calls will be automatically approved.\nYOLO mode is enabled. All tool calls will be automatically approved.\nAn unexpected critical error occurred: Resource has been exhausted (e.g. check quota). (Status: 429)\n",
+    "usage_limit": true
+   }
+  ],
+  "stopped": "after book-store: usage limit reported"
+ },
+ "Devin": {
+  "runs": [
+   {
+    "task": "book-store",
+    "secs": 49.9,
+    "rc": 0,
+    "model": null,
+    "tests_total": 20,
+    "tests_passed": 1,
+    "passed": false,
+    "grader": "book-store/book_store_test.py\", line 19, in test_two_of_the_same_book\n    self.assertEqual(total(basket), 1600)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 16.0 != 1600\n\n----------------------------------------------------------------------\nRan 20 tests in 0.006s\n\nFAILED (failures=19)\n",
+    "tail": "the end.\n- Because it's exact DP rather than greedy, it correctly handles the classic trap where a 5+3 split should be regrouped as 4+4.\n- Verified against the task's example (`[1,1,2,2,3,3,4,5]` \u2192 51.20), all single-group discount tiers, edge cases, and 500 random baskets cross-checked against an independent brute-force implementation. A 200-book basket computes instantly thanks to `lru_cache`.\n\n",
+    "usage_limit": false
+   },
+   {
+    "task": "bowling",
+    "secs": 49.2,
+    "rc": 0,
+    "model": null,
+    "tests_total": 31,
+    "tests_passed": 0,
+    "passed": false,
+    "grader": "ls_in_a_frame_cannot_score_more_than_10_points\n    with self.assertRaisesWithMessage(Exception):\n         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^\nAssertionError: Exception not raised\n\n----------------------------------------------------------------------\nRan 31 tests in 0.002s\n\nFAILED (failures=31)\n",
+    "tail": "he pins left by a non-strike second ball\n- `score()` raises `IndexError` until the game is complete, then sums frames 1\u20139 with strike/spare bonuses plus the raw tenth-frame total.\n\n[bowling.py](file://<scratch>/subs-work2/devin/bowling/bowling.py)\n\n",
+    "usage_limit": false
+   },
+   {
+    "task": "dominoes",
+    "secs": 19.5,
+    "rc": 0,
+    "model": null,
+    "tests_total": 13,
+    "tests_passed": 13,
+    "passed": true,
+    "grader": ".............\n----------------------------------------------------------------------\nRan 13 tests in 0.000s\n\nOK\n",
+    "tail": "no, fixing the first domino first to cut symmetry\n- Returns the ordered list of tuples for a valid circular chain, `[]` for empty input, and `None` when no chain exists \u2014 matching the Exercism test contract (`assert_correct_chain` / `refute_correct_chain`)\n\nVerified against all 13 canonical test cases locally (via inline run, no test file created); all produce valid chains or `None` as expected.\n\n",
+    "usage_limit": false
+   },
+   {
+    "task": "forth",
+    "secs": 81.8,
+    "rc": 0,
+    "model": null,
+    "tests_total": 54,
+    "tests_passed": 54,
+    "passed": true,
+    "grader": "......................................................\n----------------------------------------------------------------------\nRan 54 tests in 0.001s\n\nOK\n",
+    "tail": "edefinition.\n- Errors match the test contract exactly: `StackUnderflowError(\"Insufficient number of items in stack\")`, `ZeroDivisionError(\"divide by zero\")`, `ValueError(\"illegal operation\")` for redefining numbers, `ValueError(\"undefined operation\")` for unknown words.\n- Case-insensitive throughout; `( ... )` comments are stripped; multi-line definitions are supported via a small state machine.\n\n",
+    "usage_limit": false
+   },
+   {
+    "task": "go-counting",
+    "secs": 27.4,
+    "rc": 0,
+    "model": null,
+    "tests_total": 11,
+    "tests_passed": 11,
+    "passed": true,
+    "grader": "...........\n----------------------------------------------------------------------\nRan 11 tests in 0.000s\n\nOK\n",
+    "tail": " stone coordinate \u2192 `NONE`. Raises `ValueError(\"Invalid coordinate\")` for out-of-bounds.\n- **`Board.territories()`** \u2014 same flood-fill across the whole board, returning `{WHITE: set, BLACK: set, NONE: set}`.\n- Exported `WHITE = \"W\"`, `BLACK = \"B\"`, `NONE = \"\"` as required by the test imports.\n\nVerified against the canonical Exercism test suite (fetched from `exercism/python`): all 11 tests pass.\n\n",
+    "usage_limit": false
+   },
+   {
+    "task": "poker",
+    "secs": 30.0,
+    "rc": 0,
+    "model": null,
+    "tests_total": 37,
+    "tests_passed": 35,
+    "passed": false,
+    "grader": ")\n    ^\nAssertionError: Lists differ: ['3S 4D 6D 8C 7S'] != ['2S 5H 6S 8D 7H']\n\nFirst differing element 0:\n'3S 4D 6D 8C 7S'\n'2S 5H 6S 8D 7H'\n\n- ['3S 4D 6D 8C 7S']\n+ ['2S 5H 6S 8D 7H']\n\n----------------------------------------------------------------------\nRan 37 tests in 0.002s\n\nFAILED (failures=2)\n",
+    "tail": "uency, high-card ordering for flushes, and proper handling of the wheel (`A-2-3-4-5`, scored as a 5-high straight).\n- `best_hands` scores every hand, finds the max, and returns all hands tied for best in their original string form.\n\nSanity-checked against the Exercism cases: highest-card wins, wheel straight loses to `2-3-4-5-6`, royal straight flush beats everything, ties return multiple hands.\n\n",
+    "usage_limit": false
+   },
+   {
+    "task": "react",
+    "secs": 57.6,
+    "rc": 0,
+    "model": null,
+    "tests_total": 14,
+    "tests_passed": 14,
+    "passed": true,
+    "grader": "..............\n----------------------------------------------------------------------\nRan 14 tests in 0.000s\n\nOK\n",
+    "tail": "cks exactly once.\n- **Callbacks** \u2014 `add_callback`/`remove_callback` manage a list (duplicate removes are safe). A callback fires with the new value only when the recomputed value differs from the previous stable value.\n\nVerified against all scenarios from the canonical Exercism test suite (initial values, chained computes, callback firing/suppression, add/remove, diamond dependency) \u2014 all pass.\n\n",
+    "usage_limit": false
+   },
+   {
+    "task": "rest-api",
+    "secs": 28.4,
+    "rc": 0,
+    "model": null,
+    "tests_total": 9,
+    "tests_passed": 0,
+    "passed": false,
+    "grader": "33, in _user_object\n    balance = sum(user[\"owed_by\"].values()) - sum(user[\"owes\"].values())\n                  ~~~~^^^^^^^^^^^\nTypeError: list indices must be integers or slices, not str\n\n----------------------------------------------------------------------\nRan 9 tests in 0.001s\n\nFAILED (errors=9)\n",
+    "tail": "t between the pair (handles same-direction accumulation, partial reversal, full cancellation, and direction flips), returning both users sorted by name.\n- `balance` is computed as `sum(owed_by) - sum(owes)` and rounded to 2 decimals.\n- `__init__` accepts an optional `database` dict for persistence.\n\nSmoke-tested all flows including netting in both directions and exact cancellation \u2014 all correct.\n\n",
+    "usage_limit": false
+   },
+   {
+    "task": "sgf-parsing",
+    "secs": 56.8,
+    "rc": 0,
+    "model": null,
+    "tests_total": 23,
+    "tests_passed": 23,
+    "passed": true,
+    "grader": ".......................\n----------------------------------------------------------------------\nRan 23 tests in 0.000s\n\nOK\n",
+    "tail": "red.\n- **`_parse_value`** scans bracketed values honoring `\\` escapes (so `\\]` doesn't terminate the value) and applies SGF Text rules in `_unescape_text`: backslash-newline removed, other escaped whitespace \u2192 space, non-whitespace after `\\` literal, bare newlines preserved, other whitespace \u2192 space.\n\nVerified against all three README examples plus escape handling and every specified error case.\n\n",
+    "usage_limit": false
+   },
+   {
+    "task": "zebra-puzzle",
+    "secs": 43.3,
+    "rc": 0,
+    "model": null,
+    "tests_total": 2,
+    "tests_passed": 2,
+    "passed": true,
+    "grader": "..\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+    "tail": "e middle house), then prunes each remaining category against all applicable clues as soon as both attributes are known.\n- Two bugs caught during testing: `NATIONALITIES[1:]` still included \"Norwegian\", and the pet/hobby `permutations` iterators were exhausted after the first partial match \u2014 both fixed.\n\nResult (solved in ~16ms):\n\n- `drinks_water()` \u2192 `'Norwegian'`\n- `owns_zebra()` \u2192 `'Japanese'`\n\n",
+    "usage_limit": false
+   }
+  ]
+ },
+ "finished": "2026-11-27T23:39:59"
+}

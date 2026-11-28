@@ -90,7 +90,7 @@ def make_text(d):
                  "plus every published benchmark that applies. Trek's own claims were treated as things to check. Where an app could not be run, "
                  "the report says so and uses published numbers, labelled as such.")
     T["toc"] = [("scorecard", "Scorecard"), ("why", "Why and why not"), ("performance", "Performance"), ("scale", "Scale"), ("swarm", "Swarming"),
-                ("tokens", "Tokens and harness"), ("features", "Features"), ("ux", "UX and accessibility"), ("design", "Design"),
+                ("quality", "Agent quality"), ("tokens", "Tokens and harness"), ("features", "Features"), ("ux", "UX and accessibility"), ("design", "Design"),
                 ("posts", "Your posts"), ("method", "Method and limits")]
 
     tb_sentence = d.get("tb_sentence") or "its own agent loop, used for API and local models, passed 0 of 19 Terminal-Bench tasks with a cheap model on 30 Oct, and today's build abandoned a task on a reasoning-only reply"
@@ -218,6 +218,21 @@ def make_text(d):
                         "starting a sub-agent (`mock:delegate implement …`, a child thread). The frame times and typing latency are taken during the load. "
                         "A real-agent run follows, replicating Synara's post exactly.</p>")
     T["swarm_after"] = d.get("real10_html", "")
+    T["quality_boards_intro"] = ("<p>No paid model calls were made for this report. These are other people's measurements, quoted with the page and date they came from; "
+        "“Checked” says whether the number was seen on the page itself or only in a search result. Trek appears on none of them: "
+        "when Trek runs Claude Code or Codex, those rows are its numbers too, since Trek drives the vendor's own CLI.</p>")
+    T["quality_subs_intro"] = ("<p>The way people really use these apps: each on the plan the owner is already signed in with, default model, full auto, "
+        "on the same 10 Python exercises from Aider's polyglot benchmark (book-store, bowling, dominoes, forth, go-counting, poker, react, rest-api, sgf-parsing, zebra-puzzle). "
+        "Each app got the same one-line message pointing at a TASK.md with the exercise; the unit tests were held back and run afterwards; one attempt, 10 minutes. "
+        "<b>The models are not the same</b>, so this compares products, not harnesses. Trek is the real app (isolated profile) driving Claude Code, its default agent, "
+        "so Trek against Claude Code alone is the one like-for-like pair here. Runs were in one batch late at night; an app that reported a usage limit was stopped at once.</p>")
+    T["quality_local_intro"] = ("<p>The fair harness comparison: every harness on the same model, DeepSeek V4 Flash through OpenRouter (Claude Code through a LiteLLM proxy, "
+        "since it only speaks Anthropic's API), on 15 Terminal-Bench CPU-only tasks, one trial each, a 25-minute hard cap for every harness, two runs at a time, task by task with "
+        "the harness order rotated. Paid for by the owner's OpenRouter credit, with a guard that stops at $18. The scores are on the verifier's own tests, against each task's "
+        "untouched state.</p>")
+    T["quality_local_after"] = ("<p class='sub'>A free attempt came first: qwen3:14b on this Mac through Ollama. It was stopped after 2 of 15 tasks because no harness gained a single test in 8 minutes "
+        "at 12 tokens a second, so it couldn't tell harnesses apart; those runs are kept in results/tb-local.json. The model (9.3 GB) was deleted afterwards. "
+        "It did show one thing: Claude Code's 19K-token opening prompt took about 2 minutes to read locally, against about 450 tokens for Trek's Direct harness.</p>")
     T["tokens_intro"] = ("<p>Trek wraps the vendor CLIs, so two things matter: what Trek adds to every request, and how good its own loop is when you use API or local models.</p>")
     T["tb_html"] = d.get("tb_html") or (
         "<h3>Trek's own agent loop on Terminal-Bench</h3>"
@@ -285,7 +300,7 @@ def make_text(d):
 <li><b>Tokens</b>: <code>claude -p "hi" --output-format json --strict-mcp-config</code>, bare and with Trek's exact flags read from a running Trek session's argv (<code>results/tokens-hi.json</code>).</li>
 <li><b>Accessibility</b>: <code>scripts/axprobe.swift</code> walks the tree VoiceOver reads; for Chromium apps it sets <code>AXManualAccessibility</code> and walks twice.</li>
 <li><b>Design</b>: a separate read-only sub-agent judged anonymised images; the key was opened only after its verdict (<code>results/design-blind-*.json</code>).</li>
-<li><b>Terminal-Bench</b>: Harbor 0.25 with the earlier study's Trek adapter; see the harness section.</li>
+<li><b>Agent quality, no paid API</b>: (1) published boards, each number with its link and date (<code>research/field/leaderboards-verified.json</code>, checked by a separate read-only agent); (2) each app on the plan already signed in on this Mac, 10 Aider polyglot Python exercises, one late batch (<code>scripts/subs_run.py</code>); (3) one local model, qwen3:14b through Ollama and a LiteLLM proxy, for Trek\'s Direct harness, OpenCode, Droid (BYOK) and Claude Code on 15 Terminal-Bench tasks, one at a time (<code>scripts/tb_local.py</code>, <code>scripts/litellm-local.yaml</code>, <code>scripts/qwen3-nothink.Modelfile</code>).</li>
 <li><b>Spend</b>: OpenRouter credit read from <code>GET /api/v1/key</code> before and after; Claude Code turns on the owner's subscription; everything else free.</li>
 </ul>
 <h3>Limits — what this could not do</h3>
@@ -298,7 +313,7 @@ def make_text(d):
 <li><b>Only macOS.</b> Windows and Linux builds of Trek and the rest were not measured; nor Trek's iPhone app (no phone connected; it isn't distributed).</li>
 <li><b>Accessibility is structural.</b> Counting named controls is not a VoiceOver user test; a fuller audit would also check contrast and focus order by hand.</li>
 <li><b>One judge.</b> The design review is one model's blind reading of marketing screenshots; Trek's image is its own curated README shot, as everyone else's is theirs.</li>
-<li><b>Terminal-Bench was not rerun.</b> The OpenRouter account was empty ($40.20 of $40 used); the check before spending read the key's cap ($6.58 left), not the account balance, which was the wrong endpoint. The attempt cost $0.008 and was stopped; a free substitute (local models) would have scored near zero for both harnesses and taken hours, so it was not run.</li>
+<li><b>No paid model calls.</b> The owner ruled out paid API use; the OpenRouter account was empty anyway ($40.20 of $40 used; a first attempt cost $0.008 before 402s stopped it, because the pre-check read the key\'s cap, not the balance). So agent quality comes from public boards (other people\'s runs, different dates and models), from the apps on their own plans (different models: a product comparison, not a harness one), and from a small local model (a fair same-model comparison, but at a scale far below what these harnesses are built for: scores are low and an 8-minute cap at 12 tokens a second favours harnesses with small prompts).</li>
 <li><b>A rule was broken once:</b> the field-research sub-agent started four worker agents of its own, beyond the two-at-a-time limit set for this study. Its notes were kept; nothing else ran that way.</li>
 </ul>""")
     T["footer"] = ("Scripts and raw results: bench-report/scripts and bench-report/results on branch bench/competitors-2026-11. Built by scripts/build_report.py. "

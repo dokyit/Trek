@@ -1,0 +1,18 @@
+# Claude Code reaches DeepSeek V4 Flash only through an Anthropic-style endpoint: LiteLLM on the
+# host translates to OpenRouter. Any model name Claude Code asks for (its background model too)
+# goes to the same model, so every request is the one model under test.
+model_list:
+  - model_name: deepseek-v4-flash
+    litellm_params:
+      model: openrouter/deepseek/deepseek-v4-flash
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: "*"
+    litellm_params:
+      model: openrouter/deepseek/deepseek-v4-flash
+      api_key: os.environ/OPENROUTER_API_KEY
+litellm_settings:
+  drop_params: true
+  telemetry: false
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  disable_spend_logs: true

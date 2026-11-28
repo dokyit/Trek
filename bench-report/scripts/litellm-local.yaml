@@ -1,0 +1,22 @@
+# One local model behind one proxy, for every harness alike (OpenAI and Anthropic routes).
+# Thinking is off for everyone: qwen3-14b-nothink is qwen3:14b with a chat template that always closes the think block (scripts/qwen3-nothink.Modelfile), since a client's own reasoning_effort overrides a proxy setting. No harness pays qwen3's long
+# thinking at 12 tokens a second while another doesn't.
+model_list:
+  - model_name: qwen3-14b
+    litellm_params:
+      model: openai/qwen3-14b-nothink
+      api_base: http://127.0.0.1:11435/v1
+      api_key: ollama
+      reasoning_effort: none
+  # Any other name a harness asks for (Claude Code's background model, say) goes to the same model.
+  - model_name: "*"
+    litellm_params:
+      model: openai/qwen3-14b-nothink
+      api_base: http://127.0.0.1:11435/v1
+      api_key: ollama
+litellm_settings:
+  drop_params: true
+  telemetry: false
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  disable_spend_logs: true

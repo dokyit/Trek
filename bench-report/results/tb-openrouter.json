@@ -1,0 +1,65 @@
+{
+ "cap_s": 1500,
+ "model": "deepseek/deepseek-v4-flash via OpenRouter",
+ "runs": [
+  {
+   "task": "cargo-flight-dispatch",
+   "harness": "nop",
+   "wall_s": 36,
+   "load_before": 3.4,
+   "rc": 0,
+   "reward": 0.0,
+   "exception": "",
+   "tests": "18/40",
+   "tokens_in": null,
+   "tokens_out": null,
+   "agent_secs": 0
+  },
+  {
+   "task": "cargo-flight-dispatch",
+   "harness": "trek-direct",
+   "wall_s": 228,
+   "load_before": 3.4,
+   "rc": 0,
+   "reward": 0.0,
+   "exception": "",
+   "tests": "36/40",
+   "tokens_in": 1420257,
+   "tokens_out": 42281,
+   "agent_secs": 189
+  },
+  {
+   "task": "cargo-flight-dispatch",
+   "harness": "opencode",
+   "wall_s": 366,
+   "load_before": 3.33,
+   "rc": 0,
+   "reward": 0.0,
+   "exception": "",
+   "tests": "27/40",
+   "tokens_in": 1919093,
+   "tokens_out": 22982,
+   "agent_secs": 199
+  },
+  {
+   "task": "cargo-flight-dispatch",
+   "harness": "droid",
+   "wall_s": 276,
+   "load_before": 2.94,
+   "rc": 0,
+   "reward": 0.0,
+   "exception": "",
+   "tests": "35/40",
+   "tokens_in": 654991,
+   "tokens_out": 28001,
+   "agent_secs": 207
+  }
+ ],
+ "spend_start": {
+  "balance": 19.798634427000003,
+  "key_limit_remaining": 6.5771335529999995,
+  "key_usage": 13.422866447,
+  "at": "2026-11-27 23:19"
+ },
+ "spent_usd": 0.123
+}

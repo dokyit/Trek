@@ -26,6 +26,15 @@ design_a = load("design-blind-a.json", {})
 design_b = load("design-blind-b.json", {})
 tb = load("terminal-bench.json", {})
 real10 = load("trek-real10.json", {})
+boards = load("leaderboards.json", [])
+subs = load("subscriptions.json", {})
+# Codex, Devin and Gemini CLI first failed to launch (flags their versions reject, workspace trust); they
+# were run again the same night with fixed flags, and those runs replace the failed ones.
+for _app, _r in (load("subscriptions-rerun.json", {}) or {}).items():
+    if isinstance(_r, dict) and "runs" in _r:
+        subs[_app] = {**_r, "rerun": True}
+tbl = load("tb-local.json", {})
+tbo = load("tb-openrouter.json", {})
 ademark = list(csv.DictReader(open(REP / "research/field/ademark.csv")))
 features = list(csv.DictReader(open(REP / "research/field/features.csv")))
 from report_text import make_text, SHOTS  # noqa: E402
@@ -138,6 +147,81 @@ chart_thr = hbar([(f"Trek, {int(n):,} threads", r.get("footprint_mb"), f"scroll 
 chart_tabs = hbar([(f"Trek, {int(n)} tabs", r.get("total_footprint_mb"), f"{r.get('webkit_processes')} WebKit processes") for n, r in tabs.items() if n.isdigit()],
                   "Trek plus its WebKit processes by open Browser tabs (MB)", " MB", note="About 20 MB per live tab; every tab kept its own page process (no tab was suspended).")
 
+# ---------------------------------------------------------------- agent quality (three free sources)
+def quality_html():
+    out = []
+    # 1. published boards
+    rows = []
+    for b in boards:
+        src = f'<a href="{esc(b.get("url", ""))}">{esc(b.get("source_name") or b.get("benchmark"))}</a>, {esc(b.get("date", ""))}'
+        rows.append({"cls": "trek" if str(b.get("app", "")).startswith("Trek") else "", "cells": [
+            esc(b.get("app", "")), esc(f'{b.get("benchmark", "")} {b.get("version") or ""}'.strip()), esc(b.get("model", "") or "–"),
+            f'<b>{esc(b.get("score", ""))}</b>{esc(b.get("unit", "") or "")}', src, esc(b.get("status", "")), esc((b.get("note") or "")[:140])]})
+    full = json.load(open(REP / "research/field/leaderboards-verified.json")) if (REP / "research/field/leaderboards-verified.json").exists() else []
+    full_rows = [[esc(x.get("app")), esc(f'{x.get("benchmark")} {x.get("version") or ""}'), esc(x.get("model") or "–"), esc(f'{x.get("score")} {x.get("unit") or ""}'),
+                  f'<a href="{esc(x.get("url"))}">link</a>, {esc(x.get("date"))}', esc(x.get("status"))] for x in full]
+    out.append("<h3>1. Published leaderboards (the headline numbers)</h3>" + T["quality_boards_intro"]
+               + table(["App / harness", "Benchmark", "Model", "Score", "Source and date", "Checked", "Note"], rows)
+               + f"<details><summary>All {len(full)} verified rows, with every board's link and date</summary>"
+               + table(["App", "Benchmark", "Model", "Score", "Source", "Checked"], full_rows) + "</details>")
+    # 2. each app on its own plan
+    rows = []
+    for app, r in (subs.items() if isinstance(subs, dict) else []):
+        if not isinstance(r, dict) or "runs" not in r:
+            continue
+        runs = r["runs"]
+        n = len(runs)
+        solved = sum(1 for x in runs if x.get("passed"))
+        tp = sum(x.get("tests_passed", 0) for x in runs)
+        tt = sum(x.get("tests_total", 0) for x in runs)
+        secs = sorted(x.get("secs", 0) for x in runs)
+        # From each app's own config where it says (the parsed output named Claude Code's background model).
+        models = [{"Claude Code": "Opus (the plan default in ~/.claude/settings.json)", "Trek (Claude Code inside Trek)": "Opus 5.5 (Trek's Claude Code default)",
+                   "Codex": "GPT-6 Astra, medium effort (~/.codex/config.toml)"}.get(app, "plan default, not reported")]
+        rows.append({"cls": "trek" if app.startswith("Trek") else "", "cells": [
+            esc(app), f"<b>{solved} / {n}</b>", f"{tp} / {tt}", f"{secs[len(secs)//2] if secs else '–'} s", esc(", ".join(models)[:80] or "plan default"),
+            esc(r.get("stopped", "") or "–"), "this Mac, 27–28 Nov" + (" (rerun after a launch-flag fix)" if r.get("rerun") else "")]})
+    out.append("<h3>2. Each app on its own plan (not the same model)</h3>" + T["quality_subs_intro"]
+               + table(["App", "Exercises solved", "Unit tests passed", "Median time", "Model reported", "Stopped early", "Source"], rows, "data nums"))
+    # 3. same local model
+    runs3 = tbo.get("runs", []) if isinstance(tbo, dict) else []
+    def tests(x):
+        t = x.get("tests") or ""
+        return tuple(int(v) for v in t.split("/")) if "/" in t else None
+    base = {x["task"]: tests(x) for x in runs3 if x["harness"] == "nop" and tests(x)}
+    by = {}
+    for x in runs3:
+        if x["harness"] != "nop":
+            by.setdefault(x["harness"], []).append(x)
+    rows = []
+    for h in ["trek-direct", "opencode", "droid", "claude-code", "codex"]:
+        rs = [x for x in by.get(h, []) if x["task"] in base]
+        if not rs:
+            continue
+        solved = sum(1 for x in rs if (x.get("reward") or 0) >= 1)
+        gained = lost = tp = tt = 0
+        for x in rs:
+            t = tests(x)
+            b = base[x["task"]]
+            if t:
+                tp += t[0]; tt += t[1]
+                d = t[0] - b[0]
+                gained += max(d, 0); lost += max(-d, 0)
+        better = sum(1 for x in rs if tests(x) and tests(x)[0] > base[x["task"]][0])
+        capped = sum(1 for x in rs if "timed out" in (x.get("exception") or ""))
+        errs = sum(1 for x in rs if x.get("exception") and "timed out" not in x["exception"])
+        name = {"trek-direct": "Trek (Direct harness)", "opencode": "OpenCode", "droid": "Factory Droid (BYOK)", "claude-code": "Claude Code (via LiteLLM)", "codex": "Codex"}[h]
+        rows.append({"cls": "trek" if h.startswith("trek") else "", "cells": [esc(name), str(len(rs)), f"<b>{solved}</b>", f"{better}", f"+{gained} / −{lost}", f"{tp} / {tt}", str(capped), str(errs)]})
+    bt = sum(v[0] for v in base.values()); btt = sum(v[1] for v in base.values())
+    spent = (tbo.get("spend_end") or {}).get("spent_usd", tbo.get("spent_usd")) if isinstance(tbo, dict) else None
+    out.append("<h3>3. One model, five harnesses (the same-model head-to-head)</h3>" + T["quality_local_intro"]
+               + table(["Harness (source: this Mac, DeepSeek V4 Flash via OpenRouter)", "Tasks run", "Tasks passed", "Tasks improved", "Tests gained / lost vs the untouched task", "Tests passing after", "Hit the 8-min cap", "Errors"], rows, "data nums")
+               + f"<p class='sub'>The untouched tasks (Harbor's nop agent, no model) already pass {bt} of {btt} verifier tests across the {len(base)} tasks; a harness that makes no change scores exactly that. "
+               + (f"Spent on OpenRouter: ${spent:.2f}." if isinstance(spent, (int, float)) else "") + "</p>"
+               + T["quality_local_after"])
+    return "\n".join(out)
+
+
 # ---------------------------------------------------------------- accessibility
 ax_rows = []
 for a in APP_ORDER + [x for x in ax_pass if x not in APP_ORDER]:
@@ -214,6 +298,7 @@ html_out = f"""<!doctype html>
 {section('performance', 'Performance', T['perf_intro'] + '<div class="grid2">' + chart_mem + chart_launch + '</div><div class="grid2">' + chart_cpu + chart_proc + '</div>' + T['perf_after'] + T['claims_html'])}
 {section('scale', 'Scale: thousands of threads, hundreds of tabs', T['scale_intro'] + '<h3>Threads in the sidebar</h3>' + table(['Threads', 'Launch', 'Footprint idle', 'Footprint drawn', 'Idle CPU', 'Sidebar scroll frame p50/p95', 'Open the oldest thread', 'Typing latency p50/p95', 'Load'], thread_rows, 'data nums') + '<div class="grid2">' + chart_thr + chart_tabs + '</div>' + '<h3>Browser tabs</h3>' + table(['Tabs', 'New tab p50', 'Last 10 tabs p50', 'Trek footprint', 'WebKit processes / footprint', 'Total', 'Typing p95', 'Tabs kept', 'Load'], tab_rows, 'data nums') + T['scale_after'])}
 {section('swarm', 'Swarming: many agents at once', T['swarm_intro'] + table(['Swarm', 'Footprint before', 'Footprint peak', 'Trek CPU', 'Frame p50/p95', 'Typing p95', 'Open a thread', 'All finished', 'Sessions alive', 'Machine load'], swarm_rows, 'data nums') + T['swarm_after'])}
+{section('quality', 'Agent quality: three free sources', quality_html())}
 {section('tokens', 'Tokens and harness quality', T['tokens_intro'] + chart_hi + T['tb_html'] + T['tokens_after'])}
 {section('features', 'Features', T['features_intro'] + feat_table + T['features_after'])}
 {section('ux', 'Beginner UX and accessibility', T['ux_intro'] + ax_table + T['ux_after'])}
