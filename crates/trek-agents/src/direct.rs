@@ -325,9 +325,13 @@ async fn project_instructions(exec: &dyn ToolExecutor, cwd: &Path) -> Option<Str
 
 static ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// An id no other call makes, in this process or another: the time, the process and a count. (The
+/// count alone starts at 0 in every process, so two processes making one in the same millisecond
+/// made the same: under nextest, where each test is a process, two tests shared a working folder
+/// named by it and the first to finish deleted it from under the other.)
 fn next_id() -> String {
     let c = ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("{}_{c}", trek_core::store::now_ms())
+    format!("{}_{}_{c}", trek_core::store::now_ms(), std::process::id())
 }
 
 /// The tools a session offers: what a read-only session can't use isn't on offer, and `web_fetch`
@@ -6579,8 +6583,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_execution_file_ops() {
-        let temp_dir =
-            std::env::temp_dir().join(format!("trek_test_direct_{}", trek_core::store::now_ms()));
+        let temp_dir = std::env::temp_dir().join(format!("trek_test_direct_{}", next_id()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let cwd = &temp_dir;
 
