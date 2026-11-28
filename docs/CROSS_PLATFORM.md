@@ -48,8 +48,9 @@ Four things keep it that way, the first three run on both platforms' CI for ever
 4. **Every feature is shown working on each platform, by the same steps.** A feature in the ledger
    says how to see it in the capture build (`live`: an isolated Trek driven by commands, ending
    in a check), or why an isolated run can't show it (`live_skip`). CI holds every feature to one
-   or the other, and `.github/workflows/live.yml` runs every feature's steps on a Mac and on a PC
-   for each pull request, the report in the run's summary and each feature's screenshot kept.
+   or the other, and `.github/workflows/live.yml` runs every feature's steps on a Mac, a PC and Linux
+   once for each pull request before it merges ("The live checks" below), and on every push to
+   main, the report in the run's summary and each feature's screenshot kept.
    `cargo run -p trek-parity --bin parity-live` runs them on whichever computer it's on and writes
    `docs/parity/live-<platform>.md`: the same steps on both, so a feature built on one is seen
    working, or not, on the other, before a user finds it.
@@ -190,6 +191,55 @@ had 1,308 platform gates in 187 files, 595 of them in trek-app.
 CI has a `lint-windows` job (`.github/workflows/ci.yml`). It runs the same Clippy correctness and
 suspicious lints as the Mac's `lint` job, over trek-app's targets and every crate's lib and bins.
 It has its own cache, parallel with the tests.
+
+### The live checks
+
+`.github/workflows/live.yml` starts the real app on all three platforms and runs the ledger's steps.
+It takes 30 to 45 minutes and a macOS runner, so it runs once per pull request, before the merge, not
+on every push:
+
+- **Before merging, the merger (an agent or a person) labels the pull request once:**
+
+      gh pr edit <number> --add-label live
+
+  then waits for it: `gh pr checks <number> --watch --interval 120` (Live (macOS), Live (Windows),
+  Live (Linux), and the **Live** status). Once a pull request has the label, each later push to it
+  runs the checks again, so what merges is what was checked. Marking a draft ready for review runs
+  them too, and so does `gh workflow run live.yml --ref <branch>`. A change with no app code runs
+  none of them, labelled or not.
+- **Agents merge with `./bin/agent-cli merge <number>`** (`script/merge-pr`; its tests are
+  `script/tests/merge-pr.py`). It merges only when the newest CI run of the head passed and, for a
+  change to app code (`script/live-plan.py`: a file in a crate or one a crate reads, Markdown and
+  `ios/` included), a Live run of that same head passed on all three platforms; otherwise it says
+  what's missing and the command that fixes it.
+- **Pull requests from forks** get no **Live** status: their token can't write one. Their Live run
+  still starts on the label (a maintainer adds it), and `agent-cli merge` reads the run's jobs, not
+  the status, so it holds them to the same rule. A required **Live** status (below) would block a
+  fork's pull request until a maintainer merges it past the rule.
+- **What enforces it.** Nothing on GitHub, today: `main` has no branch protection, so the rule is
+  `agent-cli merge`. Making GitHub enforce it is the owner's choice:
+  - *Require the `Live` status (and `CI result`) on `main`* (a ruleset, or classic branch
+    protection). That also applies to pushes: the release workflow pushes its `Release v<version>`
+    commit straight to `main` as `github-actions[bot]` with `GITHUB_TOKEN`
+    (`script/lib/release-finish.sh push`, `git push --atomic`), a commit no check has run on, and
+    the push would be refused. A ruleset can let it through only with a bypass actor the push comes
+    from: a deploy key (the release pushes over SSH with it) or a GitHub App's token (the release
+    pushes with it), listed as bypass. `GITHUB_TOKEN` can't be one.
+  - *Or require them for pull requests only*: a ruleset with "Require a pull request before merging"
+    and the status checks, and the release workflow given bypass the same way, or the bump made
+    through a pull request of its own.
+  - *Or leave GitHub as it is* and keep `agent-cli merge` as the rule, which binds agents and
+    anyone who uses it, not a person pressing the merge button.
+- **Without the label**, a push runs only the first job ("Live plan", seconds), which sets the
+  pull request head's **Live** status: *success* when the change touches no app code (the docs but
+  `docs/parity/`, the site, the iPhone app, media, the brand files, the other workflows), *pending*
+  ("waiting for the live label") when it does, and the checks' verdict once they ran on that head.
+  Requiring the **Live** status on `main` (Settings › Branches) makes a missing or failed Live run
+  block the merge of a pull request that touches app code, and nothing else.
+- **Every push to `main`** runs them, as before: main's run is the one that saves Live's caches.
+
+A failed check's report is in the run's summary; each attempt keeps its own artifacts
+(`live-<platform>-<attempt>`: screenshots, `start.json`, the app's `trek.log`).
 
 ### Releases
 

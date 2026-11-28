@@ -6,9 +6,18 @@ name: Live
 # user. `cargo run -p trek-parity --bin parity-live` runs them (it's what a developer runs against
 # their own capture build); each job writes its report to the run's summary and keeps it, every
 # feature's screenshot and the app's log as artifacts.
+#
+# Once per pull request, before it merges, not on every push (docs/CROSS_PLATFORM.md, "The live
+# checks"): when a pull request is marked ready for review, when it's given the label `live`, and,
+# once it has that label, on each later push to it, so what merges is what was checked. And on
+# every push to main, and on a dispatch. A pull request without the label, or a draft, runs only
+# the small first job, which sets the pull request's head's "Live" status: passed when the change
+# touches no app code, waiting (for the label) when it does, and the checks' verdict once they ran.
+#
+#   gh pr edit <number> --add-label live      the merger's one command, before merging
 on:
   pull_request:
-    paths-ignore: ['media/**', 'ios/**', 'assets/brand/**']
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
   push:
     branches: [main]
   workflow_dispatch:
@@ -16,8 +25,10 @@ on:
 permissions:
   contents: read
 
+# A run that will check (`decide` below says the same) has a group of its own, so a label added for
+# something else, or a push before the label, never cancels the checks underway.
 concurrency:
-  group: live-${{ github.ref }}
+  group: live-${{ github.ref }}-${{ github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || (github.event.action == 'labeled' && github.event.label.name == 'live') || (github.event.action != 'labeled' && !github.event.pull_request.draft && contains(github.event.pull_request.labels.*.name, 'live')) }}
   cancel-in-progress: true
 
 env:
@@ -26,8 +37,64 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  # Whether this event runs the checks, whether the change touches app code (any file but the docs,
+  # the site, the iPhone app, media, the brand files and the other workflows: the ledger's steps in
+  # docs/parity/ are app code here), and the pull request head's "Live" status that says so.
+  decide:
+    name: Live plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      statuses: write
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      app: ${{ steps.decide.outputs.app }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Decide
+        id: decide
+        env:
+          RUN: ${{ github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || (github.event.action == 'labeled' && github.event.label.name == 'live') || (github.event.action != 'labeled' && !github.event.pull_request.draft && contains(github.event.pull_request.labels.*.name, 'live')) }}
+        run: |
+          app=true
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            # What the merge commit brings to main, a moved file at both paths (script/live-plan.py:
+            # a file in a crate, or one a crate reads, is app code, Markdown and ios/ too).
+            app=$(python3 script/live-plan.py)
+          fi
+          # A change with no app code runs nothing, even marked ready or labelled.
+          run=false
+          if [ "$RUN" = true ] && [ "$app" = true ]; then run=true; fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "app=$app" >> "$GITHUB_OUTPUT"
+          echo "Live checks run: $run (this event asks: $RUN); the change touches app code: $app" >> "$GITHUB_STEP_SUMMARY"
+      - name: The pull request's Live status
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          RUN: ${{ steps.decide.outputs.run }}
+          APP: ${{ steps.decide.outputs.app }}
+        run: |
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          if [ "$APP" != true ]; then state=success; what="no app code changed: no live checks needed"
+          elif [ "$RUN" = true ]; then state=pending; what="the live checks are running"
+          else
+            # Already checked on this very head (a label for something else, a reopen): leave it.
+            if gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/statuses" --jq '[.[] | select(.context == "Live")][0].state' | grep -qx success; then exit 0; fi
+            state=pending; what="waiting for the live label: gh pr edit ${{ github.event.pull_request.number }} --add-label live"
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state="$state" -f context=Live -f description="$what" -f target_url="$url" > /dev/null
+          echo "Live: $state, $what"
+
   live-macos:
     name: Live (macOS)
+    needs: decide
+    if: needs.decide.outputs.run == 'true'
     runs-on: macos-15
     # A pull request builds the app cold until main has saved this workflow's cache.
     timeout-minutes: 120
@@ -66,9 +133,11 @@ jobs:
           fi
           xcrun -sdk macosx metal --version
 
-      # The mock agent's video makes its clip with ffmpeg.
+      # The mock agent's video makes its clip with ffmpeg: the step fails if it isn't there after.
       - name: ffmpeg
-        run: command -v ffmpeg || brew install ffmpeg
+        run: |
+          command -v ffmpeg || brew install ffmpeg || { sleep 20; brew install ffmpeg; }
+          ffmpeg -version | head -1
 
       # The capture build in the log (its time, and any error) before the driver starts the app; the
       # driver's own build then finds it done. It builds into target/shots: the shots feature
@@ -120,7 +189,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: live-macos
+          name: live-macos-${{ github.run_attempt }}
           path: |
             live-macos.md
             start.json
@@ -145,6 +214,8 @@ jobs:
 
   live-windows:
     name: Live (Windows)
+    needs: decide
+    if: needs.decide.outputs.run == 'true'
     runs-on: windows-2022
     # A pull request builds the app cold until main has saved this workflow's cache.
     timeout-minutes: 120
@@ -184,9 +255,21 @@ jobs:
       - name: Cache freshness
         run: python script/ci-cache.py restore
 
-      # The mock agent's video makes its clip with ffmpeg.
+      # The mock agent's video makes its clip with ffmpeg. Chocolatey's feed answers 504 at times,
+      # and `choco` then installs nothing and still exits 0: video-transcripts and video-posters
+      # failed with nothing wrong (run 46022931315). So: a few tries, and the step fails if there's
+      # still no ffmpeg, rather than the checks failing for want of it.
       - name: ffmpeg
-        run: if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) { choco install ffmpeg -y --no-progress }
+        run: |
+          foreach ($try in 1..4) {
+            if (Get-Command ffmpeg -ErrorAction SilentlyContinue) { break }
+            choco install ffmpeg -y --no-progress
+            Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1" -ErrorAction SilentlyContinue
+            refreshenv | Out-Null
+            if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds (15 * $try) }
+          }
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) { throw 'ffmpeg could not be installed (Chocolatey)' }
+          ffmpeg -version | Select-Object -First 1
 
       # The capture build in the log (its time, and any error) before the driver starts the app; the
       # driver's own build then finds it done.
@@ -279,7 +362,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: live-windows
+          name: live-windows-${{ github.run_attempt }}
           path: |
             live-windows.md
             start.json
@@ -308,6 +391,8 @@ jobs:
   # with its reason.
   live-linux:
     name: Live (Linux)
+    needs: decide
+    if: needs.decide.outputs.run == 'true'
     runs-on: ubuntu-22.04
     # A pull request builds the app cold until main has saved this workflow's cache.
     timeout-minutes: 120
@@ -382,7 +467,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: live-linux
+          name: live-linux-${{ github.run_attempt }}
           path: |
             live-linux.md
             start.json
@@ -406,3 +491,30 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: ${{ steps.key.outputs.key }}
+
+  # The verdict on the pull request's head, as its "Live" status (what a merger, and branch
+  # protection, can wait for): the three jobs above passed, or not.
+  report:
+    name: Live result
+    needs: [decide, live-macos, live-windows, live-linux]
+    if: always() && needs.decide.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    steps:
+      - name: Live status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          RESULTS: ${{ needs.live-macos.result }} ${{ needs.live-windows.result }} ${{ needs.live-linux.result }}
+          FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          if [ "$RESULTS" = "success success success" ]; then state=success; what="macOS, Windows and Linux passed"
+          else state=failure; what="macOS, Windows, Linux: $RESULTS"; fi
+          echo "Live: $state ($what)"
+          if [ "$FORK" != true ]; then
+            gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state="$state" -f context=Live -f description="$what" -f target_url="$url" > /dev/null
+          fi
+          [ "$state" = success ]

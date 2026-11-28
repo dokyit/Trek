@@ -621,6 +621,19 @@ def cmd_disk(a):
     return d
 
 
+def cmd_merge(a):
+    """Merge a pull request only when CI passed on its head and, when it touches app code, the live checks (Live, all three platforms) did too (script/merge-pr)."""
+    args = [str(a.number)] + (["--dry-run"] if a.dry_run else []) + (["--", *a.merge_args] if a.merge_args else [])
+    if OFFLINE:
+        return {"pr": a.number, "offline": True, "_text": [f"offline: would run script/merge-pr {' '.join(args)}"]}
+    p = subprocess.run([sys.executable, str(ROOT / "script" / "merge-pr"), *args], cwd=str(ROOT),
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    lines = [l for l in p.stdout.splitlines() if l.strip()]
+    if p.returncode != 0:
+        raise CliError("\n".join(lines) or f"script/merge-pr exited {p.returncode}")
+    return {"pr": a.number, "merged": not a.dry_run, "dry_run": a.dry_run, "_text": lines}
+
+
 def cmd_release(a):
     """Latest tag, release run state, in-progress guard, and the exact gh line for the next version."""
     tag = latest_tag()
@@ -2117,6 +2130,11 @@ def build_parser():
     s.add_argument("--fast", action="store_true", help="skip per-worktree git status and du")
     add("disk", cmd_disk, epilog="Prints levers; never deletes anything itself.")
     add("release", cmd_release, epilog="Prints the dispatch line; never dispatches.")
+    s = add("merge", cmd_merge, epilog="The way agents merge (AGENTS.md). Refuses, saying what to do, when CI or (for app code) Live hasn't passed on the head. "
+            "Examples: agent-cli merge 99 --dry-run; agent-cli merge 99; agent-cli merge 99 -- --squash")
+    s.add_argument("number", type=int)
+    s.add_argument("--dry-run", action="store_true", help="say whether it may merge; don't merge")
+    s.add_argument("merge_args", nargs="*", help="after --: options for gh pr merge (default --merge)")
     s = add("downloads", cmd_downloads, epilog="Replaces: gh api repos/dokyit/Trek/releases | jq '.[].assets[].download_count'. "
             f"PostHog installs need a personal API key (phx_...) in {POSTHOG_KEY_FILE}; project id in {POSTHOG_PROJECT_FILE} "
             "or TREK_POSTHOG_PROJECT (default @current).")
@@ -2199,6 +2217,7 @@ def build_parser():
 SELFTEST_ARGS = {
     "dock": [],
     "perf": ["--dry-run"],
+    "merge": ["1", "--dry-run"],
     "status": [], "ci": ["latest"], "crates": [], "feature": ["video"], "where": ["--defs", "main", "--max", "3"],
     "logs": ["5"], "worktrees": ["--fast"], "disk": [], "release": [], "downloads": ["3"], "phone": [], "memory": [], "tasks": ["3"],
     "digest": ["-"], "test": ["--dry-run", "-p", "trek-time"], "check": ["--dry-run", "-p", "trek-time"],
