@@ -1,0 +1,8 @@
+{"what": "Blind review of the first screen a new user sees, captured on this Mac (Trek's isolated first run; the others as installed: Claude, Capy and Warp never signed in, Conductor at sign-up, Paseo and super.engineering freshly installed, Zed's start page). Unlabelled A-H, separate read-only sub-agent. Scores 1-10.",
+ "key": {"A": "Warp", "B": "super.engineering", "C": "Paseo", "D": "Capy", "E": "Trek", "F": "Conductor", "G": "Claude", "H": "Zed"},
+ "criteria": ["next step", "beginner", "type", "colour", "craft", "distinct"],
+ "scores": {"A": [8,6,6,5,7,4,6], "B": [6,2,3,5,5,3,3], "C": [7,6,7,7,7,6,6], "D": [8,3,7,5,7,7,5], "E": [8,9,7,7,7,7,8], "F": [7,6,7,7,7,8,7], "G": [8,5,8,7,8,6,7], "H": [7,4,7,6,8,4,5]},
+ "ranking": ["E", "G", "F", "C", "A", "H", "D", "B"],
+ "on_E_trek": {"best": "Says what the product is, that setup is short and optional, that data stays on the machine; asks for no account or permissions; the pixel figure walking to a signpost gives it identity.",
+   "faults": ["the 'Get started' button is small next to the wide card row", "white on the light orange button is likely about 3:1", "grey card body text on dark grey is only moderate", "small illustration in a lot of empty space"]},
+ "caveats": "A and B may have been caught mid-animation; G shows a machine-specific gateway screen; H says 'Welcome back'; one static frame each, contrast eyeballed. Trek's next screens ask for 7 macOS permissions, which this frame doesn't show."}

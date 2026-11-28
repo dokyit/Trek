@@ -1,0 +1,21 @@
+{
+ "what": "axprobe (scripts/axprobe.swift): the macOS accessibility tree VoiceOver reads, after setting AXManualAccessibility",
+ "trek_installed_0.4.68_owner_window": {
+  "nodes": 10,
+  "controls": 6,
+  "named_controls": 1,
+  "static_texts": 0
+ },
+ "trek_main_isolated_empty_thread": {
+  "nodes": 16,
+  "controls": 13,
+  "named_controls": 2,
+  "static_texts": 0
+ },
+ "trek_main_isolated_settings_general": {
+  "nodes": 21,
+  "controls": 17,
+  "named_controls": 3,
+  "static_texts": 0
+ }
+}

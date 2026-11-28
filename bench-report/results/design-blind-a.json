@@ -1,0 +1,12 @@
+{"what": "Blind design review of each maker's own marketing screenshot (README or site hero), unlabelled A-H, by a separate read-only sub-agent that was told not to identify products. Scores 1-10.",
+ "key": {"A": "Conductor (og image, app region cropped)", "B": "Synara (README split view dark)", "C": "Zed (og image, app region cropped)", "D": "Orca (README hero)", "E": "OpenCode desktop (docs screenshot)", "F": "Paseo (site hero mockup)", "G": "T3 Code (README hero)", "H": "Trek (README hero, Night)"},
+ "criteria": ["hierarchy", "typography", "colour", "density", "craft", "calm", "distinct"],
+ "scores": {"A": [6,7,7,6,7,7,7,6], "B": [5,7,7,5,6,7,3,5.5], "C": [5,8,7,7,7,8,6,6.5], "D": [6,6,6,5,6,5,5,5.5], "E": [7,6,8,6,7,8,6,6], "F": [5,6,6,5,6,5,4,5], "G": [8,8,8,7,8,8,5,7.5], "H": [9,7,6,6,7,7,7,7]},
+ "ranking": ["G", "H", "C", "E", "A", "D", "B", "F"],
+ "on_H_trek": {"best": "Inbox first in the sidebar ('Waiting: a plan to review' in amber), a framed plan card with an orange 'Approve and start', a composer placeholder that says what to do next; strongest identity of the set.",
+   "faults": ["too many accent hues: orange, amber, green, an indigo plan border, a purple branch icon, a red stop button and a pink badge; the indigo border competes with the orange button",
+              "nearly every sidebar title is heavy bold, flattening the levels",
+              "about 200 px of dead space between 'Read 1 file and ran 1 search' and the plan card",
+              "every tab uses the same icon",
+              "a red stop button shows while the agent is waiting for approval, which mixes up the state"]},
+ "caveats": "A is a small crop and C a strip (hierarchy guessed); A is the only light theme; D, F, G overlay a phone; all are staged marketing images."}

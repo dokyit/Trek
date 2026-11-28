@@ -1,0 +1,55 @@
+{
+ "what": "'hi' with `claude -p --output-format json --strict-mcp-config --model claude-opus-5-5 --effort low` in an empty git repo, the owner's user config the same in every run. bare = no flags; barets = bare with ENABLE_TOOL_SEARCH=true; trek = Trek's own flags read from a running Trek session's argv: --append-system-prompt (3,678 chars), --mcp-config (6 Trek servers), --add-dir (Trek skills), --disallowedTools Workflow,ScheduleWakeup,EnterWorktree,ExitWorktree,ReportFindings, ENABLE_TOOL_SEARCH=true.",
+ "claude_code_version": "2.1.332 (Claude Code)",
+ "date": "2026-11-27",
+ "runs": [
+  {
+   "run": "bare-1",
+   "input_total": 40121,
+   "input_tokens": 2,
+   "cache_creation_input_tokens": 15904,
+   "cache_read_input_tokens": 24215,
+   "output_tokens": 13
+  },
+  {
+   "run": "bare-2",
+   "input_total": 40119,
+   "input_tokens": 2,
+   "cache_creation_input_tokens": 13335,
+   "cache_read_input_tokens": 26782,
+   "output_tokens": 14
+  },
+  {
+   "run": "barets-1",
+   "input_total": 40120,
+   "input_tokens": 2,
+   "cache_creation_input_tokens": 13336,
+   "cache_read_input_tokens": 26782,
+   "output_tokens": 14
+  },
+  {
+   "run": "barets-2",
+   "input_total": 40121,
+   "input_tokens": 2,
+   "cache_creation_input_tokens": 13337,
+   "cache_read_input_tokens": 26782,
+   "output_tokens": 13
+  },
+  {
+   "run": "trek-1",
+   "input_total": 39108,
+   "input_tokens": 2,
+   "cache_creation_input_tokens": 39106,
+   "cache_read_input_tokens": 0,
+   "output_tokens": 14
+  },
+  {
+   "run": "trek-2",
+   "input_total": 39104,
+   "input_tokens": 2,
+   "cache_creation_input_tokens": 15591,
+   "cache_read_input_tokens": 23511,
+   "output_tokens": 13
+  }
+ ]
+}

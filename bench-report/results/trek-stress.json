@@ -1,0 +1,434 @@
+{
+ "threads": {
+  "100": {
+   "seed_secs": 0.1,
+   "load": 2.96,
+   "launch_ms_runs": [
+    208,
+    202,
+    215
+   ],
+   "launch_ms": 208,
+   "rss_mb": 137,
+   "footprint_mb": 65,
+   "idle_cpu_pct": 0.03,
+   "drawn_footprint_mb": 66,
+   "sidebar_scroll": {
+    "frames": "301",
+    "frame_p50": "5.3",
+    "frame_p95": "6.9",
+    "latency_p95": "20.7",
+    "unpainted": "0"
+   },
+   "opened_title": "Review the release script #99",
+   "open_thread": {
+    "loaded": "3.9",
+    "painted": "63.1"
+   },
+   "typing": {
+    "latency_p50": "11.5",
+    "latency_p95": "19.1",
+    "unpainted": "0",
+    "frames": "62"
+   },
+   "footprint_after_mb": 159,
+   "load_after": 2.83
+  },
+  "1000": {
+   "seed_secs": 1.2,
+   "load": 2.83,
+   "launch_ms_runs": [
+    186,
+    183,
+    194
+   ],
+   "launch_ms": 186,
+   "rss_mb": 181,
+   "footprint_mb": 69,
+   "idle_cpu_pct": 0.03,
+   "drawn_footprint_mb": 71,
+   "sidebar_scroll": {
+    "frames": "300",
+    "frame_p50": "5.9",
+    "frame_p95": "7.4",
+    "latency_p95": "22.4",
+    "unpainted": "0"
+   },
+   "opened_title": "Review the release script #999",
+   "open_thread": {
+    "loaded": "3.0",
+    "painted": "57.9"
+   },
+   "typing": {
+    "latency_p50": "10.3",
+    "latency_p95": "18.4",
+    "unpainted": "0",
+    "frames": "62"
+   },
+   "footprint_after_mb": 163,
+   "load_after": 3.16
+  },
+  "5000": {
+   "seed_secs": 5.4,
+   "load": 3.15,
+   "launch_ms_runs": [
+    200,
+    202,
+    188
+   ],
+   "launch_ms": 200,
+   "rss_mb": 395,
+   "footprint_mb": 107,
+   "idle_cpu_pct": 0.03,
+   "drawn_footprint_mb": 108,
+   "sidebar_scroll": {
+    "frames": "300",
+    "frame_p50": "7.0",
+    "frame_p95": "9.2",
+    "latency_p95": "24.1",
+    "unpainted": "0"
+   },
+   "opened_title": "Review the release script #4999",
+   "open_thread": {
+    "loaded": "77.9",
+    "painted": "87.9"
+   },
+   "typing": {
+    "latency_p50": "10.9",
+    "latency_p95": "18.9",
+    "unpainted": "0",
+    "frames": "61"
+   },
+   "footprint_after_mb": 193,
+   "load_after": 2.78
+  },
+  "10000": {
+   "seed_secs": 10.8,
+   "load": 2.76,
+   "launch_ms_runs": [
+    221,
+    231,
+    217
+   ],
+   "launch_ms": 221,
+   "rss_mb": 665,
+   "footprint_mb": 154,
+   "idle_cpu_pct": 0.03,
+   "drawn_footprint_mb": 159,
+   "sidebar_scroll": {
+    "frames": "300",
+    "frame_p50": "9.4",
+    "frame_p95": "10.9",
+    "latency_p95": "26.7",
+    "unpainted": "0"
+   },
+   "opened_title": "Review the release script #9999",
+   "open_thread": {
+    "loaded": "95.0",
+    "painted": "112.8"
+   },
+   "typing": {
+    "latency_p50": "12.2",
+    "latency_p95": "19.0",
+    "unpainted": "0",
+    "frames": "62"
+   },
+   "footprint_after_mb": 238,
+   "load_after": 3.6
+  }
+ },
+ "_meta": {
+  "threads": {
+   "finished": "2026-11-27 20:24:14",
+   "work": "<tmp>"
+  },
+  "swarm": {
+   "finished": "2026-11-27 20:34:26",
+   "work": "<tmp>"
+  },
+  "browser": {
+   "finished": "2026-11-27 20:37:42",
+   "work": "<tmp>"
+  }
+ },
+ "swarm": {
+  "stream-10": {
+   "load": 3.6,
+   "agents": 10,
+   "footprint_before_mb": 70,
+   "start_all_secs": 0.21,
+   "sessions_line": {
+    "label": "swarm",
+    "alive": "10",
+    "titles": "mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s"
+   },
+   "frames": {
+    "frames": "178",
+    "frame_p50": "5.2",
+    "frame_p95": "7.5",
+    "lag_p95": "7.5"
+   },
+   "open_thread_during": {
+    "loaded": "16.8",
+    "painted": "69.4"
+   },
+   "typing_during": {
+    "latency_p50": "13.0",
+    "latency_p95": "19.5",
+    "unpainted": "0"
+   },
+   "footprint_peak_mb": 194,
+   "rss_peak_mb": 166,
+   "cpu_pct_of_one_core": 19.4,
+   "child_processes": 0,
+   "all_turns_ended": true,
+   "rss_after_mb": 170,
+   "load_after": 2.98
+  },
+  "stream-20": {
+   "load": 2.98,
+   "agents": 20,
+   "footprint_before_mb": 70,
+   "start_all_secs": 0.33,
+   "sessions_line": {
+    "label": "swarm",
+    "alive": "20",
+    "titles": "mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s"
+   },
+   "frames": {
+    "frames": "175",
+    "frame_p50": "5.7",
+    "frame_p95": "7.0",
+    "lag_p95": "7.2"
+   },
+   "open_thread_during": {
+    "loaded": "2.5",
+    "painted": "23.9"
+   },
+   "typing_during": {
+    "latency_p50": "12.4",
+    "latency_p95": "19.6",
+    "unpainted": "0"
+   },
+   "footprint_peak_mb": 184,
+   "rss_peak_mb": 169,
+   "cpu_pct_of_one_core": 24.9,
+   "child_processes": 0,
+   "all_turns_ended": true,
+   "rss_after_mb": 175,
+   "load_after": 3.54
+  },
+  "stream-50": {
+   "load": 3.54,
+   "agents": 50,
+   "footprint_before_mb": 70,
+   "start_all_secs": 0.95,
+   "sessions_line": {
+    "label": "swarm",
+    "alive": "50",
+    "titles": "mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s|mock:stream_90s"
+   },
+   "frames": {
+    "frames": "176",
+    "frame_p50": "4.3",
+    "frame_p95": "6.4",
+    "lag_p95": "6.3"
+   },
+   "open_thread_during": {
+    "loaded": "3.0",
+    "painted": "28.6"
+   },
+   "typing_during": {
+    "latency_p50": "11.1",
+    "latency_p95": "20.2",
+    "unpainted": "0"
+   },
+   "footprint_peak_mb": 219,
+   "rss_peak_mb": 187,
+   "cpu_pct_of_one_core": 35.9,
+   "child_processes": 0,
+   "all_turns_ended": true,
+   "rss_after_mb": 198,
+   "load_after": 3.14
+  },
+  "subagents-10": {
+   "load": 3.14,
+   "agents": 10,
+   "footprint_before_mb": 71,
+   "start_all_secs": 0.21,
+   "sessions_line": {
+    "label": "swarm",
+    "alive": "10",
+    "titles": "Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion"
+   },
+   "frames": {
+    "frames": "0",
+    "frame_p50": "0.0",
+    "frame_p95": "0.0",
+    "lag_p95": "1.4"
+   },
+   "open_thread_during": {
+    "loaded": "16.5",
+    "painted": "76.8"
+   },
+   "typing_during": {
+    "latency_p50": "13.4",
+    "latency_p95": "19.8",
+    "unpainted": "0"
+   },
+   "footprint_peak_mb": 121,
+   "rss_peak_mb": 159,
+   "cpu_pct_of_one_core": 3.3,
+   "child_processes": 0,
+   "all_turns_ended": true,
+   "rss_after_mb": 159,
+   "load_after": 4.24
+  },
+  "subagents-20": {
+   "load": 4.24,
+   "agents": 20,
+   "footprint_before_mb": 70,
+   "start_all_secs": 0.33,
+   "sessions_line": {
+    "label": "swarm",
+    "alive": "20",
+    "titles": "Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion"
+   },
+   "frames": {
+    "frames": "0",
+    "frame_p50": "0.0",
+    "frame_p95": "0.0",
+    "lag_p95": "1.4"
+   },
+   "open_thread_during": {
+    "loaded": "19.9",
+    "painted": "67.9"
+   },
+   "typing_during": {
+    "latency_p50": "13.3",
+    "latency_p95": "19.8",
+    "unpainted": "0"
+   },
+   "footprint_peak_mb": 123,
+   "rss_peak_mb": 161,
+   "cpu_pct_of_one_core": 3.9,
+   "child_processes": 0,
+   "all_turns_ended": true,
+   "rss_after_mb": 161,
+   "load_after": 2.95
+  },
+  "subagents-50": {
+   "load": 2.95,
+   "agents": 50,
+   "footprint_before_mb": 70,
+   "start_all_secs": 0.64,
+   "sessions_line": {
+    "label": "swarm",
+    "alive": "50",
+    "titles": "Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion|Get_a_second_opinion"
+   },
+   "frames": {
+    "frames": "0",
+    "frame_p50": "0.0",
+    "frame_p95": "0.0",
+    "lag_p95": "1.4"
+   },
+   "open_thread_during": {
+    "loaded": "23.4",
+    "painted": "78.4"
+   },
+   "typing_during": {
+    "latency_p50": "11.4",
+    "latency_p95": "18.2",
+    "unpainted": "0"
+   },
+   "footprint_peak_mb": 137,
+   "rss_peak_mb": 176,
+   "cpu_pct_of_one_core": 5.7,
+   "child_processes": 0,
+   "all_turns_ended": true,
+   "rss_after_mb": 172,
+   "load_after": 3.35
+  }
+ },
+ "browser": {
+  "50": {
+   "load": 3.35,
+   "tabs": 50,
+   "open_all_secs": 15.4,
+   "new_tab_ms_p50": 320,
+   "new_tab_ms_p95": 328,
+   "new_tab_ms_last10_p50": 322,
+   "state_ok": true,
+   "tabs_kept": "50 + the first tab",
+   "webkit_processes": 53,
+   "trek_footprint_mb": 250,
+   "webkit_footprint_mb": 1013.4,
+   "total_footprint_mb": 1263,
+   "webkit_rss_mb": 1763.9,
+   "frames": {
+    "frames": "0",
+    "frame_p50": "0.0",
+    "frame_p95": "0.0"
+   },
+   "typing": {
+    "latency_p50": "12.4",
+    "latency_p95": "18.7",
+    "unpainted": "0"
+   },
+   "load_after": 6.52
+  },
+  "100": {
+   "load": 6.52,
+   "tabs": 100,
+   "open_all_secs": 31.0,
+   "new_tab_ms_p50": 319,
+   "new_tab_ms_p95": 326,
+   "new_tab_ms_last10_p50": 320,
+   "state_ok": true,
+   "tabs_kept": "100 + the first tab",
+   "webkit_processes": 103,
+   "trek_footprint_mb": 259,
+   "webkit_footprint_mb": 1986.5,
+   "total_footprint_mb": 2246,
+   "webkit_rss_mb": 3589.8,
+   "frames": {
+    "frames": "0",
+    "frame_p50": "0.0",
+    "frame_p95": "0.0"
+   },
+   "typing": {
+    "latency_p50": "12.1",
+    "latency_p95": "19.3",
+    "unpainted": "0"
+   },
+   "load_after": 17.54
+  },
+  "200": {
+   "load": 17.54,
+   "tabs": 200,
+   "open_all_secs": 61.4,
+   "new_tab_ms_p50": 312,
+   "new_tab_ms_p95": 316,
+   "new_tab_ms_last10_p50": 312,
+   "state_ok": true,
+   "tabs_kept": "200 + the first tab",
+   "webkit_processes": 204,
+   "trek_footprint_mb": 171,
+   "webkit_footprint_mb": 4031.3,
+   "total_footprint_mb": 4202,
+   "webkit_rss_mb": 6625.3,
+   "frames": {
+    "frames": "0",
+    "frame_p50": "0.0",
+    "frame_p95": "0.0"
+   },
+   "typing": {
+    "latency_p50": "11.9",
+    "latency_p95": "19.2",
+    "unpainted": "0"
+   },
+   "load_after": 5.06
+  }
+ }
+}

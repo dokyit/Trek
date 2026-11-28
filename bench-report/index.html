@@ -1,0 +1,713 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Trek vs the field</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Newsreader:opsz,wght@6..72,400;6..72,600&display=swap">
+<style>
+:root{--bg:#f6f5f1;--surface:#fffefb;--ink:#1b1c1a;--ink-2:#55574f;--ink-3:#85877e;--line:#dcdad2;--accent:#c2410c;--accent-soft:#fbe6da;--neutral:#a8a59a;--good:#1f7a4a;--good-soft:#dff1e6;--bad:#b42318;--bad-soft:#fbe3e0;--mid:#8a6a00;--mid-soft:#f6edcf;
+--serif:"Newsreader",Georgia,serif;--sans:"Inter Tight","Inter",system-ui,-apple-system,sans-serif;--mono:"JetBrains Mono",ui-monospace,Menlo,monospace;color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#141512;--surface:#1c1d1a;--ink:#ecebe5;--ink-2:#b4b2a8;--ink-3:#85837a;--line:#33342f;--accent:#f0864f;--accent-soft:#3a2418;--neutral:#6d6b63;--good:#5cc08a;--good-soft:#173324;--bad:#f07a6e;--bad-soft:#3a1d1a;--mid:#e0bb4a;--mid-soft:#352c12;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#141512;--surface:#1c1d1a;--ink:#ecebe5;--ink-2:#b4b2a8;--ink-3:#85837a;--line:#33342f;--accent:#f0864f;--accent-soft:#3a2418;--neutral:#6d6b63;--good:#5cc08a;--good-soft:#173324;--bad:#f07a6e;--bad-soft:#3a1d1a;--mid:#e0bb4a;--mid-soft:#352c12;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15.5px/1.6 var(--sans);-webkit-font-smoothing:antialiased}
+main{max-width:1120px;margin:0 auto;padding:48px 16px 96px}
+header.top{border-bottom:1px solid var(--line);padding-bottom:28px;margin-bottom:8px}
+.eyebrow{font:500 12px/1.4 var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3)}
+h1{font:600 clamp(30px,4.6vw,50px)/1.08 var(--serif);letter-spacing:-.01em;margin:10px 0 14px;text-wrap:balance}
+h2{font:600 28px/1.2 var(--serif);margin:64px 0 6px;text-wrap:balance}
+h3{font:600 17px/1.35 var(--sans);margin:28px 0 6px}
+p{max-width:74ch;margin:0 0 12px}
+a{color:var(--accent);text-underline-offset:2px}
+.lede{font:400 19px/1.55 var(--serif);color:var(--ink);max-width:70ch}
+.verdict{background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:10px;padding:20px 22px;margin:22px 0}
+.verdict p{font:400 17px/1.6 var(--serif);max-width:none;margin:0}
+.sub{color:var(--ink-2)}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin:18px 0}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.tile .v{font:600 26px/1.1 var(--mono);font-variant-numeric:tabular-nums}
+.tile .k{font-size:13px;color:var(--ink-2);margin-top:6px}
+.tile.good .v{color:var(--good)} .tile.bad .v{color:var(--bad)}
+.table-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--surface);margin:14px 0}
+table{border-collapse:collapse;width:100%;font-size:13.5px;font-variant-numeric:tabular-nums}
+th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+thead th{font:500 11.5px/1.3 var(--mono);text-transform:uppercase;letter-spacing:.04em;color:var(--ink-3);background:var(--surface);position:sticky;top:0}
+tbody tr:last-child td{border-bottom:0}
+tr.trek td{background:var(--accent-soft)}
+.nums td{white-space:nowrap}
+table.score td{min-width:120px;font-size:12.5px;line-height:1.4}
+table.score td:first-child{min-width:110px;font-weight:600;font-size:13px;position:sticky;left:0;background:var(--surface);z-index:1}
+table.score tr.trek td:first-child{background:var(--accent-soft)}
+table.score thead th:first-child{position:sticky;left:0;z-index:2}
+.g{display:inline-block;font:600 11px/1 var(--mono);padding:3px 6px;border-radius:4px;margin-bottom:3px}
+.g.ahead{background:var(--good-soft);color:var(--good)} .g.par{background:var(--mid-soft);color:var(--mid)} .g.behind{background:var(--bad-soft);color:var(--bad)} .g.na{background:transparent;color:var(--ink-3);border:1px solid var(--line)}
+.chart{margin:18px 0;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px 14px 8px}
+.chart-title{font:600 14px/1.3 var(--sans);margin-bottom:8px}
+.chart svg{width:100%;height:auto;display:block;font-family:var(--sans)}
+.chart .bar{fill:var(--neutral)} .chart .bar.trek{fill:var(--accent)}
+.chart .lbl{fill:var(--ink-2);font-size:12.5px} .chart .trek-l{fill:var(--ink);font-weight:700}
+.chart .val{fill:var(--ink);font-size:12px;font-family:var(--mono)}
+.chart g:hover .bar{opacity:.8}
+.chart-note{font-size:12.5px;color:var(--ink-3);margin:8px 2px 4px;max-width:none}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,460px),1fr));gap:16px}
+.shots{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:14px;margin:16px 0}
+.shots figure{margin:0;background:var(--surface);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.shots img{width:100%;display:block;aspect-ratio:16/10;object-fit:cover;object-position:top left;background:#000}
+.shots figcaption{font-size:12.5px;padding:8px 10px;color:var(--ink-2)}
+.pros{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,440px),1fr));gap:16px}
+.pros section{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
+.pros h3{margin-top:0}
+.pros li{margin-bottom:8px}
+.callout{border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:14px 16px;margin:14px 0}
+.callout.warn{border-left:4px solid var(--bad)}
+code{font:13px var(--mono);background:var(--surface);border:1px solid var(--line);border-radius:4px;padding:0 4px}
+nav.toc{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:13px;margin-top:16px}
+nav.toc a{color:var(--ink-2)}
+footer{margin-top:72px;border-top:1px solid var(--line);padding-top:16px;font-size:13px;color:var(--ink-3)}
+@media (max-width:640px){h2{font-size:23px}.lede{font-size:17px}}
+</style></head><body><main>
+<header class="top">
+<div class="eyebrow">Competitive benchmark · 27 November 2026 · Trek 0.4.69+ (main 242fdff8) against 16 apps</div>
+<h1>Is Trek the best by far? No. It is the lightest and the broadest, and it loses where newcomers and blind users meet it.</h1>
+<p class="lede">Trek was measured against the desktop agent apps it actually competes with, on one Mac, with the same scripts for every app, plus every published benchmark that applies. Trek's own claims were treated as things to check. Where an app could not be run, the report says so and uses published numbers, labelled as such.</p>
+<nav class="toc"><a href="#scorecard">Scorecard</a><a href="#why">Why and why not</a><a href="#performance">Performance</a><a href="#scale">Scale</a><a href="#swarm">Swarming</a><a href="#tokens">Tokens and harness</a><a href="#features">Features</a><a href="#ux">UX and accessibility</a><a href="#design">Design</a><a href="#posts">Your posts</a><a href="#method">Method and limits</a></nav>
+</header>
+<div class="verdict"><p>No: Trek is not the best by far. It is the best at two things. It is the lightest app measured at idle (65 MB and 0.05% CPU in one process, against 290 MB for Zed and 481–2,911 MB for the Electron apps), and it stays smooth at scale: 10,000 threads launch in 221 ms, and with 200 Browser tabs or 50 agents at once typing stayed under 21 ms at p95. It also has the broadest tool set found: no other app combines other vendors' agents with API and local models, a Browser with extensions, computer use, an iOS Simulator, a real-iPhone tool, video watching and study mode. It falls short in five places. Once real agents run, the lead is gone: 10 threads with 4 streaming took 1,744 MB, the same as Synara, because Trek keeps every Claude Code process alive where super.engineering and Synara park idle ones. VoiceOver can read almost nothing in it (2 of 13 controls named, no text), while the Electron rivals name 88–99% of 25–440 controls. Its first screen was rated the best of 8 in a blind test, but the 8 steps after it ask for 7 macOS permissions and an agent CLI you install yourself. Its own agent loop, used for API and local models, passed 0 of 19 Terminal-Bench tasks with a cheap model on 30 Oct, and today's build abandoned a task on a reasoning-only reply. And no one outside measures it: Trek is not in ADEMark, though its docs quote ADEMark ranks. In a blind review of makers' screenshots it came 2nd of 8, behind T3 Code. Use Trek if you are a developer who runs several vendors' agents and values speed and tools. Look elsewhere if you rely on a screen reader, want one vendor's supported app, or want a one-click start.</p></div>
+<div class="tiles"><div class="tile good"><div class="v">65 MB</div><div class="k">Trek at idle, 100 threads (next lightest measured: Zed 290 MB)</div></div><div class="tile good"><div class="v">221 ms</div><div class="k">launch with 10,000 threads to the first frame</div></div><div class="tile "><div class="v">4,202 MB</div><div class="k">200 Browser tabs, Trek and all its WebKit processes</div></div><div class="tile bad"><div class="v">2 / 13</div><div class="k">controls VoiceOver can name in Trek's window</div></div><div class="tile "><div class="v">2nd of 8</div><div class="k">blind design review, makers' own screenshots</div></div><div class="tile "><div class="v">39,104</div><div class="k">tokens for “hi” with Trek's flags (bare Claude Code: 40,120)</div></div></div>
+<section id="scorecard"><h2>Scorecard</h2>
+<p>Each competitor cell says whether it <b>beats Trek</b>, is <b>on par</b>, or <b>Trek is ahead</b> on that dimension, with the number behind it. Numbers marked <i>here</i> were measured on this Mac today; <i>ADEMark</i> numbers are theirs (Mac mini M4, 12 Nov); others link to their source in the sections below. Memory is all of an app's processes at idle, as installed.</p><div class="table-wrap"><table class="data score"><thead><tr>
+<th>App</th>
+<th>Performance</th>
+<th>Scale / stress</th>
+<th>Swarming</th>
+<th>Features</th>
+<th>Beginner UX</th>
+<th>Developer power</th>
+<th>Design</th>
+<th>Helpfulness</th>
+<th>Cost</th>
+<th>Platforms</th>
+</tr></thead><tbody>
+<tr class="trek"><td><b>Trek</b></td><td>65 MB, 0.05% CPU idle, 207 ms to frame (here). Real use: 520 MB after 4.7 h</td><td>10,000 threads: 221 ms launch, 154 MB, scroll p95 10.9 ms (here)</td><td>50 mock streams: 219 MB peak, typing p95 20.2 ms (here). Sub-agents, consult, handoffs, started threads</td><td>Widest: any vendor CLI + API/local models, Browser + extensions + ad blocker, computer use, iOS Simulator, real iPhone, video, study, notes, machines, plugins</td><td>7 permission prompts in onboarding, CLI must be installed, VoiceOver sees 2/13 controls, iPhone app from source</td><td>Strong: worktrees, per-turn diffs and rewind, PR cards, editor, terminal, MCP, plugins, ⌘K</td><td>2nd of 8 blind (7.0/10): best hierarchy, too many accents</td><td>= the vendor CLI; own harness 0/19 tasks (30 Oct, DeepSeek V4 Flash), unranked</td><td>Free, Apache-2.0; “hi” ≈ bare CLI (39.1K vs 40.1K)</td><td>macOS, Windows, Linux (partial); iPhone app built from source; any phone via the web remote</td></tr>
+<tr class=""><td>Claude desktop</td><td><span class="g behind">Trek ahead</span> 488 MB idle signed out (here); ADEMark 1,696 MB at rest</td><td><span class="g na">no data</span></td><td><span class="g par">on par</span> parallel sessions, sub-agents</td><td><span class="g behind">Trek ahead</span> browser, computer use, remote; Anthropic models only</td><td><span class="g ahead">beats Trek</span> sign in, pick a folder; one vendor's defaults</td><td><span class="g behind">Trek ahead</span> one vendor</td><td><span class="g na">no data</span></td><td><span class="g par">on par</span> Claude Code: 65.8% Terminal-Bench 4.1</td><td><span class="g behind">Trek ahead</span> paid plan; ADEMark “hi” 75.5K</td><td><span class="g par">on par</span> Mac, Windows, Linux beta, phones</td></tr>
+<tr class=""><td>Codex app</td><td><span class="g behind">Trek ahead</span> 2,911 MB, 21 processes, 13.0% CPU idle (here)</td><td><span class="g na">no data</span></td><td><span class="g par">on par</span> parallel threads, automations</td><td><span class="g behind">Trek ahead</span> in-app browser, computer use; OpenAI only</td><td><span class="g ahead">beats Trek</span> ChatGPT sign-in, free tier; 129/131 controls named (here)</td><td><span class="g behind">Trek ahead</span> one vendor</td><td><span class="g na">no data</span></td><td><span class="g par">on par</span> Codex: 62.1% Terminal-Bench 4.1</td><td><span class="g par">on par</span> free tier, then $20+</td><td><span class="g par">on par</span> Mac, Windows, phone via ChatGPT</td></tr>
+<tr class=""><td>Cursor</td><td><span class="g behind">Trek ahead</span> 934 MB, 20% CPU idle (here)</td><td><span class="g na">no data</span></td><td><span class="g par">on par</span> coordinator + sub-agents, cloud agents</td><td><span class="g behind">Trek ahead</span> agent browser, iOS app; mostly own models</td><td><span class="g ahead">beats Trek</span> 44/46 controls named (here); account sign-in</td><td><span class="g par">on par</span> full IDE, own agent</td><td><span class="g na">no data</span></td><td><span class="g par">on par</span> 62.1% (Factory's TB4, Opus 5.5)</td><td><span class="g behind">Trek ahead</span> free, then $8–200</td><td><span class="g par">on par</span> Mac (others unverified), iOS</td></tr>
+<tr class=""><td>Orca</td><td><span class="g behind">Trek ahead</span> 798 MB, 10% CPU idle (here); ADEMark 10th</td><td><span class="g na">no data</span></td><td><span class="g behind">Trek ahead</span> orchestration exists, but ADEMark's build: workers never started</td><td><span class="g par">on par</span> closest match: browser, computer use, plugins, SSH, Android</td><td><span class="g ahead">beats Trek</span> 144/146 controls named (here)</td><td><span class="g par">on par</span> many vendors' CLIs</td><td><span class="g behind">Trek ahead</span> 6th of 8 blind (5.5)</td><td><span class="g na">no data</span></td><td><span class="g par">on par</span> free, MIT</td><td><span class="g ahead">beats Trek</span> Mac, Win, Linux, iOS, Android</td></tr>
+<tr class=""><td>T3 Code</td><td><span class="g behind">Trek ahead</span> 720 MB, 2,690 ms launch (here); ADEMark 5th</td><td><span class="g na">no data</span></td><td><span class="g behind">Trek ahead</span> parallel threads, no orchestration</td><td><span class="g behind">Trek ahead</span> no browser or computer use found</td><td><span class="g ahead">beats Trek</span> opens straight to a composer; 82k stars, poll winner</td><td><span class="g par">on par</span> any ACP agent</td><td><span class="g ahead">beats Trek</span> 1st of 8 blind (7.5)</td><td><span class="g na">no data</span></td><td><span class="g par">on par</span> free, MIT; “hi” 52.7K (ADEMark)</td><td><span class="g ahead">beats Trek</span> all desktops, web, phones</td></tr>
+<tr class=""><td>Paseo</td><td><span class="g behind">Trek ahead</span> 481 MB, 799 ms launch (here); ADEMark 3rd</td><td><span class="g na">no data</span></td><td><span class="g par">on par</span> agents start agents</td><td><span class="g behind">Trek ahead</span> fewer tools</td><td><span class="g par">on par</span> restrained UI (post #4)</td><td><span class="g par">on par</span> many CLIs, daemon</td><td><span class="g behind">Trek ahead</span> 8th of 8 blind (5.0)</td><td><span class="g na">no data</span></td><td><span class="g ahead">beats Trek</span> fewest tokens: “hi” 22.2K (ADEMark)</td><td><span class="g ahead">beats Trek</span> Mac, web, iOS, Android</td></tr>
+<tr class=""><td>Conductor</td><td><span class="g behind">Trek ahead</span> 1,490 MB idle (here)</td><td><span class="g na">no data</span></td><td><span class="g par">on par</span> parallel workspaces</td><td><span class="g behind">Trek ahead</span> Claude Code, Codex, Cursor only</td><td><span class="g behind">Trek ahead</span> account sign-up before anything (here); Meta-acquired, sign-ups closed</td><td><span class="g par">on par</span> PR review flow</td><td><span class="g behind">Trek ahead</span> 5th of 8 blind (6.0, partial image)</td><td><span class="g na">no data</span></td><td><span class="g behind">Trek ahead</span> uncertain</td><td><span class="g behind">Trek ahead</span> Mac, iOS</td></tr>
+<tr class=""><td>Zed</td><td><span class="g behind">Trek ahead</span> 290 MB, 0.5% CPU idle, 388 ms (here): closest to Trek</td><td><span class="g na">no data</span></td><td><span class="g behind">Trek ahead</span> parallel threads</td><td><span class="g behind">Trek ahead</span> no browser, no phone</td><td><span class="g par">on par</span> same GPUI stack: also weak for VoiceOver</td><td><span class="g ahead">beats Trek</span> a real editor; ACP agents, keys, local models</td><td><span class="g par">on par</span> 3rd of 8 blind (6.5, partial image)</td><td><span class="g na">no data</span></td><td><span class="g par">on par</span> free, Pro $10</td><td><span class="g par">on par</span> Mac, Linux, Windows</td></tr>
+<tr class=""><td>super.engineering</td><td><span class="g ahead">beats Trek</span> with agents running: 134 MB at rest with 5 threads (ADEMark) vs Trek ≈855 MB (estimate); 242 ms launch, 311 MB on its first-run screen (here)</td><td><span class="g na">no data</span></td><td><span class="g ahead">beats Trek</span> ADEMark build 5/5 hidden tests in 7.1 min</td><td><span class="g behind">Trek ahead</span> 18 agents, browser experimental</td><td><span class="g na">no data</span></td><td><span class="g par">on par</span> native Rust, worktree per task</td><td><span class="g na">no data</span></td><td><span class="g na">no data</span></td><td><span class="g ahead">beats Trek</span> “hi” 29.6K (ADEMark); free alpha</td><td><span class="g behind">Trek ahead</span> Mac, Linux</td></tr>
+<tr class=""><td>Synara</td><td><span class="g behind">Trek ahead</span> 955 MB, 24% CPU idle (here; animated background)</td><td><span class="g par">on par</span> its own post: 1,784 MB at 10 threads, 4 streaming</td><td><span class="g ahead">beats Trek</span> ADEMark build 5/5 in 5.2 min (fastest)</td><td><span class="g behind">Trek ahead</span> agent browser, Kanban, canvas coming; Mac only</td><td><span class="g na">no data</span></td><td><span class="g par">on par</span> many vendors, delegation</td><td><span class="g behind">Trek ahead</span> 7th of 8 blind (5.5)</td><td><span class="g na">no data</span></td><td><span class="g ahead">beats Trek</span> “hi” 30.6K (ADEMark)</td><td><span class="g behind">Trek ahead</span> Mac, iOS (TestFlight)</td></tr>
+</tbody></table></div><p class='sub'>“no data” means nothing measurable or published was found; it is not a judgement. Helpfulness is mostly the agent CLI's, and Trek runs the same CLIs, so on helpfulness Trek can only tie the vendor apps when it runs their agent, and is behind when it runs its own loop.</p>
+</section>
+<section id="why"><h2>Why you should, and shouldn’t, use Trek</h2>
+<div class="pros"><section><h3>Why you should</h3><ol><li><b>It is by far the lightest.</b> 65 MB and 0.05% CPU at idle with 100 threads, one process; the Electron apps measured here use 669–2,911 MB across 7–21 processes. Only Zed (290 MB) is in the same class.</li><li><b>It scales.</b> 10,000 threads launch in 221 ms at 154 MB with sidebar scrolling at p95 10.9 ms; a 10,000-item thread opens in 100 ms and scrolls at p95 9.6 ms.</li><li><b>It runs everyone's agents, not one vendor's.</b> Claude Code, Codex, OpenCode, Cursor, Copilot, Droid, any ACP agent, plus API keys and local models, with the logins you already have.</li><li><b>The tool set is unmatched.</b> No competitor found has the iOS Simulator and a real-iPhone tool, video watching, study mode, notes and connected machines together, on top of a Browser with extensions and ad blocking and background computer use.</li><li><b>It costs nothing and doesn't bloat your prompts.</b> Free and Apache-2.0; with Trek's exact flags a “hi” is 39,104 tokens against 40,120 for bare Claude Code (measured here), so Trek's tools cost you no extra tokens.</li><li><b>It looks good and it welcomes newcomers well.</b> Blind, its screenshot came 2nd of 8 with the top hierarchy score (9/10), and its first screen came 1st of 8: it says what the app is, that setup can wait, and that data stays on the Mac, with no account.</li></ol></section><section><h3>Why you shouldn’t</h3><ol><li><b>With real agents, its memory lead disappears.</b> 10 threads open and 4 streaming with Claude Code: 1,744 MB, the same as Synara's 1,784. Trek kept all 10 CLIs alive after their turns ended (1,623 MB at rest), where Synara cut its count to 4 and super.engineering measures 134 MB with 5 idle threads.</li><li><b>Screen-reader users can't use it.</b> Trek's window exposes 16 accessibility nodes: 2 of 13 controls have a name and no text is readable (here, current main). Codex, Orca and Cursor expose 46–146 controls with 95%+ named. This is a GPUI gap Zed shares.</li><li><b>After a good first screen, the setup is heavy.</b> An intro and 8 steps, 7 of them macOS permission prompts (Accessibility, Screen Recording, Microphone, Speech, Notifications, Full Disk Access, Local Network); you must already have, or install, an agent CLI and sign in to it. T3 Code opens straight to a composer; the Codex app needs one sign-in.</li><li><b>Its own agent loop is weak and unranked.</b> On Terminal-Bench 4 with DeepSeek V4 Flash, Trek's Direct harness passed 0 of 19 tasks on 30 Oct; today's build gave up a task after two reasoning-only replies instead of lowering the effort. No same-model comparison with another harness exists yet (today's was stopped by an empty OpenRouter account). Trek is only as good as the vendor CLI you run in it.</li><li><b>No one outside has measured it, and its docs overclaim.</b> Trek is not in ADEMark; docs/PLUGINS.md says “Trek is first on ADEMark's speed and weight tests” with no source. The lab numbers (55–65 MB) also differ from real use: 520 MB after a 4.7-hour day with 782 threads.</li><li><b>It is small and little known.</b> T3 Code (82k stars) and Orca (142k) win the polls in the posts you sent; Trek wasn't an option in either. The iPhone app isn't on the App Store or TestFlight (any phone gets a web remote instead).</li><li><b>Its design has fixable faults.</b> The blind reviewer counted seven accent hues on one screen, uniformly heavy sidebar titles, a dead gap above the plan card, identical tab icons and a red Stop button while it waits for approval. T3 Code's restraint won.</li></ol></section></div>
+</section>
+<section id="performance"><h2>Performance</h2>
+<p>Every app was launched the same way (<code>open -g</code>, never activated, no keystrokes), left 25 s, then measured over all of its processes, three times. Trek was measured with its own harness (<code>./bin/agent-cli perf</code>, the method in docs/PERFORMANCE.md) in an isolated profile. The competitors ran with the owner's own profiles, which is closer to real use but not identical to Trek's empty one, so the real-use Trek figure is given beside it.</p><div class="grid2"><figure class="chart"><figcaption class="chart-title">Memory at idle, all of the app&#x27;s processes (footprint, MB; lower is better)</figcaption>
+<svg viewBox="0 0 720 458" role="img" aria-label="Memory at idle, all of the app&#x27;s processes (footprint, MB; lower is better)">
+<g><title>Trek (main): 65 MB · 100 threads, empty profile</title>
+<text class="lbl trek-l" x="160" y="25" text-anchor="end">Trek (main)</text>
+<rect class="bar trek" x="170" y="13" width="9.4" height="16" rx="4"/>
+<text class="val" x="185.4" y="25">65 MB 100 threads, empty profile</text></g>
+<g><title>Zed: 290 MB</title>
+<text class="lbl" x="160" y="51" text-anchor="end">Zed</text>
+<rect class="bar" x="170" y="39" width="42.0" height="16" rx="4"/>
+<text class="val" x="218.0" y="51">290 MB</text></g>
+<g><title>super.engineering: 311 MB</title>
+<text class="lbl" x="160" y="77" text-anchor="end">super.engineering</text>
+<rect class="bar" x="170" y="65" width="45.0" height="16" rx="4"/>
+<text class="val" x="221.0" y="77">311 MB</text></g>
+<g><title>Paseo: 481 MB</title>
+<text class="lbl" x="160" y="103" text-anchor="end">Paseo</text>
+<rect class="bar" x="170" y="91" width="69.7" height="16" rx="4"/>
+<text class="val" x="245.7" y="103">481 MB</text></g>
+<g><title>Claude: 488 MB</title>
+<text class="lbl" x="160" y="129" text-anchor="end">Claude</text>
+<rect class="bar" x="170" y="117" width="70.8" height="16" rx="4"/>
+<text class="val" x="246.8" y="129">488 MB</text></g>
+<g><title>Trek (owner&#x27;s, real use): 520 MB · 4.7 h, 782 threads, 37 tabs</title>
+<text class="lbl trek-l" x="160" y="155" text-anchor="end">Trek (owner&#x27;s, real use)</text>
+<rect class="bar trek" x="170" y="143" width="75.3" height="16" rx="4"/>
+<text class="val" x="251.3" y="155">520 MB 4.7 h, 782 threads, 37 tabs</text></g>
+<g><title>Capy: 549 MB</title>
+<text class="lbl" x="160" y="181" text-anchor="end">Capy</text>
+<rect class="bar" x="170" y="169" width="79.6" height="16" rx="4"/>
+<text class="val" x="255.6" y="181">549 MB</text></g>
+<g><title>Antigravity: 669 MB</title>
+<text class="lbl" x="160" y="207" text-anchor="end">Antigravity</text>
+<rect class="bar" x="170" y="195" width="96.9" height="16" rx="4"/>
+<text class="val" x="272.9" y="207">669 MB</text></g>
+<g><title>T3 Code: 720 MB</title>
+<text class="lbl" x="160" y="233" text-anchor="end">T3 Code</text>
+<rect class="bar" x="170" y="221" width="104.2" height="16" rx="4"/>
+<text class="val" x="280.2" y="233">720 MB</text></g>
+<g><title>OpenCode desktop: 739 MB</title>
+<text class="lbl" x="160" y="259" text-anchor="end">OpenCode desktop</text>
+<rect class="bar" x="170" y="247" width="107.1" height="16" rx="4"/>
+<text class="val" x="283.1" y="259">739 MB</text></g>
+<g><title>Orca: 798 MB</title>
+<text class="lbl" x="160" y="285" text-anchor="end">Orca</text>
+<rect class="bar" x="170" y="273" width="115.5" height="16" rx="4"/>
+<text class="val" x="291.5" y="285">798 MB</text></g>
+<g><title>Warp: 834 MB</title>
+<text class="lbl" x="160" y="311" text-anchor="end">Warp</text>
+<rect class="bar" x="170" y="299" width="120.8" height="16" rx="4"/>
+<text class="val" x="296.8" y="311">834 MB</text></g>
+<g><title>Cursor: 934 MB</title>
+<text class="lbl" x="160" y="337" text-anchor="end">Cursor</text>
+<rect class="bar" x="170" y="325" width="135.3" height="16" rx="4"/>
+<text class="val" x="311.3" y="337">934 MB</text></g>
+<g><title>Synara: 955 MB</title>
+<text class="lbl" x="160" y="363" text-anchor="end">Synara</text>
+<rect class="bar" x="170" y="351" width="138.3" height="16" rx="4"/>
+<text class="val" x="314.3" y="363">955 MB</text></g>
+<g><title>Conductor: 1,490 MB</title>
+<text class="lbl" x="160" y="389" text-anchor="end">Conductor</text>
+<rect class="bar" x="170" y="377" width="215.9" height="16" rx="4"/>
+<text class="val" x="391.9" y="389">1,490 MB</text></g>
+<g><title>VS Code: 1,865 MB</title>
+<text class="lbl" x="160" y="415" text-anchor="end">VS Code</text>
+<rect class="bar" x="170" y="403" width="270.1" height="16" rx="4"/>
+<text class="val" x="446.1" y="415">1,865 MB</text></g>
+<g><title>Codex app: 2,911 MB</title>
+<text class="lbl" x="160" y="441" text-anchor="end">Codex app</text>
+<rect class="bar" x="170" y="429" width="421.6" height="16" rx="4"/>
+<text class="val" x="597.6" y="441">2,911 MB</text></g>
+</svg>
+<p class="chart-note">Competitors: the owner's own profile as installed, 25 s after launch, summed over every process the app is responsible for (renderers, GPU, helpers, any agent server it starts at launch), median of 3. Trek: an isolated profile with 100 seeded threads, no agent running (docs/PERFORMANCE.md method). The owner's real Trek after 4 h 41 m with 782 threads: 520 MB.</p>
+</figure><figure class="chart"><figcaption class="chart-title">Launch to first window (ms; lower is better)</figcaption>
+<svg viewBox="0 0 720 432" role="img" aria-label="Launch to first window (ms; lower is better)">
+<g><title>Trek (main): 207 ms · spawn to first frame</title>
+<text class="lbl trek-l" x="160" y="25" text-anchor="end">Trek (main)</text>
+<rect class="bar trek" x="170" y="13" width="32.4" height="16" rx="4"/>
+<text class="val" x="208.4" y="25">207 ms spawn to first frame</text></g>
+<g><title>super.engineering: 242 ms</title>
+<text class="lbl" x="160" y="51" text-anchor="end">super.engineering</text>
+<rect class="bar" x="170" y="39" width="37.9" height="16" rx="4"/>
+<text class="val" x="213.9" y="51">242 ms</text></g>
+<g><title>Zed: 388 ms</title>
+<text class="lbl" x="160" y="77" text-anchor="end">Zed</text>
+<rect class="bar" x="170" y="65" width="60.8" height="16" rx="4"/>
+<text class="val" x="236.8" y="77">388 ms</text></g>
+<g><title>VS Code: 472 ms</title>
+<text class="lbl" x="160" y="103" text-anchor="end">VS Code</text>
+<rect class="bar" x="170" y="91" width="74.0" height="16" rx="4"/>
+<text class="val" x="250.0" y="103">472 ms</text></g>
+<g><title>Antigravity: 525 ms</title>
+<text class="lbl" x="160" y="129" text-anchor="end">Antigravity</text>
+<rect class="bar" x="170" y="117" width="82.3" height="16" rx="4"/>
+<text class="val" x="258.3" y="129">525 ms</text></g>
+<g><title>Claude: 568 ms</title>
+<text class="lbl" x="160" y="155" text-anchor="end">Claude</text>
+<rect class="bar" x="170" y="143" width="89.0" height="16" rx="4"/>
+<text class="val" x="265.0" y="155">568 ms</text></g>
+<g><title>Capy: 574 ms</title>
+<text class="lbl" x="160" y="181" text-anchor="end">Capy</text>
+<rect class="bar" x="170" y="169" width="90.0" height="16" rx="4"/>
+<text class="val" x="266.0" y="181">574 ms</text></g>
+<g><title>Conductor: 596 ms</title>
+<text class="lbl" x="160" y="207" text-anchor="end">Conductor</text>
+<rect class="bar" x="170" y="195" width="93.4" height="16" rx="4"/>
+<text class="val" x="269.4" y="207">596 ms</text></g>
+<g><title>Cursor: 613 ms</title>
+<text class="lbl" x="160" y="233" text-anchor="end">Cursor</text>
+<rect class="bar" x="170" y="221" width="96.1" height="16" rx="4"/>
+<text class="val" x="272.1" y="233">613 ms</text></g>
+<g><title>Synara: 618 ms</title>
+<text class="lbl" x="160" y="259" text-anchor="end">Synara</text>
+<rect class="bar" x="170" y="247" width="96.9" height="16" rx="4"/>
+<text class="val" x="272.9" y="259">618 ms</text></g>
+<g><title>Paseo: 799 ms</title>
+<text class="lbl" x="160" y="285" text-anchor="end">Paseo</text>
+<rect class="bar" x="170" y="273" width="125.2" height="16" rx="4"/>
+<text class="val" x="301.2" y="285">799 ms</text></g>
+<g><title>Orca: 825 ms</title>
+<text class="lbl" x="160" y="311" text-anchor="end">Orca</text>
+<rect class="bar" x="170" y="299" width="129.3" height="16" rx="4"/>
+<text class="val" x="305.3" y="311">825 ms</text></g>
+<g><title>Warp: 865 ms</title>
+<text class="lbl" x="160" y="337" text-anchor="end">Warp</text>
+<rect class="bar" x="170" y="325" width="135.6" height="16" rx="4"/>
+<text class="val" x="311.6" y="337">865 ms</text></g>
+<g><title>Codex app: 1,064 ms</title>
+<text class="lbl" x="160" y="363" text-anchor="end">Codex app</text>
+<rect class="bar" x="170" y="351" width="166.7" height="16" rx="4"/>
+<text class="val" x="342.7" y="363">1,064 ms</text></g>
+<g><title>OpenCode desktop: 1,564 ms</title>
+<text class="lbl" x="160" y="389" text-anchor="end">OpenCode desktop</text>
+<rect class="bar" x="170" y="377" width="245.1" height="16" rx="4"/>
+<text class="val" x="421.1" y="389">1,564 ms</text></g>
+<g><title>T3 Code: 2,690 ms</title>
+<text class="lbl" x="160" y="415" text-anchor="end">T3 Code</text>
+<rect class="bar" x="170" y="403" width="421.6" height="16" rx="4"/>
+<text class="val" x="597.6" y="415">2,690 ms</text></g>
+</svg>
+<p class="chart-note">Competitors: <code>open -g</code> to the first on-screen window, median of 3 warm launches. Trek: process spawn to its first painted frame (no Launch Services). The <code>open -g</code> path itself costs at least 328 ms (Calculator/TextEdit, same method), so add about that to Trek's bar for a like-for-like reading.</p>
+</figure></div><div class="grid2"><figure class="chart"><figcaption class="chart-title">CPU while idle (% of one core; lower is better)</figcaption>
+<svg viewBox="0 0 720 432" role="img" aria-label="CPU while idle (% of one core; lower is better)">
+<g><title>Trek (main): 0.05% · window behind others</title>
+<text class="lbl trek-l" x="160" y="25" text-anchor="end">Trek (main)</text>
+<rect class="bar trek" x="170" y="13" width="2.0" height="16" rx="4"/>
+<text class="val" x="178.0" y="25">0.05% window behind others</text></g>
+<g><title>Zed: 0.50%</title>
+<text class="lbl" x="160" y="51" text-anchor="end">Zed</text>
+<rect class="bar" x="170" y="39" width="8.7" height="16" rx="4"/>
+<text class="val" x="184.7" y="51">0.50%</text></g>
+<g><title>OpenCode desktop: 1.20%</title>
+<text class="lbl" x="160" y="77" text-anchor="end">OpenCode desktop</text>
+<rect class="bar" x="170" y="65" width="20.8" height="16" rx="4"/>
+<text class="val" x="196.8" y="77">1.20%</text></g>
+<g><title>Conductor: 2.30%</title>
+<text class="lbl" x="160" y="103" text-anchor="end">Conductor</text>
+<rect class="bar" x="170" y="91" width="40.0" height="16" rx="4"/>
+<text class="val" x="216.0" y="103">2.30%</text></g>
+<g><title>Claude: 3.10%</title>
+<text class="lbl" x="160" y="129" text-anchor="end">Claude</text>
+<rect class="bar" x="170" y="117" width="53.8" height="16" rx="4"/>
+<text class="val" x="229.8" y="129">3.10%</text></g>
+<g><title>Paseo: 3.17%</title>
+<text class="lbl" x="160" y="155" text-anchor="end">Paseo</text>
+<rect class="bar" x="170" y="143" width="55.1" height="16" rx="4"/>
+<text class="val" x="231.1" y="155">3.17%</text></g>
+<g><title>Antigravity: 3.23%</title>
+<text class="lbl" x="160" y="181" text-anchor="end">Antigravity</text>
+<rect class="bar" x="170" y="169" width="56.1" height="16" rx="4"/>
+<text class="val" x="232.1" y="181">3.23%</text></g>
+<g><title>Warp: 5.07%</title>
+<text class="lbl" x="160" y="207" text-anchor="end">Warp</text>
+<rect class="bar" x="170" y="195" width="88.1" height="16" rx="4"/>
+<text class="val" x="264.1" y="207">5.07%</text></g>
+<g><title>T3 Code: 7.70%</title>
+<text class="lbl" x="160" y="233" text-anchor="end">T3 Code</text>
+<rect class="bar" x="170" y="221" width="133.7" height="16" rx="4"/>
+<text class="val" x="309.7" y="233">7.70%</text></g>
+<g><title>Orca: 10.03%</title>
+<text class="lbl" x="160" y="259" text-anchor="end">Orca</text>
+<rect class="bar" x="170" y="247" width="174.2" height="16" rx="4"/>
+<text class="val" x="350.2" y="259">10.03%</text></g>
+<g><title>super.engineering: 11.57%</title>
+<text class="lbl" x="160" y="285" text-anchor="end">super.engineering</text>
+<rect class="bar" x="170" y="273" width="201.0" height="16" rx="4"/>
+<text class="val" x="377.0" y="285">11.57%</text></g>
+<g><title>Codex app: 12.97%</title>
+<text class="lbl" x="160" y="311" text-anchor="end">Codex app</text>
+<rect class="bar" x="170" y="299" width="225.3" height="16" rx="4"/>
+<text class="val" x="401.3" y="311">12.97%</text></g>
+<g><title>Capy: 16.37%</title>
+<text class="lbl" x="160" y="337" text-anchor="end">Capy</text>
+<rect class="bar" x="170" y="325" width="284.3" height="16" rx="4"/>
+<text class="val" x="460.3" y="337">16.37%</text></g>
+<g><title>VS Code: 17.90%</title>
+<text class="lbl" x="160" y="363" text-anchor="end">VS Code</text>
+<rect class="bar" x="170" y="351" width="310.9" height="16" rx="4"/>
+<text class="val" x="486.9" y="363">17.90%</text></g>
+<g><title>Cursor: 20.00%</title>
+<text class="lbl" x="160" y="389" text-anchor="end">Cursor</text>
+<rect class="bar" x="170" y="377" width="347.4" height="16" rx="4"/>
+<text class="val" x="523.4" y="389">20.00%</text></g>
+<g><title>Synara: 24.27%</title>
+<text class="lbl" x="160" y="415" text-anchor="end">Synara</text>
+<rect class="bar" x="170" y="403" width="421.6" height="16" rx="4"/>
+<text class="val" x="597.6" y="415">24.27%</text></g>
+</svg>
+<p class="chart-note">Competitors: 30 s, 25 s after launch, window launched in the background (may be partly visible). Trek: 60 s, window behind others (macOS stops drawing it), so Trek's figure is a best case; on screen it measured 0.13–0.20% in docs/PERFORMANCE.md.</p>
+</figure><figure class="chart"><figcaption class="chart-title">Processes at idle (lower is better)</figcaption>
+<svg viewBox="0 0 720 432" role="img" aria-label="Processes at idle (lower is better)">
+<g><title>Trek (main): 1 · + about 6 per agent session</title>
+<text class="lbl trek-l" x="160" y="25" text-anchor="end">Trek (main)</text>
+<rect class="bar trek" x="170" y="13" width="20.1" height="16" rx="4"/>
+<text class="val" x="196.1" y="25">1 + about 6 per agent session</text></g>
+<g><title>Zed: 3</title>
+<text class="lbl" x="160" y="51" text-anchor="end">Zed</text>
+<rect class="bar" x="170" y="39" width="60.2" height="16" rx="4"/>
+<text class="val" x="236.2" y="51">3</text></g>
+<g><title>super.engineering: 3</title>
+<text class="lbl" x="160" y="77" text-anchor="end">super.engineering</text>
+<rect class="bar" x="170" y="65" width="60.2" height="16" rx="4"/>
+<text class="val" x="236.2" y="77">3</text></g>
+<g><title>Warp: 4</title>
+<text class="lbl" x="160" y="103" text-anchor="end">Warp</text>
+<rect class="bar" x="170" y="91" width="80.3" height="16" rx="4"/>
+<text class="val" x="256.3" y="103">4</text></g>
+<g><title>Paseo: 6</title>
+<text class="lbl" x="160" y="129" text-anchor="end">Paseo</text>
+<rect class="bar" x="170" y="117" width="120.4" height="16" rx="4"/>
+<text class="val" x="296.4" y="129">6</text></g>
+<g><title>OpenCode desktop: 7</title>
+<text class="lbl" x="160" y="155" text-anchor="end">OpenCode desktop</text>
+<rect class="bar" x="170" y="143" width="140.5" height="16" rx="4"/>
+<text class="val" x="316.5" y="155">7</text></g>
+<g><title>Capy: 7</title>
+<text class="lbl" x="160" y="181" text-anchor="end">Capy</text>
+<rect class="bar" x="170" y="169" width="140.5" height="16" rx="4"/>
+<text class="val" x="316.5" y="181">7</text></g>
+<g><title>Claude: 7</title>
+<text class="lbl" x="160" y="207" text-anchor="end">Claude</text>
+<rect class="bar" x="170" y="195" width="140.5" height="16" rx="4"/>
+<text class="val" x="316.5" y="207">7</text></g>
+<g><title>Synara: 8</title>
+<text class="lbl" x="160" y="233" text-anchor="end">Synara</text>
+<rect class="bar" x="170" y="221" width="160.6" height="16" rx="4"/>
+<text class="val" x="336.6" y="233">8</text></g>
+<g><title>T3 Code: 9</title>
+<text class="lbl" x="160" y="259" text-anchor="end">T3 Code</text>
+<rect class="bar" x="170" y="247" width="180.7" height="16" rx="4"/>
+<text class="val" x="356.7" y="259">9</text></g>
+<g><title>Orca: 9</title>
+<text class="lbl" x="160" y="285" text-anchor="end">Orca</text>
+<rect class="bar" x="170" y="273" width="180.7" height="16" rx="4"/>
+<text class="val" x="356.7" y="285">9</text></g>
+<g><title>Conductor: 9</title>
+<text class="lbl" x="160" y="311" text-anchor="end">Conductor</text>
+<rect class="bar" x="170" y="299" width="180.7" height="16" rx="4"/>
+<text class="val" x="356.7" y="311">9</text></g>
+<g><title>Cursor: 11</title>
+<text class="lbl" x="160" y="337" text-anchor="end">Cursor</text>
+<rect class="bar" x="170" y="325" width="220.8" height="16" rx="4"/>
+<text class="val" x="396.8" y="337">11</text></g>
+<g><title>Antigravity: 13</title>
+<text class="lbl" x="160" y="363" text-anchor="end">Antigravity</text>
+<rect class="bar" x="170" y="351" width="261.0" height="16" rx="4"/>
+<text class="val" x="437.0" y="363">13</text></g>
+<g><title>VS Code: 14</title>
+<text class="lbl" x="160" y="389" text-anchor="end">VS Code</text>
+<rect class="bar" x="170" y="377" width="281.0" height="16" rx="4"/>
+<text class="val" x="457.0" y="389">14</text></g>
+<g><title>Codex app: 21</title>
+<text class="lbl" x="160" y="415" text-anchor="end">Codex app</text>
+<rect class="bar" x="170" y="403" width="421.6" height="16" rx="4"/>
+<text class="val" x="597.6" y="415">21</text></g>
+</svg>
+<p class="chart-note">Trek runs one process until a thread starts; each Claude Code session then adds the CLI (≈255 MB) and Trek's MCP helpers (≈2 MB each).</p>
+</figure></div><p><b>Streaming.</b> A two-minute answer at about 70 tokens a second cost Trek 42% of one core with frames at p50 5.1 ms / p95 6.5 ms, and RSS rose 137→166 MB. docs/PERFORMANCE.md reports 21–25% for the same test; today's 42% is higher and is reported as measured. Competitors' streaming CPU could not be driven the same way without signing in to them.</p><p><b>Real use.</b> The owner's running Trek 0.4.68, read without touching it: the main process at 520 MB after 4h41m with 782 threads and 37 Browser tabs; each Claude Code session it runs adds the CLI (≈255 MB) and six MCP helpers (≈2 MB each). The agent CLIs, not the app, dominate memory once agents run — in every app.</p><h3>Trek's own claims, checked</h3><div class='table-wrap'><table class='data'><thead><tr><th>Claim</th><th>Where</th><th>Measured today</th><th>Verdict</th></tr></thead><tbody><tr><td>Idle footprint 55 / 56 / 57 MB with 0 / 10 / 100 threads</td><td>docs/PERFORMANCE.md</td><td>58 / 64 / 65 MB</td><td>Holds (a few MB higher)</td></tr><tr><td>Warm launch 201 / 191 / 186 ms</td><td>docs/PERFORMANCE.md</td><td>230 / 222 / 207 ms</td><td>Holds (about 10% slower today)</td></tr><tr><td>Cold launch, 100 threads, 235–243 ms after remount</td><td>docs/PERFORMANCE.md</td><td>275 ms</td><td>Holds</td></tr><tr><td>Idle CPU 0.03% of a core</td><td>docs/PERFORMANCE.md</td><td>0.05%</td><td>Holds</td></tr><tr><td>Streaming a 2-minute answer: 21–25% CPU</td><td>docs/PERFORMANCE.md</td><td>42.2%</td><td>Not reproduced (about double)</td></tr><tr><td>10,000-item thread: first paint 157 ms, scroll p95 5.1 ms</td><td>docs/PERFORMANCE.md</td><td>100 ms, p95 9.6 ms</td><td>Open faster; scroll p95 higher, still under a 60 Hz frame</td></tr><tr><td>Trek's “hi” is below the bare CLI's</td><td>docs/PROMPT_BUDGET.md</td><td>39,104 vs 40,120 tokens</td><td>Holds</td></tr><tr><td>“Trek is first on ADEMark's speed and weight tests”</td><td>docs/PLUGINS.md:322</td><td>Trek is not in ADEMark</td><td>Unsupported: remove or get measured</td></tr><tr><td>“Light and fast”</td><td>README</td><td>65 MB idle; 520 MB in a real 4.7 h day; agents add ≈150–255 MB each</td><td>True of the app, not of a session with agents</td></tr></tbody></table></div>
+</section>
+<section id="scale"><h2>Scale: thousands of threads, hundreds of tabs</h2>
+<p>Threads were seeded through Trek's own store (<code>perf_seed</code>: four turns each, spread over four months) and the app driven by its test harness on an invisible display. No competitor offers a way to seed thousands of threads, so this is Trek against itself; ADEMark's per-thread and long-thread numbers are the only comparable published figures.</p><h3>Threads in the sidebar</h3><div class="table-wrap"><table class="data nums"><thead><tr>
+<th>Threads</th>
+<th>Launch</th>
+<th>Footprint idle</th>
+<th>Footprint drawn</th>
+<th>Idle CPU</th>
+<th>Sidebar scroll frame p50/p95</th>
+<th>Open the oldest thread</th>
+<th>Typing latency p50/p95</th>
+<th>Load</th>
+</tr></thead><tbody>
+<tr class=""><td>100</td><td>208 ms</td><td>65 MB</td><td>66 MB</td><td>0.03%</td><td>5.3 / 6.9 ms</td><td>63.1 ms</td><td>11.5 / 19.1 ms</td><td>3.0</td></tr>
+<tr class=""><td>1,000</td><td>186 ms</td><td>69 MB</td><td>71 MB</td><td>0.03%</td><td>5.9 / 7.4 ms</td><td>57.9 ms</td><td>10.3 / 18.4 ms</td><td>2.8</td></tr>
+<tr class=""><td>5,000</td><td>200 ms</td><td>107 MB</td><td>108 MB</td><td>0.03%</td><td>7.0 / 9.2 ms</td><td>87.9 ms</td><td>10.9 / 18.9 ms</td><td>3.1</td></tr>
+<tr class=""><td>10,000</td><td>221 ms</td><td>154 MB</td><td>159 MB</td><td>0.03%</td><td>9.4 / 10.9 ms</td><td>112.8 ms</td><td>12.2 / 19.0 ms</td><td>2.8</td></tr>
+</tbody></table></div><div class="grid2"><figure class="chart"><figcaption class="chart-title">Trek&#x27;s memory at idle by threads in the sidebar (footprint, MB)</figcaption>
+<svg viewBox="0 0 720 120" role="img" aria-label="Trek&#x27;s memory at idle by threads in the sidebar (footprint, MB)">
+<g><title>Trek, 100 threads: 65 MB · scroll p95 6.9 ms</title>
+<text class="lbl trek-l" x="160" y="25" text-anchor="end">Trek, 100 threads</text>
+<rect class="bar trek" x="170" y="13" width="177.9" height="16" rx="4"/>
+<text class="val" x="353.9" y="25">65 MB scroll p95 6.9 ms</text></g>
+<g><title>Trek, 1,000 threads: 69 MB · scroll p95 7.4 ms</title>
+<text class="lbl trek-l" x="160" y="51" text-anchor="end">Trek, 1,000 threads</text>
+<rect class="bar trek" x="170" y="39" width="188.9" height="16" rx="4"/>
+<text class="val" x="364.9" y="51">69 MB scroll p95 7.4 ms</text></g>
+<g><title>Trek, 5,000 threads: 107 MB · scroll p95 9.2 ms</title>
+<text class="lbl trek-l" x="160" y="77" text-anchor="end">Trek, 5,000 threads</text>
+<rect class="bar trek" x="170" y="65" width="292.9" height="16" rx="4"/>
+<text class="val" x="468.9" y="77">107 MB scroll p95 9.2 ms</text></g>
+<g><title>Trek, 10,000 threads: 154 MB · scroll p95 10.9 ms</title>
+<text class="lbl trek-l" x="160" y="103" text-anchor="end">Trek, 10,000 threads</text>
+<rect class="bar trek" x="170" y="91" width="421.6" height="16" rx="4"/>
+<text class="val" x="597.6" y="103">154 MB scroll p95 10.9 ms</text></g>
+</svg>
+<p class="chart-note">A thread costs about 9 KB of footprint at idle; the 10,000-thread launch was 221 ms.</p>
+</figure><figure class="chart"><figcaption class="chart-title">Trek plus its WebKit processes by open Browser tabs (MB)</figcaption>
+<svg viewBox="0 0 720 94" role="img" aria-label="Trek plus its WebKit processes by open Browser tabs (MB)">
+<g><title>Trek, 50 tabs: 1,263 MB · 53 WebKit processes</title>
+<text class="lbl trek-l" x="160" y="25" text-anchor="end">Trek, 50 tabs</text>
+<rect class="bar trek" x="170" y="13" width="126.7" height="16" rx="4"/>
+<text class="val" x="302.7" y="25">1,263 MB 53 WebKit processes</text></g>
+<g><title>Trek, 100 tabs: 2,246 MB · 103 WebKit processes</title>
+<text class="lbl trek-l" x="160" y="51" text-anchor="end">Trek, 100 tabs</text>
+<rect class="bar trek" x="170" y="39" width="225.3" height="16" rx="4"/>
+<text class="val" x="401.3" y="51">2,246 MB 103 WebKit processes</text></g>
+<g><title>Trek, 200 tabs: 4,202 MB · 204 WebKit processes</title>
+<text class="lbl trek-l" x="160" y="77" text-anchor="end">Trek, 200 tabs</text>
+<rect class="bar trek" x="170" y="65" width="421.6" height="16" rx="4"/>
+<text class="val" x="597.6" y="77">4,202 MB 204 WebKit processes</text></g>
+</svg>
+<p class="chart-note">About 20 MB per live tab; every tab kept its own page process (no tab was suspended).</p>
+</figure></div><h3>Browser tabs</h3><div class="table-wrap"><table class="data nums"><thead><tr>
+<th>Tabs</th>
+<th>New tab p50</th>
+<th>Last 10 tabs p50</th>
+<th>Trek footprint</th>
+<th>WebKit processes / footprint</th>
+<th>Total</th>
+<th>Typing p95</th>
+<th>Tabs kept</th>
+<th>Load</th>
+</tr></thead><tbody>
+<tr class=""><td>50</td><td>320 ms</td><td>322 ms</td><td>250 MB</td><td>53 / 1,013 MB</td><td>1,263 MB</td><td>18.7 ms</td><td>50 + the first tab</td><td>3.4</td></tr>
+<tr class=""><td>100</td><td>319 ms</td><td>320 ms</td><td>259 MB</td><td>103 / 1,986 MB</td><td>2,246 MB</td><td>19.3 ms</td><td>100 + the first tab</td><td>6.5</td></tr>
+<tr class=""><td>200</td><td>312 ms</td><td>312 ms</td><td>171 MB</td><td>204 / 4,031 MB</td><td>4,202 MB</td><td>19.2 ms</td><td>200 + the first tab</td><td>17.5</td></tr>
+</tbody></table></div><p><b>Browser tabs</b> are WebKit pages of a local 60-paragraph document with a timer, opened one after another through the Browser's own command. Each tab's page lives in a WebKit process, which is where the memory goes; Trek's own process barely moves.</p><p><b>Compared:</b> ADEMark's long-thread test (2,000 messages) opened in 76–351 ms across apps; Trek opened a 10,000-item thread in 100 ms here. ADEMark's “memory per thread” ranged 2.1 MB (Zeron) to 39.9 MB (Traycer); Trek's footprint grew 89 MB from 100 to 10,000 idle threads.</p>
+</section>
+<section id="swarm"><h2>Swarming: many agents at once</h2>
+<p>Swarms were run with Trek's mock agent so that only the app is measured and nothing is spent: N threads each streaming an answer at once, then N threads each starting a sub-agent (<code>mock:delegate implement …</code>, a child thread). The frame times and typing latency are taken during the load. A real-agent run follows, replicating Synara's post exactly.</p><div class="table-wrap"><table class="data nums"><thead><tr>
+<th>Swarm</th>
+<th>Footprint before</th>
+<th>Footprint peak</th>
+<th>Trek CPU</th>
+<th>Frame p50/p95</th>
+<th>Typing p95</th>
+<th>Open a thread</th>
+<th>All finished</th>
+<th>Sessions alive</th>
+<th>Machine load</th>
+</tr></thead><tbody>
+<tr class=""><td>Streaming answers × 10</td><td>70 MB</td><td>194 MB</td><td>19.4%</td><td>5.2 / 7.5 ms</td><td>19.5 ms</td><td>69.4 ms</td><td>yes</td><td>10</td><td>3.6</td></tr>
+<tr class=""><td>Streaming answers × 20</td><td>70 MB</td><td>184 MB</td><td>24.9%</td><td>5.7 / 7.0 ms</td><td>19.6 ms</td><td>23.9 ms</td><td>yes</td><td>20</td><td>3.0</td></tr>
+<tr class=""><td>Streaming answers × 50</td><td>70 MB</td><td>219 MB</td><td>35.9%</td><td>4.3 / 6.4 ms</td><td>20.2 ms</td><td>28.6 ms</td><td>yes</td><td>50</td><td>3.5</td></tr>
+<tr class=""><td>Sub-agents (delegate) × 10</td><td>71 MB</td><td>121 MB</td><td>3.3%</td><td>nothing to draw</td><td>19.8 ms</td><td>76.8 ms</td><td>yes</td><td>10</td><td>3.1</td></tr>
+<tr class=""><td>Sub-agents (delegate) × 20</td><td>70 MB</td><td>123 MB</td><td>3.9%</td><td>nothing to draw</td><td>19.8 ms</td><td>67.9 ms</td><td>yes</td><td>20</td><td>4.2</td></tr>
+<tr class=""><td>Sub-agents (delegate) × 50</td><td>70 MB</td><td>137 MB</td><td>5.7%</td><td>nothing to draw</td><td>18.2 ms</td><td>78.4 ms</td><td>yes</td><td>50</td><td>3.0</td></tr>
+</tbody></table></div><h3>Real agents: Synara's post #12, repeated in Trek</h3><p>Isolated Trek with real Claude Code on the owner's subscription, in a throwaway project: 6 threads each ran a one-word turn, then 4 more streamed a 900-word story at once — <b>10 threads open, 4 streaming</b>, as in the post. Peak: <b>1,744 MB</b> for Trek and every process under it (Trek itself 180 MB; 10 Claude Code CLIs 1,564 MB). Synara's own post reports 1,784 MB for the same shape after its fix (2,307 MB before), on its machine. Trek's MCP helpers did not start in this run (the build folder had no trek-mcp); from the owner's live Trek they add about 2 MB each, about 120 MB for 10 sessions.</p><p><b>What it shows:</b> once agents run, the CLIs are 90% of the memory in any app. Trek kept <b>all 10</b> CLIs alive after every turn had ended (1,623 MB at rest); Synara's fix was to cut its count from 10 to 4, and super.engineering's 134 MB on ADEMark's “5 idle threads” test means it parks idle agents too. At about 153 MB per idle Claude Code here, Trek would score roughly 855 MB on that ADEMark test (estimate), behind super.engineering (134), MonoCode (419) and Capy (593).</p>
+</section>
+<section id="tokens"><h2>Tokens and harness quality</h2>
+<p>Trek wraps the vendor CLIs, so two things matter: what Trek adds to every request, and how good its own loop is when you use API or local models.</p><figure class="chart"><figcaption class="chart-title">Tokens sent for “hi” (ADEMark&#x27;s numbers; Trek placed by its measured difference)</figcaption>
+<svg viewBox="0 0 720 406" role="img" aria-label="Tokens sent for “hi” (ADEMark&#x27;s numbers; Trek placed by its measured difference)">
+<g><title>Paseo: 22,206</title>
+<text class="lbl" x="160" y="25" text-anchor="end">Paseo</text>
+<rect class="bar" x="170" y="13" width="121.6" height="16" rx="4"/>
+<text class="val" x="297.6" y="25">22,206</text></g>
+<g><title>bb: 24,545</title>
+<text class="lbl" x="160" y="51" text-anchor="end">bb</text>
+<rect class="bar" x="170" y="39" width="134.4" height="16" rx="4"/>
+<text class="val" x="310.4" y="51">24,545</text></g>
+<g><title>super.engineering: 29,558</title>
+<text class="lbl" x="160" y="77" text-anchor="end">super.engineering</text>
+<rect class="bar" x="170" y="65" width="161.9" height="16" rx="4"/>
+<text class="val" x="337.9" y="77">29,558</text></g>
+<g><title>Synara: 30,551</title>
+<text class="lbl" x="160" y="103" text-anchor="end">Synara</text>
+<rect class="bar" x="170" y="91" width="167.3" height="16" rx="4"/>
+<text class="val" x="343.3" y="103">30,551</text></g>
+<g><title>Trek (est.): 37,211 · bare CLI + Trek&#x27;s measured Δ</title>
+<text class="lbl trek-l" x="160" y="129" text-anchor="end">Trek (est.)</text>
+<rect class="bar trek" x="170" y="117" width="203.8" height="16" rx="4"/>
+<text class="val" x="379.8" y="129">37,211 bare CLI + Trek&#x27;s measured Δ</text></g>
+<g><title>Orca: 37,659</title>
+<text class="lbl" x="160" y="155" text-anchor="end">Orca</text>
+<rect class="bar" x="170" y="143" width="206.2" height="16" rx="4"/>
+<text class="val" x="382.2" y="155">37,659</text></g>
+<g><title>Bare CLI: 38,226</title>
+<text class="lbl" x="160" y="181" text-anchor="end">Bare CLI</text>
+<rect class="bar" x="170" y="169" width="209.3" height="16" rx="4"/>
+<text class="val" x="385.3" y="181">38,226</text></g>
+<g><title>Diri: 39,466</title>
+<text class="lbl" x="160" y="207" text-anchor="end">Diri</text>
+<rect class="bar" x="170" y="195" width="216.1" height="16" rx="4"/>
+<text class="val" x="392.1" y="207">39,466</text></g>
+<g><title>Zeron: 40,487</title>
+<text class="lbl" x="160" y="233" text-anchor="end">Zeron</text>
+<rect class="bar" x="170" y="221" width="221.7" height="16" rx="4"/>
+<text class="val" x="397.7" y="233">40,487</text></g>
+<g><title>Cloudroom: 41,550</title>
+<text class="lbl" x="160" y="259" text-anchor="end">Cloudroom</text>
+<rect class="bar" x="170" y="247" width="227.5" height="16" rx="4"/>
+<text class="val" x="403.5" y="259">41,550</text></g>
+<g><title>MonoCode: 44,621</title>
+<text class="lbl" x="160" y="285" text-anchor="end">MonoCode</text>
+<rect class="bar" x="170" y="273" width="244.4" height="16" rx="4"/>
+<text class="val" x="420.4" y="285">44,621</text></g>
+<g><title>T3 Code: 52,669</title>
+<text class="lbl" x="160" y="311" text-anchor="end">T3 Code</text>
+<rect class="bar" x="170" y="299" width="288.4" height="16" rx="4"/>
+<text class="val" x="464.4" y="311">52,669</text></g>
+<g><title>Traycer: 68,421</title>
+<text class="lbl" x="160" y="337" text-anchor="end">Traycer</text>
+<rect class="bar" x="170" y="325" width="374.7" height="16" rx="4"/>
+<text class="val" x="550.7" y="337">68,421</text></g>
+<g><title>Claude desktop: 75,537</title>
+<text class="lbl" x="160" y="363" text-anchor="end">Claude desktop</text>
+<rect class="bar" x="170" y="351" width="413.7" height="16" rx="4"/>
+<text class="val" x="589.7" y="363">75,537</text></g>
+<g><title>Emdash: 76,982</title>
+<text class="lbl" x="160" y="389" text-anchor="end">Emdash</text>
+<rect class="bar" x="170" y="377" width="421.6" height="16" rx="4"/>
+<text class="val" x="597.6" y="389">76,982</text></g>
+</svg>
+<p class="chart-note">ADEMark measured 15 apps on a Mac mini M4 (12 Nov 2026). Trek is not in ADEMark; here its 'hi' was measured with Claude Code 2.1.x on this Mac with Trek's exact flags: 39,104 tokens vs 40,119 for the bare CLI with the same user config, then placed on ADEMark's scale as the bare CLI's ADEMark value plus that difference.</p>
+</figure><h3>Trek's own agent loop on Terminal-Bench</h3><p><b>Earlier (30 Oct, same Mac):</b> Trek's Direct harness on 19 CPU-only Terminal-Bench 4 tasks with DeepSeek V4 Flash, one trial, 25 minutes: <b>0 tasks passed</b> (121 of 184 verifier tests), $3.29; with its Script tool on, 1 passed (120 of 184), $5.07. No other harness ran then, so it could not be ranked (<a href='https://claude.ai/artifact/GzrTHeDnj4ub46sumSKgwb'>report</a>).</p><p><b>Today's rerun failed for want of credit.</b> The plan was the missing comparison: Trek's current harness against OpenCode on the same 7 tasks and model. The OpenRouter account is exhausted ($40.20 used of $40); the key's own remaining cap ($6.58) had hidden that, and requests returned 402 after a few calls. Spent: $0.008. OpenCode never ran, so <b>Trek's harness is still unranked against any other on the same model</b>.</p><p><b>One thing it did show:</b> on cargo-flight-dispatch, before any 402, the current harness gave up the whole task after 5 requests: “The model used its whole output limit on reasoning and wrote nothing. Try a lower effort.” It retries an empty, reasoning-only reply twice (<code>MAX_EMPTY = 2</code>, crates/trek-agents/src/direct.rs) and then stops, rather than lowering the effort or raising the output limit itself. The 30 Oct build ran the same model and effort through 19 tasks without stopping this way. One occurrence is a signal, not a rate.</p><p><b>Published harness results</b> (not run here): Terminal-Bench 4.1 — Copilot 71.2%, Claude Code 65.8% (Opus 5.5), Antigravity CLI 64.5%, Codex 62.1%; Factory's own TB4 run on Opus 5.5 — Droid 65.2, Cursor 62.1, OpenCode 62.1, Devin 59.6, Claude Code 57.6. When Trek runs Claude Code or Codex, these are its numbers too.</p>
+</section>
+<section id="features"><h2>Features</h2>
+<p>From the field research (every row has a source URL in research/field/features.csv).</p><div class="table-wrap"><table class="data"><thead><tr>
+<th>Product</th>
+<th>Platforms</th>
+<th>Free</th>
+<th>Open source</th>
+<th>Other vendors' agents</th>
+<th>API / local models</th>
+<th>Parallel</th>
+<th>Worktrees</th>
+<th>Agent drives browser</th>
+<th>Computer use</th>
+<th>Phone</th>
+<th>Sub-agents</th>
+<th>Stack</th>
+</tr></thead><tbody>
+<tr class="trek"><td>Trek</td><td>macOS, Windows, Linux, iPhone companion</td><td>yes (free)</td><td>yes</td><td>yes (Claude Code, Codex, OpenCode, Cursor, Copilot, Droid, a</td><td>yes (API and local models)</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td>yes (iPhone)</td><td>yes</td><td>Rust + GPUI native</td></tr>
+<tr class=""><td>Claude desktop (Code tab)</td><td>macOS, Windows, Linux beta; web + iOS/Android Claude app for</td><td>no (needs Pro/Max/Team/Enterprise or API)</td><td>no</td><td>no (Anthropic only)</td><td>partial (third-party gateway config; cloud sessions refuse B</td><td>yes</td><td>yes (opt-in)</td><td>yes</td><td>yes (macOS 14+, per-app tiers)</td><td>yes (Remote Control, Dispatch, cloud sessions)</td><td>yes (background tasks; agent teams experimental)</td><td>Electron (ADEMark)</td></tr>
+<tr class=""><td>OpenAI Codex app</td><td>macOS, Windows (Linux waitlist); web, CLI, IDE; mobile via C</td><td>yes (Free: GPT-6 Luna only)</td><td>partial (app closed; CLI open)</td><td>no (OpenAI only)</td><td>partial (API key; no local)</td><td>yes</td><td>yes</td><td>partial (DOM comments; broader control &#x27;planned&#x27; in Apr)</td><td>yes (background, macOS)</td><td>yes (start, approve, review from phone)</td><td>unverified</td><td>unverified</td></tr>
+<tr class=""><td>Cursor (Agents window, cloud agents)</td><td>macOS listed (Windows/Linux not verified here); iOS app</td><td>yes (Free $0)</td><td>no</td><td>unverified</td><td>yes (Composer + Grok/GPT/Opus/Gemini)</td><td>yes</td><td>unverified</td><td>yes</td><td>unverified</td><td>yes (iOS, voice 2026-11-06)</td><td>yes (coordinator delegates to subagents)</td><td>VS Code fork (not verified here)</td></tr>
+<tr class=""><td>Orca (Stably)</td><td>macOS, Windows, Linux, iOS, Android</td><td>yes</td><td>yes</td><td>yes (Claude Code, Codex, Grok, Agy, other CLIs)</td><td>n/a (uses agents&#x27; own)</td><td>yes</td><td>yes</td><td>yes (Orca CLI)</td><td>yes</td><td>yes (push when agent needs you)</td><td>yes (experimental; workers never started in ADEMark C1)</td><td>Electron</td></tr>
+<tr class=""><td>T3 Code (Ping)</td><td>macOS, Windows, Linux, web, iOS, Android</td><td>yes</td><td>yes</td><td>yes (Claude Code, Codex, Cursor, OpenCode, Grok Build, Antig</td><td>n/a</td><td>yes</td><td>yes (one per thread)</td><td>unverified</td><td>no (not mentioned)</td><td>yes (LAN, Tailscale, T3 Connect)</td><td>partial (Orchestrator V2 delegate_task; Claude can hand off </td><td>Electron</td></tr>
+<tr class=""><td>Paseo</td><td>macOS desktop, web app, CLI/daemon, native iOS + Android</td><td>yes</td><td>yes</td><td>yes (Claude Code, Codex, Copilot, OpenCode, Pi, OMP, Cursor,</td><td>n/a</td><td>yes</td><td>yes</td><td>unverified</td><td>no (not mentioned)</td><td>yes (full parity, native)</td><td>yes (agents launch agents via MCP/CLI/SDK)</td><td>Electron</td></tr>
+<tr class=""><td>Paradev (ex Superset)</td><td>macOS, Linux (experimental), iOS, Android; no Windows yet</td><td>yes (local workspaces)</td><td>yes</td><td>yes (Claude Code, Codex, OpenCode, Gemini, Cursor Agent, any</td><td>n/a</td><td>yes</td><td>yes (per workspace)</td><td>unverified</td><td>no (not mentioned)</td><td>partial (paid Pro)</td><td>yes (CLI + MCP + orchestrate skill)</td><td>Electron</td></tr>
+<tr class=""><td>Conductor</td><td>macOS; iOS app (0.90.0, 2026-10-02)</td><td>unverified (pricing page not found; sign-ups stopped 2026-11</td><td>no</td><td>yes (Claude Code, Codex, Cursor)</td><td>n/a</td><td>yes</td><td>yes (workspaces)</td><td>unverified</td><td>unverified</td><td>yes (iOS)</td><td>partial (0.95.0 agents that manage local workspaces)</td><td>Tauri→Electron (secondary source, unverified)</td></tr>
+<tr class=""><td>Zed</td><td>macOS, Linux, Windows</td><td>yes (Personal $0, BYOK/external agents unlimited)</td><td>yes</td><td>yes (ACP: Claude Agent, Codex, OpenCode, Copilot, Cursor, Pi</td><td>yes (Anthropic, OpenAI, Ollama, LM Studio, OpenRouter keys)</td><td>yes (parallel threads)</td><td>yes (optional per thread)</td><td>no</td><td>no</td><td>no</td><td>unverified</td><td>Rust + GPUI native</td></tr>
+<tr class=""><td>super.engineering (ex Superconductor)</td><td>macOS (Apple Silicon); Linux per site footer</td><td>yes (free during alpha, per competitor page)</td><td>no</td><td>yes (18 agents incl. Claude, Codex, Cursor, OpenCode, Gemini</td><td>n/a</td><td>yes</td><td>yes (per task)</td><td>partial (experimental sc browser)</td><td>no (not mentioned)</td><td>partial (docs page linked; not shipped per competitor page)</td><td>yes (experimental lead + roles; 5/5 in ADEMark C1)</td><td>Rust + GPUI native</td></tr>
+<tr class=""><td>Herdr</td><td>macOS (Apple Silicon), Linux, Windows; iPhone, iPad, Android</td><td>yes (free)</td><td>yes</td><td>yes (any terminal agent; OSC 7501 status)</td><td>n/a</td><td>yes (spaces/tabs, multi-machine)</td><td>no (not mentioned)</td><td>no</td><td>no (not mentioned)</td><td>yes (SSH/Tailscale, no account)</td><td>yes (hc run --bg, hc send)</td><td>Rust</td></tr>
+<tr class=""><td>Nimbalyst (ex Crystal)</td><td>macOS, Windows, Linux, iOS (Android unverified)</td><td>yes (individuals)</td><td>yes</td><td>yes (Claude Code, Codex; OpenCode/Copilot alpha)</td><td>n/a</td><td>yes</td><td>yes (opt-in)</td><td>unverified</td><td>no (not found)</td><td>yes (iOS: input, voice, diffs, push)</td><td>no (not found)</td><td>Electron + SwiftUI iOS</td></tr>
+<tr class=""><td>Devin Desktop (ex Windsurf)</td><td>macOS, Windows, Linux</td><td>yes (Free $0)</td><td>no</td><td>yes (any ACP agent alongside Devin)</td><td>yes (OpenAI, Claude, Gemini)</td><td>yes (Agent Command Center)</td><td>unverified</td><td>unverified</td><td>unverified</td><td>unverified</td><td>yes (Devin Local subagents)</td><td>VS Code fork (inferred)</td></tr>
+<tr class=""><td>Google Antigravity</td><td>macOS, Windows, Linux, Googlebook, web</td><td>yes (weekly quota)</td><td>no</td><td>no (Gemini first)</td><td>yes (Gemini 4, Claude on paid tiers, GPT-OSS)</td><td>yes (agent manager)</td><td>unverified</td><td>yes</td><td>unverified</td><td>unclear (&#x27;Remote Control&#x27; on AI Pro)</td><td>yes (CLI background subagents)</td><td>unverified</td></tr>
+<tr class=""><td>Factory app + Droid</td><td>macOS, Windows; phones/tablets per post</td><td>yes (BYO inference)</td><td>no</td><td>no (Droid only)</td><td>yes (BYOK, Ollama, vLLM)</td><td>yes</td><td>unverified</td><td>yes</td><td>partial (VS Code, terminals, documents)</td><td>yes (per post)</td><td>yes (subagents)</td><td>unverified</td></tr>
+<tr class=""><td>OpenCode desktop</td><td>macOS, Windows, Linux; mobile (TestFlight, Google Play)</td><td>yes (free models, no account)</td><td>yes</td><td>no (its own agent)</td><td>yes (200+ providers, local)</td><td>partial (sessions, tabs)</td><td>unverified</td><td>unverified</td><td>unverified</td><td>yes</td><td>unverified</td><td>Electron + SolidJS</td></tr>
+<tr class=""><td>Diri</td><td>macOS 15+, Linux beta</td><td>yes</td><td>yes</td><td>yes (Claude Code, Codex, Cursor, Gemini, OpenCode, +dozen)</td><td>n/a</td><td>yes</td><td>yes</td><td>no</td><td>yes (background Mac apps)</td><td>no</td><td>yes (MCP spawns agents, SSH)</td><td>Rust + GPUI</td></tr>
+<tr class=""><td>Traycer Desktop</td><td>macOS, Windows, Linux + mobile app</td><td>yes (individuals)</td><td>yes (claimed; repo traycerai/traycer, 1.4k per site)</td><td>yes (19 agents incl. Claude Code, Codex, OpenCode, Cursor, D</td><td>partial (Traycer Inference, OpenRouter, HF)</td><td>yes</td><td>yes</td><td>partial</td><td>no (not mentioned)</td><td>yes</td><td>yes (agents message each other, child agents)</td><td>Electron</td></tr>
+<tr class=""><td>Synara</td><td>macOS, Windows, Linux</td><td>yes</td><td>yes</td><td>yes (Codex, Claude Code, Cursor, Antigravity, Grok, Droid, O</td><td>n/a</td><td>yes</td><td>yes (managed)</td><td>yes (WebMCP tools)</td><td>no (not mentioned)</td><td>no</td><td>yes (worker subagents; 5/5 C1 in 5.2 min)</td><td>Electron</td></tr>
+</tbody></table></div><p>Where Trek is alone: iOS Simulator plus a real-iPhone tool, video watching, notes and study mode, connected machines, and API/local models beside vendor CLIs. Where it is not ahead: phone companions are now table stakes (Claude, Codex, Cursor, Orca, T3, Paseo, Conductor, Herdr all have one, most in app stores), and Orca matches most of Trek's surface including computer use and Android.</p>
+</section>
+<section id="ux"><h2>Beginner UX and accessibility</h2>
+<p><b>First run, counted.</b> Trek: an intro, then Appearance, Permissions (7 macOS permissions), Agents (scan; install and sign in run in a terminal), API keys, Local models, Approvals, Phone and machines, Finish — 9 screens, all skippable, no Trek account. Claude desktop: a welcome and a sign-in (a paid plan for Code). Codex app: a ChatGPT sign-in (free tier). Conductor: “Sign up” is the first screen. Paseo: a 5-step setup (Appearance, Providers, Projects, Orchestration, Mobile), skippable. super.engineering: one “Get started” or “Set up later”. T3 Code: opens straight to a composer and uses the CLIs already installed. The counts of clicks for “start an agent on a repo, review a diff, recover from an error” could not be measured in the competitors without signing in to them; see the limits.</p><p><b>Accessibility.</b> What VoiceOver can see, read from each app's accessibility tree (scripts/axprobe.swift, which asks Chromium apps to build their tree first and walks it twice). A control “with a name” has a title, description or label VoiceOver can speak.</p><div class="table-wrap"><table class="data"><thead><tr>
+<th>App</th>
+<th>Screen probed</th>
+<th>Accessibility nodes</th>
+<th>Controls</th>
+<th>Controls with a name</th>
+<th>Text a screen reader can read</th>
+</tr></thead><tbody>
+<tr class=""><td>VS Code</td><td>working window</td><td>1,526</td><td>220</td><td>218</td><td>465</td></tr>
+<tr class=""><td>Synara</td><td>working window</td><td>1,256</td><td>440</td><td>438</td><td>209</td></tr>
+<tr class=""><td>Orca</td><td>working window</td><td>560</td><td>146</td><td>144</td><td>191</td></tr>
+<tr class=""><td>Codex app</td><td>working window</td><td>513</td><td>161</td><td>159</td><td>45</td></tr>
+<tr class=""><td>Paseo</td><td>sign-in / first run</td><td>398</td><td>35</td><td>33</td><td>48</td></tr>
+<tr class=""><td>Cursor</td><td>working window</td><td>166</td><td>46</td><td>44</td><td>20</td></tr>
+<tr class=""><td>T3 Code</td><td>working window</td><td>157</td><td>49</td><td>47</td><td>30</td></tr>
+<tr class=""><td>Antigravity</td><td>working window</td><td>136</td><td>38</td><td>36</td><td>9</td></tr>
+<tr class=""><td>OpenCode desktop</td><td>working window</td><td>101</td><td>25</td><td>22</td><td>17</td></tr>
+<tr class=""><td>Claude</td><td>sign-in / first run</td><td>39</td><td>5</td><td>3</td><td>2</td></tr>
+<tr class=""><td>Conductor</td><td>sign-in / first run</td><td>38</td><td>5</td><td>3</td><td>6</td></tr>
+<tr class=""><td>Capy</td><td>sign-in / first run</td><td>26</td><td>5</td><td>3</td><td>4</td></tr>
+<tr class="trek"><td>Trek (main)</td><td>working window</td><td>16</td><td>13</td><td>2</td><td>0</td></tr>
+<tr class=""><td>Zed</td><td>working window</td><td>12</td><td>6</td><td>2</td><td>0</td></tr>
+<tr class=""><td>Warp</td><td>sign-in / first run</td><td>7</td><td>4</td><td>1</td><td>0</td></tr>
+<tr class=""><td>super.engineering</td><td>sign-in / first run</td><td>6</td><td>3</td><td>1</td><td>0</td></tr>
+</tbody></table></div><p>Trek's GPUI window gives VoiceOver almost nothing: no thread titles, no transcript text, unnamed buttons. Zed, on the same UI framework, is similar. The component kit has accessibility labels (e.g. switches), but they don't reach macOS. Keyboard-only use is better: ⌘K, shortcuts and review by keyboard exist, but without a screen reader a blind user cannot know where focus is.</p>
+</section>
+<section id="design"><h2>Design: a blind comparison</h2>
+<p>A separate, read-only reviewer scored unlabelled images on seven criteria without being told which product was which, and was told not to guess. Set A is each maker's own best screenshot (README or site), the fairest like-for-like: everyone's best foot forward. The images are shown below exactly as the reviewer saw them; the products are named in the table after it. Sources: T3 Code, Orca and Synara READMEs on GitHub, paseo.sh, the OpenCode docs, the Zed and Conductor site preview images (app area cropped), and Trek's README.</p><div class="shots"><figure><img src="blind/a/A.png" alt="Unlabelled image A" loading="lazy"><figcaption>Image A</figcaption></figure><figure><img src="blind/a/B.png" alt="Unlabelled image B" loading="lazy"><figcaption>Image B</figcaption></figure><figure><img src="blind/a/C.png" alt="Unlabelled image C" loading="lazy"><figcaption>Image C</figcaption></figure><figure><img src="blind/a/D.png" alt="Unlabelled image D" loading="lazy"><figcaption>Image D</figcaption></figure><figure><img src="blind/a/E.png" alt="Unlabelled image E" loading="lazy"><figcaption>Image E</figcaption></figure><figure><img src="blind/a/F.png" alt="Unlabelled image F" loading="lazy"><figcaption>Image F</figcaption></figure><figure><img src="blind/a/G.png" alt="Unlabelled image G" loading="lazy"><figcaption>Image G</figcaption></figure><figure><img src="blind/a/H.png" alt="Unlabelled image H" loading="lazy"><figcaption>Image H</figcaption></figure></div><div class="table-wrap"><table class="data"><thead><tr>
+<th>Image</th>
+<th>Product (revealed after judging)</th>
+<th>Hierarchy</th>
+<th>Type</th>
+<th>Colour</th>
+<th>Density</th>
+<th>Craft</th>
+<th>Calm</th>
+<th>Distinct</th>
+<th>Overall</th>
+</tr></thead><tbody>
+<tr class=""><td>G</td><td>T3 Code (README hero)</td><td>8</td><td>8</td><td>8</td><td>7</td><td>8</td><td>8</td><td>5</td><td>7.5</td></tr>
+<tr class="trek"><td>H</td><td>Trek (README hero, Night)</td><td>9</td><td>7</td><td>6</td><td>6</td><td>7</td><td>7</td><td>7</td><td>7</td></tr>
+<tr class=""><td>C</td><td>Zed (og image, app region cropped)</td><td>5</td><td>8</td><td>7</td><td>7</td><td>7</td><td>8</td><td>6</td><td>6.5</td></tr>
+<tr class=""><td>E</td><td>OpenCode desktop (docs screenshot)</td><td>7</td><td>6</td><td>8</td><td>6</td><td>7</td><td>8</td><td>6</td><td>6</td></tr>
+<tr class=""><td>A</td><td>Conductor (og image, app region cropped)</td><td>6</td><td>7</td><td>7</td><td>6</td><td>7</td><td>7</td><td>7</td><td>6</td></tr>
+<tr class=""><td>D</td><td>Orca (README hero)</td><td>6</td><td>6</td><td>6</td><td>5</td><td>6</td><td>5</td><td>5</td><td>5.5</td></tr>
+<tr class=""><td>B</td><td>Synara (README split view dark)</td><td>5</td><td>7</td><td>7</td><td>5</td><td>6</td><td>7</td><td>3</td><td>5.5</td></tr>
+<tr class=""><td>F</td><td>Paseo (site hero mockup)</td><td>5</td><td>6</td><td>6</td><td>5</td><td>6</td><td>5</td><td>4</td><td>5</td></tr>
+</tbody></table></div><p>Set A, decoded after the verdict: Trek (H) came <b>2nd of 8</b>. The reviewer on Trek: “Inbox first in the sidebar ('Waiting: a plan to review' in amber), a framed plan card with an orange 'Approve and start', a composer placeholder that says what to do next; strongest identity of the set.” Faults: too many accent hues: orange, amber, green, an indigo plan border, a purple branch icon, a red stop button and a pink badge; the indigo border competes with the orange button; nearly every sidebar title is heavy bold, flattening the levels; about 200 px of dead space between 'Read 1 file and ran 1 search' and the plan card; every tab uses the same icon; a red stop button shows while the agent is waiting for approval, which mixes up the state.</p><h3>Set B: the first screen a new user sees</h3><p>Captured on this Mac. Trek's is its isolated first run; the others as installed (several never signed in). Same reviewer setup, a new run.</p><div class="shots"><figure><img src="blind/b/A.png" alt="Unlabelled first screen A" loading="lazy"><figcaption>Image A</figcaption></figure><figure><img src="blind/b/B.png" alt="Unlabelled first screen B" loading="lazy"><figcaption>Image B</figcaption></figure><figure><img src="blind/b/C.png" alt="Unlabelled first screen C" loading="lazy"><figcaption>Image C</figcaption></figure><figure><img src="blind/b/D.png" alt="Unlabelled first screen D" loading="lazy"><figcaption>Image D</figcaption></figure><figure><img src="blind/b/E.png" alt="Unlabelled first screen E" loading="lazy"><figcaption>Image E</figcaption></figure><figure><img src="blind/b/F.png" alt="Unlabelled first screen F" loading="lazy"><figcaption>Image F</figcaption></figure><figure><img src="blind/b/G.png" alt="Unlabelled first screen G" loading="lazy"><figcaption>Image G</figcaption></figure><figure><img src="blind/b/H.png" alt="Unlabelled first screen H" loading="lazy"><figcaption>Image H</figcaption></figure></div><div class="table-wrap"><table class="data"><thead><tr>
+<th>Image</th>
+<th>Product (revealed after judging)</th>
+<th>Hierarchy</th>
+<th>Type</th>
+<th>Colour</th>
+<th>Density</th>
+<th>Craft</th>
+<th>Calm</th>
+<th>Distinct</th>
+<th>Overall</th>
+</tr></thead><tbody>
+<tr class="trek"><td>E</td><td>Trek</td><td>8</td><td>9</td><td>7</td><td>7</td><td>7</td><td>7</td><td>8</td></tr>
+<tr class=""><td>G</td><td>Claude</td><td>8</td><td>5</td><td>8</td><td>7</td><td>8</td><td>6</td><td>7</td></tr>
+<tr class=""><td>F</td><td>Conductor</td><td>7</td><td>6</td><td>7</td><td>7</td><td>7</td><td>8</td><td>7</td></tr>
+<tr class=""><td>C</td><td>Paseo</td><td>7</td><td>6</td><td>7</td><td>7</td><td>7</td><td>6</td><td>6</td></tr>
+<tr class=""><td>A</td><td>Warp</td><td>8</td><td>6</td><td>6</td><td>5</td><td>7</td><td>4</td><td>6</td></tr>
+<tr class=""><td>H</td><td>Zed</td><td>7</td><td>4</td><td>7</td><td>6</td><td>8</td><td>4</td><td>5</td></tr>
+<tr class=""><td>D</td><td>Capy</td><td>8</td><td>3</td><td>7</td><td>5</td><td>7</td><td>7</td><td>5</td></tr>
+<tr class=""><td>B</td><td>super.engineering</td><td>6</td><td>2</td><td>3</td><td>5</td><td>5</td><td>3</td><td>3</td></tr>
+</tbody></table></div><p>Trek (E) came <b>1st of 8</b>: Says what the product is, that setup is short and optional, that data stays on the machine; asks for no account or permissions; the pixel figure walking to a signpost gives it identity. Faults: the 'Get started' button is small next to the wide card row; white on the light orange button is likely about 3:1; grey card body text on dark grey is only moderate; small illustration in a lot of empty space. This frame doesn't show what follows: 7 macOS permission prompts.</p><div class="shots"><figure><img src="shots/trek-home.png" alt="Trek, isolated profile with seeded threads" loading="lazy"><figcaption><b>Trek</b> (main, isolated profile, 100 seeded threads, Night theme)</figcaption></figure>
+<figure><img src="shots/codex-app.png" alt="Codex app as launched" loading="lazy"><figcaption><b>Codex app</b> 26.1023, as launched (private titles pixelated)</figcaption></figure>
+<figure><img src="shots/cursor.png" alt="Cursor as launched" loading="lazy"><figcaption><b>Cursor</b> 3.24, as launched</figcaption></figure>
+<figure><img src="shots/t3-code.png" alt="T3 Code as launched" loading="lazy"><figcaption><b>T3 Code</b> 0.0.33, as launched</figcaption></figure>
+<figure><img src="shots/zed.png" alt="Zed as launched" loading="lazy"><figcaption><b>Zed</b> 1.30, as launched</figcaption></figure>
+<figure><img src="shots/claude.png" alt="Claude desktop first run" loading="lazy"><figcaption><b>Claude</b> desktop, first run (asks for a sign-in or a gateway)</figcaption></figure>
+<figure><img src="shots/conductor.png" alt="Conductor first run" loading="lazy"><figcaption><b>Conductor</b> 0.101, first run (asks to sign up)</figcaption></figure>
+<figure><img src="shots/opencode-desktop.png" alt="OpenCode desktop as launched" loading="lazy"><figcaption><b>OpenCode</b> desktop 1.18, as launched</figcaption></figure>
+<figure><img src="shots/antigravity.png" alt="Antigravity as launched" loading="lazy"><figcaption><b>Antigravity</b> 2.31, as launched</figcaption></figure>
+<figure><img src="shots/warp.png" alt="Warp first run" loading="lazy"><figcaption><b>Warp</b>, first run</figcaption></figure>
+<figure><img src="shots/paseo.png" alt="Paseo first run" loading="lazy"><figcaption><b>Paseo</b> 0.18, first run (5-step setup)</figcaption></figure>
+<figure><img src="shots/super-engineering.png" alt="super.engineering first run" loading="lazy"><figcaption><b>super.engineering</b>, first run</figcaption></figure>
+<figure><img src="shots/capy.png" alt="Capy first run" loading="lazy"><figcaption><b>Capy</b>, as launched (sign-in)</figcaption></figure>
+</div><p class='sub'>Screenshots below are as each app launched on this Mac; private thread and project names are pixelated, and Synara, Orca and VS Code are left out because nearly all of their windows showed the owner's own work. The competitors ran with the owner's profiles, so some show onboarding or sign-in screens rather than a working window.</p>
+</section>
+<section id="posts"><h2>The posts you sent</h2>
+<p>Each post was read through its public API and every video watched (frames and transcript). Full notes in research/posts/.</p><div class="table-wrap"><table class="data"><thead><tr>
+<th>#</th>
+<th>Post</th>
+<th>What it shows</th>
+<th>Claim</th>
+<th>How Trek compares</th>
+</tr></thead><tbody>
+<tr class=""><td>1</td><td>@0xPaulius, Clonk v2</td><td>Motion ad: one commander splits “Run my company” into teams; 39,800→360,830 thread counter; phone live status</td><td>Swarms across every plan and machine; “12,307 agents threads”</td><td>Marketing counts, not a benchmark. Trek ran 10,000 threads and 50 parallel mock agents smoothly; it has sub-agents, started threads and machines, but no “commander” that splits a goal into teams.</td></tr>
+<tr class=""><td>2</td><td>@gavmilde, Capy</td><td>Screenshot of role “Captains” with automations</td><td>$20/mo for cloud machines, tokens on your Claude sub</td><td>Trek is free and local; no hosted machines or role agents. Capy measured 549 MB idle here vs Trek 65 MB.</td></tr>
+<tr class=""><td>3</td><td>@lxe, Superharness</td><td>Free, open-source app that discovers every harness's sessions; steer, queue, usage limits, iPhone mirror</td><td>Drive all your harnesses with no setup</td><td>Closest idea to Trek (imports history, many harnesses, phone). Trek has far more tools; Superharness shows usage limits per vendor prominently and needs no setup. 28 stars, two days old.</td></tr>
+<tr class=""><td>4</td><td>@dazuoforyou, review</td><td>Orca complete but unpolished; Paseo restrained; Herdr lost records; T3 Code didn't land</td><td>Polish and first-run clarity beat feature count</td><td>Trek risks Orca's verdict: everything, less polish. Its blind design score (2nd) is good, but its first run (7 permissions) is the opposite of “restrained”.</td></tr>
+<tr class=""><td>5</td><td>@hanghuang_, polls</td><td>T3 Code 52%, Orca 39% (1,968 votes); Capy 58% (295)</td><td>Popularity</td><td>Trek wasn't an option in either poll: its weakest point is reach, not speed.</td></tr>
+<tr class=""><td>6</td><td>@trySynara canvas</td><td>Agents edit a Figma-like canvas</td><td>Agents make mockups before prod</td><td>Trek has HTML artifacts and charts inline, not an editable canvas.</td></tr>
+<tr class=""><td>7</td><td>@trySynara dither video</td><td>Animated dither background; 25% faster startup chart; worktree toggle per chat</td><td>Delight + speed</td><td>Trek has themes and painted backgrounds; Synara's animated background idled at 24% CPU here vs Trek's 0.05%.</td></tr>
+<tr class=""><td>8</td><td>@trySynara 1.6.8</td><td>Startup 505→379 ms, RAM 239→224 MB idle</td><td>Speed</td><td>Trek: 207 ms to frame and 65 MB; Synara measured 955 MB across all processes here (its 224 MB is one process).</td></tr>
+<tr class=""><td>9</td><td>@trySynara iOS 182</td><td>Phone failover 8.03 s→651 ms; streaming decode</td><td>Phone speed</td><td>Not measured for Trek's iPhone app (no phone connected; it isn't distributed). A gap in this report.</td></tr>
+<tr class=""><td>10</td><td>@trySynara 1.6.6</td><td>Installer −22%, 315→61 requests at launch; cross-provider delegation</td><td>Smaller, faster</td><td>Trek's binary is 126 MB (release, shots); delegation across agents and models: Trek has it (consult, delegate).</td></tr>
+<tr class=""><td>11</td><td>@trySynara iOS perf</td><td>14 microbenchmarks, up to −99.5%</td><td>Model-tuned performance</td><td>Microbenchmarks of their own code; nothing comparable to run.</td></tr>
+<tr class=""><td>12</td><td>@emanueledpt RAM</td><td>10 threads, 4 streaming: 2,307→1,784 MB; CLI processes 10→4</td><td>Memory with real agents</td><td>Repeated in Trek with real Claude Code: 1,744 MB peak, about the same as Synara's 1,784 MB. Trek kept all 10 CLIs alive after the turns ended; Synara cut its count from 10 to 4.</td></tr>
+<tr class=""><td>—</td><td>ademark.dev</td><td>15 apps, speed/weight/tokens/orchestration; Trek absent</td><td>Independent per-test ranking</td><td>Trek is not in it, despite its docs quoting ranks. Getting into ADEMark is the cheapest credibility win available.</td></tr>
+</tbody></table></div>
+</section>
+<section id="method"><h2>Method and limits</h2>
+
+<h3>What was run, and how to run it again</h3>
+<ul>
+<li><b>Machine:</b> MacBook Air M5 (10 cores, 24 GB), macOS 27.2.1, on the charger. Other agents' builds came and went; every run waited (up to 45 min) for a 1-minute load below 5 and records the load before and after. Most runs started at a load of 2.7–5.</li>
+<li><b>Competitor apps</b> (<code>scripts/measure_apps.py</code>, <code>scripts/appprobe.swift</code>): one thrown-away launch, then 3 launches with <code>open -g</code>; the time to the first on-screen window of at least 200×150 pt; 25 s settle; <code>footprint</code> and RSS summed over every process in the bundle, every process whose responsible process is the app, and WebKit processes that appeared; CPU over 30 s; quit with an Apple Event. Medians of 3. Versions are in <code>results/apps.json</code>.</li>
+<li><b>Trek</b> (<code>./bin/agent-cli perf launch idle stream long</code> on a release build of main 242fdff8 with the <code>shots</code> feature): isolated profile, mock agent, nothing of the owner's read. Then <code>scripts/trek_stress.py</code> for 100/1,000/5,000/10,000 threads, swarms of 10/20/50, and 50/100/200 Browser tabs, through the app's own test harness on an invisible display.</li>
+<li><b>Real agents</b> (<code>scripts/trek_real10.py</code>): the isolated app with <code>TREK_REAL_AGENTS=1</code>, Claude Code on the owner's subscription, a throwaway project.</li>
+<li><b>Tokens</b>: <code>claude -p "hi" --output-format json --strict-mcp-config</code>, bare and with Trek's exact flags read from a running Trek session's argv (<code>results/tokens-hi.json</code>).</li>
+<li><b>Accessibility</b>: <code>scripts/axprobe.swift</code> walks the tree VoiceOver reads; for Chromium apps it sets <code>AXManualAccessibility</code> and walks twice.</li>
+<li><b>Design</b>: a separate read-only sub-agent judged anonymised images; the key was opened only after its verdict (<code>results/design-blind-*.json</code>).</li>
+<li><b>Terminal-Bench</b>: Harbor 0.25 with the earlier study's Trek adapter; see the harness section.</li>
+<li><b>Spend</b>: OpenRouter credit read from <code>GET /api/v1/key</code> before and after; Claude Code turns on the owner's subscription; everything else free.</li>
+</ul>
+<h3>Limits — what this could not do</h3>
+<ul>
+<li><b>ADEMark itself was not run.</b> Its harness refuses to measure outside a dedicated macOS user named <code>ademark</code>, and creating a user on the owner's Mac was out of scope. Its published numbers are used, labelled, and they come from a different machine (Mac mini M4, 16 GB).</li>
+<li><b>Profiles differ.</b> Competitors ran with the owner's own data (some with long histories, two never signed in); Trek ran empty or seeded. The owner's real Trek is reported beside it to show the gap.</li>
+<li><b>Launch timing differs.</b> Trek is timed from spawn to its first painted frame; the others from <code>open -g</code> to a window appearing. Calculator and TextEdit through the same <code>open -g</code> path give the floor to add to Trek.</li>
+<li><b>No competitor was driven with real agents or asked a prompt</b>: that needs their sign-ins (Claude, Conductor and Warp were not signed in) and would act on the owner's accounts. So streaming CPU, swarms, browser-tab stress and click counts for “start an agent, review a diff, recover from an error” are Trek-only or published.</li>
+<li><b>Not installed:</b> Paradev, Herdr, Superharness, Clonk (invite-gated), Devin Desktop, the Factory app, Amp, Kiro, Traycer, Emdash. Conductor's maker was bought and new sign-ups are closed, so it could only be measured at its sign-up screen.</li>
+<li><b>Only macOS.</b> Windows and Linux builds of Trek and the rest were not measured; nor Trek's iPhone app (no phone connected; it isn't distributed).</li>
+<li><b>Accessibility is structural.</b> Counting named controls is not a VoiceOver user test; a fuller audit would also check contrast and focus order by hand.</li>
+<li><b>One judge.</b> The design review is one model's blind reading of marketing screenshots; Trek's image is its own curated README shot, as everyone else's is theirs.</li>
+<li><b>Terminal-Bench was not rerun.</b> The OpenRouter account was empty ($40.20 of $40 used); the check before spending read the key's cap ($6.58 left), not the account balance, which was the wrong endpoint. The attempt cost $0.008 and was stopped; a free substitute (local models) would have scored near zero for both harnesses and taken hours, so it was not run.</li>
+<li><b>A rule was broken once:</b> the field-research sub-agent started four worker agents of its own, beyond the two-at-a-time limit set for this study. Its notes were kept; nothing else ran that way.</li>
+</ul>
+</section>
+<footer>Scripts and raw results: bench-report/scripts and bench-report/results on branch bench/competitors-2026-11. Built by scripts/build_report.py. Measured on a MacBook Air M5 (10 cores, 24 GB), macOS 27.2.1; the 1-minute load average is recorded with every number.</footer>
+</main></body></html>

@@ -1,0 +1,259 @@
+{
+ "Cursor": {
+  "named_controls": 43,
+  "trusted": true,
+  "static_texts": 17,
+  "top_roles": [
+   "AXGroup:88",
+   "AXButton:30",
+   "AXStaticText:17",
+   "AXPopUpButton:7",
+   "AXComboBox:3",
+   "AXRadioButton:2",
+   "AXSplitter:2",
+   "AXWindow:1"
+  ],
+  "nodes": 156,
+  "unnamed_examples": [
+   "AXButton",
+   "AXButton"
+  ],
+  "controls": 45,
+  "windows": 1
+ },
+ "Synara": {
+  "unnamed_examples": [
+   "AXButton",
+   "AXButton"
+  ],
+  "trusted": true,
+  "named_controls": 438,
+  "static_texts": 209,
+  "top_roles": [
+   "AXGroup:512",
+   "AXButton:292",
+   "AXStaticText:209",
+   "AXCheckBox:100",
+   "AXImage:40",
+   "AXList:35",
+   "AXCell:33",
+   "AXListMarker:12"
+  ],
+  "nodes": 1256,
+  "controls": 440,
+  "windows": 1
+ },
+ "T3 Code": {
+  "named_controls": 47,
+  "controls": 49,
+  "unnamed_examples": [
+   "AXButton",
+   "AXButton"
+  ],
+  "trusted": true,
+  "windows": 1,
+  "top_roles": [
+   "AXGroup:67",
+   "AXButton:37",
+   "AXStaticText:30",
+   "AXPopUpButton:5",
+   "AXList:3",
+   "AXCheckBox:3",
+   "AXSplitter:3",
+   "AXHeading:2"
+  ],
+  "nodes": 157,
+  "static_texts": 30
+ },
+ "OpenCode desktop": {
+  "static_texts": 17,
+  "top_roles": [
+   "AXGroup:57",
+   "AXStaticText:17",
+   "AXButton:17",
+   "AXCheckBox:3",
+   "AXPopUpButton:2",
+   "AXLink:2",
+   "AXWindow:1",
+   "AXTextField:1"
+  ],
+  "trusted": true,
+  "windows": 1,
+  "nodes": 101,
+  "unnamed_examples": [
+   "AXButton",
+   "AXButton",
+   "AXButton"
+  ],
+  "controls": 25,
+  "named_controls": 22
+ },
+ "Zed": {
+  "windows": 2,
+  "controls": 6,
+  "static_texts": 0,
+  "top_roles": [
+   "AXButton:6",
+   "AXGroup:4",
+   "AXWindow:2"
+  ],
+  "unnamed_examples": [
+   "AXButton",
+   "AXButton",
+   "AXButton",
+   "AXButton"
+  ],
+  "named_controls": 2,
+  "nodes": 12,
+  "trusted": true
+ },
+ "Antigravity": {
+  "static_texts": 9,
+  "trusted": true,
+  "windows": 1,
+  "top_roles": [
+   "AXGroup:78",
+   "AXButton:18",
+   "AXPopUpButton:13",
+   "AXStaticText:9",
+   "AXLink:6",
+   "AXHeading:5",
+   "AXList:2",
+   "AXWebArea:2"
+  ],
+  "unnamed_examples": [
+   "AXButton",
+   "AXButton"
+  ],
+  "controls": 38,
+  "named_controls": 36,
+  "nodes": 136
+ },
+ "VS Code": {
+  "static_texts": 465,
+  "top_roles": [
+   "AXGroup:704",
+   "AXStaticText:465",
+   "AXButton:58",
+   "AXLink:57",
+   "AXRow:43",
+   "AXHeading:38",
+   "AXToolbar:26",
+   "AXImage:26"
+  ],
+  "nodes": 1526,
+  "windows": 1,
+  "named_controls": 218,
+  "trusted": true,
+  "controls": 220,
+  "unnamed_examples": [
+   "AXButton",
+   "AXButton"
+  ]
+ },
+ "Orca": {
+  "static_texts": 191,
+  "controls": 146,
+  "windows": 1,
+  "trusted": true,
+  "top_roles": [
+   "AXGroup:205",
+   "AXStaticText:191",
+   "AXButton:105",
+   "AXPopUpButton:33",
+   "AXImage:9",
+   "AXMenuItem:5",
+   "AXRadioButton:3",
+   "AXCheckBox:3"
+  ],
+  "unnamed_examples": [
+   "AXButton",
+   "AXButton"
+  ],
+  "nodes": 560,
+  "named_controls": 144
+ },
+ "Capy": {
+  "nodes": 26,
+  "controls": 5,
+  "unnamed_examples": [
+   "AXButton",
+   "AXButton"
+  ],
+  "named_controls": 3,
+  "static_texts": 4,
+  "top_roles": [
+   "AXGroup:12",
+   "AXStaticText:4",
+   "AXButton:3",
+   "AXLink:2",
+   "AXWindow:1",
+   "AXImage:1",
+   "AXHeading:1",
+   "AXScrollArea:1"
+  ],
+  "windows": 1,
+  "trusted": true
+ },
+ "Conductor": {
+  "nodes": 38,
+  "windows": 1,
+  "controls": 5,
+  "static_texts": 6,
+  "unnamed_examples": [
+   "AXButton",
+   "AXButton"
+  ],
+  "trusted": true,
+  "top_roles": [
+   "AXGroup:21",
+   "AXStaticText:6",
+   "AXButton:5",
+   "AXHeading:3",
+   "AXWebArea:1",
+   "AXWindow:1",
+   "AXScrollArea:1"
+  ],
+  "named_controls": 3
+ },
+ "Claude": {
+  "nodes": 39,
+  "static_texts": 2,
+  "trusted": true,
+  "controls": 5,
+  "windows": 1,
+  "unnamed_examples": [
+   "AXButton",
+   "AXButton"
+  ],
+  "named_controls": 3,
+  "top_roles": [
+   "AXGroup:26",
+   "AXButton:5",
+   "AXWebArea:2",
+   "AXScrollArea:2",
+   "AXStaticText:2",
+   "AXHeading:1",
+   "AXWindow:1"
+  ]
+ },
+ "Warp": {
+  "top_roles": [
+   "AXButton:3",
+   "AXGroup:2",
+   "AXTextArea:1",
+   "AXWindow:1"
+  ],
+  "static_texts": 0,
+  "trusted": true,
+  "unnamed_examples": [
+   "AXTextArea",
+   "AXButton",
+   "AXButton"
+  ],
+  "controls": 4,
+  "windows": 1,
+  "named_controls": 1,
+  "nodes": 7
+ }
+}

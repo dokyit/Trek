@@ -1,0 +1,19 @@
+# 01 — @0xPaulius (Paulius) — Clonk v2 for Mac
+- URL: https://x.com/0xPaulius/status/2126425239802310697
+- Date: 2026-11-27 21:17 UTC (3 likes, 555 views when fetched)
+- Text: "what if u could run 12,307 agents threads from one chat / introducing Clonk v2 for Mac / run swarms across every AI plan you pay for, on every machine you own, local or cloud - no credits ever / Commanders do the work with goals. you go live your life / comment \"clonk\" for access"
+- Product: Clonk v2 (clonk.ai), "For Mac, iOS and Cloud". Access-gated (comment for access).
+- Claim: one chat runs agent swarms across all your subscriptions (no Clonk credits), on all your machines, local or cloud; "Commanders" pursue goals. Text says 12,307 threads; the video's counter says 39,800 -> 360,830 -> "Not 394,032 threads. One [chat]".
+- Video (47.6 s, no speech; WATCHED, 24 frames at 0.5 fps). It is a motion-graphics ad, not a screen recording:
+  - 0:01–0:03 mascot face; "You pay for all of" + provider logos (Claude, OpenAI, Cursor, Copilot, Gemini, Grok, OpenCode, Kimi, Pi, Antigravity).
+  - 0:05–0:07 wall of thread cards (task + harness: "Stripe webhooks / Antigravity", "Fix flaky test / Grok", "Search index / Kimi"...) with counter "39,800 THREADS" then "360,830 THREADS".
+  - 0:09–0:11 "What if one commander ran them all?" with multiplayer-style agent cursors (agent-01, agent-17...).
+  - 0:13–0:17 Clonk composer: "Run my company" -> "Launching agent swarm…"; tree of team cards: Design 5 agents (Designing the hero), Engineering 9 agents (Building the landing page), Marketing 5 agents (Writing the headline), each on a different model, with progress bars.
+  - 0:19–0:23 canvas with many agent cursors editing a landing page ("Run agent swarms on autopilot — Orchestrate hundreds of [logos] agents from one chat, across every Mac and machine you own").
+  - 0:25–0:27 "All your subs on one canvas." — window with agent columns Apollo (Pricing tiers, Fable 5: "Created 3 products in Stripe"), Athena (Brand & design, Composer: "Read brand.md and the site"), Hermes (Launch email).
+  - 0:29–0:31 "Hold ⌘⌥. Just talk." — voice input "Add monetization tiers:" -> "On it. Splitting it three ways…" into Apollo/Athena/Hermes.
+  - 0:33–0:35 "Walk away. Your phone keeps you in the loop." — iPhone lock screen Live Activity "Monetization tiers 3 agents working 0 of 3 (Billing/Brand/Email)" -> "Shipped"; notifications "Email: Sent to 12,480 users".
+  - 0:37–0:39 "No AI slop." / "Steal design from apps with Super design" (grid of app icons).
+  - 0:41 "Plan Design Build Test Ship"; 0:43 "Not 394,032 threads. One …"; 0:45–0:47 "Clonk — Run agent swarms on autopilot — clonk.ai — For Mac, iOS and Cloud".
+- Relation to Trek: direct competitor on orchestration — one chat dispatching sub-agents across many harnesses/subscriptions, team "commanders", voice push-to-talk, iPhone Live Activity/notifications, multi-machine/cloud runners, design-reference feature. Trek's comparable pieces: sub-agents/orchestrate across Claude Code/Codex/OpenCode/ACP, generative UI, iPhone companion. Clonk's numbers are marketing counters, not benchmarks.
+- Frames: <scratch>/frames/01-clonk/ (24 jpgs)

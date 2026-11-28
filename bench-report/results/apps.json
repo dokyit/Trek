@@ -1,0 +1,1324 @@
+{
+ "Codex app": {
+  "name": "Codex app",
+  "app": "/Applications/ChatGPT.app",
+  "bundle_id": "com.openai.codex",
+  "version": "26.1023.50603",
+  "runs": [
+   {
+    "load_before": 3.17,
+    "launch_ms": 1022,
+    "processes": 21,
+    "other_children": [
+     "node"
+    ],
+    "footprint_mb": 2784.2,
+    "rss_mb": 5130.0,
+    "idle_cpu_pct": 14.4,
+    "windows": "1",
+    "accessibility": {
+     "windows": 1,
+     "nodes": 513,
+     "static_texts": 45,
+     "named_controls": 159,
+     "top_roles": [
+      "AXGroup:294",
+      "AXButton:140",
+      "AXStaticText:45",
+      "AXPopUpButton:18",
+      "AXList:7",
+      "AXWebArea:1",
+      "AXSplitter:1",
+      "AXCheckBox:1"
+     ],
+     "unnamed_examples": [
+      "AXButton",
+      "AXButton"
+     ],
+     "controls": 161,
+     "trusted": true
+    },
+    "screenshot": "shots/codex-app.png",
+    "load_after": 2.86,
+    "quit": "quit"
+   },
+   {
+    "load_before": 2.88,
+    "launch_ms": 1085,
+    "processes": 21,
+    "other_children": [
+     "node"
+    ],
+    "footprint_mb": 2910.6,
+    "rss_mb": 5224.6,
+    "idle_cpu_pct": 12.97,
+    "windows": "1",
+    "load_after": 3.44,
+    "quit": "quit"
+   },
+   {
+    "load_before": 3.13,
+    "launch_ms": 1064,
+    "processes": 21,
+    "other_children": [
+     "node"
+    ],
+    "footprint_mb": 3015.7,
+    "rss_mb": 5411.5,
+    "idle_cpu_pct": 12.97,
+    "windows": "1",
+    "load_after": 2.94,
+    "quit": "quit"
+   }
+  ],
+  "warmup_launch_ms": "1667",
+  "median": {
+   "launch_ms": 1064,
+   "footprint_mb": 2910.6,
+   "rss_mb": 5224.6,
+   "idle_cpu_pct": 12.97,
+   "processes": 21
+  }
+ },
+ "Cursor": {
+  "name": "Cursor",
+  "app": "/Applications/Cursor.app",
+  "bundle_id": "com.todesktop.230313mzl4w4u92",
+  "version": "3.24.12",
+  "runs": [
+   {
+    "load_before": 4.2,
+    "launch_ms": 613,
+    "processes": 12,
+    "other_children": [
+     "Cursor Helper (Plugin):",
+     "Cursor Helper: fileWatcher",
+     "Cursor Helper: mcp-process",
+     "Cursor Helper: shared-process"
+    ],
+    "footprint_mb": 900.7,
+    "rss_mb": 1762.9,
+    "idle_cpu_pct": 14.87,
+    "windows": "1",
+    "accessibility": {
+     "top_roles": [
+      "AXGroup:93",
+      "AXButton:31",
+      "AXStaticText:20",
+      "AXPopUpButton:9",
+      "AXRadioButton:2",
+      "AXSplitter:2",
+      "AXComboBox:1",
+      "AXCheckBox:1"
+     ],
+     "trusted": true,
+     "windows": 1,
+     "named_controls": 44,
+     "controls": 46,
+     "static_texts": 20,
+     "nodes": 166,
+     "unnamed_examples": [
+      "AXButton",
+      "AXButton"
+     ]
+    },
+    "screenshot": "shots/cursor.png",
+    "load_after": 4.8,
+    "quit": "quit"
+   },
+   {
+    "load_before": 5.14,
+    "launch_ms": 730,
+    "processes": 11,
+    "other_children": [
+     "Cursor Helper (Plugin):",
+     "Cursor Helper: conversation-search",
+     "Cursor Helper: fileWatcher",
+     "Cursor Helper: mcp-process",
+     "Cursor Helper: shared-process"
+    ],
+    "footprint_mb": 934.0,
+    "rss_mb": 1944.5,
+    "idle_cpu_pct": 20.0,
+    "windows": "1",
+    "load_after": 4.47,
+    "quit": "quit"
+   },
+   {
+    "load_before": 5.08,
+    "launch_ms": 567,
+    "processes": 10,
+    "other_children": [
+     "Cursor Helper (Plugin):",
+     "Cursor Helper: conversation-search",
+     "Cursor Helper: fileWatcher",
+     "Cursor Helper: mcp-process",
+     "Cursor Helper: shared-process"
+    ],
+    "footprint_mb": 1068.9,
+    "rss_mb": 1795.5,
+    "idle_cpu_pct": 20.37,
+    "windows": "1",
+    "load_after": 4.44,
+    "quit": "quit"
+   }
+  ],
+  "warmup_launch_ms": "992",
+  "median": {
+   "launch_ms": 613,
+   "footprint_mb": 934.0,
+   "rss_mb": 1795.5,
+   "idle_cpu_pct": 20.0,
+   "processes": 11
+  }
+ },
+ "Synara": {
+  "name": "Synara",
+  "app": "/Applications/Synara.app",
+  "bundle_id": "com.emanueledipietro.synara",
+  "version": "0.9.2",
+  "runs": [
+   {
+    "load_before": 3.99,
+    "launch_ms": 618,
+    "processes": 8,
+    "other_children": [
+     "opencode",
+     "zsh"
+    ],
+    "footprint_mb": 1116.3,
+    "rss_mb": 1462.1,
+    "idle_cpu_pct": 24.97,
+    "windows": "1",
+    "accessibility": {
+     "static_texts": 0,
+     "named_controls": 1,
+     "windows": 1,
+     "nodes": 12,
+     "trusted": true,
+     "unnamed_examples": [
+      "AXButton",
+      "AXButton"
+     ],
+     "top_roles": [
+      "AXGroup:8",
+      "AXButton:3",
+      "AXWindow:1"
+     ],
+     "controls": 3
+    },
+    "screenshot": "shots/synara.png",
+    "load_after": 4.15,
+    "quit": "quit"
+   },
+   {
+    "load_before": 4.21,
+    "launch_ms": 633,
+    "processes": 8,
+    "other_children": [
+     "opencode",
+     "zsh"
+    ],
+    "footprint_mb": 939.2,
+    "rss_mb": 1293.2,
+    "idle_cpu_pct": 24.07,
+    "windows": "1",
+    "load_after": 4.28,
+    "quit": "quit"
+   },
+   {
+    "load_before": 4.73,
+    "launch_ms": 591,
+    "processes": 7,
+    "other_children": [
+     "opencode",
+     "zsh"
+    ],
+    "footprint_mb": 954.7,
+    "rss_mb": 1319.1,
+    "idle_cpu_pct": 24.27,
+    "windows": "1",
+    "load_after": 4.51,
+    "quit": "quit"
+   }
+  ],
+  "warmup_launch_ms": "1019",
+  "median": {
+   "launch_ms": 618,
+   "footprint_mb": 954.7,
+   "rss_mb": 1319.1,
+   "idle_cpu_pct": 24.27,
+   "processes": 8
+  }
+ },
+ "T3 Code": {
+  "name": "T3 Code",
+  "app": "/Applications/T3 Code (Alpha).app",
+  "bundle_id": "com.t3tools.t3code",
+  "version": "0.0.33",
+  "runs": [
+   {
+    "load_before": 5.14,
+    "launch_ms": 2690,
+    "processes": 10,
+    "other_children": [
+     "cloudflared",
+     "git"
+    ],
+    "footprint_mb": 780.7,
+    "rss_mb": 1193.5,
+    "idle_cpu_pct": 7.43,
+    "windows": "1",
+    "accessibility": {
+     "windows": 1,
+     "top_roles": [
+      "AXGroup:8",
+      "AXButton:3",
+      "AXWindow:1"
+     ],
+     "unnamed_examples": [
+      "AXButton",
+      "AXButton"
+     ],
+     "trusted": true,
+     "nodes": 12,
+     "named_controls": 1,
+     "controls": 3,
+     "static_texts": 0
+    },
+    "screenshot": "shots/t3-code.png",
+    "load_after": 4.34,
+    "quit": "quit"
+   },
+   {
+    "load_before": 4.15,
+    "launch_ms": 2687,
+    "processes": 9,
+    "other_children": [
+     "cloudflared"
+    ],
+    "footprint_mb": 713.3,
+    "rss_mb": 1130.2,
+    "idle_cpu_pct": 7.7,
+    "windows": "1",
+    "load_after": 4.08,
+    "quit": "quit"
+   },
+   {
+    "load_before": 3.68,
+    "launch_ms": 2726,
+    "processes": 9,
+    "other_children": [
+     "cloudflared"
+    ],
+    "footprint_mb": 719.7,
+    "rss_mb": 1128.8,
+    "idle_cpu_pct": 7.77,
+    "windows": "1",
+    "load_after": 2.93,
+    "quit": "quit"
+   }
+  ],
+  "warmup_launch_ms": "6471",
+  "median": {
+   "launch_ms": 2690,
+   "footprint_mb": 719.7,
+   "rss_mb": 1130.2,
+   "idle_cpu_pct": 7.7,
+   "processes": 9
+  }
+ },
+ "OpenCode desktop": {
+  "name": "OpenCode desktop",
+  "app": "/Applications/OpenCode.app",
+  "bundle_id": "ai.opencode.desktop",
+  "version": "1.18.21",
+  "runs": [
+   {
+    "load_before": 3.08,
+    "launch_ms": 1564,
+    "processes": 8,
+    "other_children": [],
+    "footprint_mb": 761.5,
+    "rss_mb": 1312.8,
+    "idle_cpu_pct": 1.2,
+    "windows": "1",
+    "accessibility": {
+     "top_roles": [
+      "AXGroup:8",
+      "AXButton:3",
+      "AXWindow:1"
+     ],
+     "unnamed_examples": [
+      "AXButton",
+      "AXButton"
+     ],
+     "static_texts": 0,
+     "named_controls": 1,
+     "windows": 1,
+     "controls": 3,
+     "trusted": true,
+     "nodes": 12
+    },
+    "screenshot": "shots/opencode-desktop.png",
+    "load_after": 3.45,
+    "quit": "quit"
+   },
+   {
+    "load_before": 3.41,
+    "launch_ms": 1633,
+    "processes": 7,
+    "other_children": [],
+    "footprint_mb": 739.4,
+    "rss_mb": 1279.1,
+    "idle_cpu_pct": 1.2,
+    "windows": "1",
+    "load_after": 3.03,
+    "quit": "quit"
+   },
+   {
+    "load_before": 3.02,
+    "launch_ms": 1547,
+    "processes": 7,
+    "other_children": [],
+    "footprint_mb": 707.0,
+    "rss_mb": 1345.2,
+    "idle_cpu_pct": 1.13,
+    "windows": "1",
+    "load_after": 3.42,
+    "quit": "quit"
+   }
+  ],
+  "warmup_launch_ms": "1843",
+  "median": {
+   "launch_ms": 1564,
+   "footprint_mb": 739.4,
+   "rss_mb": 1312.8,
+   "idle_cpu_pct": 1.2,
+   "processes": 7
+  }
+ },
+ "Zed": {
+  "name": "Zed",
+  "app": "/Applications/Zed.app",
+  "bundle_id": "dev.zed.Zed",
+  "version": "1.30.2",
+  "runs": [
+   {
+    "load_before": 3.26,
+    "launch_ms": 388,
+    "processes": 3,
+    "other_children": [],
+    "footprint_mb": 289.3,
+    "rss_mb": 263.9,
+    "idle_cpu_pct": 0.53,
+    "windows": "2",
+    "accessibility": {
+     "nodes": 10,
+     "controls": 6,
+     "top_roles": [
+      "AXButton:6",
+      "AXGroup:2",
+      "AXWindow:2"
+     ],
+     "named_controls": 2,
+     "unnamed_examples": [
+      "AXButton",
+      "AXButton",
+      "AXButton",
+      "AXButton"
+     ],
+     "trusted": true,
+     "static_texts": 0,
+     "windows": 2
+    },
+    "screenshot": "shots/zed.png",
+    "load_after": 3.58,
+    "quit": "quit"
+   },
+   {
+    "load_before": 3.62,
+    "launch_ms": 390,
+    "processes": 3,
+    "other_children": [],
+    "footprint_mb": 289.8,
+    "rss_mb": 264.4,
+    "idle_cpu_pct": 0.5,
+    "windows": "2",
+    "load_after": 2.97,
+    "quit": "quit"
+   },
+   {
+    "load_before": 3.05,
+    "launch_ms": 385,
+    "processes": 3,
+    "other_children": [],
+    "footprint_mb": 291.2,
+    "rss_mb": 265.7,
+    "idle_cpu_pct": 0.5,
+    "windows": "2",
+    "load_after": 2.97,
+    "quit": "quit"
+   }
+  ],
+  "warmup_launch_ms": "466",
+  "median": {
+   "launch_ms": 388,
+   "footprint_mb": 289.8,
+   "rss_mb": 264.4,
+   "idle_cpu_pct": 0.5,
+   "processes": 3
+  }
+ },
+ "Antigravity": {
+  "name": "Antigravity",
+  "app": "/Applications/Antigravity.app",
+  "bundle_id": "com.google.antigravity",
+  "version": "2.31.0",
+  "runs": [
+   {
+    "load_before": 2.7,
+    "launch_ms": 525,
+    "processes": 15,
+    "other_children": [],
+    "footprint_mb": 770.1,
+    "rss_mb": 1613.0,
+    "idle_cpu_pct": 3.27,
+    "windows": "1",
+    "accessibility": {
+     "static_texts": 23,
+     "unnamed_examples": [
+      "AXButton",
+      "AXButton"
+     ],
+     "windows": 1,
+     "named_controls": 36,
+     "nodes": 176,
+     "trusted": true,
+     "controls": 38,
+     "top_roles": [
+      "AXGroup:75",
+      "AXImage:33",
+      "AXStaticText:23",
+      "AXButton:20",
+      "AXPopUpButton:11",
+      "AXLink:6",
+      "AXHeading:2",
+      "AXList:2"
+     ]
+    },
+    "screenshot": "shots/antigravity.png",
+    "load_after": 2.5,
+    "quit": "quit"
+   },
+   {
+    "load_before": 2.62,
+    "launch_ms": 745,
+    "processes": 13,
+    "other_children": [],
+    "footprint_mb": 668.7,
+    "rss_mb": 1391.1,
+    "idle_cpu_pct": 3.23,
+    "windows": "1",
+    "load_after": 3.18,
+    "quit": "quit"
+   },
+   {
+    "load_before": 3.16,
+    "launch_ms": 517,
+    "processes": 13,
+    "other_children": [],
+    "footprint_mb": 651.2,
+    "rss_mb": 1391.9,
+    "idle_cpu_pct": 3.23,
+    "windows": "1",
+    "load_after": 2.56,
+    "quit": "quit"
+   }
+  ],
+  "warmup_launch_ms": "889",
+  "median": {
+   "launch_ms": 525,
+   "footprint_mb": 668.7,
+   "rss_mb": 1391.9,
+   "idle_cpu_pct": 3.23,
+   "processes": 13
+  }
+ },
+ "VS Code": {
+  "name": "VS Code",
+  "app": "/Applications/Visual Studio Code.app",
+  "bundle_id": "com.microsoft.VSCode",
+  "version": "1.143.1",
+  "runs": [
+   {
+    "load_before": 3.88,
+    "launch_ms": 472,
+    "processes": 14,
+    "other_children": [
+     "dotnet",
+     "zsh"
+    ],
+    "footprint_mb": 1748.0,
+    "rss_mb": 2788.5,
+    "idle_cpu_pct": 18.3,
+    "windows": "1",
+    "accessibility": {
+     "controls": 3,
+     "top_roles": [
+      "AXGroup:8",
+      "AXButton:3",
+      "AXWindow:1"
+     ],
+     "unnamed_examples": [
+      "AXButton",
+      "AXButton"
+     ],
+     "trusted": true,
+     "windows": 1,
+     "nodes": 12,
+     "static_texts": 0,
+     "named_controls": 1
+    },
+    "screenshot": "shots/vs-code.png",
+    "load_after": 3.99,
+    "quit": "quit"
+   },
+   {
+    "load_before": 4.15,
+    "launch_ms": 657,
+    "processes": 18,
+    "other_children": [
+     "dotnet",
+     "zsh"
+    ],
+    "footprint_mb": 2007.9,
+    "rss_mb": 3459.1,
+    "idle_cpu_pct": 7.2,
+    "windows": "1",
+    "load_after": 4.2,
+    "quit": "quit"
+   },
+   {
+    "load_before": 4.18,
+    "launch_ms": 458,
+    "processes": 14,
+    "other_children": [
+     "dotnet",
+     "zsh"
+    ],
+    "footprint_mb": 1864.9,
+    "rss_mb": 3007.5,
+    "idle_cpu_pct": 17.9,
+    "windows": "1",
+    "load_after": 4.34,
+    "quit": "quit"
+   }
+  ],
+  "warmup_launch_ms": "653",
+  "median": {
+   "launch_ms": 472,
+   "footprint_mb": 1864.9,
+   "rss_mb": 3007.5,
+   "idle_cpu_pct": 17.9,
+   "processes": 14
+  }
+ },
+ "Orca": {
+  "name": "Orca",
+  "app": "/Applications/Orca.app",
+  "bundle_id": "com.stablyai.orca",
+  "version": "1.4.222",
+  "runs": [
+   {
+    "load_before": 3.94,
+    "launch_ms": 825,
+    "processes": 9,
+    "other_children": [
+     "caffeinate",
+     "log",
+     "zsh"
+    ],
+    "footprint_mb": 771.5,
+    "rss_mb": 1254.4,
+    "idle_cpu_pct": 9.73,
+    "windows": "1",
+    "accessibility": {
+     "static_texts": 199,
+     "named_controls": 144,
+     "trusted": true,
+     "windows": 1,
+     "nodes": 569,
+     "controls": 146,
+     "top_roles": [
+      "AXGroup:204",
+      "AXStaticText:199",
+      "AXButton:105",
+      "AXPopUpButton:33",
+      "AXImage:11",
+      "AXMenuItem:5",
+      "AXCheckBox:3",
+      "AXRadioButton:3"
+     ],
+     "unnamed_examples": [
+      "AXButton",
+      "AXButton"
+     ]
+    },
+    "screenshot": "shots/orca.png",
+    "load_after": 3.5,
+    "quit": "sigterm"
+   },
+   {
+    "load_before": 3.12,
+    "launch_ms": 792,
+    "processes": 9,
+    "other_children": [
+     "caffeinate",
+     "log",
+     "zsh"
+    ],
+    "footprint_mb": 818.2,
+    "rss_mb": 1284.9,
+    "idle_cpu_pct": 10.4,
+    "windows": "1",
+    "load_after": 3.27,
+    "quit": "sigterm"
+   },
+   {
+    "load_before": 2.68,
+    "launch_ms": 893,
+    "processes": 9,
+    "other_children": [
+     "caffeinate",
+     "log",
+     "zsh"
+    ],
+    "footprint_mb": 797.6,
+    "rss_mb": 1289.7,
+    "idle_cpu_pct": 10.03,
+    "windows": "1",
+    "load_after": 3.23,
+    "quit": "sigterm"
+   }
+  ],
+  "warmup_launch_ms": "1120",
+  "median": {
+   "launch_ms": 825,
+   "footprint_mb": 797.6,
+   "rss_mb": 1284.9,
+   "idle_cpu_pct": 10.03,
+   "processes": 9
+  }
+ },
+ "Capy": {
+  "name": "Capy",
+  "app": "/Applications/Capy.app",
+  "bundle_id": "ai.capy.desktop",
+  "version": "0.5.0",
+  "runs": [
+   {
+    "load_before": 2.93,
+    "launch_ms": 574,
+    "processes": 7,
+    "other_children": [],
+    "footprint_mb": 549.3,
+    "rss_mb": 876.1,
+    "idle_cpu_pct": 16.8,
+    "windows": "1",
+    "accessibility": {
+     "nodes": 21,
+     "named_controls": 2,
+     "static_texts": 2,
+     "windows": 1,
+     "unnamed_examples": [
+      "AXButton",
+      "AXButton"
+     ],
+     "controls": 4,
+     "top_roles": [
+      "AXGroup:12",
+      "AXButton:3",
+      "AXStaticText:2",
+      "AXWebArea:1",
+      "AXWindow:1",
+      "AXLink:1",
+      "AXImage:1"
+     ],
+     "trusted": true
+    },
+    "screenshot": "shots/capy.png",
+    "load_after": 3.69,
+    "quit": "quit"
+   },
+   {
+    "load_before": 3.69,
+    "launch_ms": 669,
+    "processes": 7,
+    "other_children": [],
+    "footprint_mb": 560.7,
+    "rss_mb": 886.1,
+    "idle_cpu_pct": 15.93,
+    "windows": "1",
+    "load_after": 3.18,
+    "quit": "quit"
+   },
+   {
+    "load_before": 3.18,
+    "launch_ms": 484,
+    "processes": 6,
+    "other_children": [],
+    "footprint_mb": 509.5,
+    "rss_mb": 747.0,
+    "idle_cpu_pct": 16.37,
+    "windows": "1",
+    "load_after": 3.54,
+    "quit": "quit"
+   }
+  ],
+  "warmup_launch_ms": "816",
+  "median": {
+   "launch_ms": 574,
+   "footprint_mb": 549.3,
+   "rss_mb": 876.1,
+   "idle_cpu_pct": 16.37,
+   "processes": 7
+  }
+ },
+ "Conductor": {
+  "name": "Conductor",
+  "app": "/Applications/Conductor.app",
+  "bundle_id": "com.conductor.app",
+  "version": "0.101.2",
+  "runs": [
+   {
+    "load_before": 3.74,
+    "launch_ms": 634,
+    "processes": 10,
+    "other_children": [
+     "conductor-runtime"
+    ],
+    "footprint_mb": 1515.5,
+    "rss_mb": 1718.4,
+    "idle_cpu_pct": 2.13,
+    "windows": "1",
+    "accessibility": {
+     "controls": 5,
+     "unnamed_examples": [
+      "AXButton",
+      "AXButton"
+     ],
+     "nodes": 37,
+     "trusted": true,
+     "static_texts": 6,
+     "named_controls": 3,
+     "windows": 1,
+     "top_roles": [
+      "AXGroup:20",
+      "AXStaticText:6",
+      "AXButton:5",
+      "AXHeading:3",
+      "AXScrollArea:1",
+      "AXWebArea:1",
+      "AXWindow:1"
+     ]
+    },
+    "screenshot": "shots/conductor.png",
+    "load_after": 3.42,
+    "quit": "quit"
+   },
+   {
+    "load_before": 3.47,
+    "launch_ms": 596,
+    "processes": 9,
+    "other_children": [
+     "conductor-runtime"
+    ],
+    "footprint_mb": 1490.4,
+    "rss_mb": 1557.6,
+    "idle_cpu_pct": 15.7,
+    "windows": "1",
+    "load_after": 3.61,
+    "quit": "quit"
+   },
+   {
+    "load_before": 3.89,
+    "launch_ms": 582,
+    "processes": 9,
+    "other_children": [
+     "conductor-runtime"
+    ],
+    "footprint_mb": 1417.5,
+    "rss_mb": 1543.8,
+    "idle_cpu_pct": 2.3,
+    "windows": "1",
+    "load_after": 3.36,
+    "quit": "quit"
+   }
+  ],
+  "warmup_launch_ms": "9367",
+  "median": {
+   "launch_ms": 596,
+   "footprint_mb": 1490.4,
+   "rss_mb": 1557.6,
+   "idle_cpu_pct": 2.3,
+   "processes": 9
+  }
+ },
+ "Claude": {
+  "name": "Claude",
+  "app": "/Applications/Claude.app",
+  "bundle_id": "com.anthropic.claudefordesktop",
+  "version": "7.37095.0",
+  "runs": [
+   {
+    "load_before": 3.0,
+    "launch_ms": 559,
+    "processes": 7,
+    "other_children": [],
+    "footprint_mb": 485.3,
+    "rss_mb": 1068.0,
+    "idle_cpu_pct": 2.93,
+    "windows": "1",
+    "accessibility": {
+     "static_texts": 2,
+     "named_controls": 3,
+     "nodes": 38,
+     "trusted": true,
+     "windows": 1,
+     "top_roles": [
+      "AXGroup:25",
+      "AXButton:5",
+      "AXWebArea:2",
+      "AXStaticText:2",
+      "AXScrollArea:2",
+      "AXHeading:1",
+      "AXWindow:1"
+     ],
+     "controls": 5,
+     "unnamed_examples": [
+      "AXButton",
+      "AXButton"
+     ]
+    },
+    "screenshot": "shots/claude.png",
+    "load_after": 3.47,
+    "quit": "quit"
+   },
+   {
+    "load_before": 3.35,
+    "launch_ms": 597,
+    "processes": 8,
+    "other_children": [],
+    "footprint_mb": 526.6,
+    "rss_mb": 1118.3,
+    "idle_cpu_pct": 3.1,
+    "windows": "1",
+    "load_after": 2.89,
+    "quit": "quit"
+   },
+   {
+    "load_before": 2.98,
+    "launch_ms": 568,
+    "processes": 7,
+    "other_children": [],
+    "footprint_mb": 488.5,
+    "rss_mb": 1086.5,
+    "idle_cpu_pct": 3.1,
+    "windows": "1",
+    "load_after": 2.58,
+    "quit": "quit"
+   }
+  ],
+  "warmup_launch_ms": "10093",
+  "median": {
+   "launch_ms": 568,
+   "footprint_mb": 488.5,
+   "rss_mb": 1086.5,
+   "idle_cpu_pct": 3.1,
+   "processes": 7
+  }
+ },
+ "Warp": {
+  "name": "Warp",
+  "app": "/Applications/Warp.app",
+  "bundle_id": "dev.warp.Warp-Stable",
+  "version": "0.2026.11.18.08.17.06",
+  "runs": [
+   {
+    "load_before": 3.43,
+    "launch_ms": 898,
+    "processes": 4,
+    "other_children": [],
+    "footprint_mb": 834.8,
+    "rss_mb": 1055.4,
+    "idle_cpu_pct": 5.03,
+    "windows": "1",
+    "accessibility": {
+     "named_controls": 1,
+     "trusted": true,
+     "unnamed_examples": [
+      "AXTextArea",
+      "AXButton",
+      "AXButton"
+     ],
+     "windows": 1,
+     "static_texts": 0,
+     "controls": 4,
+     "top_roles": [
+      "AXButton:3",
+      "AXWindow:1",
+      "AXTextArea:1",
+      "AXGroup:1"
+     ],
+     "nodes": 6
+    },
+    "screenshot": "shots/warp.png",
+    "load_after": 3.27,
+    "quit": "quit"
+   },
+   {
+    "load_before": 3.49,
+    "launch_ms": 865,
+    "processes": 4,
+    "other_children": [],
+    "footprint_mb": 833.7,
+    "rss_mb": 1055.0,
+    "idle_cpu_pct": 5.07,
+    "windows": "1",
+    "load_after": 3.28,
+    "quit": "quit"
+   },
+   {
+    "load_before": 3.17,
+    "launch_ms": 846,
+    "processes": 4,
+    "other_children": [],
+    "footprint_mb": 833.2,
+    "rss_mb": 1054.5,
+    "idle_cpu_pct": 5.07,
+    "windows": "1",
+    "load_after": 2.99,
+    "quit": "quit"
+   }
+  ],
+  "warmup_launch_ms": "10013",
+  "median": {
+   "launch_ms": 865,
+   "footprint_mb": 833.7,
+   "rss_mb": 1055.0,
+   "idle_cpu_pct": 5.07,
+   "processes": 4
+  }
+ },
+ "Paseo": {
+  "name": "Paseo",
+  "app": "/Applications/Paseo.app",
+  "bundle_id": "sh.paseo.desktop",
+  "version": "0.18.0",
+  "runs": [
+   {
+    "load_before": 3.17,
+    "launch_ms": 773,
+    "processes": 7,
+    "other_children": [
+     "Paseo Daemon",
+     "Paseo Supervisor",
+     "tar"
+    ],
+    "footprint_mb": 509.2,
+    "rss_mb": 988.0,
+    "idle_cpu_pct": 3.07,
+    "windows": "1",
+    "accessibility": {
+     "named_controls": 33,
+     "trusted": true,
+     "top_roles": [
+      "AXGroup:287",
+      "AXStaticText:48",
+      "AXImage:24",
+      "AXButton:22",
+      "AXRadioButton:13",
+      "AXWebArea:1",
+      "AXRadioGroup:1",
+      "AXHeading:1"
+     ],
+     "windows": 1,
+     "controls": 35,
+     "static_texts": 48,
+     "nodes": 398,
+     "unnamed_examples": [
+      "AXButton",
+      "AXButton"
+     ]
+    },
+    "screenshot": "shots/paseo.png",
+    "load_after": 2.66,
+    "quit": "quit"
+   },
+   {
+    "load_before": 2.53,
+    "launch_ms": 799,
+    "processes": 6,
+    "other_children": [
+     "Paseo Daemon",
+     "Paseo Supervisor"
+    ],
+    "footprint_mb": 476.3,
+    "rss_mb": 781.3,
+    "idle_cpu_pct": 4.17,
+    "windows": "1",
+    "load_after": 2.49,
+    "quit": "quit"
+   },
+   {
+    "load_before": 2.53,
+    "launch_ms": 807,
+    "processes": 6,
+    "other_children": [
+     "Paseo Daemon",
+     "Paseo Supervisor"
+    ],
+    "footprint_mb": 481.0,
+    "rss_mb": 891.8,
+    "idle_cpu_pct": 3.17,
+    "windows": "1",
+    "load_after": 5.06,
+    "quit": "quit"
+   }
+  ],
+  "warmup_launch_ms": "6537",
+  "median": {
+   "launch_ms": 799,
+   "footprint_mb": 481.0,
+   "rss_mb": 891.8,
+   "idle_cpu_pct": 3.17,
+   "processes": 6
+  }
+ },
+ "super.engineering": {
+  "name": "super.engineering",
+  "app": "/Applications/super.engineering.app",
+  "bundle_id": "engineering.super.app",
+  "version": "53f6d61c",
+  "runs": [
+   {
+    "load_before": 4.65,
+    "launch_ms": 227,
+    "processes": 3,
+    "other_children": [],
+    "footprint_mb": 310.6,
+    "rss_mb": 485.0,
+    "idle_cpu_pct": 13.4,
+    "windows": "1",
+    "accessibility": {
+     "named_controls": 1,
+     "static_texts": 0,
+     "controls": 3,
+     "windows": 1,
+     "nodes": 6,
+     "top_roles": [
+      "AXButton:3",
+      "AXGroup:2",
+      "AXWindow:1"
+     ],
+     "trusted": true,
+     "unnamed_examples": [
+      "AXButton",
+      "AXButton"
+     ]
+    },
+    "screenshot": "shots/super-engineering.png",
+    "load_after": 3.11,
+    "quit": "quit"
+   },
+   {
+    "load_before": 3.1,
+    "launch_ms": 259,
+    "processes": 3,
+    "other_children": [],
+    "footprint_mb": 343.0,
+    "rss_mb": 444.8,
+    "idle_cpu_pct": 11.23,
+    "windows": "1",
+    "load_after": 2.35,
+    "quit": "quit"
+   },
+   {
+    "load_before": 2.24,
+    "launch_ms": 242,
+    "processes": 2,
+    "other_children": [],
+    "footprint_mb": 202.7,
+    "rss_mb": 228.2,
+    "idle_cpu_pct": 11.57,
+    "windows": "1",
+    "load_after": 2.32,
+    "quit": "quit"
+   }
+  ],
+  "warmup_launch_ms": "483",
+  "median": {
+   "launch_ms": 242,
+   "footprint_mb": 310.6,
+   "rss_mb": 444.8,
+   "idle_cpu_pct": 11.57,
+   "processes": 3
+  }
+ },
+ "Calculator (baseline)": {
+  "name": "Calculator (baseline)",
+  "app": "/System/Applications/Calculator.app",
+  "bundle_id": "com.apple.calculator",
+  "version": "12.0",
+  "runs": [
+   {
+    "load_before": 2.31,
+    "launch_ms": 335,
+    "processes": 2,
+    "other_children": [],
+    "footprint_mb": 47.8,
+    "rss_mb": 79.1,
+    "idle_cpu_pct": 0.0,
+    "windows": "1",
+    "accessibility": {
+     "controls": 25,
+     "trusted": true,
+     "static_texts": 1,
+     "unnamed_examples": [
+      "AXButton",
+      "AXButton",
+      "AXButton"
+     ],
+     "windows": 1,
+     "nodes": 36,
+     "top_roles": [
+      "AXButton:25",
+      "AXGroup:5",
+      "AXSplitter:1",
+      "AXSplitGroup:1",
+      "AXWindow:1",
+      "AXStaticText:1",
+      "AXToolbar:1",
+      "AXScrollArea:1"
+     ],
+     "named_controls": 22
+    },
+    "screenshot": "shots/calculator-baseline.png",
+    "load_after": 1.85,
+    "quit": "quit"
+   },
+   {
+    "load_before": 1.78,
+    "launch_ms": 328,
+    "processes": 3,
+    "other_children": [],
+    "footprint_mb": 174.4,
+    "rss_mb": 282.4,
+    "idle_cpu_pct": -1.7,
+    "windows": "1",
+    "load_after": 1.79,
+    "quit": "quit"
+   },
+   {
+    "load_before": 1.79,
+    "launch_ms": 321,
+    "processes": 3,
+    "other_children": [],
+    "footprint_mb": 172.5,
+    "rss_mb": 281.2,
+    "idle_cpu_pct": -1.7,
+    "windows": "1",
+    "load_after": 2.08,
+    "quit": "quit"
+   }
+  ],
+  "warmup_launch_ms": "448",
+  "median": {
+   "launch_ms": 328,
+   "footprint_mb": 172.5,
+   "rss_mb": 281.2,
+   "idle_cpu_pct": -1.7,
+   "processes": 3
+  }
+ },
+ "TextEdit (baseline)": {
+  "name": "TextEdit (baseline)",
+  "app": "/System/Applications/TextEdit.app",
+  "bundle_id": "com.apple.TextEdit",
+  "version": "1.21",
+  "runs": [
+   {
+    "load_before": 1.14,
+    "launch_ms": 565,
+    "processes": 6,
+    "other_children": [],
+    "footprint_mb": 65.0,
+    "rss_mb": 180.8,
+    "idle_cpu_pct": 6.7,
+    "windows": "1",
+    "accessibility": {
+     "trusted": true,
+     "unnamed_examples": [
+      "AXButton",
+      "AXButton",
+      "AXButton",
+      "AXButton",
+      "AXButton",
+      "AXButton"
+     ],
+     "named_controls": 74,
+     "static_texts": 30,
+     "nodes": 151,
+     "controls": 80,
+     "windows": 1,
+     "top_roles": [
+      "AXStaticText:30",
+      "AXCell:29",
+      "AXRow:29",
+      "AXImage:25",
+      "AXButton:18",
+      "AXColumn:4",
+      "AXScrollArea:2",
+      "AXSplitGroup:2"
+     ]
+    },
+    "screenshot": "shots/textedit-baseline.png",
+    "load_after": 1.55,
+    "quit": "quit"
+   },
+   {
+    "load_before": 1.55,
+    "launch_ms": 490,
+    "processes": 6,
+    "other_children": [],
+    "footprint_mb": 64.8,
+    "rss_mb": 180.5,
+    "idle_cpu_pct": 4.73,
+    "windows": "1",
+    "load_after": 1.48,
+    "quit": "quit"
+   },
+   {
+    "load_before": 1.48,
+    "launch_ms": 483,
+    "processes": 6,
+    "other_children": [],
+    "footprint_mb": 64.8,
+    "rss_mb": 180.3,
+    "idle_cpu_pct": 3.47,
+    "windows": "1",
+    "load_after": 3.86,
+    "quit": "quit"
+   }
+  ],
+  "warmup_launch_ms": "timeout",
+  "median": {
+   "launch_ms": 490,
+   "footprint_mb": 64.8,
+   "rss_mb": 180.5,
+   "idle_cpu_pct": 4.73,
+   "processes": 6
+  }
+ }
+}

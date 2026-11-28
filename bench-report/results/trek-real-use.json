@@ -1,0 +1,11 @@
+{
+ "what": "The owner's running Trek 0.4.68, read-only: footprint per process it is responsible for (scripts/appprobe.swift + footprint)",
+ "uptime": "4h41m",
+ "threads_in_db": 782,
+ "browser_tabs_saved": 37,
+ "trek_main_footprint_mb": 520,
+ "claude_code_sessions": 3,
+ "claude_code_avg_footprint_mb": 255,
+ "trek_mcp_processes": 18,
+ "trek_mcp_avg_footprint_mb": 2
+}

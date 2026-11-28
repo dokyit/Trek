@@ -1,0 +1,138 @@
+{
+  "date": "2026-11-27 20:08",
+  "git": "242fdff8",
+  "machine": {
+    "model": "Mac17,4",
+    "cpu": "Apple M5",
+    "cores": "10",
+    "memory_gb": 24,
+    "macos": "27.2.1",
+    "load": 2.728515625
+  },
+  "binary": {
+    "arch": "arm64",
+    "mb": 126
+  },
+  "launch": {
+    "warm_0_threads_ms": 230,
+    "warm_0_threads_runs": [
+      231,
+      220,
+      229,
+      230,
+      232
+    ],
+    "warm_0_threads_phases_ms": {
+      "first_frame": 209.3,
+      "claim": 0.3,
+      "platform": 59.2,
+      "run": 69.5,
+      "kit": 139.7,
+      "fonts": 140.3,
+      "app": 146.3,
+      "workspace": 150.1
+    },
+    "warm_10_threads_ms": 222,
+    "warm_10_threads_runs": [
+      222,
+      222,
+      227,
+      225,
+      206
+    ],
+    "warm_10_threads_phases_ms": {
+      "first_frame": 193.6,
+      "claim": 0.1,
+      "platform": 46.1,
+      "run": 55.5,
+      "kit": 125.1,
+      "fonts": 125.8,
+      "app": 133.0,
+      "workspace": 135.8
+    },
+    "warm_100_threads_ms": 207,
+    "warm_100_threads_runs": [
+      198,
+      207,
+      208,
+      197,
+      221
+    ],
+    "warm_100_threads_phases_ms": {
+      "first_frame": 207.4,
+      "claim": 0.3,
+      "platform": 50.3,
+      "run": 59.5,
+      "kit": 128.4,
+      "fonts": 129.0,
+      "app": 140.8,
+      "workspace": 143.1
+    },
+    "cold_100_threads_ms": 275,
+    "cold_100_threads_runs": [
+      274,
+      275,
+      280
+    ]
+  },
+  "idle": {
+    "0_threads": {
+      "rss_mb": 125,
+      "footprint_mb": 58,
+      "cpu_percent": 0.03,
+      "switches_per_s": 10.0,
+      "rss_after_mb": 125,
+      "secs": 60
+    },
+    "10_threads": {
+      "rss_mb": 131,
+      "footprint_mb": 64,
+      "cpu_percent": 0.03,
+      "switches_per_s": 9.9,
+      "rss_after_mb": 131,
+      "secs": 60
+    },
+    "100_threads": {
+      "rss_mb": 137,
+      "footprint_mb": 65,
+      "cpu_percent": 0.05,
+      "switches_per_s": 10.1,
+      "rss_after_mb": 137,
+      "secs": 60
+    },
+    "drawn": {
+      "threads": 100,
+      "footprint_mb": 65
+    }
+  },
+  "stream": {
+    "rss_start_mb": 137,
+    "rss_peak_mb": 166,
+    "rss_after_settling_mb": 167,
+    "cpu_percent": 42.2,
+    "secs": 113,
+    "frame_p50_ms": 5.1,
+    "frame_p95_ms": 6.5,
+    "frames_in_3s": 172,
+    "lag_p95_ms": 6.8
+  },
+  "long": {
+    "items": 10000,
+    "loaded_ms": 77.1,
+    "first_paint_ms": 100.4,
+    "rss_before_mb": 140,
+    "rss_opened_mb": 172,
+    "rss_scrolled_mb": 184,
+    "scroll_frame_p50_ms": 5.3,
+    "scroll_frame_p95_ms": 9.6,
+    "scroll_frames": 300,
+    "scroll_latency_p50_ms": 14.3,
+    "scroll_latency_p95_ms": 35.7,
+    "scroll_unpainted": 0,
+    "stream_frame_p50_ms": 6.2,
+    "stream_frame_p95_ms": 9.7,
+    "stream_lag_p95_ms": 7.5,
+    "stream_frames_in_3s": 95
+  },
+  "load_after": 2.96435546875
+}

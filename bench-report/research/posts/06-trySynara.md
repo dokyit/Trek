@@ -1,0 +1,12 @@
+# 06 — @trySynara — Paper-style canvas coming to Synara
+- URL: https://x.com/trySynara/status/2126016385134350412
+- Date: 2026-11-26 18:13 UTC (14 likes, 1K views)
+- Text: "Paper-style canvas coming to Synara / Let your agent make demos, mockups and views before pushing to prod"
+- Quotes @emanueledpt (2026-11-26 18:05 UTC, https://x.com/emanueledpt/status/2126014543994454120): "been building a little paper-style canvas inside synara / your agents drive it: layers, pages, frames, flex, shadows, they edit everything while you tweak what you want / still rough but this is how it looks right now"
+- Media: one image in the quoted post (seen; alt "Synara's paper-style design canvas with layers, frames and a properties panel"). No video.
+  - "Aurora app" file, page "Mobile"; left tabs Chat / Layers / Comments 1; Pages: Mobile, Marketing, Components; frames Footer strip, Form controls, Effects, Home – Mobile, Pricing card > Card. Tool rail (select, hand, frame, rect, text, image, comment), undo/redo.
+  - Canvas frames: Pricing card 390×380 (Pro plan $24/month, selected, "Fill 358 × Fit 23…"), Home – Mobile 390×600 ("Good morning, Sam"), Effects 390×420 ("Golden hour"), Form controls 390×250.
+  - Right inspector: Layout (W 358 Fill, H 233 Fit, Flex direction, gap 12, padding 20/20), Absolute position, Clip content, Radius 14, Blending 100% Normal, Fill FFFFFF, Outline, Border, Shadow (Box shadow 0 8 24 · 8%), Inner shadow, Filters, "Other styles margin: 16px", Selection colors. "56%" zoom, "Back to chat". App left rail shows provider usage rings.
+- Claim: agents can create and edit design frames (Figma/Paper-like canvas) inside the coding app; user tweaks alongside. "Still rough", coming.
+- Relation to Trek: maps to Trek's generative UI / design work — an agent-editable design canvas with layers and inspector inside the agent app. Comparison axis: in-app design/mockup surface that agents drive.
+- Image: <scratch>/media/HYEe9hsbwAEEDTR.jpg

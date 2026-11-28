@@ -1,0 +1,17 @@
+# 03 — @lxe (Aleksey Smolenchuk) — Superharness
+- URL: https://x.com/lxe/status/2126185469415469395
+- Date: 2026-11-27 05:24 UTC (84 likes, 7.1K views)
+- Text: "Introducing Superharness: a free open source desktop app to drive all your coding harnesses. It discovers all of your sessions. No setup needed... It multiplexes things over tmux or acp... a native iOS app that securely mirrors everything (submitted already). Fast compressed stream. Push notifications. Easy private dictation proxy. It's already my daily driver. https://superharness.tech"
+- Product: Superharness (superharness.tech, site returns 200) — free, open source, desktop + iOS.
+- Claim: auto-discovers existing sessions with no setup; drives Claude, Codex, Antigravity, Muse, Pi via tmux/ACP/RPC; iOS mirror with compressed stream, push, dictation. No numbers.
+- Video (30.2 s, no speech; WATCHED, 22 frames at 0.7 fps):
+  - 0:00–0:03 3D logo, "Every… One window."
+  - 0:05–0:08 dark app window: sidebar grouped by harness (Antigravity, Codex, Claude, Muse, Pi) with threads (e.g. "Checkout v2: Apple Pay + saved cards", "Migrate billing to Stripe Elements", "Fix flaky checkout e2e tests"); bottom row of harness icons with ring indicators. Chat shows "Ran 3 commands · Edited 2 files", "All 27 checkout tests pass", "Running pnpm test 13m 31s", plan strip "2/3 Card brand logos", composer "Ask anything, paste screenshots (Ctrl+V)…", model "Opus 5.5 · Medium". Overlay text lists "Claude Codex Antigravity Muse Pi".
+  - 0:10–0:13 "Steer it." — message sent mid-run, agent "Editing SavedCards.css"; reply "All 31 checkout tests pass".
+  - 0:14–0:16 "Queue it." — "Queued Messages" panel ("Then write the release notes", "And open a PR") with send-now/edit/delete per item.
+  - 0:17–0:19 "Every harness. Every limit." — usage popover for Claude: Weekly limit 46% (+18% today, on pace for 80%), 5-hour session 28%, Extra usage 28% of monthly cap, "API-equivalent value (est.) 7d · 3.0B tokens: $1.9k week, $390 today, $156 last 5h", bar chart by day.
+  - 0:20–0:24 "In your pocket. Steer from anywhere." — iPhone app with same thread, keyboard, "Message Claude tmux…" composer, mic.
+  - 0:25–0:28 "Start any [thread]" — new-thread picker: Antigravity (Direct ACP conversation), Codex (OpenAI Codex thread), Muse (Headless exec, resumable), Pi (Pi RPC session, steerable), Claude (tmux + remote control); project "acme-storefront", model "GPT-6.2-Sol High". "Desktop and phone." — desktop + phone side by side on a Codex thread ("Rate-limit the /export endpoint to 10 a minute").
+  - 0:29 "Superharness — All your coding agents in one superapp."
+- Relation to Trek: the closest match to Trek — free/open-source desktop app for many harnesses, threads sidebar, steer + queue, usage limits per provider, iOS companion with push and dictation. Differences to check: session auto-discovery of existing CLI sessions (tmux multiplexing), per-harness grouping, API-equivalent cost estimate. No browser, worktrees, computer use or sub-agents shown.
+- Frames: <scratch>/frames/03-superharness/ (22 jpgs)

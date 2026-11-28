@@ -1,0 +1,73 @@
+{
+ "date": "2026-11-27",
+ "attempt": "Terminal-Bench CPU-only (Harbor registry terminal-bench/terminal-bench-cpu-only), 7 light tasks, DeepSeek V4 Flash via OpenRouter, Trek's Direct harness built from main 242fdff8 (trek-bench) then OpenCode, 1 trial, 25 min, max 200 turns.",
+ "outcome": "Stopped: the OpenRouter account had no credit left (total_credits 40, total_usage 40.20 from /api/v1/credits; the key endpoint's limit_remaining of $6.58 is the key's own cap, not the balance). Requests returned 402. Spent this session: $0.008. OpenCode never ran.",
+ "finding": "One Trek run (cargo-flight-dispatch) ended before any 402: after 5 requests trek-bench exited with code 2, 'The model used its whole output limit on reasoning and wrote nothing. Try a lower effort.' (crates/trek-agents/src/direct.rs:1394). The 30 Oct build ran 19 tasks on the same model and effort without stopping this way.",
+ "runs": [
+  {
+   "task": "bun-sourcemap-leak",
+   "requests": 19,
+   "tool_calls": 47,
+   "cost_usd": 0.0032486051360000002,
+   "error": "402 Payment Required: Prompt tokens limit exceeded: 10892 > 2094. To increase, visit"
+  },
+  {
+   "task": "cargo-flight-dispatch",
+   "requests": 5,
+   "tool_calls": 7,
+   "cost_usd": 0.001199694832,
+   "error": "The model used its whole output limit on reasoning and wrote nothing. Try a lower effort."
+  },
+  {
+   "task": "foodstuff-beta-activity",
+   "requests": 13,
+   "tool_calls": 10,
+   "cost_usd": 0.003698483704,
+   "error": "402 Payment Required: Insufficient credits. Add more using"
+  },
+  {
+   "task": "photonic-waveguide-routing",
+   "requests": 1,
+   "tool_calls": 0,
+   "cost_usd": null,
+   "error": "402 Payment Required: Insufficient credits. Add more using"
+  },
+  {
+   "task": "production-planning",
+   "requests": 1,
+   "tool_calls": 0,
+   "cost_usd": null,
+   "error": "402 Payment Required: Insufficient credits. Add more using"
+  },
+  {
+   "task": "risk-scorer-replay",
+   "requests": 1,
+   "tool_calls": 0,
+   "cost_usd": null,
+   "error": "402 Payment Required: Insufficient credits. Add more using"
+  },
+  {
+   "task": "roy-polymorph-cn",
+   "requests": 1,
+   "tool_calls": 0,
+   "cost_usd": null,
+   "error": "402 Payment Required: Insufficient credits. Add more using"
+  }
+ ],
+ "previous_2026_10_30": {
+  "tasks": 19,
+  "model": "deepseek/deepseek-v4-flash",
+  "effort": "high",
+  "trek_direct": {
+   "passed": 0,
+   "verifier_tests": "121/184",
+   "cost_usd": 3.29
+  },
+  "trek_script": {
+   "passed": 1,
+   "verifier_tests": "120/184",
+   "cost_usd": 5.07
+  },
+  "report": "https://claude.ai/artifact/GzrTHeDnj4ub46sumSKgwb"
+ }
+}

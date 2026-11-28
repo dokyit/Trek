@@ -1,0 +1,11 @@
+# 04 — @dazuoforyou (Andy Zhang) — subjective comparison of Orca, Paseo, Herdr, T3 Code
+- URL: https://x.com/dazuoforyou/status/2126173791168659756
+- Date: 2026-11-27 04:38 UTC (424 likes, 85.9K views — the most-viewed post in this set)
+- Text (Chinese, translated): "Tried Orca, Paseo, Herdr and T3 Code; purely subjective impressions:
+  - Orca: very powerful and complete; the founding team is clearly careful and humble, building a real product. Downside: 'has everything' but the concrete experience isn't polished enough.
+  - Paseo: very restrained design; I find the features I want quickly and understand them at a glance; excellent UX.
+  - Herdr: best first impression, clean refined UI. But the most problems in real use — lost records (history), and the features I wanted weren't presented intuitively.
+  - T3 Code: went in because of all the praise, but didn't get the point at first; maybe expectations were too high; uninstalled after trying few features."
+- Media: none (text only).
+- Product/benchmark: informal user review of four agent desktop apps/ADEs. No numbers.
+- Relation to Trek: shows what users judge these apps on — breadth vs polish (Orca), discoverability/restraint (Paseo), reliability of history/records (Herdr lost records), and whether the core idea is obvious on first launch (T3 Code). Trek would be compared on the same: first-run clarity, no lost threads, polish over feature count.

@@ -1,0 +1,57 @@
+{
+ "load": 2.88,
+ "empty": {
+  "total_mb": 70,
+  "trek_mb": 70,
+  "by_process": {
+   "trek-release": {
+    "count": 1,
+    "mb": 70
+   }
+  }
+ },
+ "six_idle": {
+  "total_mb": 1008,
+  "trek_mb": 90,
+  "by_process": {
+   "claude": {
+    "count": 6,
+    "mb": 918
+   },
+   "trek-release": {
+    "count": 1,
+    "mb": 90
+   }
+  }
+ },
+ "ten_open_four_streaming_peak": {
+  "total_mb": 1744,
+  "trek_mb": 180,
+  "by_process": {
+   "claude": {
+    "count": 10,
+    "mb": 1564
+   },
+   "trek-release": {
+    "count": 1,
+    "mb": 180
+   }
+  }
+ },
+ "after": {
+  "total_mb": 1623,
+  "trek_mb": 113,
+  "by_process": {
+   "claude": {
+    "count": 10,
+    "mb": 1510
+   },
+   "trek-release": {
+    "count": 1,
+    "mb": 113
+   }
+  }
+ },
+ "log_errors": [],
+ "note": "6 threads each ran one short real Claude Code turn; then 4 more threads streamed a long answer at once (10 threads open, 4 streaming, as in Synara's post). Footprint summed over Trek and every process under it."
+}

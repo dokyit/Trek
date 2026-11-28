@@ -1,0 +1,13 @@
+# 12 — @emanueledpt (Emanuele Di Pietro, Synara's author) — Synara RAM with many threads
+- URL: https://x.com/emanueledpt/status/2126375772453786026
+- Date: 2026-11-27 18:01 UTC (33 likes, 1.5K views)
+- Text: "gemini 4 neon keeps surprising me / synara now uses 23% less ram with 10 threads open and 4 agents streaming at once (-523 mb) / this model is a beast at performance work and bug hunting / → 77% less layout work → 78% fewer dom nodes → cli processes down from 10 to 4 / with 10 threads all idle: → 194 mb less ram → up to ~2 gb saved with real claude code / codex clis (estimate)"
+- Media: one screenshot (seen) of a Synara thread (project synara, "Goal", host Macmini-di-Emanuele.local, model Gemini 4 Neon High, Full access) with a TL;DR table:
+  - 10 open threads, 4 streaming (1 front + 3 background): Total RAM (RSS) 2,307 → 1,784 MB (−523 MB, −22.7%); Total PSS 1,571 → 1,337 MB (−14.9%); Renderer PSS 607 → 477 MB (−21.4%); Renderer CPU 24.2% → 20.9% (−13.6%); Renderer layout 15.6 → 3.6 ms/s (−76.9%); DOM nodes 43,432 → 9,435 (−78.3%); Parked terminals (xterm) 9 → 1 (−88.9%); Live provider CLI processes 10 → 4 (−60%); Switch-back to background thread 87.7 → 76.7 ms (−12.5%).
+  - 5 open threads, 3 streaming: RSS 1,934 → 1,659 MB (−14.2%); PSS 1,471 → 1,201 MB (−18.3%); Renderer PSS 654 → 441 MB (−32.6%); Layout 13.8 → 4.0 ms/s (−71%); DOM nodes 80,177 → 9,554 (−88.1%); CLI processes 5 → 3 (−40%).
+  - "10 open threads — all idle" table cut off.
+  - Right panel: Environment — Changes +2,972 −32, Worktree, branch synara/optimize-background-t…, Commit & push; Actions; Local Servers 0; Usage (5h 54%, Weekly 77%, Claude And GPT Models Weekly 100%, 5h 100%) for Antigravity; Repository Emanuele-web04/synara; Pull request "Link pull request…"; Editor view; Recap (Italian summary of the perf work).
+- Product: Synara desktop (Electron-style renderer with DOM + xterm terminals, spawning provider CLIs).
+- Claim: −23% RAM (−523 MB) at 10 threads / 4 streaming; −194 MB idle; estimate up to ~2 GB saved with real Claude Code/Codex CLIs. Baseline is still ~1.8 GB RSS at 10 threads.
+- Relation to Trek: the clearest benchmark axis versus Trek — memory and process count with many threads and parallel streaming agents. Trek is native Rust/GPUI (no DOM/renderer process); a same-scenario measurement (10 threads, 4 streaming; RSS, CPU, CLI process count, thread switch time) would compare directly with these numbers. Also shows Synara's per-thread environment panel (worktree, commit & push, local servers, PR link, usage).
+- Image: <scratch>/media/HYJnfkqbsAA5Vwc.jpg
