@@ -11,7 +11,7 @@ serde_json.workspace = true
 tracing.workspace = true
 trek-core.workspace = true
 base64 = "0.22"
-sha2 = "0.10"
+sha2 = "0.11"
 getrandom = "0.3"
 # The keys of the stand-in authenticator (tests, the verify app) and of a Mac without a Secure
 # Enclave, and the check every test makes of a signature: ECDSA P-256 from the ring that rustls

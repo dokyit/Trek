@@ -50,7 +50,7 @@ windows = { version = "0.62", features = [
 ] }
 windows-registry = "0.6"
 # The downloaded speech model's checksum.
-sha2 = "0.10"
+sha2 = "0.11"
 tracing.workspace = true
 
 # On-device speech recognition for a Trek without package identity, which Windows' recognizer
