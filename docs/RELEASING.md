@@ -297,7 +297,7 @@ tested exactly the code being released, and passed. Two kinds of run count:
 - **The pull request's run, when nothing else reached `main` in between.** A pull request's run
   doesn't test its head commit: it tests GitHub's merge of it into `main` (`refs/pull/N/merge`).
   So every CI run records the tree it tested (`git rev-parse HEAD^{tree}`), with the run's id,
-  event, head and scope, in its `tested-tree` artifact (job **Tested tree**). The gate finds the
+  event, head and scope, in its `tested-tree` artifact (the **Plan** job). The gate finds the
   pull requests GitHub links to the release commit (and a merge commit's second parent), reads
   each of their runs' records, and takes a run only when its record is that run's own, of that
   head, of the full suite, and of a tree equal to `git rev-parse <commit>^{tree}`. A merge (or a
