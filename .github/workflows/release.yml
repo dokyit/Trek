@@ -107,6 +107,8 @@ jobs:
     permissions:
       actions: read
       contents: read
+      # The pull request a commit came from (commits/<sha>/pulls), whose CI run may vouch for it.
+      pull-requests: read
     outputs:
       linux: ${{ steps.ci.outputs.linux }}
     steps:
@@ -125,20 +127,12 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          # commit: "<others> <linux>", each yes when some completed CI run of it passed every job
-          # of that group (passed or skipped; a group with no jobs hasn't passed).
-          judge() {
-            local runs id jobs others=no linux=no
-            runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$1&status=completed&per_page=20" --jq '.workflow_runs[].id')
-            for id in $runs; do
-              jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?per_page=100" --jq '.jobs[] | "\(.conclusion)\t\(.name)"')
-              group() { awk -F'\t' -v linux="$1" '($2 ~ /Linux/) == linux { n++; if ($1 != "success" && $1 != "skipped") bad = 1 } END { exit !(n && !bad) }' <<< "$jobs"; }
-              group 0 && others=yes
-              group 1 && linux=yes
-            done
-            echo "CI on $1 (${runs//$'\n'/ }): macOS and Windows $others, Linux $linux" >&2
-            echo "$others $linux"
-          }
+          # commit: "<others> <linux>", each yes when some completed CI run tested exactly that
+          # commit's code and passed every job of that group (passed or skipped; a group with no jobs
+          # hasn't passed). A run of the commit itself counts, and so does the run of the pull request
+          # it merged, when the tree that run recorded testing is this commit's tree
+          # (script/ci-gate.py; its tests: script/tests/ci-gate.py).
+          judge() { python3 script/ci-gate.py judge "$1"; }
           # Linux's verdict, for the Linux build; a run that isn't enforced builds it as before.
           finish() { # linux
             echo "linux=$1" >> "$GITHUB_OUTPUT"
@@ -168,7 +162,7 @@ jobs:
             verdict "CI hasn't passed on $GITHUB_SHA's parent $parent either (this commit is only the version bump). Release a commit CI passed on, or run again with skip_ci_check for an emergency fix."
           fi
           echo "Not only the v${VERSION#v} bump, so its parent's CI doesn't count: $why"
-          verdict "CI hasn't passed on $GITHUB_SHA (macOS and Windows). Release a commit it passed on, or run again with skip_ci_check for an emergency fix."
+          verdict "CI hasn't passed on $GITHUB_SHA (macOS and Windows), nor on a pull request run that tested its tree. Release a commit it passed on, or run again with skip_ci_check for an emergency fix."
 
   macos:
     name: macOS app
