@@ -50,6 +50,40 @@ FULL_PREFIX = ('vendor/', '.github/', '.cargo/', 'crates/test-fixtures/',
 UNREAD_PREFIX = ('docs/', 'site/', 'ios/', 'media/', 'evidence/', '.agents/', 'assets/brand/', 'bin/')
 UNREAD_SUFFIX = ('.md',)
 UNREAD_EXACT = {'LICENSE', 'NOTICE', '.gitignore', '.gitattributes'}
+# Crates whose tests walk folders by building the path piece by piece, which no string in their
+# sources names whole: a change under one of these prefixes reaches that crate. (`tests` in
+# script/tests/ci-plan.py fails when a test leaves its crate with `CARGO_MANIFEST_DIR` and `..`
+# from a file not listed in WALKER_FILES, so a new one can't go unnoticed.)
+WALKERS = {
+    # The scale check reads every UI source of these crates.
+    'trek-palette': ('crates/trek-app/src/', 'crates/trek-line-breakdown/src/', 'crates/trek-motion/src/'),
+    # The gate count reads every crate's source; the ledger and its pages are its own.
+    'trek-parity': ('crates/', 'docs/parity/', 'docs/PARITY.md'),
+}
+# The files that leave their crate to read others with `CARGO_MANIFEST_DIR` and `..`, and what
+# catches them: 'walker' (in WALKERS above) or 'named' (the whole path is in a string, which the
+# reader check finds).
+WALKER_FILES = {
+    'crates/trek-palette/src/scale.rs': 'walker',
+    'crates/trek-parity/src/bin/parity-live.rs': 'walker',
+    'crates/trek-parity/tests/parity.rs': 'walker',
+    'crates/trek-words/src/lib.rs': 'named',
+    'crates/trek-agents/src/opencode.rs': 'named',
+    'crates/trek-app/src/winsys.rs': 'named',
+    'crates/trek-brand/src/small_icon_tests.rs': 'named',
+    'crates/trek-core/src/artifact.rs': 'named',
+}
+# Programs a crate starts without depending on them: a change to the key is a change to what the
+# crates listed run (trek-app finds the trek-mcp dev build beside it, workspace.rs trek_mcp_binary).
+LAUNCHES = {
+    'trek-mcp': ('trek-app',),
+}
+
+# A path named inside one of these is compiled into the crate (include_str!, include_bytes!,
+# rust-embed's folder), so what depends on that crate is reached too; a path read at run time (a
+# test's fs::read, a walk) reaches only the crate that reads it.
+EMBED = re.compile(r'(include_str!|include_bytes!|#\[folder\s*=)\s*\((?:[^;]*)$|#\[folder\s*=\s*[^\]]*$', re.S)
+
 # File names too common to mean a crate reads this one when it names a file of that name.
 GENERIC_NAMES = {'README.md', 'SKILL.md', 'CHANGELOG.md', 'LICENSE.md', 'mod.rs', 'lib.rs', 'main.rs',
                  'Cargo.toml', 'package.json', 'Contents.json', 'config.toml', 'settings.json',
@@ -79,6 +113,9 @@ class Workspace:
             for d in p['dependencies']:
                 if d['name'] in self.packages and d['name'] != name:
                     self.rdeps[d['name']].add(name)
+        for launched, by in LAUNCHES.items():
+            if launched in self.rdeps:
+                self.rdeps[launched] |= {b for b in by if b in self.packages}
 
     def package_of(self, path):
         """(package, path within it) for a file in a crate, or (None, None)."""
@@ -118,14 +155,31 @@ class Workspace:
     def readers(self, path):
         """The crates whose sources name `path`, a folder it's in (two levels deep or more), or its
         file name, in a string that ends there ("../../assets/fonts", "docs/parity/ledger.toml",
-        "LivePage.swift"): a crate that names a deeper path in the same folder doesn't read this."""
+        "LivePage.swift", include_str!("../../trek-assets/assets/themes/trek.json"),
+        join("../trek-app/src")): a crate that names a deeper path in the same folder doesn't read
+        this. A path in crates/ is looked for with and without `crates/`, as a crate reaches
+        another's files by `../<crate>/…`. Then the crates in WALKERS whose folders hold it."""
+        forms = [path]
+        if path.startswith('crates/'):
+            forms.append(path[len('crates/'):])
+        needles = []
+        for form in forms:
+            parts = form.split('/')
+            needles += [form] + ['/'.join(parts[:i]) for i in range(len(parts) - 1, 1, -1)]
         parts = path.split('/')
-        needles = [path] + ['/'.join(parts[:i]) for i in range(len(parts) - 1, 1, -1)]
         base = parts[-1]
-        if '.' in base and len(base) >= 6 and base not in GENERIC_NAMES and not base.startswith('index.'):
+        # By its name alone only outside the crates (a crate reaches another's file by its path).
+        if (not path.startswith('crates/') and '.' in base and len(base) >= 6 and base not in GENERIC_NAMES
+                and not base.startswith('index.')):
             needles.append(base)
         pattern = re.compile('(' + '|'.join(re.escape(n) for n in needles) + ')/?"')
-        return {name for name, text in self.sources() if pattern.search(text)}
+        embedded, read = set(), set()
+        for name, text in self.sources():
+            for m in pattern.finditer(text):
+                (embedded if EMBED.search(text[max(0, m.start() - 160):m.start()]) else read).add(name)
+        read |= {crate for crate, prefixes in WALKERS.items()
+                 if crate in self.packages and any(path.startswith(p) for p in prefixes)}
+        return embedded, read - embedded
 
 
 # --- cfg gates -------------------------------------------------------------------------------
@@ -306,7 +360,9 @@ def plan(files, ws, event, labels=()):
         full(f'a {event or "push"} runs everything')
     if LABEL_FULL in labels:
         full(f'the pull request is labelled {LABEL_FULL}')
-    touched = set()
+    # Crates a file belongs to (what depends on them is reached too), and crates whose tests only
+    # read a changed file (they don't change, so what depends on them isn't).
+    touched, read_by = set(), set()
     for path in files:
         if path in FULL_EXACT or path.startswith(FULL_PREFIX) or path.endswith('/build.rs') or path == 'build.rs':
             full(f'{path} can affect every crate')
@@ -321,10 +377,21 @@ def plan(files, ws, event, labels=()):
             crate_dir = os.path.dirname(os.path.relpath(ws.packages[pkg]['manifest_path'], ws.root))
             gates = module_platforms(ws.root, crate_dir, rel) if rel.endswith('.rs') else set(PLATFORMS)
             result['platforms'] |= gates
+            # Another crate's test may read this file as a file (trek-words reads trek-app's
+            # sources, trek-palette the theme in trek-assets, trek-parity every crate's gates): it
+            # reaches that crate, on the platforms that compile the file (every one when none do).
+            embedded, read = ws.readers(path)
+            embedded, read = embedded - {pkg}, read - {pkg}
+            if embedded or read:
+                touched |= embedded
+                read_by |= read
+                if not gates:
+                    result['platforms'] |= set(PLATFORMS)
             continue
-        readers = ws.readers(path)
-        if readers:
-            touched |= readers
+        embedded, read = ws.readers(path)
+        if embedded or read:
+            touched |= embedded
+            read_by |= read
             result['platforms'] |= set(PLATFORMS)
             continue
         if path in UNREAD_EXACT or path.startswith(UNREAD_PREFIX) or path.endswith(UNREAD_SUFFIX):
@@ -338,7 +405,7 @@ def plan(files, ws, event, labels=()):
         result['scripts'] = True
         result['audit'] = True
     else:
-        result['packages'] = ws.closure(touched)
+        result['packages'] = ws.closure(touched) | read_by
         if not result['packages']:
             result['platforms'] = set()
     return result
@@ -366,6 +433,15 @@ def outputs(result):
     return out
 
 
+def changed_files(cwd=None):
+    """What a pull request's merge commit brings to its base: HEAD^1..HEAD. --no-renames: a moved
+    file is its old path and its new one, so moving a file out of a crate (or out of what a crate
+    reads) still reaches that crate."""
+    out = subprocess.run(['git', 'diff', '--name-only', '--no-renames', 'HEAD^1', 'HEAD'],
+                         check=True, capture_output=True, text=True, cwd=cwd).stdout
+    return [l for l in out.splitlines() if l]
+
+
 def main(argv):
     ap = argparse.ArgumentParser()
     ap.add_argument('--files')
@@ -379,7 +455,7 @@ def main(argv):
         with open(a.files, encoding='utf-8') as f:
             files = [l.strip() for l in f if l.strip()]
     elif a.event == 'pull_request':
-        files = [l for l in git('diff', '--name-only', 'HEAD^1', 'HEAD').splitlines() if l]
+        files = changed_files()
     else:
         files = []
     if a.metadata:

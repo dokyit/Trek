@@ -61,13 +61,14 @@ class Plan(unittest.TestCase):
 
     def test_an_app_change_tests_the_app_alone(self):
         out = self.plan(['crates/trek-app/src/lib.rs'])
-        self.assertEqual((out['packages'], out['app'], out['others'], out['scope']), ('trek-app', 'true', '', 'partial'))
+        self.assertEqual((out['packages'], out['app'], out['others'], out['scope']),
+                         ('trek-app trek-parity', 'true', '-p trek-parity', 'partial'))
         self.assertEqual(self.platforms(out), {'macos', 'windows', 'linux'})
 
     def test_a_core_change_tests_everything_that_depends_on_it(self):
         out = self.plan(['crates/trek-core/src/lib.rs'])
-        self.assertEqual(out['packages'], 'trek-agents trek-app trek-core trek-mcp')
-        self.assertEqual(out['others'], '-p trek-agents -p trek-core -p trek-mcp')
+        self.assertEqual(out['packages'], 'trek-agents trek-app trek-core trek-mcp trek-parity')
+        self.assertEqual(out['others'], '-p trek-agents -p trek-core -p trek-mcp -p trek-parity')
         self.assertEqual(out['arm'], 'true')
 
     def test_a_leaf_change_skips_the_app(self):
@@ -75,8 +76,68 @@ class Plan(unittest.TestCase):
         self.assertEqual((out['packages'], out['app'], out['arm']), ('trek-parity', 'false', 'false'))
 
     def test_a_crate_manifest_or_asset_counts_for_its_crate(self):
-        self.assertEqual(self.plan(['crates/trek-phone/Cargo.toml'])['packages'], 'trek-app trek-mcp trek-phone')
-        self.assertEqual(self.plan(['crates/trek-phone/assets/x.png'])['packages'], 'trek-app trek-mcp trek-phone')
+        self.assertEqual(self.plan(['crates/trek-phone/Cargo.toml'])['packages'], 'trek-app trek-mcp trek-parity trek-phone')
+        self.assertEqual(self.plan(['crates/trek-phone/assets/x.png'])['packages'], 'trek-app trek-mcp trek-parity trek-phone')
+
+    # Crates that read other crates' files, and programs a crate starts
+
+    def test_a_crate_whose_test_reads_another_crates_files_runs_with_it(self):
+        # trek-phone depends on neither crate it reads.
+        self.write('crates/trek-phone/src/lib.rs', 'fn t() { walk(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../trek-app/src")); }\n'
+                   'const T: &str = include_str!("../../trek-core/assets/themes/trek.json");\n')
+        self.assertIn('trek-phone', self.plan(['crates/trek-app/src/workspace.rs'])['packages'].split())
+        self.assertIn('trek-phone', self.plan(['crates/trek-core/assets/themes/trek.json'])['packages'].split())
+        # A file the reader doesn't name isn't read.
+        self.assertNotIn('trek-phone', self.plan(['crates/trek-core/assets/themes/other.json'])['packages'].split())
+
+    def test_a_reader_runs_on_the_platforms_that_compile_the_file(self):
+        self.write('crates/trek-app/src/lib.rs', '#[cfg(windows)]\nmod win;\n')
+        self.assertEqual(self.platforms(self.plan(['crates/trek-app/src/win.rs'])), {'windows'})
+        self.assertIn('trek-parity', self.plan(['crates/trek-app/src/win.rs'])['packages'].split())
+
+    def test_the_walkers_read_what_their_folders_hold(self):
+        out = self.plan(['docs/parity/gates.toml'])
+        self.assertEqual(out['packages'], 'trek-parity')
+        self.assertEqual(self.plan(['crates/trek-core/src/lib.rs'])['others'].count('trek-parity'), 1)
+
+    def test_a_program_the_app_starts_tests_the_app(self):
+        out = self.plan(['crates/trek-mcp/src/main.rs'])
+        self.assertIn('trek-app', out['packages'].split())
+
+    def test_every_test_that_leaves_its_crate_is_accounted_for(self):
+        # A test that reaches outside its crate with CARGO_MANIFEST_DIR and `..` must be in
+        # WALKER_FILES: 'named' when the path it reads is whole in a string, 'walker' (and in
+        # WALKERS) when it builds the path piece by piece.
+        import glob, re
+        found = set()
+        for f in glob.glob(os.path.join(ROOT, 'crates', '**', '*.rs'), recursive=True):
+            text = open(f, encoding='utf-8', errors='replace').read()
+            for m in re.finditer(r'CARGO_MANIFEST_DIR', text):
+                if re.search(r'"/?\.\.', text[m.start():m.start() + 200].split(';')[0]):
+                    found.add(os.path.relpath(f, ROOT).replace(os.sep, '/'))
+        missing = found - set(plan_mod.WALKER_FILES)
+        self.assertFalse(missing, f'reads outside its crate, not in ci-plan.py WALKER_FILES: {sorted(missing)}')
+        walker_crates = {f.split('/')[1] for f, how in plan_mod.WALKER_FILES.items() if how == 'walker'}
+        self.assertTrue(walker_crates <= set(plan_mod.WALKERS), walker_crates)
+
+    # What a pull request brings
+
+    def test_a_moved_file_counts_at_both_its_paths(self):
+        import subprocess
+        repo = os.path.join(self.root, 'git')
+        os.makedirs(os.path.join(repo, 'crates', 'trek-assets'))
+        def git(*a):
+            return subprocess.run(['git', *a], cwd=repo, check=True, capture_output=True, text=True).stdout
+        git('init', '-q')
+        git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'root')
+        with open(os.path.join(repo, 'crates', 'trek-assets', 'trek.json'), 'w') as f:
+            f.write('{"a": 1, "b": 2, "c": 3}\n' * 20)
+        git('add', '.')
+        git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'add')
+        os.makedirs(os.path.join(repo, 'docs'))
+        git('mv', 'crates/trek-assets/trek.json', 'docs/trek.json')
+        git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'move')
+        self.assertEqual(sorted(plan_mod.changed_files(cwd=repo)), ['crates/trek-assets/trek.json', 'docs/trek.json'])
 
     # The full suite
 
@@ -113,6 +174,10 @@ class Plan(unittest.TestCase):
         self.write('crates/trek-phone/src/fonts.rs', 'const DIR: &str = "../../assets/fonts";\n')
         self.assertEqual(self.plan(['docs/parity/ledger.toml'])['packages'], 'trek-parity')
         self.assertEqual(self.plan(['ios/Trek/Views/LivePage.swift'])['packages'], 'trek-agents trek-app trek-core trek-mcp')
+        # Read at run time: only the crate that reads it. Embedded (rust-embed's folder): compiled
+        # into the crate, so what depends on it too.
+        self.assertEqual(self.plan(['assets/fonts/x/Regular.ttf'])['packages'], 'trek-phone')
+        self.write('crates/trek-phone/src/fonts.rs', '#[derive(RustEmbed)]\n#[folder = "../../assets/fonts"]\nstruct Fonts;\n')
         self.assertEqual(self.plan(['assets/fonts/x/Regular.ttf'])['packages'], 'trek-app trek-mcp trek-phone')
         # Naming a different file in the same folder isn't reading this one.
         self.assertEqual(self.plan(['ios/Trek/App.swift'])['packages'], '')
@@ -169,7 +234,7 @@ class Plan(unittest.TestCase):
         self.write('crates/trek-core/src/lib.rs', '#[cfg(windows)]\nmod win;\n')
         out = self.plan(['crates/trek-core/src/win.rs'])
         self.assertEqual(self.platforms(out), {'windows'})
-        self.assertEqual(out['packages'], 'trek-agents trek-app trek-core trek-mcp')
+        self.assertEqual(out['packages'], 'trek-agents trek-app trek-core trek-mcp trek-parity')
         self.assertEqual(out['arm'], 'false')
 
     def test_this_repositorys_gates_read(self):
