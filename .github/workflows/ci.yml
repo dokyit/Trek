@@ -254,6 +254,7 @@ jobs:
         run: cargo test --config "$CI_PROFILE" --locked --doc --workspace
 
       - uses: ./.github/actions/rust-cache-save
+        if: ${{ !cancelled() }}
         with:
           key: ${{ steps.setup.outputs.key }}
           cache-hit: ${{ steps.setup.outputs.cache-hit }}
@@ -330,6 +331,7 @@ jobs:
         run: cargo build --config $env:CI_PROFILE -p trek-phone --features coredevice --example pc_screen --locked
 
       - uses: ./.github/actions/rust-cache-save
+        if: ${{ !cancelled() }}
         with:
           key: ${{ steps.setup.outputs.key }}
           cache-hit: ${{ steps.setup.outputs.cache-hit }}
@@ -402,6 +404,7 @@ jobs:
         run: cargo nextest run --config "$CI_PROFILE" --locked --profile ci --no-tests=warn ${{ needs.plan.outputs.full == 'true' && '--workspace --exclude trek-app' || needs.plan.outputs.others }}
 
       - uses: ./.github/actions/rust-cache-save
+        if: ${{ !cancelled() }}
         with:
           key: ${{ steps.setup.outputs.key }}
           cache-hit: ${{ steps.setup.outputs.cache-hit }}
