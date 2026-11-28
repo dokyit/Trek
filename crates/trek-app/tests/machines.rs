@@ -2604,8 +2604,24 @@ fn trek_s_own_sub_agent_on_another_machine_opens_here_with_its_own_and_stops_fro
             move |ws| !ws.task_state(&c).live() && ws.sub_agents_at_work(&r).is_empty(),
         )
         .await;
-        trek.render(cx);
-        assert!(working_rows(&trek, cx).is_empty());
+        // The parent's working rows here follow the machine's own update of its sub-agent,
+        // which can land a moment after the stop is settled here (seen on Windows runners under
+        // load): wait for them to clear, within the usual limit, rather than look once.
+        let deadline = std::time::Instant::now() + REAL_TIME_LIMIT;
+        loop {
+            trek.render(cx);
+            let rows = working_rows(&trek, cx);
+            if rows.is_empty() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a stopped sub-agent still has a working row here: {rows:?}"
+            );
+            cx.background_executor
+                .timer(Duration::from_millis(20))
+                .await;
+        }
         assert_eq!(badge(&trek, cx, &id), 0);
     });
 }
