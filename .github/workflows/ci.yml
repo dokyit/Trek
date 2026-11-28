@@ -196,6 +196,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      # The pinned toolchain, for script/tests/ci-cache.py (it builds a throwaway workspace).
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
+        with:
+          toolchain: '1.99.0'
       - name: Scripts parse
         run: |
           bash -n script/bundle-linux.sh script/release-linux.sh

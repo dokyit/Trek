@@ -103,6 +103,11 @@ A missed cache makes a job three times as long, so:
   Caches, where the plan allows more than 10 GB) is what lets every kind stay warm; about 25 GB fits
   all of them with Live's.
 
+**When the toolchain is bumped**, check that Cargo still lays target/ out as
+`target/<profile>/{deps,.fingerprint,build}` (`script/ci-cache.py` prunes and keeps units by that
+layout, and `script/tests/ci-cache.py` runs on the pinned toolchain): newer Cargo's build-dir layout
+(`target/debug/build/<crate>/<hash>/…`) would need prune taught it.
+
 ## Runners
 
 Every job names its runner in its own `runs-on` (`macos-15`, `windows-2022`, `ubuntu-22.04`,

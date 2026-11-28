@@ -29,8 +29,12 @@ class Job:
         self.home = os.path.join(tmp, 'cargo-home')
         os.makedirs(self.repo)
         self.env = dict(os.environ, CARGO_TARGET_DIR=os.path.join(self.repo, 'target'), CARGO_INCREMENTAL='0',
+                        CARGO_TERM_COLOR='never',
                         GIT_CONFIG_GLOBAL=os.path.join(tmp, 'gitconfig'), GIT_CONFIG_NOSYSTEM='1')
         self.env.pop('GITHUB_OUTPUT', None)
+        # The repository's own toolchain: ci-cache.py reads target/ as that Cargo lays it out (a
+        # newer Cargo's build-dir layout puts units elsewhere).
+        shutil.copy(os.path.join(ROOT, 'rust-toolchain.toml'), os.path.join(self.repo, 'rust-toolchain.toml'))
         self.git('init', '-q')
         self.git('config', 'user.name', 't')
         self.git('config', 'user.email', 't@t')
@@ -110,7 +114,14 @@ class Job:
         return passed, log
 
 
-@unittest.skipUnless(shutil.which('cargo'), 'no cargo here')
+def pinned_cargo():
+    """Whether the repository's pinned toolchain's cargo runs here."""
+    if not shutil.which('cargo'):
+        return False
+    return subprocess.run(['cargo', '--version'], cwd=ROOT, capture_output=True).returncode == 0
+
+
+@unittest.skipUnless(pinned_cargo(), "no cargo of the repository's toolchain here")
 class Poisoning(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
