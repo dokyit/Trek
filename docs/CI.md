@@ -75,6 +75,22 @@ of six.
 
 The numbers per job, before and after, are in the pull request that made this change.
 
+## The cache budget
+
+GitHub keeps 10 GB of Actions caches per repository and evicts the least recently used past that,
+within minutes when runs are busy. One cache per kind of job per platform comes to about that on its
+own: per platform about 1–1.5 GB for `test-workspace`, 1–1.2 GB for `test-app` and 0.6–0.9 GB for
+`clippy` (with no debug info, workspace libraries kept, executables and trek-app pruned), 0.55 GB
+for the Arm check, and Live's three (`live`, 1.5–1.7 GB each) and the release's (`warm-release`,
+~0.9 GB) on top. Measured on 2026-11-28, a macOS trek-app cache saved at 03:13 was gone by 03:26.
+A missed cache makes a job three times as long, so:
+
+- Only `main` saves caches (pull requests read them), one job of each kind, and the jobs save before
+  builds that resolve features of their own (doc tests, the CoreDevice example, the Linux packages).
+- The workflow raises nothing itself: **raising the repository's cache limit** (Settings › Actions ›
+  Caches, where the plan allows more than 10 GB) is what lets every kind stay warm; about 25 GB fits
+  all of them with Live's.
+
 ## Runners
 
 Every job names its runner in its own `runs-on` (`macos-15`, `windows-2022`, `ubuntu-22.04`,
