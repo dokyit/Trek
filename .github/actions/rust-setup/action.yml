@@ -79,9 +79,10 @@ runs:
         got=${got%% *}
         [ "$got" = "$sum" ] || { echo "::error::cargo-nextest $version $asset: SHA-256 $got, not $sum"; exit 1; }
         bin="${CARGO_HOME:-$HOME/.cargo}/bin"
-        # Git Bash's tar takes C:\… for a remote host named C: give it /c/….
-        if [ "$RUNNER_OS" = Windows ]; then bin=$(cygpath -u "$bin"); fi
-        tar zxf "$RUNNER_TEMP/nextest.tar.gz" -C "$bin"
+        archive="$RUNNER_TEMP/nextest.tar.gz"
+        # Git Bash's tar takes C:\… (or D:\…) for a remote host named C: give it /c/….
+        if [ "$RUNNER_OS" = Windows ]; then bin=$(cygpath -u "$bin"); archive=$(cygpath -u "$archive"); fi
+        tar zxf "$archive" -C "$bin"
         cargo nextest --version
 
     # gpui compiles its Metal shaders at build time with `xcrun metal`. Since Xcode 26 the Metal
