@@ -243,6 +243,15 @@ jobs:
       - name: Test (workspace, except trek-app)
         run: cargo nextest run --config "$CI_PROFILE" --locked --profile ci --no-tests=warn ${{ needs.plan.outputs.full == 'true' && '--workspace --exclude trek-app' || needs.plan.outputs.others }}
 
+      # Saved before the builds below: their graphs (an example's features, the doc tests' own)
+      # would make the cache twice the size, and the cache's limit is the whole repository's.
+      - uses: ./.github/actions/rust-cache-save
+        if: ${{ !cancelled() }}
+        with:
+          key: ${{ steps.setup.outputs.key }}
+          cache-hit: ${{ steps.setup.outputs.cache-hit }}
+          save: ${{ needs.plan.outputs.save }}
+
       # The iPhone's screen and taps through CoreDevice (trek-phone's `coredevice` feature, the
       # `pc_screen` example): built here, as a test run leaves out an example whose feature is off.
       - name: Build the CoreDevice example (trek-phone)
@@ -252,13 +261,6 @@ jobs:
       - name: Doc tests
         if: needs.plan.outputs.full == 'true'
         run: cargo test --config "$CI_PROFILE" --locked --doc --workspace
-
-      - uses: ./.github/actions/rust-cache-save
-        if: ${{ !cancelled() }}
-        with:
-          key: ${{ steps.setup.outputs.key }}
-          cache-hit: ${{ steps.setup.outputs.cache-hit }}
-          save: ${{ needs.plan.outputs.save }}
 
   # trek-app's targets split across jobs (script/ci-shard.py): the 1st also runs the unit tests in
   # src/. Each job compiles the app once and only its own test binaries.
@@ -326,16 +328,16 @@ jobs:
         env:
           TREK_QUIET_SPAWNS_CONTROL: "1"
 
-      - name: Build the CoreDevice example (trek-phone)
-        if: needs.plan.outputs.phone == 'true'
-        run: cargo build --config $env:CI_PROFILE -p trek-phone --features coredevice --example pc_screen --locked
-
       - uses: ./.github/actions/rust-cache-save
         if: ${{ !cancelled() }}
         with:
           key: ${{ steps.setup.outputs.key }}
           cache-hit: ${{ steps.setup.outputs.cache-hit }}
           save: ${{ needs.plan.outputs.save }}
+
+      - name: Build the CoreDevice example (trek-phone)
+        if: needs.plan.outputs.phone == 'true'
+        run: cargo build --config $env:CI_PROFILE -p trek-phone --features coredevice --example pc_screen --locked
 
   test-windows-app:
     name: Test (Windows, trek-app ${{ matrix.shard }}/9)
