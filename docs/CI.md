@@ -42,6 +42,7 @@ its run when nothing else reached `main` in between.
 | Doc tests (Linux) | `cargo test --doc` of the affected crates | any crate is affected |
 | Doc tests (Windows), and in Test (macOS) | every crate's doc tests | full runs |
 | Clippy (macOS / Windows / Linux) | correctness and suspicious lints of the affected crates, the capture build | any crate is affected on that platform |
+| Packages (Linux) | the debug build packaged as AppImage, .deb and tarball, and opened | trek-app is affected |
 | Check (Linux, Arm) | `cargo check` of trek-app and trek-mcp on Arm | either is affected |
 | Rust dependency audit | `cargo audit` | `Cargo.lock` changed, or full runs |
 | Scripts (macOS / Windows / Linux) | the scripts' own tests | a script or what they test changed, or full runs |

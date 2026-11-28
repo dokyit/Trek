@@ -410,9 +410,7 @@ jobs:
           cache-hit: ${{ steps.setup.outputs.cache-hit }}
           save: ${{ needs.plan.outputs.save }}
 
-  # As on the Mac. The 1st shard also packages the debug build the tests leave (an AppImage, a .deb
-  # and a tarball, script/bundle-linux.sh) and opens each, so a change that breaks the packaging
-  # shows here rather than at release time.
+  # As on the Mac.
   test-linux-app:
     name: Test (Linux, trek-app ${{ matrix.shard }}/4)
     needs: plan
@@ -439,8 +437,32 @@ jobs:
           echo "targets: $targets"
           cargo nextest run --config "$CI_PROFILE" -p trek-app --locked --profile ci --no-tests=warn $targets
 
+      - uses: ./.github/actions/rust-cache-save
+        if: ${{ !cancelled() }}
+        with:
+          key: ${{ steps.setup.outputs.key }}
+          cache-hit: ${{ steps.setup.outputs.cache-hit }}
+          save: ${{ needs.plan.outputs.save == 'true' && matrix.shard == 1 }}
+
+  # The app's debug build packaged (an AppImage, a .deb and a tarball, script/bundle-linux.sh) and
+  # each opened, so a change that breaks the packaging shows here rather than at release time. A
+  # job of its own: `cargo build` of the app resolves features apart from its tests, a second copy
+  # of much of the graph that made trek-app's test cache twice the size. It restores that cache and
+  # keeps nothing.
+  packages-linux:
+    name: Packages (Linux)
+    needs: plan
+    if: needs.plan.outputs.app == 'true' && needs.plan.outputs.linux == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: System packages
+        run: sudo sh script/linux/packages.sh --with-packaging
+      - uses: ./.github/actions/rust-setup
+        with:
+          kind: test-app
       - name: Packages
-        if: matrix.shard == 1
         run: |
           cargo build --config "$CI_PROFILE" -p trek-app -p trek-mcp --locked
           script/bundle-linux.sh --bin-dir target/debug --out dist/ci
@@ -453,12 +475,6 @@ jobs:
           test -x squashfs-root/AppRun && test -x squashfs-root/usr/bin/trek && test -x squashfs-root/usr/bin/trek-mcp
           desktop-file-validate squashfs-root/dev.trek.Trek.desktop
 
-      - uses: ./.github/actions/rust-cache-save
-        if: ${{ !cancelled() }}
-        with:
-          key: ${{ steps.setup.outputs.key }}
-          cache-hit: ${{ steps.setup.outputs.cache-hit }}
-          save: ${{ needs.plan.outputs.save == 'true' && matrix.shard == 1 }}
 
   # Doc tests (nextest doesn't run them) of every crate the change reaches, trek-app's too: on
   # Linux, which has runners to spare, for every run; on Windows (here) and the Mac (in Test
@@ -656,7 +672,7 @@ jobs:
     name: CI result
     if: always()
     needs: [plan, audit, scripts-macos, scripts-windows, scripts-linux, test, test-app, test-windows,
-            test-windows-app, test-linux, test-linux-app, doc-linux, doc-windows, lint, lint-windows, lint-linux,
+            test-windows-app, test-linux, test-linux-app, packages-linux, doc-linux, doc-windows, lint, lint-windows, lint-linux,
             check-linux-arm]
     runs-on: ubuntu-latest
     timeout-minutes: 5
