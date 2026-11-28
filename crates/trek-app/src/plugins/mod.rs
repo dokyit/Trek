@@ -277,19 +277,20 @@ fn grant_key() -> Option<core::grant::Key> {
 /// only when some plugin asks for permissions.
 fn checked_state(dir: &std::path::Path, scan: &core::Scan) -> State {
     let mut state = State::read(dir);
-    if scan
-        .plugins
-        .iter()
-        .any(|p| !p.manifest.permissions.is_empty())
-    {
-        for id in state.verify(&scan.plugins, grant_key().as_ref()) {
+    check(&mut state, &scan.plugins);
+    state
+}
+
+/// Take away from `state` every grant that isn't sealed for its plugin as it is now (above).
+fn check(state: &mut State, plugins: &[Plugin]) {
+    if plugins.iter().any(|p| !p.manifest.permissions.is_empty()) {
+        for id in state.verify(plugins, grant_key().as_ref()) {
             core::log(
                 &id,
                 "its permissions aren't sealed for it as it is now (its files changed, or the grant wasn't made in Settings): it waits to be allowed",
             );
         }
     }
-    state
 }
 
 /// Read the folder, index what's running, and watch it. Before any window opens.
@@ -411,22 +412,40 @@ fn apply_scan(
     } else {
         at_work(ws, cx)
     };
-    let mut noted = false;
-    for pl in &fresh {
-        let added = core::Added {
-            at: trek_core::store::now_ms(),
-            by: by.as_ref().map(|w| w.agent.clone()),
-            thread: by.as_ref().map(|w| w.thread.clone()),
-            title: by.as_ref().map(|w| w.title.clone()),
-        };
-        noted |= state.note_added(&pl.manifest.id, added);
-    }
-    if noted {
-        // Kept with the user's choices; what was just written isn't news to the next look.
-        if let Err(e) = state.write(&dir) {
-            tracing::warn!("plugins: couldn't note what was added: {e}");
+    // Noted over the file as it is now (`State::update`, under the lock `trek plugin` takes too),
+    // not over the copy the scan read off this thread: an agent turns the plugin it just wrote on
+    // at once (`trek plugin enable`), which could land between that read and this write. Writing
+    // the older copy back turned the plugin off again, and the fingerprint taken after the write
+    // hid that anything had changed, so it stayed off.
+    if fresh
+        .iter()
+        .any(|pl| state.choice(&pl.manifest.id).added.is_none())
+    {
+        let at = trek_core::store::now_ms();
+        let noted = State::update(&dir, |file| {
+            check(file, &scan.plugins);
+            let mut noted = false;
+            for pl in &fresh {
+                let added = core::Added {
+                    at,
+                    by: by.as_ref().map(|w| w.agent.clone()),
+                    thread: by.as_ref().map(|w| w.thread.clone()),
+                    title: by.as_ref().map(|w| w.title.clone()),
+                };
+                noted |= file.note_added(&pl.manifest.id, added);
+            }
+            noted
+        });
+        match noted {
+            Ok((now, noted)) => {
+                state = now;
+                if noted {
+                    // Kept with the user's choices; what was just written isn't news to the next look.
+                    print = core::fingerprint(&dir);
+                }
+            }
+            Err(e) => tracing::warn!("plugins: couldn't note what was added: {e}"),
         }
-        print = core::fingerprint(&dir);
     }
     core::write_problems(&dir, &scan.problems);
     {
@@ -829,9 +848,23 @@ pub fn update_state(ws: &Entity<Workspace>, cx: &mut App, f: impl FnOnce(&mut St
         return;
     }
     let p = cx.global_mut::<Plugins>();
-    f(&mut p.state);
-    if let Err(e) = p.state.write(&p.dir) {
-        tracing::warn!("plugins: the choices couldn't be kept: {e}");
+    // Over the file as it is now, under the lock `trek plugin` takes too: a choice an agent made
+    // from its shell since Trek last read the folder stays made.
+    let mut f = Some(f);
+    match State::update(&p.dir, |file| {
+        check(file, &p.plugins);
+        if let Some(f) = f.take() {
+            f(file);
+        }
+    }) {
+        Ok((now, ())) => p.state = now,
+        Err(e) => {
+            // Taken here for now, as before, even though the file couldn't keep it.
+            if let Some(f) = f.take() {
+                f(&mut p.state);
+            }
+            tracing::warn!("plugins: the choices couldn't be kept: {e}");
+        }
     }
     // The state file is part of the folder's fingerprint: what was just written isn't news.
     p.fingerprint = core::fingerprint(&p.dir);

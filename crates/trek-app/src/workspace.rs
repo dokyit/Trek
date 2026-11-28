@@ -240,6 +240,25 @@ fn title_reveal_time() -> Duration {
     crate::motion::scaled(TITLE_REVEAL).max(Duration::from_millis(1))
 }
 
+/// Until when the once-a-minute housekeeping (`start_housekeeping`) waits: `None` when it runs.
+static HOUSEKEEPING_HELD: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+/// Hold the once-a-minute housekeeping off for at most `cap` from now, or (`None`) let it run
+/// again; a round due meanwhile runs when the hold ends. For the capture build's live check of
+/// what a working agent redraws (`housekeeping hold`): a round redraws the window on its own
+/// clock (the pictures' look at what's on screen redraws every view; read usage lands in the
+/// workspace, which the title bar and sidebar draw), and one landing in the two seconds the
+/// check counts made it fail.
+pub fn hold_housekeeping(cap: Option<Duration>) {
+    let until = cap.map(|c| Instant::now() + c);
+    *HOUSEKEEPING_HELD.lock().unwrap_or_else(|e| e.into_inner()) = until;
+}
+
+fn housekeeping_held() -> bool {
+    let until = *HOUSEKEEPING_HELD.lock().unwrap_or_else(|e| e.into_inner());
+    until.is_some_and(|until| Instant::now() < until)
+}
+
 /// In-memory state of an open thread: transcript plus its live agent session, if any.
 #[derive(Default)]
 pub struct LiveThread {
@@ -9885,6 +9904,12 @@ impl Workspace {
                 cx.background_executor()
                     .timer(Duration::from_secs(60))
                     .await;
+                // A live check counting renders holds it off while it counts (`hold_housekeeping`).
+                while housekeeping_held() {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(100))
+                        .await;
+                }
                 let alive = this.update(cx, |this, cx| {
                     let now = now_ms();
                     this.tidy_inbox(now, cx);

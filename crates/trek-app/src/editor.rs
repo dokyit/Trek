@@ -868,6 +868,8 @@ impl EditorView {
         self.formatting = true;
         let (tx, rx) = async_channel::bounded(1);
         let input = text.clone();
+        let name = formatter.program;
+        let started = std::time::Instant::now();
         trek_core::runtime().spawn(async move {
             let _ = tx
                 .send(crate::format::run(&program, &args, &cwd, input, crate::format::LIMIT).await)
@@ -875,6 +877,17 @@ impl EditorView {
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(result) = rx.recv().await else { return };
+            // How long it took: a formatter started for the first time (rustup's proxy, a
+            // virus scan of the program) can take seconds, which a check waiting on it needs.
+            tracing::info!(
+                "format: {name} answered in {} ms ({})",
+                started.elapsed().as_millis(),
+                if result.is_ok() {
+                    "formatted"
+                } else {
+                    "failed"
+                }
+            );
             let _ = this.update_in(cx, |this, window, cx| {
                 this.formatted(&text, caret, scrolled, result, window, cx)
             });
@@ -1752,6 +1765,12 @@ impl EditorView {
     /// Why the file is read-only, when it is (too big, not text, gone).
     pub fn problem(&self) -> Option<&str> {
         self.problem.as_deref()
+    }
+
+    /// Whether Format Document's formatter is still working on the text (its answer, or the
+    /// toast that says why there's none, hasn't come yet).
+    pub fn formatting(&self) -> bool {
+        self.formatting
     }
 
     /// Save now (⌘S, or Save in the close prompt); `false` when it didn't land (the on-disk

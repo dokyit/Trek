@@ -199,9 +199,8 @@ fn install_folder(folder: &Path, dir: &Path, out: &mut dyn std::io::Write) -> Re
         return Err(e.to_string());
     }
     let _ = std::fs::remove_dir_all(&old);
-    let mut state = State::read(dir);
-    state.ask_on(&manifest);
-    state.write(dir).map_err(|e| e.to_string())?;
+    let (state, _) =
+        State::update(dir, |state| state.ask_on(&manifest)).map_err(|e| e.to_string())?;
     let _ = writeln!(
         out,
         "installed {} {} ({id}){}",
@@ -299,20 +298,17 @@ fn list(dir: &Path, out: &mut dyn std::io::Write) -> Result<(), String> {
 
 fn enable(id: &str, dir: &Path, out: &mut dyn std::io::Write) -> Result<(), String> {
     let p = find(id, dir)?;
-    let mut state = State::read(dir);
-    state.ask_on(&p.manifest);
-    state.write(dir).map_err(|e| e.to_string())?;
+    let (state, _) =
+        State::update(dir, |state| state.ask_on(&p.manifest)).map_err(|e| e.to_string())?;
     say_on(&p, &state, out);
     Ok(())
 }
 
 fn disable(id: &str, dir: &Path, out: &mut dyn std::io::Write) -> Result<(), String> {
-    let mut state = State::read(dir);
-    if !state.plugins.contains_key(id) && find(id, dir).is_err() {
+    if !State::read(dir).plugins.contains_key(id) && find(id, dir).is_err() {
         return Err(format!("there's no plugin called {id}"));
     }
-    state.turn_off(id);
-    state.write(dir).map_err(|e| e.to_string())?;
+    State::update(dir, |state| state.turn_off(id)).map_err(|e| e.to_string())?;
     let _ = writeln!(out, "{id} is off");
     Ok(())
 }
@@ -340,9 +336,7 @@ fn remove(id: &str, dir: &Path, out: &mut dyn std::io::Write) -> Result<(), Stri
     }
     let _ = std::fs::remove_file(&link);
     let _ = std::fs::remove_dir_all(data_dir(id));
-    let mut state = State::read(dir);
-    state.forget(id);
-    state.write(dir).map_err(|e| e.to_string())?;
+    State::update(dir, |state| state.forget(id)).map_err(|e| e.to_string())?;
     if !had {
         return Err(format!("there's no plugin called {id}"));
     }
@@ -367,10 +361,14 @@ fn dev(src: &str, once: bool, dir: &Path, out: &mut dyn std::io::Write) -> Resul
     let _ = writeln!(out, "linked {id} to {}", folder.display());
     let check = |out: &mut dyn std::io::Write, last: &mut Option<Result<(), String>>| {
         let now = read(&folder, &id).map(|m| {
-            let mut state = State::read(dir);
-            if !state.choice(&id).on && !state.choice(&id).waiting {
-                state.ask_on(&m);
-                let _ = state.write(dir);
+            let asked = State::update(dir, |state| {
+                let ask = !state.choice(&id).on && !state.choice(&id).waiting;
+                if ask {
+                    state.ask_on(&m);
+                }
+                ask
+            });
+            if let Ok((state, true)) = asked {
                 let plugin = Plugin {
                     hash: grant::content_hash(&folder),
                     manifest: m,

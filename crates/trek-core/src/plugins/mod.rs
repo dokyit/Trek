@@ -29,6 +29,9 @@ pub const DATA_DIR_NAME: &str = "plugin-data";
 pub const MANIFEST: &str = "plugin.toml";
 /// What the user chose, in the plugins folder.
 pub const STATE_FILE: &str = "state.toml";
+/// Held while a writer reads, changes and writes `state.toml` (`State::update`). A dot file, so
+/// the folder's fingerprint doesn't see it.
+pub const LOCK_FILE: &str = ".state.toml.lock";
 /// What's wrong in the folder, one line a plugin: there while something is.
 pub const PROBLEMS_FILE: &str = "problems.txt";
 /// A file `<id>.link` naming a folder elsewhere: a plugin under development, read in place.
@@ -1163,7 +1166,26 @@ impl State {
             .unwrap_or_default()
     }
 
-    /// Write it, if it changed.
+    /// Change the choices as the file holds them now: under a lock every writer takes (Trek, and
+    /// `trek plugin …` in an agent's shell), read the file, apply `f`, write it. Two rounds at once
+    /// can't undo each other: Trek noting a plugin it just found used to write its older copy over
+    /// the `trek plugin enable` an agent ran a moment after writing that plugin, and it stayed off.
+    pub fn update<R>(dir: &Path, f: impl FnOnce(&mut State) -> R) -> std::io::Result<(State, R)> {
+        std::fs::create_dir_all(dir)?;
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join(LOCK_FILE))?;
+        lock.lock()?;
+        let mut state = State::read(dir);
+        let out = f(&mut state);
+        state.write(dir)?;
+        drop(lock);
+        Ok((state, out))
+    }
+
+    /// Write it, if it changed. Changing the file's choices is [`State::update`]'s.
     pub fn write(&self, dir: &Path) -> std::io::Result<()> {
         let text = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
         let path = dir.join(STATE_FILE);
@@ -1382,6 +1404,31 @@ pub fn set_storage(id: &str, value: &serde_json::Map<String, Value>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Trek and `trek plugin` change the choices at once (an agent enabling the plugin it just
+    /// wrote while Trek notes it as added): every change lands, none written over by another's
+    /// older copy.
+    #[test]
+    fn choices_changed_at_once_all_land() {
+        let root = scratch("update-at-once");
+        let writers: Vec<_> = (0..8)
+            .map(|w| {
+                let root = root.clone();
+                std::thread::spawn(move || {
+                    for i in 0..25 {
+                        State::update(&root, |st| {
+                            st.plugins.insert(format!("p{w}-{i}"), Choice::default());
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+        assert_eq!(State::read(&root).plugins.len(), 8 * 25);
+    }
 
     pub(crate) fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

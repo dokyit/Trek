@@ -1846,6 +1846,13 @@ impl Workspace {
                             .request(tr::ClientMessage::MarkSeen { thread_id: tid })
                             .await;
                     }
+                    // The connection dropped before the transcript came: the client subscribes
+                    // again once it's back, and the transcript comes with the events then. Still
+                    // followed, so the machine's going offline (`Event::Disconnected`, which
+                    // follows this failure) settles the thread here: no clock, nothing running.
+                    // Forgotten here, the race went the other way and its turn clock counted on
+                    // for a machine that was gone, and it said it couldn't be opened.
+                    Err(tr::client::ClientError::Disconnected) => {}
                     Err(e) => {
                         let _ = this.update(cx, |ws, cx| {
                             if let Some(m) = ws.machines.get_mut(&host) {
@@ -1854,6 +1861,11 @@ impl Workspace {
                             let live = ws.live.entry(local.clone()).or_default();
                             live.loading = false;
                             live.loaded = true;
+                            // Not opened, nothing of it runs here (a row that said it was working
+                            // may have started its clock already).
+                            live.turn_started = None;
+                            live.streaming = None;
+                            live.reasoning = None;
                             live.items = Transcript::stored(vec![(
                                 "error".into(),
                                 Item::Error {

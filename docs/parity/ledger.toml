@@ -1838,7 +1838,7 @@ what = "Format document runs the file's formatter (rustfmt, prettier, black, gof
 macos = "yes"
 windows = "yes"
 linux = "yes"
-live = ["route project:{project}", "click mode-editor", "wait 900", "editor open {project}{/}src{/}main.rs", "wait 900", "key alt-shift-f", "wait 3000", "key secondary-s", "wait 800", "file {project}{/}src{/}main.rs contains     println", "click mode-agents"]
+live = ["route project:{project}", "click mode-editor", "wait 900", "editor open {project}{/}src{/}main.rs", "wait 900", "key alt-shift-f", "wait formatted 35000", "key secondary-s", "wait 800", "file {project}{/}src{/}main.rs contains     println", "click mode-agents"]
 how = { macos = "The formatter as the PATH has it, stopped after 30 s.", windows = "The same; a .cmd shim (prettier.cmd) runs in a job object, so giving up ends the node behind it too, and its cmd.exe is told not to look in the file's folder for programs (NoDefaultCurrentDirectoryInExePath)." }
 code = ["crates/trek-format/src/lib.rs"]
 tests = ["crates/trek-format/src/lib.rs"]
@@ -2050,7 +2050,7 @@ what = "Trek stays light while agents work: the working bar, streamed text and t
 macos = "yes"
 windows = "yes"
 linux = "yes"
-live = ["route project:{project}", "motion on", "pace 1", "send mock:long 10s", "wait 3000", "renders mark", "wait 2000", "renders WorkingBar 5+ ThreadView <=WorkingBar WindowTitle 0- Sidebar 3-", "click stop", "pace 0", "motion system"]
+live = ["housekeeping hold", "route project:{project}", "motion on", "pace 1", "send mock:long 10s", "wait 3000", "renders mark", "wait 2000", "renders WorkingBar 5+ ThreadView <=WorkingBar WindowTitle 0- Sidebar 3-", "click stop", "pace 0", "motion system", "housekeeping on"]
 tests = ["crates/trek-app/tests/render.rs"]
 
 [[feature.promise]]

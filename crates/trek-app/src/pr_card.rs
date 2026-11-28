@@ -6799,9 +6799,11 @@ mod tests {
 
     #[test]
     fn a_finished_runs_duration_stops_at_its_end() {
+        // One reading of the clock: two could fall either side of a millisecond (120001).
+        let now = now_ms();
         let card = Card {
-            started_ms: now_ms() - 10 * 60_000,
-            ended_ms: now_ms() - 8 * 60_000,
+            started_ms: now - 10 * 60_000,
+            ended_ms: now - 8 * 60_000,
             ..Default::default()
         };
         assert_eq!(run_ms(&card), 2 * 60_000);
