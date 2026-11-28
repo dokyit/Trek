@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""Merge a pull request only when what has to have run on its current head did.
+
+    script/merge-pr <number> [--dry-run] [-- <gh pr merge options>]   (default: --merge)
+    ./bin/agent-cli merge <number> [--dry-run]                          (the same)
+
+Refuses, saying what to do, unless:
+- the pull request is open and not a draft;
+- the newest CI run of its head commit passed (with no CI run on the head, only a change touching
+  no app code, which CI's filters may skip);
+- when it touches app code (script/live-plan.py), some Live run of its head commit passed
+  Live (macOS), Live (Windows) and Live (Linux). Labelling the pull request `live` starts one.
+
+Checks the head commit, not the pull request: a push after a Live run needs its own (once
+labelled, every push runs them). Works for pull requests from forks too, where the Live workflow
+can't set a commit status: it reads the workflow's runs. This is the way agents merge (AGENTS.md);
+branch protection is the owner's to set (docs/CROSS_PLATFORM.md, "The live checks").
+"""
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LIVE_JOBS = ('Live (macOS)', 'Live (Windows)', 'Live (Linux)')
+
+_spec = importlib.util.spec_from_file_location('live_plan', os.path.join(ROOT, 'script', 'live-plan.py'))
+live_plan = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(live_plan)
+
+
+class Gh:
+    def __init__(self, repo):
+        self.repo = repo
+
+    def json(self, path, paginate=False):
+        cmd = ['gh', 'api', path] + (['--paginate', '--slurp'] if paginate else [])
+        out = json.loads(subprocess.run(cmd, check=True, capture_output=True).stdout)
+        if paginate:
+            return [x for page in out for x in page]
+        return out
+
+    def pr(self, n):
+        return self.json(f'repos/{self.repo}/pulls/{n}')
+
+    def files(self, n):
+        out = []
+        for f in self.json(f'repos/{self.repo}/pulls/{n}/files?per_page=100', paginate=True):
+            out.append(f['filename'])
+            if f.get('previous_filename'):
+                out.append(f['previous_filename'])  # a move counts at both paths
+        return out
+
+    def runs(self, workflow, sha):
+        return self.json(f'repos/{self.repo}/actions/workflows/{workflow}/runs?head_sha={sha}&per_page=30')['workflow_runs']
+
+    def jobs(self, run_id):
+        return self.json(f'repos/{self.repo}/actions/runs/{run_id}/jobs?per_page=100')['jobs']
+
+    def merge(self, n, args):
+        return subprocess.run(['gh', 'pr', 'merge', str(n), *args]).returncode
+
+
+def verdict(n, gh, root=ROOT):
+    """(ok, lines): whether pull request n may merge, and why."""
+    pr = gh.pr(n)
+    sha = pr['head']['sha']
+    why = []
+    if pr.get('state') != 'open' or pr.get('merged'):
+        return False, [f'#{n} is {pr.get("state")}, not open']
+    if pr.get('draft'):
+        return False, [f'#{n} is a draft: mark it ready first (gh pr ready {n})']
+    files = gh.files(n)
+    app = live_plan.app_code(files, root)
+    ok = True
+
+    ci = sorted(gh.runs('ci.yml', sha), key=lambda r: r.get('created_at', ''), reverse=True)
+    if ci:
+        newest = ci[0]
+        if newest.get('status') != 'completed':
+            ok = False
+            why.append(f'CI on {sha[:8]} is still {newest.get("status")}: wait (gh pr checks {n} --watch --interval 120)')
+        elif newest.get('conclusion') != 'success':
+            ok = False
+            why.append(f'CI on {sha[:8]} ended {newest.get("conclusion")} (run {newest["id"]}): fix it, or rerun what flaked')
+        else:
+            why.append(f'CI passed on {sha[:8]} (run {newest["id"]})')
+    elif app:
+        ok = False
+        why.append(f'no CI run on {sha[:8]}, and it touches app code: push, or wait for CI to start')
+    else:
+        why.append(f'no CI run on {sha[:8]}: its files are ones CI may skip')
+
+    if app:
+        passed = None
+        for run in sorted(gh.runs('live.yml', sha), key=lambda r: r.get('created_at', ''), reverse=True):
+            if run.get('status') != 'completed':
+                continue
+            jobs = {j['name']: j.get('conclusion') for j in gh.jobs(run['id'])}
+            if all(jobs.get(name) == 'success' for name in LIVE_JOBS):
+                passed = run
+                break
+        if passed:
+            why.append(f'Live passed on {sha[:8]} on macOS, Windows and Linux (run {passed["id"]})')
+        else:
+            ok = False
+            why.append(f'it touches app code and no Live run passed on {sha[:8]}: '
+                       f'gh pr edit {n} --add-label live, then gh pr checks {n} --watch --interval 120')
+    else:
+        why.append('it touches no app code: no live checks needed')
+    return ok, why
+
+
+def main(argv):
+    if not argv or argv[0] in ('-h', '--help'):
+        print(__doc__)
+        return 0 if argv else 2
+    n = int(argv[0].lstrip('#'))
+    rest = argv[1:]
+    dry = '--dry-run' in rest
+    extra = rest[rest.index('--') + 1:] if '--' in rest else []
+    gh = Gh(os.environ.get('GITHUB_REPOSITORY', 'dokyit/Trek'))
+    ok, why = verdict(n, gh)
+    for line in why:
+        print('  ' + line)
+    if not ok:
+        print(f'merge-pr: not merging #{n}')
+        return 1
+    if dry:
+        print(f'merge-pr: #{n} may merge (dry run: not merging)')
+        return 0
+    return gh.merge(n, extra or ['--merge'])
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

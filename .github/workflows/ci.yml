@@ -78,6 +78,7 @@ jobs:
           bash script/tests/merge-manifest.sh
           bash script/tests/release-manifests.sh
           bash script/tests/release-finish.sh
+          python3 script/tests/merge-pr.py
           zsh ios/scripts/tests/phone-update.sh
           zsh script/capture.sh check
           node script/site/test/run.mjs

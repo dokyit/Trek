@@ -60,18 +60,18 @@ jobs:
         env:
           RUN: ${{ github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || (github.event.action == 'labeled' && github.event.label.name == 'live') || (github.event.action != 'labeled' && !github.event.pull_request.draft && contains(github.event.pull_request.labels.*.name, 'live')) }}
         run: |
-          echo "run=$RUN" >> "$GITHUB_OUTPUT"
           app=true
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            # The merge commit's parents: what the pull request brings to main.
-            app=$(git diff --name-only HEAD^1 HEAD | python3 -c '
-          import re, sys
-          not_app = re.compile(r"^(docs/(?!parity/)|site/|ios/|media/|evidence/|assets/brand/|\.github/(?!workflows/live\.yml$))|\.md$|^(LICENSE|NOTICE|\.gitignore|\.gitattributes)$")
-          files = [l.strip() for l in sys.stdin if l.strip()]
-          print("true" if any(not not_app.search(f) for f in files) else "false")')
+            # What the merge commit brings to main, a moved file at both paths (script/live-plan.py:
+            # a file in a crate, or one a crate reads, is app code, Markdown and ios/ too).
+            app=$(python3 script/live-plan.py)
           fi
+          # A change with no app code runs nothing, even marked ready or labelled.
+          run=false
+          if [ "$RUN" = true ] && [ "$app" = true ]; then run=true; fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
           echo "app=$app" >> "$GITHUB_OUTPUT"
-          echo "Live checks run: $RUN; the change touches app code: $app" >> "$GITHUB_STEP_SUMMARY"
+          echo "Live checks run: $run (this event asks: $RUN); the change touches app code: $app" >> "$GITHUB_STEP_SUMMARY"
       - name: The pull request's Live status
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         env:
